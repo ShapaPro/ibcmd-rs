@@ -438,6 +438,14 @@ pub struct EmptyStageOutcomes {
     pub different_headers: usize,
     /// In Config, not produced.
     pub missing: usize,
+    /// Of `missing`: rows the platform keeps for itself, which no XML
+    /// defines (`DynamicallyUpdated`, `*_dynupdate_*`, the 8.5 configuration
+    /// cache `<configuration>.<uuid>`).
+    pub missing_platform: usize,
+    /// Of `missing`: empty stubs a Designer history leaves behind (an emptied
+    /// help `{5,0,0}`, an emptied command interface `{7,0,0,0,0,0,0}`); the
+    /// XML has no file for them.
+    pub missing_stub: usize,
     /// Produced, not in Config.
     pub extra: usize,
     /// Would have been produced; the writer failed.
@@ -453,10 +461,17 @@ impl EmptyStageOutcomes {
                 match benign {
                     Some(Benign::Layout) => self.different_layout += 1,
                     Some(Benign::Headers) => self.different_headers += 1,
-                    None => {}
+                    Some(Benign::Platform | Benign::Stub) | None => {}
                 }
             }
-            Outcome::Missing => self.missing += 1,
+            Outcome::Missing => {
+                self.missing += 1;
+                match benign {
+                    Some(Benign::Platform) => self.missing_platform += 1,
+                    Some(Benign::Stub) => self.missing_stub += 1,
+                    _ => {}
+                }
+            }
             Outcome::Extra => self.extra += 1,
             Outcome::Failed => self.failed += 1,
         }
@@ -466,11 +481,14 @@ impl EmptyStageOutcomes {
     }
 }
 
-/// A difference that leaves the content equal.
+/// A difference that leaves the content equal, or a missing row no XML
+/// defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Benign {
     Layout,
     Headers,
+    Platform,
+    Stub,
 }
 
 impl Benign {
@@ -478,8 +496,24 @@ impl Benign {
         match self {
             Self::Layout => "layout",
             Self::Headers => "container headers",
+            Self::Platform => "platform's own",
+            Self::Stub => "empty stub",
         }
     }
+}
+
+/// Why a stored row nothing produced is not a gap, when it is not.
+fn missing_reason(name: &str, configuration: &str, stored: Option<&[u8]>) -> Option<Benign> {
+    let suffix_is_uuid = name
+        .strip_prefix(configuration)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(is_uuid);
+    if name == "DynamicallyUpdated" || name.contains("_dynupdate_") || suffix_is_uuid {
+        return Some(Benign::Platform);
+    }
+    let text = stored?;
+    let text = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
+    matches!(text, b"{5,0,0}" | b"{7,0,0,0,0,0,0}").then_some(Benign::Stub)
 }
 
 fn benign_difference(stored: &[u8], produced: &[u8]) -> Option<Benign> {
@@ -1022,13 +1056,14 @@ pub fn audit_empty_stage(
         .collect::<BTreeSet<_>>();
     for name in stored.names.keys() {
         if !accounted.contains(name) {
+            let plain = stored.plain(name)?;
             measured.push(Measured {
                 file_name: name.clone(),
                 kind: kind_of(name),
                 family: "<none>".to_string(),
                 source: String::new(),
                 outcome: Outcome::Missing,
-                benign: None,
+                benign: missing_reason(name, &context.facts.uuid, plain.as_deref()),
                 offset: None,
                 brace_path: None,
                 detail: String::new(),
@@ -1193,12 +1228,14 @@ pub fn empty_stage_summary(report: &EmptyStageAuditReport) -> String {
             report.failures
         ),
         format!(
-            "TOTAL identical {} different {} (layout only {}, container headers only {}) missing {} extra {} failed {}",
+            "TOTAL identical {} different {} (layout only {}, container headers only {}) missing {} (platform's own {}, empty stubs {}) extra {} failed {}",
             report.totals.identical,
             report.totals.different,
             report.totals.different_layout,
             report.totals.different_headers,
             report.totals.missing,
+            report.totals.missing_platform,
+            report.totals.missing_stub,
             report.totals.extra,
             report.totals.failed
         ),
