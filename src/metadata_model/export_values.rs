@@ -282,6 +282,8 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
     }
     let mut types = Vec::new();
     let mut sets = Vec::new();
+    // Type ids the configuration names nothing by follow the named ones.
+    let mut unnamed = Vec::new();
     let mut number_q = None;
     let mut string_q = None;
     let mut date_q = None;
@@ -358,7 +360,7 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
                     None => match names.type_name(type_id) {
                         Some(name) => format!("cfg:{name}"),
                         None => {
-                            types.push(leaf("v8:TypeId", type_id));
+                            unnamed.push(leaf("v8:TypeId", type_id));
                             continue;
                         }
                     },
@@ -373,6 +375,7 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
         }
     }
     types.extend(sets);
+    types.extend(unnamed);
     types.extend(number_q);
     types.extend(string_q);
     types.extend(date_q);
@@ -625,6 +628,10 @@ pub(crate) fn field_text(segment: &Brace, base: &str, names: &NameIndex) -> Resu
 
 /// A data path's segments -> its text; `{-N}` segments are standard
 /// attributes of the object the path has reached (the owner at first).
+///
+/// A path is named only inside its owner: one that reaches into another
+/// object, or names a standard attribute the owner does not have, is written
+/// raw, segment by segment (`0:<uuid>/-8`).
 pub(crate) fn data_path_text(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> Result<String> {
     if let [segment] = segments
         && list(segment)?.len() == 1
@@ -634,6 +641,14 @@ pub(crate) fn data_path_text(segments: &[Brace], owner: Owner<'_>, names: &NameI
             return Ok("0".to_string());
         }
     }
+    match named_data_path(segments, owner, names)? {
+        Some(named) => Ok(named),
+        None => raw_data_path(segments),
+    }
+}
+
+fn named_data_path(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> Result<Option<String>> {
+    let inside = format!("{}.", owner.full_name);
     let mut current: Option<String> = None;
     for segment in segments {
         let fields = list(segment)?;
@@ -641,24 +656,38 @@ pub(crate) fn data_path_text(segments: &[Brace], owner: Owner<'_>, names: &NameI
             [code] => {
                 let code = number(code)?;
                 let base = current.clone().unwrap_or_else(|| owner.full_name.to_string());
-                current = Some(format!(
-                    "{base}.StandardAttribute.{}",
-                    standard_attribute_name(&base, code)?
-                ));
+                let Ok(name) = standard_attribute_name(&base, code) else {
+                    return Ok(None);
+                };
+                current = Some(format!("{base}.StandardAttribute.{name}"));
             }
             [kind, uuid] if atom(kind)? == "0" => {
-                let uuid = atom(uuid)?;
-                current = Some(
-                    names
-                        .name(uuid)
-                        .map(str::to_string)
-                        .ok_or_else(|| anyhow!("no name for data path segment {uuid}"))?,
-                );
+                let Some(name) = names.name(atom(uuid)?) else {
+                    return Ok(None);
+                };
+                if !name.starts_with(&inside) {
+                    return Ok(None);
+                }
+                current = Some(name.to_string());
             }
-            _ => bail!("unsupported data path segment {}", short(segment)),
+            _ => return Ok(None),
         }
     }
-    current.ok_or_else(|| anyhow!("empty data path"))
+    Ok(current)
+}
+
+/// `{0,<uuid>}` -> `0:<uuid>`, `{-8}` -> `-8`, joined by `/`.
+fn raw_data_path(segments: &[Brace]) -> Result<String> {
+    let mut parts = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let fields = list(segment)?;
+        parts.push(match fields {
+            [code] => atom(code)?.to_string(),
+            [kind, uuid] => format!("{}:{}", atom(kind)?, atom(uuid)?),
+            _ => bail!("unsupported data path segment {}", short(segment)),
+        });
+    }
+    Ok(parts.join("/"))
 }
 
 // ---------------------------------------------------------------------------

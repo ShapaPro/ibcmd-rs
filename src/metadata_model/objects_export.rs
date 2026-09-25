@@ -532,10 +532,18 @@ fn decode_slot(
         Slot::References(name) => {
             let fields = list(value)?;
             let count = number(item(fields, 1)?)? as usize;
-            let mut element = el(name);
+            let mut uuids = Vec::with_capacity(count);
             for reference in fields.iter().skip(2).take(count) {
                 let payload = list(item(list(reference)?, 2)?)?;
-                let uuid = atom(item(payload, 1)?)?;
+                uuids.push(atom(item(payload, 1)?)?);
+            }
+            // A document's register records are a set: the XML lists them
+            // in uuid order even where the row kept an append order.
+            if name == "RegisterRecords" {
+                uuids.sort_unstable();
+            }
+            let mut element = el(name);
+            for uuid in uuids {
                 element.children.push(
                     leaf("xr:Item", reference_name(uuid, names)?).attr("type", "xr:MDObjectRef"),
                 );
