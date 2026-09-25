@@ -1,12 +1,15 @@
 //! Common objects and services: CommonModule, CommonPicture, CommonTemplate,
 //! CommonCommand, CommandGroup, Role, XDTOPackage, StyleItem, Style,
-//! WebService, HTTPService, WSReference, IntegrationService, Bot,
-//! ExternalDataSource, Subsystem, owned Form and Template, CommonForm,
-//! Interface.
+//! WebService, HTTPService, WSReference, IntegrationService, Bot, Subsystem,
+//! owned Form and Template, CommonForm.
 //!
 //! One typed model per kind: `from_xml` reads the metadata XML and
 //! `to_brace` writes the stored descriptor, so the export can later decode a
 //! row into the same struct.
+//!
+//! ExternalDataSource and Interface are not compiled: none of the four
+//! reference corpora (BSP and ERP УХ, 8.3.27 and 8.5) holds one, so there is
+//! no stored row to measure a layout against.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -1786,5 +1789,131 @@ impl CommonForm {
             ],
             Brace::num(0),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::metadata_model::brace::serialize_row;
+    use crate::metadata_model::compile_descriptor;
+    use crate::metadata_model::xml::parse_element_tree;
+
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+
+    #[test]
+    fn writes_a_common_module_as_bsp_stores_it() {
+        let module = CommonModule {
+            header: Header {
+                uuid: "ac847dc9-e222-45cf-af4a-6fa863c919a8".into(),
+                name: "GoogleПереводчик".into(),
+                synonym: vec![("ru".into(), "Google переводчик".into())],
+                comment: String::new(),
+            },
+            global: false,
+            client_managed_application: false,
+            server: true,
+            external_connection: true,
+            client_ordinary_application: true,
+            server_call: false,
+            privileged: false,
+            return_values_reuse: 0,
+        };
+        let expected = format!(
+            "\u{feff}{{1,\r\n{{12,\r\n{{3,\r\n{{1,0,ac847dc9-e222-45cf-af4a-6fa863c919a8}},\
+             \"GoogleПереводчик\",\r\n{{1,\"ru\",\"Google переводчик\"}},\"\",0,0,{NIL},0}},\
+             1,1,1,0,0,0,0,0}},0}}"
+        );
+        assert_eq!(
+            String::from_utf8(serialize_row(&module.to_brace())).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn resolves_xdto_type_prefixes_declared_on_the_element() {
+        let own = parse_element_tree(
+            br#"<XDTOReturningValueType xmlns:d6p1="urn:exchange">d6p1:Features</XDTOReturningValueType>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            XdtoType::from_xml(Some(&own)).unwrap(),
+            XdtoType {
+                namespace: "urn:exchange".into(),
+                name: "Features".into()
+            }
+        );
+        let standard = parse_element_tree(br#"<XDTOValueType>xs:string</XDTOValueType>"#).unwrap();
+        assert_eq!(
+            XdtoType::from_xml(Some(&standard)).unwrap().namespace,
+            "http://www.w3.org/2001/XMLSchema"
+        );
+    }
+
+    fn write(root: &Path, relative: &str, body: &str) -> PathBuf {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MetaDataObject \
+                 xmlns=\"http://v8.1c.ru/8.3/MDClasses\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" \
+                 xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" \
+                 xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"2.20\">\n{body}\n</MetaDataObject>"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn compiles_a_subsystem_with_content_children_and_a_multiline_explanation() {
+        let root = std::env::temp_dir().join(format!("ibcmd_rs_common_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        write(
+            &root,
+            "CommonModules/M.xml",
+            "<CommonModule uuid=\"cccccccc-0000-0000-0000-000000000003\"><Properties><Name>M</Name>\
+             </Properties></CommonModule>",
+        );
+        write(
+            &root,
+            "Subsystems/A/Subsystems/B.xml",
+            "<Subsystem uuid=\"bbbbbbbb-0000-0000-0000-000000000002\"><Properties><Name>B</Name>\
+             </Properties><ChildObjects/></Subsystem>",
+        );
+        let a = write(
+            &root,
+            "Subsystems/A.xml",
+            "<Subsystem uuid=\"AAAAAAAA-0000-0000-0000-000000000001\"><Properties><Name>A</Name>\
+             <Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>А</v8:content></v8:item></Synonym>\
+             <Comment/><IncludeHelpInContents>true</IncludeHelpInContents>\
+             <IncludeInCommandInterface>true</IncludeInCommandInterface>\
+             <UseOneCommand>false</UseOneCommand>\
+             <Explanation><v8:item><v8:lang>ru</v8:lang><v8:content>Line one\nline two</v8:content>\
+             </v8:item></Explanation><Picture/>\
+             <Content><xr:Item xsi:type=\"xr:MDObjectRef\">CommonModule.M</xr:Item>\
+             <xr:Item xsi:type=\"xr:MDObjectRef\">0:dddddddd-0000-0000-0000-000000000004</xr:Item>\
+             </Content></Properties><ChildObjects><Subsystem>B</Subsystem></ChildObjects></Subsystem>",
+        );
+        let context = DescriptorContext::new(&root, "2.20").unwrap();
+        let compiled =
+            compile_descriptor("Subsystem", &a, &fs::read(&a).unwrap(), &context).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let reference = |uuid: &str| {
+            format!("\r\n{{\"#\",{DESIGN_TIME_REFERENCE},\r\n{{1,{uuid}}}\r\n}}")
+        };
+        let expected = format!(
+            "\u{feff}{{1,\r\n{{22,\r\n{{3,\r\n{{1,0,aaaaaaaa-0000-0000-0000-000000000001}},\"A\",\
+             \r\n{{1,\"ru\",\"А\"}},\"\",0,0,{NIL},0}},1,\r\n{{0,0}},1,\
+             \r\n{{4,0,\r\n{{0}},\"\",-1,-1,1,0,\"\"}},\r\n{{1,\"ru\",\"Line one\r\nline two\"}},\
+             \r\n{{0,2,{},{}\r\n}},0}},1,\r\n{{{SUBSYSTEM_CHILDREN},1,bbbbbbbb-0000-0000-0000-000000000002}}\r\n}}",
+            reference("cccccccc-0000-0000-0000-000000000003"),
+            reference("dddddddd-0000-0000-0000-000000000004"),
+        );
+        assert_eq!(String::from_utf8(compiled).unwrap(), expected);
     }
 }
