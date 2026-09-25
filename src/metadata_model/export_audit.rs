@@ -302,12 +302,19 @@ fn measure_one(
                 Err(_) => Outcome::Failed("decoder panicked".to_string()),
                 Ok(Err(error)) => Outcome::Failed(format!("{error:#}")),
                 Ok(Ok(object)) => {
-                    lossless = Some(is_lossless(&object, &properties.kind, path, &stored, descriptor_context));
+                    lossless = Some(is_lossless(
+                        &object,
+                        &properties.kind,
+                        path,
+                        &stored,
+                        descriptor_context,
+                    ));
                     let written = write_document(&object, &context.version);
                     if written == expected {
                         Outcome::Identical
                     } else {
-                        let (line, expected_line, actual_line) = first_line_difference(&expected, &written);
+                        let (line, expected_line, actual_line) =
+                            first_line_difference(&expected, &written);
                         Outcome::Different {
                             line,
                             expected: expected_line,
@@ -444,7 +451,10 @@ fn write_sample(dir: &Path, kind: &str, relative: &str, root: &Path, written: &s
     let folder = dir.join(kind);
     fs::create_dir_all(&folder)?;
     let stem = relative.trim_end_matches(".xml").replace(['/', '\\'], "__");
-    fs::copy(root.join(relative), folder.join(format!("{stem}.expected.xml")))?;
+    fs::copy(
+        root.join(relative),
+        folder.join(format!("{stem}.expected.xml")),
+    )?;
     fs::write(folder.join(format!("{stem}.actual.xml")), written)?;
     Ok(())
 }

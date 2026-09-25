@@ -116,21 +116,39 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("4500381b-db30-4a10-9db4-990038032acf", "v8:FixedArray"),
     ("220455ea-6c85-4513-996f-bbe79ed07774", "v8:FixedMap"),
     ("2fdc88ec-7c9b-43cd-8ba5-873f043bdd88", "v8:StandardPeriod"),
-    ("0387f3a2-7df5-4804-948b-4580a51e4a15", "v8:StandardBeginningDate"),
+    (
+        "0387f3a2-7df5-4804-948b-4580a51e4a15",
+        "v8:StandardBeginningDate",
+    ),
     ("4772b3b4-f4a3-49c0-a1a5-8cb5961511a3", "v8:ValueListType"),
     ("f5c65050-3bbb-11d5-b988-0050bae0a95d", "v8:TypeDescription"),
     ("98ea8e5a-b586-442b-b944-6e3447734aa7", "v8:FillChecking"),
-    ("140b5ff4-37b1-4df5-b5ec-a0bfd2b94f8f", "v8ui:FormattedString"),
+    (
+        "140b5ff4-37b1-4df5-b5ec-a0bfd2b94f8f",
+        "v8ui:FormattedString",
+    ),
     ("9cd510c7-abfc-11d4-9434-004095e12fc7", "v8ui:Color"),
     ("9cd510c8-abfc-11d4-9434-004095e12fc7", "v8ui:Font"),
     ("e6f51714-91cb-4dce-94fe-90ae3e3e1ad1", "v8ui:Picture"),
     ("52616226-8ccf-4d1d-a3da-827eeb4f9cf9", "v8ui:VerticalAlign"),
-    ("43f9c095-40e8-441a-8fad-20a45798c71b", "v8ui:HorizontalAlign"),
-    ("e603103e-a318-4edc-a014-b1c6cf94d49f", "mxl:SpreadsheetDocument"),
-    ("151f8778-e2d0-496a-9f02-d9ffd93b57ec", "fd:FormattedDocument"),
+    (
+        "43f9c095-40e8-441a-8fad-20a45798c71b",
+        "v8ui:HorizontalAlign",
+    ),
+    (
+        "e603103e-a318-4edc-a014-b1c6cf94d49f",
+        "mxl:SpreadsheetDocument",
+    ),
+    (
+        "151f8778-e2d0-496a-9f02-d9ffd93b57ec",
+        "fd:FormattedDocument",
+    ),
     ("48510817-200c-48c2-9973-06cf90840514", "pdfdoc:PDFDocument"),
     ("43dc7f37-5b1d-42a7-8f28-f545080d0255", "pl:Planner"),
-    ("cab0d12b-3c88-4993-8edc-8c3827cadc7d", "dcsset:SettingsComposer"),
+    (
+        "cab0d12b-3c88-4993-8edc-8c3827cadc7d",
+        "dcsset:SettingsComposer",
+    ),
     ("f6841c6b-6c71-4c82-ae9e-d08b49db326c", "dcsset:Filter"),
     (
         "dcbf2698-3c1f-4a22-997f-48070ae9bd64",
@@ -153,7 +171,10 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "dcscor:DataCompositionPeriodAdditionType",
     ),
     ("913e8016-6e90-47a0-b2a0-4513f4edad61", "dcscor:Field"),
-    ("741ae838-6e42-4ac0-b6a4-17e5604b0669", "ent:AccountingRecordType"),
+    (
+        "741ae838-6e42-4ac0-b6a4-17e5604b0669",
+        "ent:AccountingRecordType",
+    ),
     ("b1b064f3-ae38-49bf-8c6d-390c65fd94af", "ent:ComparisonType"),
     ("dcfc3784-a14f-4786-ac7b-c82db5ba275f", "cfg:ConstantsSet"),
     ("0dda99d9-ae9f-43d2-b7ac-44f3fb0d4059", "cfg:ReportBuilder"),
@@ -163,17 +184,26 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("e61ef7b8-f3e1-4f4b-8ac7-676e90524997", "cfg:CatalogRef"),
     ("38bfd075-3e63-4aaa-a93e-94521380d579", "cfg:DocumentRef"),
     ("474c3bf6-08b5-4ddc-a2ad-989cedf11583", "cfg:EnumRef"),
-    ("0a52f9de-73ea-4507-81e8-66217bead73a", "cfg:ExchangePlanRef"),
+    (
+        "0a52f9de-73ea-4507-81e8-66217bead73a",
+        "cfg:ExchangePlanRef",
+    ),
     (
         "99892482-ed55-4fb5-a7f7-20888820a758",
         "cfg:ChartOfCharacteristicTypesRef",
     ),
-    ("ac606d60-0209-4159-8e4c-794bc091ce38", "cfg:ChartOfAccountsRef"),
+    (
+        "ac606d60-0209-4159-8e4c-794bc091ce38",
+        "cfg:ChartOfAccountsRef",
+    ),
     (
         "593cd424-0877-470d-91f9-b90a982059b4",
         "cfg:ChartOfCalculationTypesRef",
     ),
-    ("214fa4d8-6ba4-4748-a5e1-6332b5887780", "cfg:BusinessProcessRef"),
+    (
+        "214fa4d8-6ba4-4748-a5e1-6332b5887780",
+        "cfg:BusinessProcessRef",
+    ),
     (
         "11e5f865-1501-40c6-b4d4-022095a296a5",
         "cfg:BusinessProcessRoutePointRef",
@@ -181,19 +211,31 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("6291e9b3-8df5-44e1-b6b2-d9fe008016c0", "cfg:TaskRef"),
     ("cf4abea6-37b2-11d4-940f-008048da11f9", "cfg:CatalogObject"),
     ("061d872a-5787-460e-95ac-ed74ea3a3e84", "cfg:DocumentObject"),
-    ("857c4a91-e5f4-4fac-86ec-787626f1c108", "cfg:ExchangePlanObject"),
+    (
+        "857c4a91-e5f4-4fac-86ec-787626f1c108",
+        "cfg:ExchangePlanObject",
+    ),
     (
         "82a1b659-b220-4d94-a9bd-14d757b95a48",
         "cfg:ChartOfCharacteristicTypesObject",
     ),
-    ("238e7e88-3c5f-48b2-8a3b-81ebbecb20ed", "cfg:ChartOfAccountsObject"),
+    (
+        "238e7e88-3c5f-48b2-8a3b-81ebbecb20ed",
+        "cfg:ChartOfAccountsObject",
+    ),
     (
         "30b100d6-b29f-47ac-aec7-cb8ca8a54767",
         "cfg:ChartOfCalculationTypesObject",
     ),
-    ("fcd3404e-1523-48ce-9bc0-ecdb822684a1", "cfg:BusinessProcessObject"),
+    (
+        "fcd3404e-1523-48ce-9bc0-ecdb822684a1",
+        "cfg:BusinessProcessObject",
+    ),
     ("3e63355c-1378-4953-be9b-1deb5fb6bec5", "cfg:TaskObject"),
-    ("0195e80c-b157-11d4-9435-004095e12fc7", "cfg:ConstantValueManager"),
+    (
+        "0195e80c-b157-11d4-9435-004095e12fc7",
+        "cfg:ConstantValueManager",
+    ),
     (
         "13134201-f60b-11d5-a3c7-0050bae0a776",
         "cfg:InformationRegisterRecordSet",
@@ -210,16 +252,31 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "f2de87a8-64e5-45eb-a22d-b3aedab050e7",
         "cfg:CalculationRegisterRecordSet",
     ),
-    ("274bf899-db0e-4df6-8ab5-67bf6371ec0b", "cfg:SequenceRecordSet"),
-    ("bc587f20-35d9-11d6-a3c7-0050bae0a776", "cfg:RecalculationRecordSet"),
+    (
+        "274bf899-db0e-4df6-8ab5-67bf6371ec0b",
+        "cfg:SequenceRecordSet",
+    ),
+    (
+        "bc587f20-35d9-11d6-a3c7-0050bae0a776",
+        "cfg:RecalculationRecordSet",
+    ),
     ("82faabf3-7f9b-4b2e-b499-98876415f270", "cfg:CatalogManager"),
-    ("26dd1dee-252a-4942-b4b5-62ea44ed8030", "cfg:DocumentManager"),
-    ("92e7f73f-bd66-4d9e-bc43-bae2acfadfd5", "cfg:DocumentJournalManager"),
+    (
+        "26dd1dee-252a-4942-b4b5-62ea44ed8030",
+        "cfg:DocumentManager",
+    ),
+    (
+        "92e7f73f-bd66-4d9e-bc43-bae2acfadfd5",
+        "cfg:DocumentJournalManager",
+    ),
     (
         "7612de75-8b10-466a-b235-68572c605d92",
         "cfg:ChartOfCharacteristicTypesManager",
     ),
-    ("2066866d-9d38-47fe-a272-3cd416eb9c85", "cfg:ChartOfAccountsManager"),
+    (
+        "2066866d-9d38-47fe-a272-3cd416eb9c85",
+        "cfg:ChartOfAccountsManager",
+    ),
     (
         "3eab4ff4-f2d1-4c96-831c-04711b093999",
         "cfg:ChartOfCalculationTypesManager",
@@ -240,18 +297,30 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "2d0abc8e-dede-4184-afd7-7ae8da588d47",
         "cfg:CalculationRegisterManager",
     ),
-    ("38f1038d-8b0b-438b-bfbe-830a60a1153a", "cfg:BusinessProcessManager"),
+    (
+        "38f1038d-8b0b-438b-bfbe-830a60a1153a",
+        "cfg:BusinessProcessManager",
+    ),
     ("5e268c17-8035-458f-8041-daf9b15d05c9", "cfg:TaskManager"),
     ("3543ef08-3316-4f7e-9447-0cd0a1cbf1d5", "d0p1:Chart"),
     ("3a6e63bf-16aa-42eb-b48c-2fff9670ad2f", "d0p1:GanttChart"),
     ("ebf766b1-f32c-11d3-9851-008048da1252", "d0p1:TextDocument"),
-    ("95de81b0-81c3-4936-9dbb-6400e5c90378", "d0p1:GeographicalSchema"),
-    ("4af83795-fc2a-48cd-9bea-ce665789a62c", "d0p1:FlowchartContextType"),
+    (
+        "95de81b0-81c3-4936-9dbb-6400e5c90378",
+        "d0p1:GeographicalSchema",
+    ),
+    (
+        "4af83795-fc2a-48cd-9bea-ce665789a62c",
+        "d0p1:FlowchartContextType",
+    ),
     (
         "77a01c71-e9b2-4617-af07-c95a4b74548a",
         "d0p1:DataAnalysisTimeIntervalUnitType",
     ),
-    ("7dd764b6-b22f-4712-8edc-c0d634340e60", "d0p1:ConditionalAppearance"),
+    (
+        "7dd764b6-b22f-4712-8edc-c0d634340e60",
+        "d0p1:ConditionalAppearance",
+    ),
 ];
 
 fn builtin_type_name(type_id: &str) -> Option<&'static str> {
@@ -298,7 +367,11 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
                 let (length, allowed) = if fields.len() >= 3 {
                     (
                         atom(&fields[1])?.to_string(),
-                        if atom(&fields[2])? == "0" { "Fixed" } else { "Variable" },
+                        if atom(&fields[2])? == "0" {
+                            "Fixed"
+                        } else {
+                            "Variable"
+                        },
                     )
                 } else {
                     ("0".to_string(), "Variable")
@@ -315,7 +388,11 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
                     (
                         atom(&fields[1])?.to_string(),
                         atom(&fields[2])?.to_string(),
-                        if atom(&fields[3])? == "1" { "Nonnegative" } else { "Any" },
+                        if atom(&fields[3])? == "1" {
+                            "Nonnegative"
+                        } else {
+                            "Any"
+                        },
                     )
                 } else {
                     ("0".to_string(), "0".to_string(), "Any")
@@ -342,7 +419,11 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
                 let (length, allowed) = if fields.len() >= 3 {
                     (
                         atom(&fields[1])?.to_string(),
-                        if atom(&fields[2])? == "0" { "Fixed" } else { "Variable" },
+                        if atom(&fields[2])? == "0" {
+                            "Fixed"
+                        } else {
+                            "Variable"
+                        },
                     )
                 } else {
                     ("0".to_string(), "Variable")
@@ -506,7 +587,9 @@ pub(crate) fn value_element(qname: &str, node: &Brace, names: &NameIndex) -> Res
                     let count = number(item(members, 0)?)? as usize;
                     let mut array = el(qname).attr("type", "v8:FixedArray");
                     for member in members.iter().skip(1).take(count) {
-                        array.children.push(value_element("v8:Value", member, names)?);
+                        array
+                            .children
+                            .push(value_element("v8:Value", member, names)?);
                     }
                     array
                 }
@@ -584,8 +667,7 @@ pub(crate) fn standard_attribute_codes(kind: &str) -> Option<&'static [(&'static
 /// section `X.Y.TabularSection.T`) by its code.
 pub(crate) fn standard_attribute_name(base: &str, code: i64) -> Result<String> {
     let kind = base.split('.').next().unwrap_or_default();
-    if base.contains(".TabularSection.")
-        && code == super::super::objects::line_number_marker(kind)
+    if base.contains(".TabularSection.") && code == super::super::objects::line_number_marker(kind)
     {
         return Ok("LineNumber".to_string());
     }
@@ -632,7 +714,11 @@ pub(crate) fn field_text(segment: &Brace, base: &str, names: &NameIndex) -> Resu
 /// A path is named only inside its owner: one that reaches into another
 /// object, or names a standard attribute the owner does not have, is written
 /// raw, segment by segment (`0:<uuid>/-8`).
-pub(crate) fn data_path_text(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> Result<String> {
+pub(crate) fn data_path_text(
+    segments: &[Brace],
+    owner: Owner<'_>,
+    names: &NameIndex,
+) -> Result<String> {
     if let [segment] = segments
         && list(segment)?.len() == 1
     {
@@ -647,7 +733,11 @@ pub(crate) fn data_path_text(segments: &[Brace], owner: Owner<'_>, names: &NameI
     }
 }
 
-fn named_data_path(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> Result<Option<String>> {
+fn named_data_path(
+    segments: &[Brace],
+    owner: Owner<'_>,
+    names: &NameIndex,
+) -> Result<Option<String>> {
     let inside = format!("{}.", owner.full_name);
     let mut current: Option<String> = None;
     for segment in segments {
@@ -655,7 +745,9 @@ fn named_data_path(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> R
         match fields {
             [code] => {
                 let code = number(code)?;
-                let base = current.clone().unwrap_or_else(|| owner.full_name.to_string());
+                let base = current
+                    .clone()
+                    .unwrap_or_else(|| owner.full_name.to_string());
                 let Ok(name) = standard_attribute_name(&base, code) else {
                     return Ok(None);
                 };
@@ -751,18 +843,24 @@ pub(crate) fn choice_parameter_links_element(
 }
 
 /// `{0,<n>,"name",<value>...}` -> `<qname><app:item name=..><app:value/>`.
-pub(crate) fn choice_parameters_element(qname: &str, node: &Brace, names: &NameIndex) -> Result<Element> {
+pub(crate) fn choice_parameters_element(
+    qname: &str,
+    node: &Brace,
+    names: &NameIndex,
+) -> Result<Element> {
     let fields = list(node)?;
     let count = number(item(fields, 1)?)? as usize;
     let mut element = el(qname);
     for index in 0..count {
         let name = string(item(fields, 2 + 2 * index)?)?;
         let value = item(fields, 3 + 2 * index)?;
-        element.children.push(
-            el("app:item")
-                .attr("name", name)
-                .child(value_element("app:value", value, names)?),
-        );
+        element
+            .children
+            .push(el("app:item").attr("name", name).child(value_element(
+                "app:value",
+                value,
+                names,
+            )?));
     }
     Ok(element)
 }
@@ -837,11 +935,26 @@ pub(crate) fn attribute_properties(
             owner,
             names,
         )?)
-        .child(choice_parameters_element("ChoiceParameters", &slots[16], names)?)
+        .child(choice_parameters_element(
+            "ChoiceParameters",
+            &slots[16],
+            names,
+        )?)
         .child(leaf("QuickChoice", code_text(&slots[12], QUICK_CHOICE)?))
-        .child(leaf("CreateOnInput", code_text(&slots[21], CREATE_ON_INPUT)?))
-        .child(leaf("ChoiceForm", reference_name(atom(&slots[11])?, names)?))
-        .child(link_by_type_element("LinkByType", &slots[15], owner, names)?)
+        .child(leaf(
+            "CreateOnInput",
+            code_text(&slots[21], CREATE_ON_INPUT)?,
+        ))
+        .child(leaf(
+            "ChoiceForm",
+            reference_name(atom(&slots[11])?, names)?,
+        ))
+        .child(link_by_type_element(
+            "LinkByType",
+            &slots[15],
+            owner,
+            names,
+        )?)
         .child(leaf(
             "ChoiceHistoryOnInput",
             code_text(&slots[22], CHOICE_HISTORY_ON_INPUT)?,
@@ -958,16 +1071,25 @@ fn standard_attribute(
         )?)
         .child(leaf(
             "xr:FillChecking",
-            code_text(payload("2723eb98-b4c1-498a-a6f3-70444757902f")?, FILL_CHECKING)?,
+            code_text(
+                payload("2723eb98-b4c1-498a-a6f3-70444757902f")?,
+                FILL_CHECKING,
+            )?,
         ))
-        .child(leaf("xr:MultiLine", flag("2bbba66b-fabf-4863-8ba3-54b3c64c896e")?))
+        .child(leaf(
+            "xr:MultiLine",
+            flag("2bbba66b-fabf-4863-8ba3-54b3c64c896e")?,
+        ))
         .child(leaf(
             "xr:FillFromFillingValue",
             flag("2c8143d5-4248-4c43-8bfb-307c0be2e415")?,
         ))
         .child(leaf(
             "xr:CreateOnInput",
-            code_text(nested("33c74a4d-561f-4bc0-9eaa-8d21c893c0a9")?, CREATE_ON_INPUT)?,
+            code_text(
+                nested("33c74a4d-561f-4bc0-9eaa-8d21c893c0a9")?,
+                CREATE_ON_INPUT,
+            )?,
         ))
         .child(leaf("xr:TypeReductionMode", type_reduction))
         .child(value_element(
@@ -979,7 +1101,10 @@ fn standard_attribute(
             "xr:ToolTip",
             payload("4690ff70-e3fa-4914-9127-6a9acc5fc949")?,
         )?)
-        .child(leaf("xr:ExtendedEdit", flag("4de03908-56f4-4396-a61e-17253afca9ac")?))
+        .child(leaf(
+            "xr:ExtendedEdit",
+            flag("4de03908-56f4-4396-a61e-17253afca9ac")?,
+        ))
         .child(localized_element(
             "xr:Format",
             payload("580c29e2-8af4-4258-882a-7cf8073e61c8")?,
@@ -987,7 +1112,10 @@ fn standard_attribute(
         .child(leaf("xr:ChoiceForm", choice_form))
         .child(leaf(
             "xr:QuickChoice",
-            code_text(nested("6e3a1131-37a3-4da5-8895-572d9d0c9db6")?, QUICK_CHOICE)?,
+            code_text(
+                nested("6e3a1131-37a3-4da5-8895-572d9d0c9db6")?,
+                QUICK_CHOICE,
+            )?,
         ))
         .child(leaf(
             "xr:ChoiceHistoryOnInput",
@@ -1000,7 +1128,10 @@ fn standard_attribute(
             "xr:EditFormat",
             payload("88149a78-9448-4767-867b-0e650d165d2e")?,
         )?)
-        .child(leaf("xr:PasswordMode", flag("90ae4b5d-e0fd-49ef-a008-d67c1e75038c")?))
+        .child(leaf(
+            "xr:PasswordMode",
+            flag("90ae4b5d-e0fd-49ef-a008-d67c1e75038c")?,
+        ))
         .child(leaf(
             "xr:DataHistory",
             code_text(
@@ -1008,7 +1139,10 @@ fn standard_attribute(
                 &[("DontUse", 0), ("Use", 1)],
             )?,
         ))
-        .child(leaf("xr:MarkNegatives", flag("b02800e9-a8d1-42ab-9a12-f673e92be968")?))
+        .child(leaf(
+            "xr:MarkNegatives",
+            flag("b02800e9-a8d1-42ab-9a12-f673e92be968")?,
+        ))
         .child(value_element(
             "xr:MinValue",
             get("c65a541f-0b91-4f33-bc88-fbaaa57f9992")?,
@@ -1018,7 +1152,10 @@ fn standard_attribute(
             "xr:Synonym",
             payload("cf4abea3-37b2-11d4-940f-008048da11f9")?,
         )?)
-        .child(leaf("xr:Comment", text("cf4abea4-37b2-11d4-940f-008048da11f9")?))
+        .child(leaf(
+            "xr:Comment",
+            text("cf4abea4-37b2-11d4-940f-008048da11f9")?,
+        ))
         .child(leaf(
             "xr:FullTextSearch",
             code_text(
@@ -1037,7 +1174,10 @@ fn standard_attribute(
             get("e6b3f5f3-bdf3-4ad0-bc60-7323b3feb208")?,
             names,
         )?)
-        .child(leaf("xr:Mask", text("f49e4ced-4033-4e6c-8755-9fbaaccd6078")?))
+        .child(leaf(
+            "xr:Mask",
+            text("f49e4ced-4033-4e6c-8755-9fbaaccd6078")?,
+        ))
         .child(choice_parameters_element(
             "xr:ChoiceParameters",
             payload("fcf503b8-1c06-454a-970c-06413e64aee5")?,
