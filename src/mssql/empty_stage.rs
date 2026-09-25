@@ -108,6 +108,12 @@ impl EmptyStageContext {
                 .ok_or_else(|| anyhow!("Configuration.xml declares no source version"))?,
         };
         let facts = configuration_facts(&configuration)?;
+        // Body layouts follow CompatibilityMode, not the XML dialect: a 2.21
+        // tree of an 8.3-compatible configuration stores 8.3.27 bodies.
+        crate::module_blob::V85_TREE_IN_V83_LAYOUT.store(
+            version != "2.20" && facts.compatibility < 80500,
+            Ordering::Relaxed,
+        );
         let descriptors = DescriptorContext::new(root, &version)?;
         let module_group = module_group_of(&configuration);
         Ok(Self {
@@ -297,7 +303,14 @@ pub(crate) fn prepare_empty_object(
             }
         }
     } else {
+        // Track D: predefined data, flowcharts and aggregates, base-free.
+        track_d_body_rows(context, path, &xml, &properties, &relative, &mut object);
         for family in MetadataBodyFamily::ALL {
+            if family == MetadataBodyFamily::KindBody
+                && crate::metadata_model::bodies_rows::owns_kind_body(&properties.kind)
+            {
+                continue;
+            }
             let result = catch(|| {
                 prepare_metadata_body_family(
                     family,
@@ -343,6 +356,43 @@ pub(crate) fn prepare_empty_object(
     }
     object.properties = Some(properties);
     object
+}
+
+/// Track D's body rows of one object (`metadata_model::bodies_rows`).
+fn track_d_body_rows(
+    context: &EmptyStageContext,
+    path: &Path,
+    xml: &[u8],
+    properties: &SimpleMetadataXmlProperties,
+    relative: &str,
+    object: &mut EmptyStageObject,
+) {
+    use crate::metadata_model::bodies_rows::{body_row_suffix, compile_body_rows};
+    let result = catch(|| {
+        compile_body_rows(&properties.kind, path, xml, &context.descriptors)?
+            .into_iter()
+            .map(|row| {
+                Ok(EmptyStageRow {
+                    blob: deflate_raw(&row.text)?,
+                    file_name: row.file_name,
+                    family: "kind body".to_string(),
+                    source: relative_of(&context.root, &row.source),
+                    plain: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    });
+    match result {
+        Ok(rows) => object.rows.extend(rows),
+        Err(error) => object.failures.push(EmptyStageFailure {
+            file_name: body_row_suffix(&properties.kind)
+                .map(|suffix| format!("{}.{suffix}", properties.uuid)),
+            kind: properties.kind.clone(),
+            family: "kind body".to_string(),
+            source: relative.to_string(),
+            error: error_text(&error),
+        }),
+    }
 }
 
 /// The service rows: `root`, `version`, and a `versions` naming `names`.

@@ -6,7 +6,7 @@
 //! back) and losslessness (the decoded model compiled back must be the
 //! stored row). Nothing is read from or written to a database.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -47,6 +47,9 @@ pub struct ExportAuditReport {
     pub lossless: usize,
     pub lossy: usize,
     pub writer_mismatch: usize,
+    /// `object_names` agrees with the tree's index.
+    pub names_ok: usize,
+    pub names_mismatch: usize,
     pub kinds: BTreeMap<String, ExportKindStats>,
     pub timing: Option<ExportTiming>,
 }
@@ -63,6 +66,10 @@ pub struct ExportKindStats {
     pub lossy: usize,
     /// The parsed file written back differs from the file: a writer gap.
     pub writer_mismatch: usize,
+    pub names_ok: usize,
+    pub names_mismatch: usize,
+    /// Why `object_names` disagrees with the tree's index.
+    pub names_failures: BTreeMap<String, usize>,
     /// Decode errors by their first line.
     pub failures: BTreeMap<String, usize>,
     /// The element of the first differing line, with counts.
@@ -113,6 +120,8 @@ struct Measured {
     outcome: Outcome,
     lossless: Option<bool>,
     writer_ok: bool,
+    /// `None` when not checked; `Some(Err(reason))` on a disagreement.
+    names: Option<std::result::Result<(), String>>,
 }
 
 pub fn audit_export(
@@ -131,12 +140,24 @@ pub fn audit_export(
         compat: compatibility(&descriptor_context),
     };
     let paths = descriptor_xmls(root);
+    // Child objects per owner (`Catalog.X`), to check `object_names` is
+    // complete.
+    let mut child_counts: HashMap<String, usize> = HashMap::new();
+    for full_name in descriptor_context.index.children.keys() {
+        let mut parts = full_name.splitn(3, '.');
+        if let (Some(kind), Some(name)) = (parts.next(), parts.next()) {
+            *child_counts.entry(format!("{kind}.{name}")).or_default() += 1;
+        }
+    }
+    let checks = Checks {
+        context: &context,
+        descriptor_context: &descriptor_context,
+        child_counts: &child_counts,
+    };
     let measured = parallel::install(|| {
         paths
             .par_iter()
-            .filter_map(|path| {
-                measure_one(root, rows, path, &context, &descriptor_context, options).transpose()
-            })
+            .filter_map(|path| measure_one(root, rows, path, &checks, options).transpose())
             .collect::<Result<Vec<_>>>()
     })??;
 
@@ -152,6 +173,18 @@ pub fn audit_export(
         if !item.writer_ok {
             stats.writer_mismatch += 1;
             report.writer_mismatch += 1;
+        }
+        match &item.names {
+            Some(Ok(())) => {
+                stats.names_ok += 1;
+                report.names_ok += 1;
+            }
+            Some(Err(reason)) => {
+                stats.names_mismatch += 1;
+                report.names_mismatch += 1;
+                *stats.names_failures.entry(reason.clone()).or_default() += 1;
+            }
+            None => {}
         }
         match item.lossless {
             Some(true) => {
@@ -221,14 +254,21 @@ fn wanted(options: &ExportAuditOptions, kind: &str) -> bool {
     options.kinds.is_empty() || options.kinds.iter().any(|candidate| candidate == kind)
 }
 
+struct Checks<'a> {
+    context: &'a ExportContext,
+    descriptor_context: &'a DescriptorContext,
+    child_counts: &'a HashMap<String, usize>,
+}
+
 fn measure_one(
     root: &Path,
     rows: &Path,
     path: &Path,
-    context: &ExportContext,
-    descriptor_context: &DescriptorContext,
+    checks: &Checks<'_>,
     options: &ExportAuditOptions,
 ) -> Result<Option<Measured>> {
+    let context = checks.context;
+    let descriptor_context = checks.descriptor_context;
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -246,9 +286,15 @@ fn measure_one(
         .map(|written| written == expected)
         .unwrap_or(false);
     let mut lossless = None;
+    let mut names = None;
     let outcome = match read_stored_row(rows, &properties.uuid)? {
         None => Outcome::NoRow,
         Some(stored) => {
+            if let Ok(tree) = parse_row(&stored)
+                && let Ok(found) = object_names(&properties.kind, &tree)
+            {
+                names = Some(check_names(&found, &expected, checks));
+            }
             let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 parse_row(&stored).and_then(|tree| decode_object(&properties.kind, &tree, context))
             }));
@@ -256,12 +302,19 @@ fn measure_one(
                 Err(_) => Outcome::Failed("decoder panicked".to_string()),
                 Ok(Err(error)) => Outcome::Failed(format!("{error:#}")),
                 Ok(Ok(object)) => {
-                    lossless = Some(is_lossless(&object, &properties.kind, path, &stored, descriptor_context));
+                    lossless = Some(is_lossless(
+                        &object,
+                        &properties.kind,
+                        path,
+                        &stored,
+                        descriptor_context,
+                    ));
                     let written = write_document(&object, &context.version);
                     if written == expected {
                         Outcome::Identical
                     } else {
-                        let (line, expected_line, actual_line) = first_line_difference(&expected, &written);
+                        let (line, expected_line, actual_line) =
+                            first_line_difference(&expected, &written);
                         Outcome::Different {
                             line,
                             expected: expected_line,
@@ -280,7 +333,58 @@ fn measure_one(
         outcome,
         lossless,
         writer_ok,
+        names,
     }))
+}
+
+/// `object_names` of a row against the index the tree gives.
+fn check_names(
+    found: &super::ObjectNames,
+    file: &str,
+    checks: &Checks<'_>,
+) -> std::result::Result<(), String> {
+    let index = &checks.descriptor_context.index;
+    match index.objects.get(&found.full_name) {
+        Some(entry) if entry.uuid == found.uuid => {}
+        Some(_) => return Err("object uuid differs".to_string()),
+        None => return Err("object name unknown".to_string()),
+    }
+    for (full_name, uuid) in &found.children {
+        match index.children.get(full_name) {
+            Some(indexed) if indexed == uuid => {}
+            Some(_) => return Err("child uuid differs".to_string()),
+            None => return Err("child name unknown".to_string()),
+        }
+    }
+    let expected_children = checks
+        .child_counts
+        .get(&found.full_name)
+        .copied()
+        .unwrap_or_default();
+    if found.children.len() != expected_children {
+        return Err(format!(
+            "children: {} named, {} in the tree",
+            found.children.len(),
+            expected_children
+        ));
+    }
+    for generated in &found.types {
+        match index.generated_types.get(&generated.name) {
+            Some(indexed)
+                if indexed.type_id == generated.type_id
+                    && indexed.value_id == generated.value_id => {}
+            Some(_) => return Err("generated type ids differ".to_string()),
+            None => return Err(format!("generated type unknown ({})", generated.category)),
+        }
+    }
+    let declared = file.matches("<xr:GeneratedType ").count();
+    if found.types.len() != declared {
+        return Err(format!(
+            "generated types: {} named, {declared} in the file",
+            found.types.len()
+        ));
+    }
+    Ok(())
 }
 
 /// The decoded model compiled again gives the stored row back.
@@ -347,7 +451,10 @@ fn write_sample(dir: &Path, kind: &str, relative: &str, root: &Path, written: &s
     let folder = dir.join(kind);
     fs::create_dir_all(&folder)?;
     let stem = relative.trim_end_matches(".xml").replace(['/', '\\'], "__");
-    fs::copy(root.join(relative), folder.join(format!("{stem}.expected.xml")))?;
+    fs::copy(
+        root.join(relative),
+        folder.join(format!("{stem}.expected.xml")),
+    )?;
     fs::write(folder.join(format!("{stem}.actual.xml")), written)?;
     Ok(())
 }
@@ -421,12 +528,21 @@ fn time_export(
 /// One line per kind, for the terminal.
 pub fn summary_table(report: &ExportAuditReport) -> String {
     let mut lines = vec![format!(
-        "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7}",
-        "kind", "total", "identical", "different", "failed", "no_row", "lossless", "lossy", "writer!"
+        "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7} {:>6}",
+        "kind",
+        "total",
+        "identical",
+        "different",
+        "failed",
+        "no_row",
+        "lossless",
+        "lossy",
+        "writer!",
+        "names!"
     )];
     for (kind, stats) in &report.kinds {
         lines.push(format!(
-            "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7}",
+            "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7} {:>6}",
             kind,
             stats.total,
             stats.identical,
@@ -435,11 +551,12 @@ pub fn summary_table(report: &ExportAuditReport) -> String {
             stats.no_row,
             stats.lossless,
             stats.lossy,
-            stats.writer_mismatch
+            stats.writer_mismatch,
+            stats.names_mismatch
         ));
     }
     lines.push(format!(
-        "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7}",
+        "{:<30} {:>6} {:>9} {:>9} {:>7} {:>6} {:>8} {:>6} {:>7} {:>6}",
         "TOTAL",
         report.objects,
         report.identical,
@@ -448,7 +565,8 @@ pub fn summary_table(report: &ExportAuditReport) -> String {
         report.no_row,
         report.lossless,
         report.lossy,
-        report.writer_mismatch
+        report.writer_mismatch,
+        report.names_mismatch
     ));
     if let Some(timing) = &report.timing {
         lines.push(format!(

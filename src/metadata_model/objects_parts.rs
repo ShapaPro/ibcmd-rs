@@ -1417,40 +1417,10 @@ pub(crate) mod shared {
     }
 
     /// A typed value (`FillValue`, `MinValue`, `TypesFilterValue`...).
-    ///
-    /// Two value types only the charts' standard attributes hold are spelled
-    /// here: a `v8:TypeDescription` (a characteristic chart's `ValueType`) is
-    /// `{"#",<type description>,<pattern>}` and an `ent:AccountType` (a chart
-    /// of accounts' `Type`) `{"#",<account type>,<code>}`.
     pub(crate) fn typed_value(
         element: Option<&Element>,
         context: &DescriptorContext,
     ) -> Result<Brace> {
-        if let Some(element) = element.filter(|element| !element.is_nil()) {
-            match element.attr("type") {
-                Some("v8:TypeDescription") => {
-                    return Ok(crate::brace_list![
-                        Brace::str("#"),
-                        Brace::uuid("f5c65050-3bbb-11d5-b988-0050bae0a95d"),
-                        types::type_pattern(Some(element), context)?,
-                    ]);
-                }
-                Some("ent:AccountType") => {
-                    let code = match element.text.trim() {
-                        "Active" => 0,
-                        "Passive" => 1,
-                        "ActivePassive" => 2,
-                        other => return Err(anyhow!("unsupported account type {other}")),
-                    };
-                    return Ok(crate::brace_list![
-                        Brace::str("#"),
-                        Brace::uuid("872f7198-7083-4e3e-b57e-a2a9802c769e"),
-                        Brace::num(code),
-                    ]);
-                }
-                _ => {}
-            }
-        }
         types::typed_value(element, context)
     }
 

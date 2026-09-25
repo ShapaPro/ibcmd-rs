@@ -21,6 +21,12 @@ pub mod types;
 
 // Kind families, one track each.
 pub mod common;
+// Base-free body rows of track D: predefined data, flowcharts, aggregates.
+pub mod bodies_aggregates;
+pub mod bodies_flowchart;
+pub mod bodies_predefined;
+pub mod bodies_rows;
+pub mod bodies_value_table;
 pub mod objects;
 pub mod registers;
 pub mod root;
@@ -218,7 +224,9 @@ pub fn compile_object(object: &ObjectXml<'_>, context: &DescriptorContext) -> Re
         "CommonModule" | "CommonPicture" | "CommonTemplate" | "CommonCommand" | "CommandGroup"
         | "Role" | "XDTOPackage" | "StyleItem" | "Style" | "WebService" | "HTTPService"
         | "WSReference" | "IntegrationService" | "Bot" | "ExternalDataSource" | "Subsystem"
-        | "Form" | "Template" | "CommonForm" | "Interface" => common::compile(object, context),
+        | "Form" | "Template" | "CommonForm" | "Interface" | "PaletteColor" => {
+            common::compile(object, context)
+        }
         "Configuration" => root::compile(object, context),
         other => bail!("unknown metadata kind {other}"),
     }

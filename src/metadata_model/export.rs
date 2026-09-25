@@ -51,7 +51,9 @@ impl NameIndex {
             names.insert(entry.uuid.clone(), full_name.clone());
         }
         for (full_name, uuid) in &index.children {
-            names.entry(uuid.clone()).or_insert_with(|| full_name.clone());
+            names
+                .entry(uuid.clone())
+                .or_insert_with(|| full_name.clone());
         }
         let mut types = HashMap::with_capacity(index.generated_types.len());
         for generated in index.generated_types.values() {
@@ -61,11 +63,18 @@ impl NameIndex {
         for entry in index.objects.values() {
             if !matches!(
                 entry.kind.as_str(),
-                "Catalog" | "ChartOfCharacteristicTypes" | "ChartOfAccounts" | "ChartOfCalculationTypes"
+                "Catalog"
+                    | "ChartOfCharacteristicTypes"
+                    | "ChartOfAccounts"
+                    | "ChartOfCalculationTypes"
             ) {
                 continue;
             }
-            let path = entry.path.with_extension("").join("Ext").join("Predefined.xml");
+            let path = entry
+                .path
+                .with_extension("")
+                .join("Ext")
+                .join("Predefined.xml");
             if let Ok(bytes) = fs::read(&path)
                 && let Ok(root) = parse_element_tree(&bytes)
             {
@@ -96,9 +105,12 @@ impl NameIndex {
 
     /// Adds what one object contributes (for an index built from rows).
     pub fn add(&mut self, names: &ObjectNames) {
-        self.names.insert(names.uuid.clone(), names.full_name.clone());
+        self.names
+            .insert(names.uuid.clone(), names.full_name.clone());
         for (full_name, uuid) in &names.children {
-            self.names.entry(uuid.clone()).or_insert_with(|| full_name.clone());
+            self.names
+                .entry(uuid.clone())
+                .or_insert_with(|| full_name.clone());
         }
         for generated in &names.types {
             self.types
@@ -467,4 +479,197 @@ pub fn tree_version(root: &Path) -> Option<String> {
     let bytes = fs::read(root.join("Configuration.xml")).ok()?;
     let doc = super::xml::MetadataXml::parse(&bytes).ok()?;
     doc.version().map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::brace::{Brace, parse_row};
+    use super::super::objects::parts::compatibility;
+    use super::super::{DescriptorContext, compile_descriptor};
+    use super::values::{Owner, data_path_text};
+    use super::*;
+    use crate::brace_list;
+
+    /// Lines as the platform writes them: tabs, CRLF, no final newline.
+    fn native(version: &str, lines: &[&str]) -> String {
+        let mut text = format!(
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<MetaDataObject {} version=\"{version}\">\r\n",
+            root_namespaces(version)
+        );
+        for line in lines {
+            text.push_str(line);
+            text.push_str("\r\n");
+        }
+        text.push_str("</MetaDataObject>");
+        text
+    }
+
+    #[test]
+    fn the_writer_self_closes_escapes_and_declares_type_namespaces() {
+        let object = el("Enum")
+            .attr("uuid", "u")
+            .child(
+                el("Properties")
+                    .child(leaf("Comment", "a < b & \"c\""))
+                    .child(el("Explanation")),
+            )
+            .child(
+                el("Type")
+                    .child(leaf("v8:Type", "mxl:SpreadsheetDocument"))
+                    .child(leaf("v8:Type", "d0p1:Chart")),
+            )
+            .child(el("MinValue").attr("nil", "true"));
+        let written = write_document(&object, "2.20");
+        let expected = native(
+            "2.20",
+            &[
+                "\t<Enum uuid=\"u\">",
+                "\t\t<Properties>",
+                "\t\t\t<Comment>a &lt; b &amp; \"c\"</Comment>",
+                "\t\t\t<Explanation/>",
+                "\t\t</Properties>",
+                "\t\t<Type>",
+                "\t\t\t<v8:Type xmlns:mxl=\"http://v8.1c.ru/8.2/data/spreadsheet\">mxl:SpreadsheetDocument</v8:Type>",
+                "\t\t\t<v8:Type xmlns:d4p1=\"http://v8.1c.ru/8.2/data/chart\">d4p1:Chart</v8:Type>",
+                "\t\t</Type>",
+                "\t\t<MinValue xsi:nil=\"true\"/>",
+                "\t</Enum>",
+            ],
+        );
+        assert_eq!(written, expected);
+        // A parsed file writes back unchanged, 2.21 root included.
+        let file = native(
+            "2.21",
+            &["\t<Enum uuid=\"u\">", "\t\t<Properties/>", "\t</Enum>"],
+        );
+        assert_eq!(rewrite_file(file.as_bytes()).unwrap(), file);
+    }
+
+    #[test]
+    fn a_data_path_outside_its_owner_is_written_raw() {
+        let mut names = NameIndex::default();
+        names
+            .names
+            .insert("a".repeat(36), "Catalog.X.Attribute.A".to_string());
+        names
+            .names
+            .insert("b".repeat(36), "Document.Y.Attribute.B".to_string());
+        let owner = Owner {
+            kind: "Catalog",
+            full_name: "Catalog.X",
+        };
+        let segment = |uuid: String| brace_list![Brace::num(0), Brace::atom(uuid)];
+        let inside = data_path_text(&[segment("a".repeat(36))], owner, &names).unwrap();
+        assert_eq!(inside, "Catalog.X.Attribute.A");
+        let outside = data_path_text(&[segment("b".repeat(36))], owner, &names).unwrap();
+        assert_eq!(outside, format!("0:{}", "b".repeat(36)));
+        let standard = data_path_text(&[brace_list![Brace::num(-5)]], owner, &names).unwrap();
+        assert_eq!(standard, "Catalog.X.StandardAttribute.Owner");
+        let foreign = data_path_text(&[brace_list![Brace::num(-99)]], owner, &names).unwrap();
+        assert_eq!(foreign, "-99");
+    }
+
+    /// An enum goes XML -> row -> XML and comes back byte for byte.
+    #[test]
+    fn an_enum_round_trips_through_its_row() {
+        let root = std::env::temp_dir().join(format!(
+            "ibcmd-export-enum-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(root.join("Enums")).unwrap();
+        fs::write(
+            root.join("Configuration.xml"),
+            native(
+                "2.20",
+                &[
+                    "\t<Configuration uuid=\"11111111-1111-1111-1111-111111111111\">",
+                    "\t\t<Properties>",
+                    "\t\t\t<Name>C</Name>",
+                    "\t\t\t<CompatibilityMode>Version8_3_27</CompatibilityMode>",
+                    "\t\t</Properties>",
+                    "\t</Configuration>",
+                ],
+            ),
+        )
+        .unwrap();
+        let xml = native(
+            "2.20",
+            &[
+                "\t<Enum uuid=\"0d2189f1-306c-4236-836a-1a4bfc0cff13\">",
+                "\t\t<InternalInfo>",
+                "\t\t\t<xr:GeneratedType name=\"EnumRef.E\" category=\"Ref\">",
+                "\t\t\t\t<xr:TypeId>e4253022-3bfb-430b-bd60-e507622d28c9</xr:TypeId>",
+                "\t\t\t\t<xr:ValueId>2b90a755-c5f0-4075-b543-5eaf9c0f9b54</xr:ValueId>",
+                "\t\t\t</xr:GeneratedType>",
+                "\t\t\t<xr:GeneratedType name=\"EnumManager.E\" category=\"Manager\">",
+                "\t\t\t\t<xr:TypeId>6a120ac5-26bf-4c49-b7e5-37917a0c787e</xr:TypeId>",
+                "\t\t\t\t<xr:ValueId>e8eb2b7a-fbde-45c9-9e8a-1a2a0a0832bf</xr:ValueId>",
+                "\t\t\t</xr:GeneratedType>",
+                "\t\t\t<xr:GeneratedType name=\"EnumList.E\" category=\"List\">",
+                "\t\t\t\t<xr:TypeId>3a7ddce0-9165-4ff2-ab59-f91506e04201</xr:TypeId>",
+                "\t\t\t\t<xr:ValueId>6d76ebe3-a08e-4c5e-ad5d-c9f739008a98</xr:ValueId>",
+                "\t\t\t</xr:GeneratedType>",
+                "\t\t</InternalInfo>",
+                "\t\t<Properties>",
+                "\t\t\t<Name>E</Name>",
+                "\t\t\t<Synonym>",
+                "\t\t\t\t<v8:item>",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>",
+                "\t\t\t\t\t<v8:content>Две\nстроки &amp; знак</v8:content>",
+                "\t\t\t\t</v8:item>",
+                "\t\t\t</Synonym>",
+                "\t\t\t<Comment/>",
+                "\t\t\t<UseStandardCommands>false</UseStandardCommands>",
+                "\t\t\t<Characteristics/>",
+                "\t\t\t<QuickChoice>true</QuickChoice>",
+                "\t\t\t<ChoiceMode>BothWays</ChoiceMode>",
+                "\t\t\t<DefaultListForm/>",
+                "\t\t\t<DefaultChoiceForm/>",
+                "\t\t\t<AuxiliaryListForm/>",
+                "\t\t\t<AuxiliaryChoiceForm/>",
+                "\t\t\t<ListPresentation/>",
+                "\t\t\t<ExtendedListPresentation/>",
+                "\t\t\t<Explanation/>",
+                "\t\t\t<ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput>",
+                "\t\t</Properties>",
+                "\t\t<ChildObjects>",
+                "\t\t\t<EnumValue uuid=\"a03d3535-090a-46f5-a411-3567c8c12bc1\">",
+                "\t\t\t\t<Properties>",
+                "\t\t\t\t\t<Name>V</Name>",
+                "\t\t\t\t\t<Synonym/>",
+                "\t\t\t\t\t<Comment>Одна</Comment>",
+                "\t\t\t\t</Properties>",
+                "\t\t\t</EnumValue>",
+                "\t\t</ChildObjects>",
+                "\t</Enum>",
+            ],
+        );
+        let path = root.join("Enums").join("E.xml");
+        fs::write(&path, &xml).unwrap();
+        let descriptor_context = DescriptorContext::new(&root, "2.20").unwrap();
+        let row = compile_descriptor("Enum", &path, xml.as_bytes(), &descriptor_context).unwrap();
+        let context = ExportContext {
+            names: NameIndex::from_config_index(&descriptor_context.index),
+            version: "2.20".to_string(),
+            compat: compatibility(&descriptor_context),
+        };
+        assert_eq!(export_descriptor("Enum", &row, &context).unwrap(), xml);
+        // The names a row gives match the tree's.
+        let names = object_names("Enum", &parse_row(&row).unwrap()).unwrap();
+        assert_eq!(names.full_name, "Enum.E");
+        assert_eq!(
+            names.children,
+            vec![(
+                "Enum.E.EnumValue.V".to_string(),
+                "a03d3535-090a-46f5-a411-3567c8c12bc1".to_string()
+            )]
+        );
+        assert_eq!(names.types.len(), 3);
+        assert_eq!(names.types[2].name, "EnumList.E");
+        fs::remove_dir_all(&root).ok();
+    }
 }
