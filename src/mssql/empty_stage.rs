@@ -446,6 +446,10 @@ pub struct EmptyStageOutcomes {
     /// Of `different`: v8 containers whose elements are equal (their
     /// headers carry the time a platform wrote them).
     pub different_headers: usize,
+    /// Of `different`: rows stored deflated twice whose content is equal
+    /// once inflated again (a parent configuration `.cf`); only the
+    /// compressor differs.
+    pub different_recompressed: usize,
     /// In Config, not produced.
     pub missing: usize,
     /// Of `missing`: rows the platform keeps for itself, which no XML
@@ -471,6 +475,7 @@ impl EmptyStageOutcomes {
                 match benign {
                     Some(Benign::Layout) => self.different_layout += 1,
                     Some(Benign::Headers) => self.different_headers += 1,
+                    Some(Benign::Recompressed) => self.different_recompressed += 1,
                     Some(Benign::Platform | Benign::Stub) | None => {}
                 }
             }
@@ -497,6 +502,7 @@ impl EmptyStageOutcomes {
 enum Benign {
     Layout,
     Headers,
+    Recompressed,
     Platform,
     Stub,
 }
@@ -506,19 +512,18 @@ impl Benign {
         match self {
             Self::Layout => "layout",
             Self::Headers => "container headers",
+            Self::Recompressed => "recompressed",
             Self::Platform => "platform's own",
             Self::Stub => "empty stub",
         }
     }
 }
 
-/// Why a stored row nothing produced is not a gap, when it is not.
-fn missing_reason(name: &str, configuration: &str, stored: Option<&[u8]>) -> Option<Benign> {
-    let suffix_is_uuid = name
-        .strip_prefix(configuration)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(is_uuid);
-    if name == "DynamicallyUpdated" || name.contains("_dynupdate_") || suffix_is_uuid {
+/// Why a stored row nothing produced is not a gap, when it is not. (A
+/// `<configuration>.<uuid>` row is a parent configuration, which a tree
+/// holds as `Ext/ParentConfigurations/<name>.cf`: a gap when missing.)
+fn missing_reason(name: &str, stored: Option<&[u8]>) -> Option<Benign> {
+    if name == "DynamicallyUpdated" || name.contains("_dynupdate_") {
         return Some(Benign::Platform);
     }
     let text = stored?;
@@ -537,7 +542,17 @@ fn benign_difference(stored: &[u8], produced: &[u8]) -> Option<Benign> {
     if strip(stored) == strip(produced) {
         return Some(Benign::Layout);
     }
-    containers_equal(stored, produced, 0).then_some(Benign::Headers)
+    if containers_equal(stored, produced, 0) {
+        return Some(Benign::Headers);
+    }
+    // A row deflated twice (a parent configuration) compares as its inner
+    // stream, which is the compressor's output, not content.
+    match (inflate_raw(stored), inflate_raw(produced)) {
+        (Ok(stored), Ok(produced)) if !stored.is_empty() && stored == produced => {
+            Some(Benign::Recompressed)
+        }
+        _ => None,
+    }
 }
 
 /// Both v8 containers, with the same element names and equal data (nested
@@ -1086,7 +1101,7 @@ pub fn audit_empty_stage(
                 family: "<none>".to_string(),
                 source: String::new(),
                 outcome: Outcome::Missing,
-                benign: missing_reason(name, &context.facts.uuid, plain.as_deref()),
+                benign: missing_reason(name, plain.as_deref()),
                 offset: None,
                 brace_path: None,
                 detail: String::new(),
@@ -1251,11 +1266,12 @@ pub fn empty_stage_summary(report: &EmptyStageAuditReport) -> String {
             report.failures
         ),
         format!(
-            "TOTAL identical {} different {} (layout only {}, container headers only {}) missing {} (platform's own {}, empty stubs {}) extra {} failed {}",
+            "TOTAL identical {} different {} (layout only {}, container headers only {}, recompressed only {}) missing {} (platform's own {}, empty stubs {}) extra {} failed {}",
             report.totals.identical,
             report.totals.different,
             report.totals.different_layout,
             report.totals.different_headers,
+            report.totals.different_recompressed,
             report.totals.missing,
             report.totals.missing_platform,
             report.totals.missing_stub,
