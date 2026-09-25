@@ -982,6 +982,7 @@ mod forms;
 pub mod help_audit;
 pub mod interface_audit;
 mod metadata;
+pub mod model_export;
 #[cfg(test)]
 mod metadata_order_tests;
 mod moxel;

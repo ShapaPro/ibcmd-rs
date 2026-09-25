@@ -49,7 +49,8 @@ const LOCALIZED_STRING: &str = "87024738-fc2a-4436-ada1-df79d395c424";
 pub(crate) struct Compat(pub u32, pub u32, pub u32);
 
 impl Compat {
-    fn parse(text: &str) -> Option<Self> {
+    /// `Version8_3_24` -> `Compat(8, 3, 24)`.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         let rest = text.trim().strip_prefix("Version")?;
         let parts = rest
             .split('_')

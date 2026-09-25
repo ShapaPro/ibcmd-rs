@@ -16,6 +16,8 @@
 
 #[path = "export_audit.rs"]
 pub mod audit;
+#[path = "export_names.rs"]
+pub mod names;
 #[path = "export_values.rs"]
 pub mod values;
 

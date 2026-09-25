@@ -319,6 +319,46 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
+        Commands::AuditNameIndex(args) => {
+            let report = ibcmd_rs::mssql_dump::model_export::audit_name_index(
+                &args.root,
+                &args.rows,
+                args.source_version,
+                args.max_samples,
+            )?;
+            let comparison = &report.comparison;
+            for (label, part) in [
+                ("names", &comparison.names),
+                ("types", &comparison.types),
+                ("predefined", &comparison.predefined),
+            ] {
+                println!(
+                    "{label:<11} expected {:>7} built {:>7} equal {:>7} missing {:>6} extra {:>6} different {:>6}",
+                    part.expected, part.actual, part.equal, part.missing, part.extra, part.different
+                );
+                for (kind, counts) in &part.by_kind {
+                    println!(
+                        "    {kind:<36} missing {:>6} extra {:>6} different {:>6}",
+                        counts.missing, counts.extra, counts.different
+                    );
+                }
+            }
+            println!(
+                "equal: {}; compatibility: rows {:?}, tree {:?}; built from rows in {} ms, from the tree in {} ms",
+                report.equal,
+                report.rows_compatibility_mode,
+                report.tree_compatibility_mode,
+                report.build_rows_ms,
+                report.build_tree_ms
+            );
+            println!(
+                "of which: rows {} ms, legacy indexes {} ms, model index {} ms",
+                report.fetch_ms, report.legacy_ms, report.model_ms
+            );
+            if let Some(output) = args.output {
+                std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
         Commands::AuditMetadataCompiler(args) => {
             use ibcmd_rs::metadata_model::audit;
             let options = audit::DescriptorAuditOptions {
