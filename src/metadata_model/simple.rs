@@ -293,7 +293,7 @@ fn functional_option(object: &ObjectXml<'_>, context: &DescriptorContext) -> Res
     ]))
 }
 
-/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}`
+/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}` (`{0}` when empty)
 fn functional_options_parameter(
     object: &ObjectXml<'_>,
     context: &DescriptorContext,
@@ -306,6 +306,11 @@ fn functional_options_parameter(
         }
     }
     uses[1] = Brace::num((uses.len() - 2) as i64);
+    if uses.len() == 2 {
+        // No corpus parameter is empty; the older strict codec
+        // (`compiler::families::simple`) reads an empty list as bare `{0}`.
+        uses.truncate(1);
+    }
     Ok(row(brace_list![
         Brace::num(0),
         md_base(&object.uuid, properties),
@@ -457,13 +462,9 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         }
     }
     content[1] = Brace::num((content.len() - 2) as i64);
-    let commands = object
-        .child_objects()
-        .map(|children| children.children_named("Command").count())
-        .unwrap_or(0);
-    if commands > 0 {
-        bail!("filter criterion commands are not compiled yet");
-    }
+    // Owned commands are the reference objects' `{{0,{0,0,0,<command>}},0}`.
+    let commands = super::objects::parts::Obj::new(object, context)?
+        .commands(super::objects::parts::CommandWrapper::Owner)?;
     Ok(brace_list![
         Brace::num(1),
         brace_list![
@@ -493,6 +494,79 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         ],
         Brace::num(2),
         collection(FORMS, owned_object_uuids(object, "Form", context)?),
-        collection(COMMANDS, Vec::new()),
+        collection(COMMANDS, commands),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::super::brace::serialize;
+    use super::super::index::ObjectEntry;
+    use super::super::types::tests::{context, element};
+    use super::*;
+
+    const MODULE: &str = "dc2b7a9e-132b-4a30-b7a8-ec72bf3d2e63";
+    const JOB: &str = "c7ffd8ab-15e9-4cf1-a7fd-d05534dff000";
+
+    fn compile_one(kind: &str, xml: &str) -> String {
+        let mut context = context();
+        context.index.objects.insert(
+            "CommonModule.Курсы".to_string(),
+            ObjectEntry {
+                kind: "CommonModule".to_string(),
+                name: "Курсы".to_string(),
+                uuid: MODULE.to_string(),
+                full_name: "CommonModule.Курсы".to_string(),
+                path: PathBuf::new(),
+            },
+        );
+        let element = element(xml);
+        let object = ObjectXml {
+            element: &element,
+            kind,
+            uuid: element.attr("uuid").unwrap_or_default().to_string(),
+            name: element
+                .path(&["Properties", "Name"])
+                .map(|name| name.text.clone())
+                .unwrap_or_default(),
+            path: std::path::Path::new("."),
+        };
+        serialize(&compile(&object, &context).unwrap()).replace("\r\n", "")
+    }
+
+    #[test]
+    fn a_scheduled_job_writes_key_before_description() {
+        // BSP `ScheduledJobs/ЗагрузкаКурсовВалют` with a key and a description.
+        let actual = compile_one(
+            "ScheduledJob",
+            &format!(
+                r##"<ScheduledJob uuid="{JOB}"><Properties><Name>Загрузка</Name><Synonym/><Comment/><MethodName>CommonModule.Курсы.ПриЗагрузке</MethodName><Description>Описание</Description><Key>1</Key><Use>false</Use><Predefined>true</Predefined><RestartCountOnFailure>10</RestartCountOnFailure><RestartIntervalOnFailure>600</RestartIntervalOnFailure></Properties></ScheduledJob>"##
+            ),
+        );
+        assert_eq!(
+            actual,
+            format!(
+                r##"{{1,{{2,{{3,{{1,0,{JOB}}},"Загрузка",{{0}},"",0,0,{NIL_UUID},0}},"1","Описание",0,1,{MODULE},"ПриЗагрузке",10,600}},0}}"##
+            )
+        );
+    }
+
+    #[test]
+    fn an_event_subscription_stores_the_bilingual_event_name() {
+        let actual = compile_one(
+            "EventSubscription",
+            &format!(
+                r##"<EventSubscription uuid="{JOB}"><Properties><Name>Подписка</Name><Synonym/><Comment/><Source><v8:Type>cfg:CatalogRef.Валюты</v8:Type></Source><Event>BeforeWrite</Event><Handler>CommonModule.Курсы.ПередЗаписью</Handler></Properties></EventSubscription>"##
+            ),
+        );
+        let valuta = super::super::types::tests::VALUTA_TYPE;
+        assert_eq!(
+            actual,
+            format!(
+                r##"{{1,{{1,{{3,{{1,0,{JOB}}},"Подписка",{{0}},"",0,0,{NIL_UUID},0}},{{"Pattern",{{"#",{valuta}}}}},"BeforeWrite_ПередЗаписью",{MODULE},"ПередЗаписью"}},0}}"##
+            )
+        );
+    }
 }
