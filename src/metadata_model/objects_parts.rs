@@ -954,7 +954,7 @@ fn standard_attribute_bag(obj: &Obj<'_>, attribute: &Element) -> Result<Brace> {
             "3b10624f-1e3d-495d-8093-25225efc5313",
             nested(
                 "502b7765-f89c-4fd0-924f-0a28d3dc09b7",
-                code("TypeReductionMode", &[("TransformValues", 0), ("Deny", 1)])?,
+                code("TypeReductionMode", &[("TransformValues", 0), ("Deny", 2)])?,
             ),
         );
     }
