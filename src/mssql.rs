@@ -74,6 +74,12 @@ use crate::source_audit::{
     SourceLoadCoverageAuditReport, audit_source_load_coverage_from_manifest,
 };
 
+mod empty_stage;
+
+pub use empty_stage::{
+    EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
+};
+
 #[derive(Clone, Copy)]
 struct SqlAuth<'a> {
     user: Option<&'a str>,
@@ -3351,6 +3357,9 @@ pub fn stage_source_common_module_objects(
 pub fn stage_source_objects(
     args: &MssqlStageSourceObjectsArgs,
 ) -> Result<StageSourceObjectsReport> {
+    if args.base_free {
+        return empty_stage::stage_source_objects_base_free(args);
+    }
     require_non_lab_confirmation(args.allow_non_lab, "source tree staging")?;
     if !args.replace_config_save {
         return Err(anyhow!(
@@ -4406,6 +4415,42 @@ fn prepare_metadata_object_stage(
     })
 }
 
+/// The writers `prepare_metadata_body_rows` runs, in its order: the kind's
+/// own body, then help, object modules, nested command modules, command
+/// interface and additional indexes. A base-free stage runs them one by one
+/// to keep one family's failure from hiding the others' rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataBodyFamily {
+    KindBody,
+    Help,
+    ObjectModules,
+    NestedCommandModules,
+    CommandInterface,
+    AdditionalIndexes,
+}
+
+impl MetadataBodyFamily {
+    const ALL: [Self; 6] = [
+        Self::KindBody,
+        Self::Help,
+        Self::ObjectModules,
+        Self::NestedCommandModules,
+        Self::CommandInterface,
+        Self::AdditionalIndexes,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::KindBody => "kind body",
+            Self::Help => "help",
+            Self::ObjectModules => "object modules",
+            Self::NestedCommandModules => "nested command modules",
+            Self::CommandInterface => "command interface",
+            Self::AdditionalIndexes => "additional indexes",
+        }
+    }
+}
+
 fn prepare_metadata_body_rows(
     sqlcmd: &Path,
     server: &str,
@@ -4417,7 +4462,61 @@ fn prepare_metadata_body_rows(
     source: Option<&MetadataSourceContext>,
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
-    let mut rows = match properties.kind.as_str() {
+    let mut rows = Vec::new();
+    for family in MetadataBodyFamily::ALL {
+        rows.extend(prepare_metadata_body_family(
+            family, sqlcmd, server, sql_auth, database, xml_path, xml, properties, source, axes,
+        )?);
+    }
+    Ok(rows)
+}
+
+fn prepare_metadata_body_family(
+    family: MetadataBodyFamily,
+    sqlcmd: &Path,
+    server: &str,
+    sql_auth: SqlAuth<'_>,
+    database: &str,
+    xml_path: &Path,
+    xml: &[u8],
+    properties: &SimpleMetadataXmlProperties,
+    source: Option<&MetadataSourceContext>,
+    axes: &CompileAxes,
+) -> Result<Vec<PreparedMetadataBodyStage>> {
+    match family {
+        MetadataBodyFamily::KindBody => prepare_metadata_kind_body_rows(
+            sqlcmd, server, sql_auth, database, xml_path, xml, properties, source, axes,
+        ),
+        MetadataBodyFamily::Help => {
+            prepare_object_help_body_row(sqlcmd, server, database, xml_path, properties, source)
+        }
+        MetadataBodyFamily::ObjectModules => {
+            prepare_object_module_body_rows(sqlcmd, server, database, xml_path, properties, axes)
+        }
+        MetadataBodyFamily::NestedCommandModules => prepare_nested_command_module_body_rows(
+            sqlcmd, server, database, xml_path, xml, properties, axes,
+        ),
+        MetadataBodyFamily::CommandInterface => prepare_command_interface_body_row(
+            sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
+        ),
+        MetadataBodyFamily::AdditionalIndexes => {
+            prepare_additional_indexes_body_row(sqlcmd, server, database, xml_path, properties, axes)
+        }
+    }
+}
+
+fn prepare_metadata_kind_body_rows(
+    sqlcmd: &Path,
+    server: &str,
+    sql_auth: SqlAuth<'_>,
+    database: &str,
+    xml_path: &Path,
+    xml: &[u8],
+    properties: &SimpleMetadataXmlProperties,
+    source: Option<&MetadataSourceContext>,
+    axes: &CompileAxes,
+) -> Result<Vec<PreparedMetadataBodyStage>> {
+    match properties.kind.as_str() {
         "Style" => prepare_style_body_row(sqlcmd, server, database, xml_path, properties, source),
         "ScheduledJob" => {
             prepare_scheduled_job_body_row(sqlcmd, server, database, xml_path, properties)
@@ -4457,23 +4556,7 @@ fn prepare_metadata_body_rows(
             sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
         ),
         _ => Ok(Vec::new()),
-    }?;
-    rows.extend(prepare_object_help_body_row(
-        sqlcmd, server, database, xml_path, properties, source,
-    )?);
-    rows.extend(prepare_object_module_body_rows(
-        sqlcmd, server, database, xml_path, properties, axes,
-    )?);
-    rows.extend(prepare_nested_command_module_body_rows(
-        sqlcmd, server, database, xml_path, xml, properties, axes,
-    )?);
-    rows.extend(prepare_command_interface_body_row(
-        sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
-    )?);
-    rows.extend(prepare_additional_indexes_body_row(
-        sqlcmd, server, database, xml_path, properties, axes,
-    )?);
-    Ok(rows)
+    }
 }
 
 fn prepare_additional_indexes_body_row(
@@ -5139,6 +5222,24 @@ fn base_free_command_interface_body(
     })
 }
 
+/// In a base-free stage there is no row to patch once the base-free writer
+/// refuses a command interface: fail with the writer's own reason.
+fn base_free_command_interface_refusal(
+    body_id: &str,
+    xml: &[u8],
+    source: Option<&MetadataSourceContext>,
+) -> Result<()> {
+    if !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    let refusal = match pack_interface_asset_blob(InterfaceAssetSource::CommandInterface, xml, source)
+    {
+        Ok(_) => "the writer accepts it, but not for this XML dialect".to_string(),
+        Err(error) => format!("{error:#}"),
+    };
+    bail!("{BASE_FREE_MISSING_ROW} {body_id}: the base-free command interface writer refuses it: {refusal}")
+}
+
 /// `Ext/HomePageWorkArea.xml`, `Ext/ClientApplicationInterface.xml` and
 /// `Ext/StandaloneConfigurationContent.bin`: the platform stores each as brace
 /// text the writer compiles from the source. There is no base to patch, so a
@@ -5262,6 +5363,7 @@ fn prepare_configuration_command_interface_body_row(
             "Configuration CommandInterface",
         )?]);
     }
+    base_free_command_interface_refusal(&body_id, &xml, source)?;
     let required = required_base_key(&classification, "Configuration CommandInterface")?;
     let base_body =
         fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
@@ -5443,6 +5545,21 @@ fn prepare_form_body_row(
     let form_path = infer_form_body_path(xml_path);
     let module_path = infer_form_module_body_path(xml_path);
     if !form_path.exists() && !module_path.exists() {
+        // An ordinary form's body is `Ext/Form.bin`, the stored row
+        // inflated (ERP УХ: all 9). A load onto a database keeps the
+        // target's row; an empty infobase has none to keep.
+        let ordinary = form_path.with_extension("bin");
+        if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) && ordinary.is_file() {
+            let bytes = fs::read(&ordinary)
+                .with_context(|| format!("failed to read {}", ordinary.display()))?;
+            let blob = crate::module_blob::deflate_raw(&bytes)?;
+            return Ok(vec![PreparedMetadataBodyStage {
+                body_id: format!("{}.0", properties.uuid),
+                path: ordinary,
+                blob_sha256: hex_sha256(&blob),
+                blob,
+            }]);
+        }
         return Ok(Vec::new());
     }
     if let Some(reason) = crate::compiler::unsupported_axes_reason(axes) {
@@ -5529,6 +5646,33 @@ fn prepare_form_body_row(
         }
     }
 
+    // An empty infobase has no row to patch: the native writer is the only
+    // way left (a form with item assets reaches here without having tried
+    // it), and its refusal is the reason the row fails.
+    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(packed) = native() {
+            return Ok(vec![PreparedMetadataBodyStage {
+                body_id,
+                path: form_path,
+                blob: packed.blob,
+                blob_sha256: packed.output_sha256,
+            }]);
+        }
+        let refusal = if form_xml.is_empty() {
+            "the form has a module but no Form.xml".to_string()
+        } else {
+            match pack_native_form_body_blob(
+                &form_xml,
+                module_text.as_deref(),
+                source,
+                Some(native_items_root.as_path()),
+            ) {
+                Ok(_) => "the native writer accepted it on a second run".to_string(),
+                Err(error) => format!("{error:#}"),
+            }
+        };
+        bail!("{BASE_FREE_MISSING_ROW} {body_id}: the native form writer refuses it: {refusal}");
+    }
     let reason = form_body_base_free_blocker_reason(&form_path, &module_path)?;
     let provenance = if form_path.exists() {
         &form_path
@@ -5622,6 +5766,16 @@ fn prepare_role_rights_body_row(
             blob_sha256: packed.output_sha256,
         }]);
     }
+    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        let refusal = match source {
+            Some(source) => match pack_role_rights_blob_base_free(&xml, source) {
+                Ok(_) => "the writer accepted it on a second run".to_string(),
+                Err(error) => format!("{error:#}"),
+            },
+            None => "no source tree to resolve names against".to_string(),
+        };
+        bail!("{BASE_FREE_MISSING_ROW} {body_id}: the base-free rights writer refuses it: {refusal}");
+    }
     let reason = role_rights_base_free_blocker_reason(&body_path, source)?;
     let required = classify_required_base(axes, &body_id, &body_path, &reason, "Role Rights")?;
     let base_body =
@@ -5683,6 +5837,7 @@ fn prepare_command_interface_body_row(
             "CommandInterface",
         )?]);
     }
+    base_free_command_interface_refusal(&body_id, &xml, source)?;
     let required = required_base_key(&classification, "CommandInterface")?;
     let base_body =
         fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
@@ -6010,7 +6165,12 @@ fn nested_command_module_sources(
     xml: &[u8],
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<NestedCommandModuleSource>> {
-    if !metadata_kind_can_own_commands(&properties.kind) {
+    // A filter criterion owns commands too (ERP УХ: two command modules); a
+    // load onto a database has always left their rows to the target, an
+    // empty infobase needs them staged.
+    let filter_criterion_in_empty_stage = properties.kind == "FilterCriterion"
+        && BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed);
+    if !metadata_kind_can_own_commands(&properties.kind) && !filter_criterion_in_empty_stage {
         return Ok(Vec::new());
     }
     let commands_dir = xml_path.with_extension("").join("Commands");
@@ -6884,6 +7044,16 @@ fn fetch_config_blobs_for_files(
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(String, std::collections::HashMap<String, Vec<u8>>)> =
     std::sync::OnceLock::new();
 
+/// Set by a base-free stage (`mssql-stage-source-objects --base-free`,
+/// `audit-empty-stage`): the target is an empty infobase with no rows to
+/// patch, so every base-row read fails, naming its row, without touching a
+/// database.
+static BASE_FREE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The error text of a base-row read in a base-free stage; the audit reads
+/// the row name back out of it.
+const BASE_FREE_MISSING_ROW: &str = "base-free stage has no base Config row";
+
 fn fetch_config_blob_with_auth(
     sqlcmd: &Path,
     server: &str,
@@ -6891,6 +7061,9 @@ fn fetch_config_blob_with_auth(
     database: &str,
     file_name: &str,
 ) -> Result<Vec<u8>> {
+    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("{BASE_FREE_MISSING_ROW} {file_name}");
+    }
     if let Some((prefetched_database, rows)) = PREFETCHED_BASE_ROWS.get()
         && prefetched_database == database
     {

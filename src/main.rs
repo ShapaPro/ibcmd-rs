@@ -283,6 +283,42 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
+        Commands::AuditEmptyStage(args) => {
+            let options = ibcmd_rs::mssql::EmptyStageAuditOptions {
+                max_samples: args.max_samples,
+                diff_dir: args.diff_dir,
+                manifest: args.manifest,
+                rows_out: args.rows_out,
+            };
+            let report = ibcmd_rs::mssql::audit_empty_stage(
+                &args.root,
+                &args.rows,
+                args.source_version.as_deref(),
+                &options,
+            )?;
+            println!("{}", ibcmd_rs::mssql::empty_stage_summary(&report));
+            if let Some(output) = args.output {
+                std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
+        Commands::AuditMetadataExport(args) => {
+            use ibcmd_rs::metadata_model::export::{audit, tree_version};
+            let options = audit::ExportAuditOptions {
+                kinds: args.kinds,
+                max_samples: args.max_samples,
+                diff_dir: args.diff_dir,
+                timing_threads: args.timing_threads,
+            };
+            let version = args
+                .source_version
+                .or_else(|| tree_version(&args.root))
+                .unwrap_or_else(|| "2.20".to_string());
+            let report = audit::audit_export(&args.root, &args.rows, &version, &options)?;
+            println!("{}", audit::summary_table(&report));
+            if let Some(output) = args.output {
+                std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
         Commands::AuditMetadataCompiler(args) => {
             use ibcmd_rs::metadata_model::audit;
             let options = audit::DescriptorAuditOptions {
