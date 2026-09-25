@@ -857,3 +857,77 @@ pub(crate) fn names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         types,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::metadata_model::export::write_document;
+    use crate::metadata_model::objects::parts::Compat;
+    use crate::metadata_model::types::tests::{context, element};
+    use crate::metadata_model::ObjectXml;
+
+    /// XML -> row (the load direction) -> model -> XML: the same text.
+    fn round_trip(kind: &str, xml: &str) {
+        let context = context();
+        let original = element(xml);
+        let object = ObjectXml {
+            element: &original,
+            kind,
+            uuid: Element::attr(&original, "uuid").unwrap_or_default().to_string(),
+            name: original
+                .path(&["Properties", "Name"])
+                .map(|name| name.text.clone())
+                .unwrap_or_default(),
+            path: Path::new("."),
+        };
+        let row = super::super::compile(&object, &context).unwrap();
+        let export = ExportContext {
+            names: NameIndex::from_config_index(&context.index),
+            version: "2.20".to_string(),
+            compat: Compat(8, 3, 27),
+        };
+        let decoded = decode(kind, &row, &export).unwrap();
+        assert_eq!(
+            write_document(&decoded, "2.20"),
+            write_document(&original, "2.20")
+        );
+        assert_eq!(
+            names(kind, &row).unwrap().full_name,
+            format!("{kind}.{}", object.name)
+        );
+    }
+
+    #[test]
+    fn style_items_round_trip() {
+        round_trip(
+            "StyleItem",
+            r##"<StyleItem uuid="2d2a4e7c-0000-4000-8000-000000000001"><Properties><Name>Шрифт</Name><Synonym/><Comment/><Type>Font</Type><Value xsi:type="v8ui:Font" ref="style:NormalTextFont" height="10" bold="true" kind="StyleItem"/></Properties></StyleItem>"##,
+        );
+        round_trip(
+            "StyleItem",
+            r##"<StyleItem uuid="2d2a4e7c-0000-4000-8000-000000000002"><Properties><Name>Цвет</Name><Synonym/><Comment/><Type>Color</Type><Value xsi:type="v8ui:Color">#FFEC9D</Value></Properties></StyleItem>"##,
+        );
+        round_trip(
+            "StyleItem",
+            r##"<StyleItem uuid="2d2a4e7c-0000-4000-8000-000000000003"><Properties><Name>Шрифт2</Name><Synonym/><Comment/><Type>Font</Type><Value xsi:type="v8ui:Font" faceName="Arial" height="8" bold="false" italic="false" underline="false" strikeout="false" kind="Absolute" scale="100"/></Properties></StyleItem>"##,
+        );
+    }
+
+    #[test]
+    fn a_web_service_round_trips_with_a_declared_namespace() {
+        round_trip(
+            "WebService",
+            r##"<WebService uuid="300c8045-655d-41da-bf92-d3de432334e1"><Properties><Name>Сервис</Name><Synonym/><Comment/><Namespace>http://www.1c.ru/test</Namespace><XDTOPackages><xr:Item><xr:Presentation/><xr:CheckState>0</xr:CheckState><xr:Value xsi:type="xs:string">http://v8.1c.ru/8.1/data/core</xr:Value></xr:Item></XDTOPackages><DescriptorFileName>ws.1cws</DescriptorFileName><ReuseSessions>DontUse</ReuseSessions><SessionMaxAge>20</SessionMaxAge></Properties><ChildObjects><Operation uuid="0dd304ca-64fa-498e-b327-3219a9ef243e"><Properties><Name>Ping</Name><Synonym/><Comment/><XDTOReturningValueType xmlns:d6p1="http://www.1c.ru/test/Message">d6p1:Answer</XDTOReturningValueType><Nillable>false</Nillable><Transactioned>false</Transactioned><ProcedureName>Ping</ProcedureName><DataLockControlMode>Managed</DataLockControlMode></Properties><ChildObjects><Parameter uuid="4b7df58c-b9fb-4e11-875a-9b1990515b8d"><Properties><Name>Data</Name><Synonym/><Comment/><XDTOValueType>v8:ValueStorage</XDTOValueType><Nillable>true</Nillable><TransferDirection>InOut</TransferDirection></Properties></Parameter></ChildObjects></Operation></ChildObjects></WebService>"##,
+        );
+    }
+
+    #[test]
+    fn a_common_command_round_trips() {
+        round_trip(
+            "CommonCommand",
+            r##"<CommonCommand uuid="dc4b6b3e-8f6a-4375-bcf3-ce827153474a"><Properties><Name>Команда</Name><Synonym/><Comment/><Group>FormCommandBarImportant</Group><Representation>Picture</Representation><ToolTip><v8:item><v8:lang>ru</v8:lang><v8:content>Подсказка</v8:content></v8:item></ToolTip><Picture><xr:Ref>StdPicture.Print</xr:Ref><xr:LoadTransparent>true</xr:LoadTransparent></Picture><Shortcut>Ctrl+Shift+P</Shortcut><IncludeHelpInContents>false</IncludeHelpInContents><CommandParameterType><v8:Type>cfg:CatalogRef.Валюты</v8:Type></CommandParameterType><ParameterUseMode>Multiple</ParameterUseMode><ModifiesData>true</ModifiesData><OnMainServerUnavalableBehavior>Auto</OnMainServerUnavalableBehavior></Properties></CommonCommand>"##,
+        );
+    }
+}
