@@ -41,6 +41,7 @@ fn compile_tree(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<B
         "Role" => Role::from_xml(object)?.to_brace(),
         "XDTOPackage" => XdtoPackage::from_xml(object)?.to_brace(),
         "Style" => Style::from_xml(object)?.to_brace(),
+        "PaletteColor" => PaletteColor::from_xml(object, context)?.to_brace(),
         "StyleItem" => StyleItem::from_xml(object, context)?.to_brace(),
         "CommandGroup" => CommandGroup::from_xml(object, context)?.to_brace(),
         "CommonCommand" => CommonCommand::from_xml(object, context)?.to_brace(),
@@ -680,6 +681,47 @@ impl Style {
 }
 
 // ---------------------------------------------------------------------------
+// PaletteColor (8.5)
+// ---------------------------------------------------------------------------
+
+/// An 8.5 palette colour: `{1,{0,<header>,<colour>},0}`, the colour in the
+/// 8.5 record (`#FFEC9D` is `{4,0,{10349823},0}`, blue first). Only an 8.5
+/// configuration has palette colours, so the record is always the 8.5 one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteColor {
+    pub header: Header,
+    pub color: Brace,
+}
+
+impl PaletteColor {
+    pub fn from_xml(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Self> {
+        let p = object.properties()?;
+        let spelled = text(p, "Color").trim();
+        let native = format_native_color(Some(spelled), |name| {
+            context
+                .index
+                .uuid_of(&format!("StyleItem.{name}"))
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("unsupported palette colour {spelled:?}"))?;
+        let mut color = literal(&native)?;
+        up_convert_v85_primitives(&mut color);
+        Ok(Self {
+            header: Header::of(object)?,
+            color,
+        })
+    }
+
+    pub fn to_brace(&self) -> Brace {
+        brace_list![
+            Brace::num(1),
+            brace_list![Brace::num(0), self.header.to_brace(), self.color.clone()],
+            Brace::num(0),
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StyleItem
 // ---------------------------------------------------------------------------
 
@@ -818,6 +860,64 @@ fn v85_primitive(mut value: Brace, context: &DescriptorContext) -> Brace {
         _ => {}
     }
     value
+}
+
+/// Every colour and font tuple of a tree respelled the 8.5 way, members
+/// recognised by shape: a colour is `{3,<space 0-4>,{<int>}|{0,<uuid>}}`,
+/// a font `{7,<kind>,<mask>,...,1,<scale>}` (kind 3 with no members, kinds
+/// 1 and 2 with a reference list) or the nineteen-member absolute font --
+/// the tests of `form_v85_load::up_convert_primitives`.
+pub fn up_convert_v85_primitives(node: &mut Brace) {
+    let Brace::List(members) = node else {
+        return;
+    };
+    for member in members.iter_mut() {
+        up_convert_v85_primitives(member);
+    }
+    let atom = |index: usize| members.get(index).and_then(Brace::as_atom);
+    let is_int = |text: Option<&str>| {
+        text.is_some_and(|text| {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let color = members.len() == 3
+        && atom(0) == Some("3")
+        && matches!(atom(1), Some("0" | "1" | "2" | "3" | "4"))
+        && match members[2].as_list() {
+            Some([Brace::Atom(value)]) => is_int(Some(value)),
+            Some([Brace::Atom(zero), Brace::Atom(uuid)]) => {
+                zero == "0" && super::types::is_uuid(uuid)
+            }
+            _ => false,
+        };
+    let absolute_font = members.len() == 19
+        && atom(0) == Some("7")
+        && atom(1) == Some("0")
+        && is_int(atom(2))
+        && matches!(members[16], Brace::Str(_))
+        && atom(17) == Some("1")
+        && is_int(atom(18));
+    let font = members.len() >= 5
+        && atom(0) == Some("7")
+        && is_int(atom(2))
+        && atom(members.len() - 2) == Some("1")
+        && is_int(atom(members.len() - 1))
+        && match atom(1) {
+            Some("3") => members.len() == 5 && atom(2) == Some("0"),
+            Some("1" | "2") => matches!(members[3], Brace::List(_)),
+            _ => false,
+        };
+    if color {
+        let space = members[1].clone();
+        members[0] = Brace::num(4);
+        members.push(space);
+    } else if absolute_font {
+        members[0] = Brace::num(8);
+        members.push(Brace::num(0));
+    } else if font {
+        members[0] = Brace::num(8);
+    }
 }
 
 // ---------------------------------------------------------------------------
