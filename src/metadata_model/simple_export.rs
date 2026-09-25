@@ -663,3 +663,76 @@ pub(crate) fn names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         types,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::metadata_model::export::{NameIndex, write_document};
+    use crate::metadata_model::index::ObjectEntry;
+    use crate::metadata_model::objects::parts::Compat;
+    use crate::metadata_model::simple::compile;
+    use crate::metadata_model::types::tests::{context, element};
+    use crate::metadata_model::ObjectXml;
+
+    const MODULE: &str = "dc2b7a9e-132b-4a30-b7a8-ec72bf3d2e63";
+
+    /// XML -> row (the load direction) -> model -> XML: the same text.
+    fn round_trip(kind: &str, xml: &str) {
+        let mut context = context();
+        context.index.objects.insert(
+            "CommonModule.Курсы".to_string(),
+            ObjectEntry {
+                kind: "CommonModule".to_string(),
+                name: "Курсы".to_string(),
+                uuid: MODULE.to_string(),
+                full_name: "CommonModule.Курсы".to_string(),
+                path: PathBuf::new(),
+            },
+        );
+        let original = element(xml);
+        let object = ObjectXml {
+            element: &original,
+            kind,
+            uuid: Element::attr(&original, "uuid").unwrap_or_default().to_string(),
+            name: original
+                .path(&["Properties", "Name"])
+                .map(|name| name.text.clone())
+                .unwrap_or_default(),
+            path: Path::new("."),
+        };
+        let row = compile(&object, &context).unwrap();
+        let export = ExportContext {
+            names: NameIndex::from_config_index(&context.index),
+            version: "2.20".to_string(),
+            compat: Compat(8, 3, 27),
+        };
+        let decoded = decode(kind, &row, &export).unwrap();
+        assert_eq!(
+            write_document(&decoded, "2.20"),
+            write_document(&original, "2.20")
+        );
+        let names = names(kind, &row).unwrap();
+        assert_eq!(names.full_name, format!("{kind}.{}", object.name));
+    }
+
+    #[test]
+    fn a_constant_round_trips() {
+        round_trip(
+            "Constant",
+            r##"<Constant uuid="63eb6a1b-5f48-461a-9a6f-821db663c9d3"><InternalInfo><xr:GeneratedType name="ConstantManager.Валюта" category="Manager"><xr:TypeId>82211c3a-a0cd-4ac5-8106-193203e97955</xr:TypeId><xr:ValueId>72acea06-1205-4b0c-8db0-969d6002a9c9</xr:ValueId></xr:GeneratedType><xr:GeneratedType name="ConstantValueManager.Валюта" category="ValueManager"><xr:TypeId>49501720-15c0-4497-88d5-4d7a8a778371</xr:TypeId><xr:ValueId>32b6a40a-64a5-424d-bba3-2fad12699c8d</xr:ValueId></xr:GeneratedType><xr:GeneratedType name="ConstantValueKey.Валюта" category="ValueKey"><xr:TypeId>0f5a15f4-3580-52e6-99e1-8d4ccc66a3ff</xr:TypeId><xr:ValueId>80b42169-11c7-51db-8032-3520f0fc9f4b</xr:ValueId></xr:GeneratedType></InternalInfo><Properties><Name>Валюта</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Валюта
+учета</v8:content></v8:item></Synonym><Comment/><Type><v8:Type>cfg:CatalogRef.Валюты</v8:Type></Type><UseStandardCommands>true</UseStandardCommands><DefaultForm/><ExtendedPresentation/><Explanation/><PasswordMode>false</PasswordMode><Format/><EditFormat/><ToolTip/><MarkNegatives>false</MarkNegatives><Mask/><MultiLine>false</MultiLine><ExtendedEdit>false</ExtendedEdit><MinValue xsi:nil="true"/><MaxValue xsi:nil="true"/><FillChecking>ShowError</FillChecking><ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems><ChoiceParameterLinks/><ChoiceParameters><app:item name="Отбор.ПометкаУдаления"><app:value xsi:type="xs:boolean">false</app:value></app:item></ChoiceParameters><QuickChoice>Auto</QuickChoice><ChoiceForm/><LinkByType/><ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput><DataLockControlMode>Managed</DataLockControlMode><DataHistory>DontUse</DataHistory><UpdateDataHistoryImmediatelyAfterWrite>false</UpdateDataHistoryImmediatelyAfterWrite><ExecuteAfterWriteDataHistoryVersionProcessing>false</ExecuteAfterWriteDataHistoryVersionProcessing></Properties></Constant>"##,
+        );
+    }
+
+    #[test]
+    fn a_subscription_round_trips_with_family_sets_in_platform_order() {
+        // Stored by type id (Document 061d, Catalog cf4a, BusinessProcess
+        // fcd3), written in the platform's order.
+        round_trip(
+            "EventSubscription",
+            r##"<EventSubscription uuid="c7ffd8ab-15e9-4cf1-a7fd-d05534dff000"><Properties><Name>Подписка</Name><Synonym/><Comment/><Source><v8:Type>cfg:CatalogRef.Валюты</v8:Type><v8:TypeSet>cfg:BusinessProcessObject</v8:TypeSet><v8:TypeSet>cfg:CatalogObject</v8:TypeSet><v8:TypeSet>cfg:DocumentObject</v8:TypeSet></Source><Event>BeforeWrite</Event><Handler>CommonModule.Курсы.ПередЗаписью</Handler></Properties></EventSubscription>"##,
+        );
+    }
+}
