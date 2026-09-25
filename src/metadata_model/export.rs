@@ -180,6 +180,14 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::decode(kind, row, context),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::decode(kind, row, context),
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -198,6 +206,14 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::names(kind, row),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::names(kind, row),
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
