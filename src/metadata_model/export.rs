@@ -16,6 +16,8 @@
 
 #[path = "export_audit.rs"]
 pub mod audit;
+#[path = "export_names.rs"]
+pub mod names;
 #[path = "export_values.rs"]
 pub mod values;
 
@@ -180,6 +182,14 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::decode(kind, row, context),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::decode(kind, row, context),
         "Constant" | "DefinedType" | "SessionParameter" | "CommonAttribute" | "FunctionalOption" | "FunctionalOptionsParameter" | "EventSubscription" | "ScheduledJob" | "SettingsStorage" | "FilterCriterion" | "Language" => super::simple::export::decode(kind, row, context),
         other => bail!("not yet: no row decoder for {other}"),
     }
@@ -199,6 +209,14 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::names(kind, row),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::names(kind, row),
         "Constant" | "DefinedType" | "SessionParameter" | "CommonAttribute" | "FunctionalOption" | "FunctionalOptionsParameter" | "EventSubscription" | "ScheduledJob" | "SettingsStorage" | "FilterCriterion" | "Language" => super::simple::export::names(kind, row),
         other => bail!("not yet: no row decoder for {other}"),
     }
