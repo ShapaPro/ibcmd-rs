@@ -5586,10 +5586,9 @@ fn prepare_form_body_row(
     let module_path = infer_form_module_body_path(xml_path);
     if !form_path.exists() && !module_path.exists() {
         // An ordinary form's body is `Ext/Form.bin`, the stored row
-        // inflated (ERP УХ: all 9). A load onto a database keeps the
-        // target's row; an empty infobase has none to keep.
+        // inflated (ERP УХ: all 9, byte for byte), staged deflated again.
         let ordinary = form_path.with_extension("bin");
-        if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) && ordinary.is_file() {
+        if ordinary.is_file() {
             let bytes = fs::read(&ordinary)
                 .with_context(|| format!("failed to read {}", ordinary.display()))?;
             let blob = crate::module_blob::deflate_raw(&bytes)?;
@@ -6205,12 +6204,7 @@ fn nested_command_module_sources(
     xml: &[u8],
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<NestedCommandModuleSource>> {
-    // A filter criterion owns commands too (ERP УХ: two command modules); a
-    // load onto a database has always left their rows to the target, an
-    // empty infobase needs them staged.
-    let filter_criterion_in_empty_stage = properties.kind == "FilterCriterion"
-        && BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed);
-    if !metadata_kind_can_own_commands(&properties.kind) && !filter_criterion_in_empty_stage {
+    if !metadata_kind_can_own_commands(&properties.kind) {
         return Ok(Vec::new());
     }
     let commands_dir = xml_path.with_extension("").join("Commands");
@@ -6273,6 +6267,9 @@ fn metadata_kind_can_own_commands(kind: &str) -> bool {
             | "DocumentJournal"
             | "Enum"
             | "ExchangePlan"
+            // ERP УХ: two filter criteria own a command each; the exporter
+            // has always written their modules, the loader skipped them.
+            | "FilterCriterion"
             | "InformationRegister"
             | "Report"
             | "SettingsStorage"
