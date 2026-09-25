@@ -1413,7 +1413,7 @@ fn picture(node: &Brace, context: &ExportContext) -> Result<Element> {
 }
 
 /// `{0,<key>,<modifiers>}` -> `Ctrl+Alt+Shift+Key`; empty for `{0,0,0}`.
-fn shortcut(node: &Brace) -> Result<String> {
+pub(crate) fn shortcut(node: &Brace) -> Result<String> {
     let fields = list(node)?;
     let code = number(item(fields, 1)?)?;
     let mask = number(item(fields, 2)?)?;
