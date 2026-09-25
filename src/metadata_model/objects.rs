@@ -23,15 +23,15 @@ use anyhow::{Result, anyhow};
 
 use self::parts::Slot::*;
 use self::parts::{
-    AttributeWrapper, Codes, Coll, CommandWrapper, Layout, Obj, TsWrapper, Versioned,
-    restore_crlf,
+    AttributeWrapper, Codes, Coll, CommandWrapper, Layout, Obj, StandardSections, TsWrapper,
+    Versioned, restore_crlf,
 };
 use super::brace::Brace;
 use super::{DescriptorContext, ObjectXml};
 
 pub fn compile(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
-    let layout = layout(object.kind)
-        .ok_or_else(|| anyhow!("{} is not a reference object", object.kind))?;
+    let layout =
+        layout(object.kind).ok_or_else(|| anyhow!("{} is not a reference object", object.kind))?;
     let mut tree = Obj::new(object, context)?.compile(layout)?;
     restore_crlf(&mut tree);
     Ok(tree)
@@ -201,7 +201,7 @@ pub(crate) const INFORMATION_REGISTER_STANDARD: Codes = &[
 ];
 
 /// The charts' predefined tabular sections: name, marker, attribute markers.
-const COA_TABULAR: &[(&str, i64, Codes)] = &[(
+const COA_TABULAR: StandardSections = &[(
     "ExtDimensionTypes",
     -12,
     &[
@@ -216,7 +216,7 @@ const CALCULATION_TYPE_ROWS: Codes = &[
     ("CalculationType", -101),
     ("LineNumber", -100),
 ];
-const CCALC_TABULAR: &[(&str, i64, Codes)] = &[
+const CCALC_TABULAR: StandardSections = &[
     ("LeadingCalculationTypes", -30, CALCULATION_TYPE_ROWS),
     ("DisplacingCalculationTypes", -20, CALCULATION_TYPE_ROWS),
     ("BaseCalculationTypes", -10, CALCULATION_TYPE_ROWS),
@@ -672,7 +672,10 @@ static CHART_OF_CALCULATION_TYPES: Layout = Layout {
         Reference("DefaultObjectForm"),
         Reference("DefaultListForm"),
         Reference("DefaultChoiceForm"),
-        Code("DependenceOnCalculationTypes", DEPENDENCE_ON_CALCULATION_TYPES),
+        Code(
+            "DependenceOnCalculationTypes",
+            DEPENDENCE_ON_CALCULATION_TYPES,
+        ),
         References("BasedOn"),
         Flag("IncludeHelpInContents"),
         Code("ChoiceMode", CHOICE_MODE),
@@ -847,7 +850,10 @@ static TASK: Layout = Layout {
             "e97c0570-251c-4566-b0f1-10686820f143",
             Coll::Children(
                 "AddressingAttribute",
-                versioned(AttributeWrapper::Addressing(4), AttributeWrapper::Addressing(4)),
+                versioned(
+                    AttributeWrapper::Addressing(4),
+                    AttributeWrapper::Addressing(4),
+                ),
             ),
         ),
         (

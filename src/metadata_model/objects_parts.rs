@@ -73,8 +73,13 @@ pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
     let metadata = std::fs::metadata(&path).ok();
     let key: Key = (
         path.clone(),
-        metadata.as_ref().and_then(|metadata| metadata.modified().ok()),
-        metadata.as_ref().map(|metadata| metadata.len()).unwrap_or_default(),
+        metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok()),
+        metadata
+            .as_ref()
+            .map(|metadata| metadata.len())
+            .unwrap_or_default(),
     );
     let cache = CACHE.get_or_init(Default::default);
     if let Some(value) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
@@ -147,6 +152,9 @@ pub(crate) enum CommandWrapper {
 /// A code table: XML spelling -> stored number.
 pub(crate) type Codes = &'static [(&'static str, i64)];
 
+/// The charts' predefined tabular sections: name, marker, attribute markers.
+pub(crate) type StandardSections = &'static [(&'static str, i64, Codes)];
+
 /// One slot of an owner record, named by the XML property it carries. A
 /// kind's record is a list of slots, so the same table reads a row back.
 #[derive(Clone, Copy, Debug)]
@@ -182,7 +190,7 @@ pub(crate) enum Slot {
     /// The root standard attributes with the family's markers.
     StandardAttributes(Codes),
     /// The charts' predefined tabular sections: name, marker, attribute markers.
-    StandardTabularSections(&'static [(&'static str, i64, Codes)]),
+    StandardTabularSections(StandardSections),
     Characteristics,
     /// An exchange plan's `<InternalInfo><ThisNode>`.
     ThisNode,
@@ -385,8 +393,14 @@ impl<'a> Obj<'a> {
     /// `{<search mode>,<full-text search>,<data get mode>}` of input by string.
     pub fn input_modes(&self) -> Result<Brace> {
         Ok(brace_list![
-            self.code("SearchStringModeOnInputByString", &[("Begin", 1), ("AnyPart", 2)])?,
-            self.code("FullTextSearchOnInputByString", &[("Use", 1), ("DontUse", 2)])?,
+            self.code(
+                "SearchStringModeOnInputByString",
+                &[("Begin", 1), ("AnyPart", 2)]
+            )?,
+            self.code(
+                "FullTextSearchOnInputByString",
+                &[("Use", 1), ("DontUse", 2)]
+            )?,
             self.code(
                 "ChoiceDataGetModeOnInputByString",
                 &[("Directly", 0), ("Background", 1)],
@@ -405,14 +419,13 @@ impl<'a> Obj<'a> {
 
     /// `{1,{0,N,<marker>,{3,<synonym>,"comment",<fill>,0,<attrs>,<tooltip>}...}}`
     /// of the charts' predefined tabular sections.
-    pub fn standard_tabular_sections(
-        &self,
-        definitions: &[(&str, i64, &[(&str, i64)])],
-    ) -> Result<Brace> {
+    pub fn standard_tabular_sections(&self, definitions: StandardSections) -> Result<Brace> {
         let Some(list) = self.props.child("StandardTabularSections") else {
             return Ok(brace_list![num(0)]);
         };
-        let sections = list.children_named("StandardTabularSection").collect::<Vec<_>>();
+        let sections = list
+            .children_named("StandardTabularSection")
+            .collect::<Vec<_>>();
         if sections.is_empty() {
             return Ok(brace_list![num(0)]);
         }
@@ -572,13 +585,23 @@ impl<'a> Obj<'a> {
     }
 
     fn collection_items(&self, content: &Coll) -> Result<Vec<Brace>> {
-        let pick = |versioned: &Versioned<_>| if self.modern() { versioned.modern } else { versioned.old };
+        let pick = |versioned: &Versioned<_>| {
+            if self.modern() {
+                versioned.modern
+            } else {
+                versioned.old
+            }
+        };
         match *content {
             Coll::Templates => self.templates(),
             Coll::Forms => self.forms(),
             Coll::Commands(wrapper) => self.commands(wrapper),
             Coll::Children(tag, wrapper) => {
-                let wrapper = if self.modern() { wrapper.modern } else { wrapper.old };
+                let wrapper = if self.modern() {
+                    wrapper.modern
+                } else {
+                    wrapper.old
+                };
                 self.children_of(tag, wrapper)
             }
             Coll::TabularSections {
@@ -816,7 +839,12 @@ impl<'a> Obj<'a> {
             code_of(
                 properties,
                 "Representation",
-                &[("Text", 0), ("Picture", 1), ("PictureAndText", 2), ("Auto", 3)],
+                &[
+                    ("Text", 0),
+                    ("Picture", 1),
+                    ("PictureAndText", 2),
+                    ("Auto", 3)
+                ],
             )?,
             localized(properties.child("ToolTip")),
             num(1),
@@ -826,7 +854,11 @@ impl<'a> Obj<'a> {
             shared::type_pattern(properties.child("CommandParameterType"), self.cx)?,
             md_base(&uuid, properties),
             flag_of(properties, "ModifiesData")?,
-            code_of(properties, "ParameterUseMode", &[("Single", 0), ("Multiple", 1)])?,
+            code_of(
+                properties,
+                "ParameterUseMode",
+                &[("Single", 0), ("Multiple", 1)]
+            )?,
             code_of(properties, "OnMainServerUnavalableBehavior", &[("Auto", 0)])?,
         ];
         Ok(brace_list![
@@ -1019,7 +1051,9 @@ fn standard_attribute_body(
     element: &Element,
     markers: &[(&str, i64)],
 ) -> Result<Brace> {
-    let attributes = element.children_named("StandardAttribute").collect::<Vec<_>>();
+    let attributes = element
+        .children_named("StandardAttribute")
+        .collect::<Vec<_>>();
     let mut items = vec![num(1), num(attributes.len() as i64)];
     for attribute in attributes {
         let name = attribute.attr("name").unwrap_or_default();
@@ -1098,7 +1132,10 @@ fn standard_attribute_bag(obj: &Obj<'_>, attribute: &Element) -> Result<Brace> {
             num(code("FillChecking", FILL_CHECKING)?),
         ),
     );
-    push("2bbba66b-fabf-4863-8ba3-54b3c64c896e", boolean("MultiLine")?);
+    push(
+        "2bbba66b-fabf-4863-8ba3-54b3c64c896e",
+        boolean("MultiLine")?,
+    );
     push(
         "2c8143d5-4248-4c43-8bfb-307c0be2e415",
         boolean("FillFromFillingValue")?,
@@ -1127,8 +1164,14 @@ fn standard_attribute_bag(obj: &Obj<'_>, attribute: &Element) -> Result<Brace> {
         "4690ff70-e3fa-4914-9127-6a9acc5fc949",
         localized_value("ToolTip"),
     );
-    push("4de03908-56f4-4396-a61e-17253afca9ac", boolean("ExtendedEdit")?);
-    push("580c29e2-8af4-4258-882a-7cf8073e61c8", localized_value("Format"));
+    push(
+        "4de03908-56f4-4396-a61e-17253afca9ac",
+        boolean("ExtendedEdit")?,
+    );
+    push(
+        "580c29e2-8af4-4258-882a-7cf8073e61c8",
+        localized_value("Format"),
+    );
     push("6c4f7074-e7d4-48eb-b31b-132873666262", choice_form);
     push(
         "6e3a1131-37a3-4da5-8895-572d9d0c9db6",
@@ -1141,14 +1184,20 @@ fn standard_attribute_bag(obj: &Obj<'_>, attribute: &Element) -> Result<Brace> {
         "7ba608f2-e654-42a3-8885-334fe88ca910",
         typed(
             "12ca4003-ac70-450e-b897-37faf86bd313",
-            num(code("ChoiceHistoryOnInput", &[("Auto", 0), ("DontUse", 1)])?),
+            num(code(
+                "ChoiceHistoryOnInput",
+                &[("Auto", 0), ("DontUse", 1)],
+            )?),
         ),
     );
     push(
         "88149a78-9448-4767-867b-0e650d165d2e",
         localized_value("EditFormat"),
     );
-    push("90ae4b5d-e0fd-49ef-a008-d67c1e75038c", boolean("PasswordMode")?);
+    push(
+        "90ae4b5d-e0fd-49ef-a008-d67c1e75038c",
+        boolean("PasswordMode")?,
+    );
     push(
         "9288a8ed-b259-46d0-a8e3-70d87956ff2d",
         nested(
@@ -1156,7 +1205,10 @@ fn standard_attribute_bag(obj: &Obj<'_>, attribute: &Element) -> Result<Brace> {
             code("DataHistory", &[("DontUse", 0), ("Use", 1)])?,
         ),
     );
-    push("b02800e9-a8d1-42ab-9a12-f673e92be968", boolean("MarkNegatives")?);
+    push(
+        "b02800e9-a8d1-42ab-9a12-f673e92be968",
+        boolean("MarkNegatives")?,
+    );
     push(
         "c65a541f-0b91-4f33-bc88-fbaaa57f9992",
         shared::typed_value(attribute.child("MinValue"), obj.cx)?,
@@ -1403,7 +1455,10 @@ pub(crate) mod shared {
     }
 
     /// `{5006,N,...}` of `<ChoiceParameterLinks>`.
-    pub(crate) fn choice_parameter_links(element: Option<&Element>, obj: &Obj<'_>) -> Result<Brace> {
+    pub(crate) fn choice_parameter_links(
+        element: Option<&Element>,
+        obj: &Obj<'_>,
+    ) -> Result<Brace> {
         attribute::choice_parameter_links(element, obj.cx)
     }
 
