@@ -16,6 +16,8 @@
 //! attributes and a constant tail to attributes; 8.5.1 adds
 //! `AuxiliaryVariantForm` to reports and colours to enum values.
 
+#[path = "objects_export.rs"]
+pub(crate) mod export;
 #[path = "objects_parts.rs"]
 pub(crate) mod parts;
 

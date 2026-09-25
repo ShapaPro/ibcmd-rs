@@ -301,6 +301,24 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
+        Commands::AuditMetadataExport(args) => {
+            use ibcmd_rs::metadata_model::export::{audit, tree_version};
+            let options = audit::ExportAuditOptions {
+                kinds: args.kinds,
+                max_samples: args.max_samples,
+                diff_dir: args.diff_dir,
+                timing_threads: args.timing_threads,
+            };
+            let version = args
+                .source_version
+                .or_else(|| tree_version(&args.root))
+                .unwrap_or_else(|| "2.20".to_string());
+            let report = audit::audit_export(&args.root, &args.rows, &version, &options)?;
+            println!("{}", audit::summary_table(&report));
+            if let Some(output) = args.output {
+                std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
         Commands::AuditMetadataCompiler(args) => {
             use ibcmd_rs::metadata_model::audit;
             let options = audit::DescriptorAuditOptions {
