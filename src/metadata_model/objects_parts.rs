@@ -144,6 +144,90 @@ pub(crate) enum CommandWrapper {
     Bare,
 }
 
+/// A code table: XML spelling -> stored number.
+pub(crate) type Codes = &'static [(&'static str, i64)];
+
+/// One slot of an owner record, named by the XML property it carries. A
+/// kind's record is a list of slots, so the same table reads a row back.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Slot {
+    /// The record version: before 8.3.27, from 8.3.27, from 8.5.1.
+    Tag(i64, i64, i64),
+    /// Two slots: TypeId and ValueId of the generated type of a category.
+    Generated(&'static str),
+    /// `<md base>`
+    Header,
+    /// `{0,<md base>}`
+    WrappedHeader,
+    /// `true`/`false` -> 1/0.
+    Flag(&'static str),
+    /// A number as written.
+    Number(&'static str),
+    /// An enumeration through its code table.
+    Code(&'static str, Codes),
+    /// A string as written (`CodeMask`).
+    Text(&'static str),
+    /// `{N,"lang","text",...}`
+    Localized(&'static str),
+    /// One metadata object (a form, a register, a storage...): uuid or nil.
+    Reference(&'static str),
+    /// `{0,N,<metadata ref>...}` of an item list.
+    References(&'static str),
+    /// `{1,{0,N,<field ref>...}}` of a field list.
+    Fields(&'static str),
+    /// `{<search>,<full-text>,<data get>}` of input by string.
+    InputModes,
+    /// A type description property.
+    TypePattern(&'static str),
+    /// The root standard attributes with the family's markers.
+    StandardAttributes(Codes),
+    /// The charts' predefined tabular sections: name, marker, attribute markers.
+    StandardTabularSections(&'static [(&'static str, i64, Codes)]),
+    Characteristics,
+    /// An exchange plan's `<InternalInfo><ThisNode>`.
+    ThisNode,
+    /// A constant no XML property varies.
+    Const(i64),
+    /// A nil uuid no XML property fills.
+    Nil,
+    /// A slot only compatibility 8.3.27 and later stores.
+    Modern(&'static Slot),
+    /// A slot only compatibility 8.5.1 and later stores.
+    Since851(&'static Slot),
+}
+
+/// A record wrapper that changed with compatibility 8.3.27.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Versioned<T> {
+    pub old: T,
+    pub modern: T,
+}
+
+/// What one collection of the root holds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Coll {
+    Templates,
+    Forms,
+    Commands(CommandWrapper),
+    /// Attribute-like children of an XML tag (`Attribute`, `AccountingFlag`...).
+    Children(&'static str, Versioned<AttributeWrapper>),
+    TabularSections {
+        wrapper: Versioned<TsWrapper>,
+        attribute_class: &'static str,
+        attribute: AttributeWrapper,
+    },
+    EnumValues,
+    /// A collection no XML fills.
+    Empty,
+}
+
+/// A kind's row: owner record slots, then the collections by class uuid in
+/// uuid order.
+pub(crate) struct Layout {
+    pub slots: &'static [Slot],
+    pub collections: &'static [(&'static str, Coll)],
+}
+
 /// One object being compiled, with the readers every slot uses.
 pub(crate) struct Obj<'a> {
     pub xml: &'a ObjectXml<'a>,
@@ -242,11 +326,6 @@ impl<'a> Obj<'a> {
             return Ok(nil());
         }
         Ok(Brace::uuid(&self.resolve(text)?))
-    }
-
-    /// A default/auxiliary form property: the form's uuid, nil when empty.
-    pub fn form(&self, name: &str) -> Result<Brace> {
-        self.reference(name)
     }
 
     /// `{0,N,{"#",<metadata-object ref>,{1,<uuid>}}...}` of an item list
@@ -426,6 +505,92 @@ impl<'a> Obj<'a> {
         Ok(Brace::List(items))
     }
 
+    /// The whole row of a kind's layout.
+    pub fn compile(&self, layout: &Layout) -> Result<Brace> {
+        let mut owner = Vec::with_capacity(layout.slots.len() + 8);
+        for slot in layout.slots {
+            self.encode(slot, &mut owner)?;
+        }
+        let collections = layout
+            .collections
+            .iter()
+            .map(|(class, content)| Ok(collection(class, self.collection_items(content)?)))
+            .collect::<Result<Vec<_>>>()?;
+        self.root(owner, collections)
+    }
+
+    /// Appends the values of one slot.
+    fn encode(&self, slot: &Slot, out: &mut Vec<Brace>) -> Result<()> {
+        let value = match *slot {
+            Slot::Tag(old, modern, v851) => num(if self.v851() {
+                v851
+            } else if self.modern() {
+                modern
+            } else {
+                old
+            }),
+            Slot::Generated(category) => {
+                let [type_id, value_id] = self.generated(category)?;
+                out.push(type_id);
+                value_id
+            }
+            Slot::Header => self.header(),
+            Slot::WrappedHeader => self.wrapped_header(),
+            Slot::Flag(name) => self.flag(name)?,
+            Slot::Number(name) => self.number(name)?,
+            Slot::Code(name, table) => self.code(name, table)?,
+            Slot::Text(name) => Brace::str(self.text(name)),
+            Slot::Localized(name) => self.loc(name),
+            Slot::Reference(name) => self.reference(name)?,
+            Slot::References(name) => self.references(name)?,
+            Slot::Fields(name) => self.fields(name)?,
+            Slot::InputModes => self.input_modes()?,
+            Slot::TypePattern(name) => self.type_pattern(name)?,
+            Slot::StandardAttributes(markers) => self.standard_attributes(markers)?,
+            Slot::StandardTabularSections(definitions) => {
+                self.standard_tabular_sections(definitions)?
+            }
+            Slot::Characteristics => self.characteristics()?,
+            Slot::ThisNode => self.this_node()?,
+            Slot::Const(value) => num(value),
+            Slot::Nil => nil(),
+            Slot::Modern(inner) => {
+                if self.modern() {
+                    self.encode(inner, out)?;
+                }
+                return Ok(());
+            }
+            Slot::Since851(inner) => {
+                if self.v851() {
+                    self.encode(inner, out)?;
+                }
+                return Ok(());
+            }
+        };
+        out.push(value);
+        Ok(())
+    }
+
+    fn collection_items(&self, content: &Coll) -> Result<Vec<Brace>> {
+        let pick = |versioned: &Versioned<_>| if self.modern() { versioned.modern } else { versioned.old };
+        match *content {
+            Coll::Templates => self.templates(),
+            Coll::Forms => self.forms(),
+            Coll::Commands(wrapper) => self.commands(wrapper),
+            Coll::Children(tag, wrapper) => {
+                let wrapper = if self.modern() { wrapper.modern } else { wrapper.old };
+                self.children_of(tag, wrapper)
+            }
+            Coll::TabularSections {
+                wrapper,
+                attribute_class,
+                attribute,
+            } => self.tabular_sections(pick(&wrapper), attribute_class, attribute),
+            Coll::EnumValues => self.enum_values(),
+            Coll::Empty => Ok(Vec::new()),
+        }
+    }
+
     /// Direct `ChildObjects` elements with this tag, in document order.
     pub fn children(&self, tag: &str) -> Vec<&'a Element> {
         self.xml
@@ -458,10 +623,6 @@ impl<'a> Obj<'a> {
                 Ok(Brace::uuid(&self.resolve(&reference)?))
             })
             .collect()
-    }
-
-    pub fn attributes(&self, wrapper: AttributeWrapper) -> Result<Vec<Brace>> {
-        self.children_of("Attribute", wrapper)
     }
 
     /// Attribute-like children of a tag (`Attribute`, `AddressingAttribute`,
