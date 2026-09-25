@@ -5016,6 +5016,10 @@ fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
 fn build_dump_file_name_batches(
     headers: &[ConfigRowHeader],
     file_names: &BTreeSet<String>,
@@ -5671,6 +5675,26 @@ fn dump_table_row_bytes(
     let mut model_row = false;
     let metadata_xml_relative = if context.extract_metadata_xml {
         let started = Instant::now();
+        let mut shadow_us = 0;
+        let legacy_from_text = |row: &MetadataTextRow| {
+            extract_metadata_source_xml_from_text_row_audited_with_object_ref_resolutions(
+                row,
+                context.type_index,
+                context.type_index_collisions,
+                context.object_refs,
+                context.object_ref_resolutions,
+                context.metadata_object_refs,
+                context.configuration_root_object_refs,
+                context.recalculation_refs,
+                context.root_recalculation_refs,
+                context.functional_option_refs,
+                context.form_refs,
+                context.template_refs,
+                context.subsystem_refs,
+                context.source_version,
+                context.type_set_leaves,
+            )
+        };
         let extracted = if context
             .refused_output_paths
             .metadata_xml
@@ -5701,26 +5725,26 @@ fn dump_table_row_bytes(
                 })
         {
             timings.model_metadata_xml_rows += 1;
+            timings.model_metadata_xml_convert_us += micros(started);
             model_row = true;
+            if model_export::shadow() {
+                let shadow_started = Instant::now();
+                let legacy = legacy_from_text(row);
+                shadow_us = micros(shadow_started);
+                timings.model_shadow_rows += 1;
+                timings.model_shadow_legacy_convert_us += shadow_us;
+                if !model_export::same_as_written(
+                    legacy.as_ref().ok(),
+                    &modelled,
+                    context.source_version,
+                ) {
+                    timings.model_shadow_differing_rows += 1;
+                    model_export::report_shadow_difference(file_name, &modelled.relative_path);
+                }
+            }
             Ok(modelled)
         } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name) {
-            extract_metadata_source_xml_from_text_row_audited_with_object_ref_resolutions(
-                row,
-                context.type_index,
-                context.type_index_collisions,
-                context.object_refs,
-                context.object_ref_resolutions,
-                context.metadata_object_refs,
-                context.configuration_root_object_refs,
-                context.recalculation_refs,
-                context.root_recalculation_refs,
-                context.functional_option_refs,
-                context.form_refs,
-                context.template_refs,
-                context.subsystem_refs,
-                context.source_version,
-                context.type_set_leaves,
-            )
+            legacy_from_text(row)
         } else {
             extract_metadata_source_xml_with_recalculation_refs_with_object_ref_resolutions(
                 &bytes,
@@ -5748,6 +5772,7 @@ fn dump_table_row_bytes(
                 )
             })
         };
+        timings.metadata_xml_convert_us += micros(started).saturating_sub(shadow_us);
         match extracted {
             Ok(extracted) => {
                 let path = context.output_dir.join(&extracted.relative_path);

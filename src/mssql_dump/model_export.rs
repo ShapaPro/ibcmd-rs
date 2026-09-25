@@ -23,6 +23,50 @@ use crate::metadata_model::objects::parts::Compat;
 /// The environment switch, for callers without the command-line flag.
 pub(super) const MODEL_EXPORT_ENV: &str = "IBCMD_RS_MODEL_EXPORT";
 
+/// `IBCMD_RS_MODEL_EXPORT_SHADOW=1`: the legacy converter also runs on the
+/// modelled rows, to time it on the same rows and compare the bytes.
+pub(super) fn shadow() -> bool {
+    static SHADOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHADOW.get_or_init(|| {
+        std::env::var("IBCMD_RS_MODEL_EXPORT_SHADOW").is_ok_and(|value| value.trim() == "1")
+    })
+}
+
+/// The bytes a descriptor's file gets (`write_source_xml_file`).
+fn as_written(xml: &[u8], source_version: InfobaseConfigSourceVersion) -> Vec<u8> {
+    let adapter = MssqlLegacyAdapter::from_legacy_selector(source_version);
+    let mut normalized =
+        normalize_legacy_source_asset_xml_version_bytes(xml, adapter.xml_dialect());
+    if source_version == InfobaseConfigSourceVersion::V2_21 {
+        normalized = declare_palette_namespace_beside_style(normalized);
+    }
+    normalized
+}
+
+/// Whether the legacy converter would have written the same file.
+pub(super) fn same_as_written(
+    legacy: Option<&ExtractedMetadataSourceXml>,
+    modelled: &ExtractedMetadataSourceXml,
+    source_version: InfobaseConfigSourceVersion,
+) -> bool {
+    legacy.is_some_and(|legacy| {
+        legacy.relative_path == modelled.relative_path
+            && as_written(&legacy.xml, source_version) == as_written(&modelled.xml, source_version)
+    })
+}
+
+/// A modelled row whose file differs from the legacy one (the first twenty).
+pub(super) fn report_shadow_difference(file_name: &str, relative_path: &Path) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static REPORTED: AtomicUsize = AtomicUsize::new(0);
+    if REPORTED.fetch_add(1, Ordering::Relaxed) < 20 {
+        eprintln!(
+            "model export shadow: {file_name} ({}) differs from the legacy converter's file",
+            relative_path.display()
+        );
+    }
+}
+
 /// `--model-export`, or `IBCMD_RS_MODEL_EXPORT=1`.
 pub(super) fn requested(flag: bool) -> bool {
     flag || std::env::var(MODEL_EXPORT_ENV).is_ok_and(|value| value.trim() == "1")
@@ -65,6 +109,8 @@ pub(super) struct ModelExport {
     context: ExportContext,
     /// Every top-level object's kind, from the root row.
     kinds: HashMap<String, &'static str>,
+    /// The root row's own name: the configuration's uuid.
+    root: Option<String>,
     pub(super) report: ModelIndexReport,
 }
 
@@ -174,7 +220,23 @@ impl ModelExport {
             }
         }
         if let Some(root) = root {
-            index.insert_name(&root.file_name, "Configuration");
+            let names = raw_by_name
+                .get(root.file_name.as_str())
+                .ok_or_else(|| anyhow!("no stored root row"))
+                .and_then(|raw| raw_row_text(raw))
+                .and_then(|text| parse_row(&text))
+                .and_then(|tree| {
+                    crate::metadata_model::export::object_names("Configuration", &tree)
+                });
+            match names {
+                Ok(names) => {
+                    *report.rows_by_kind.entry("Configuration".to_string()).or_default() += 1;
+                    index.add(&names);
+                }
+                Err(_) => {
+                    index.insert_name(&root.file_name, "Configuration");
+                }
+            }
         }
 
         // Top-level objects of the other kinds: the root row's kind and the
@@ -309,6 +371,7 @@ impl ModelExport {
                 compat,
             },
             kinds,
+            root: root.map(|row| row.file_name.clone()),
             report,
         })
     }
@@ -325,27 +388,38 @@ impl ModelExport {
         row: &MetadataTextRow,
         stored: &[u8],
     ) -> Option<Result<ExtractedMetadataSourceXml>> {
-        let kind = *self.kinds.get(row.file_name.as_str())?;
+        let is_root = self.root.as_deref() == Some(row.file_name.as_str());
+        let kind = if is_root {
+            "Configuration"
+        } else {
+            *self.kinds.get(row.file_name.as_str())?
+        };
         if !has_decoder(kind, &self.context) {
             return None;
         }
-        let folder = kind_folder(kind)?;
+        let folder = if is_root { None } else { Some(kind_folder(kind)?) };
         Some((|| {
             let text = inflate_raw_deflate(stored)?;
             let tree = parse_row(&text)?;
             let object = decode_object(kind, &tree, &self.context)?;
-            let name = match row.header.as_ref() {
-                Some(header) => header.name.clone(),
-                None => object
-                    .path(&["Properties", "Name"])
-                    .map(|name| name.text.clone())
-                    .ok_or_else(|| anyhow!("{kind} without a name"))?,
-            };
             let xml = write_document(&object, &self.context.version);
+            let relative_path = match &folder {
+                None => PathBuf::from("Configuration.xml"),
+                Some(folder) => {
+                    let name = match row.header.as_ref() {
+                        Some(header) => header.name.clone(),
+                        None => object
+                            .path(&["Properties", "Name"])
+                            .map(|name| name.text.clone())
+                            .ok_or_else(|| anyhow!("{kind} without a name"))?,
+                    };
+                    PathBuf::from(folder)
+                        .join(sanitize_source_path_segment(&name))
+                        .with_extension("xml")
+                }
+            };
             Ok(ExtractedMetadataSourceXml {
-                relative_path: PathBuf::from(folder)
-                    .join(sanitize_source_path_segment(&name))
-                    .with_extension("xml"),
+                relative_path,
                 xml: xml.into_bytes(),
             })
         })())

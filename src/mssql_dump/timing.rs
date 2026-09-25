@@ -53,6 +53,15 @@ pub struct MssqlDumpTimingReport {
     /// Rows of a modelled kind the model failed on, written by the legacy
     /// converter instead.
     pub model_fallback_rows: u64,
+    /// Producing the descriptor XML in memory, without the file write, in
+    /// microseconds: every descriptor, and the model's share.
+    pub metadata_xml_convert_us: u64,
+    pub model_metadata_xml_convert_us: u64,
+    /// `IBCMD_RS_MODEL_EXPORT_SHADOW=1`: the legacy converter also runs on
+    /// every modelled row; its time and the rows whose bytes differ.
+    pub model_shadow_rows: u64,
+    pub model_shadow_legacy_convert_us: u64,
+    pub model_shadow_differing_rows: u64,
     pub source_asset_cpu_ms: u64,
     pub source_asset_form_cpu_ms: u64,
     pub source_asset_form_xml_cpu_ms: u64,
@@ -399,6 +408,11 @@ impl MssqlDumpTimingReport {
         self.model_metadata_xml_rows += other.model_metadata_xml_rows;
         self.model_metadata_xml_cpu_ms += other.model_metadata_xml_cpu_ms;
         self.model_fallback_rows += other.model_fallback_rows;
+        self.metadata_xml_convert_us += other.metadata_xml_convert_us;
+        self.model_metadata_xml_convert_us += other.model_metadata_xml_convert_us;
+        self.model_shadow_rows += other.model_shadow_rows;
+        self.model_shadow_legacy_convert_us += other.model_shadow_legacy_convert_us;
+        self.model_shadow_differing_rows += other.model_shadow_differing_rows;
         self.source_asset_cpu_ms += other.source_asset_cpu_ms;
         self.source_asset_form_cpu_ms += other.source_asset_form_cpu_ms;
         self.source_asset_form_xml_cpu_ms += other.source_asset_form_xml_cpu_ms;
