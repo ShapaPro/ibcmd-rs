@@ -166,3 +166,35 @@ pub fn bool_value(value: bool) -> Brace {
 pub fn number_value(text: &str) -> Brace {
     brace_list![Brace::str("N"), Brace::atom(text)]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata_model::brace::serialize;
+
+    #[test]
+    fn numbers_rows_in_document_order_and_closes_with_the_last_index() {
+        let columns = vec![
+            Column::new(0, "", pattern(vec![brace_list![Brace::str("S")]]), 0),
+            Column::new(1, "", pattern(vec![brace_list![Brace::str("B")]]), 1),
+        ];
+        let mut root = Row::new(vec![string_value("root")]);
+        let mut child = Row::new(vec![string_value("a"), bool_value(true)]);
+        child.children = vec![Row::new(vec![string_value("a1")])];
+        root.children = vec![child, Row::new(vec![string_value("b")])];
+        let text = serialize(&value_tree(&columns, &[root])).replace("\r\n", "");
+        assert!(text.contains(r#"{2,0,1,{"S","root"},1,{1,2,{2,1,2,{"S","a"},{"B",1},1,{1,1,{2,2,1,{"S","a1"},0}}},{2,3,1,{"S","b"},0}}}},-1,3}"#), "{text}");
+    }
+
+    #[test]
+    fn an_empty_table_writes_its_last_column_position() {
+        let columns = vec![
+            Column::new(0, "", pattern(Vec::new()), 0),
+            Column::new(1, "x", pattern(Vec::new()), 1),
+        ];
+        let text = serialize(&value_table(&columns, &[])).replace("\r\n", "");
+        assert!(text.ends_with(r#"{2,2,0,0,1,1,{1,0},1,-1},{0,0}}"#), "{text}");
+        let text = serialize(&value_table(&[], &[])).replace("\r\n", "");
+        assert_eq!(text, "{9,{0},{2,0,{1,0},-1,-1},{0,0}}");
+    }
+}

@@ -27,7 +27,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::DescriptorContext;
 use super::brace::{Brace, NIL_UUID, parse_row};
 use super::common::{crlf_strings, up_convert_v85_primitives, v85_layout};
-use super::types::{design_time_ref, is_uuid, object_uuid};
+use super::types::{design_time_ref, object_uuid};
 use super::xml::{Element, parse_element_tree};
 use crate::brace_list;
 use crate::compiler::bodies::form_native::{format_native_color, format_native_font};
@@ -713,7 +713,32 @@ fn outline(tag: &str, left: i64, top: i64, right: i64, bottom: i64) -> Result<Ve
     })
 }
 
-#[allow(dead_code)]
-fn is_uuid_text(text: &str) -> bool {
-    is_uuid(text)
+#[cfg(test)]
+mod tests {
+    use super::outline;
+
+    #[test]
+    fn computes_the_outlines_the_platform_stores() {
+        // BSP `Задание` and ERP УХ flowcharts, point for point.
+        assert_eq!(
+            outline("Start", 380, 20, 420, 60).unwrap(),
+            vec![(380, 20), (419, 20), (419, 49), (400, 59), (380, 49)]
+        );
+        assert_eq!(
+            outline("Completion", 180, 460, 220, 500).unwrap(),
+            vec![(200, 460), (219, 471), (219, 499), (180, 499), (180, 471)]
+        );
+        assert_eq!(
+            outline("Condition", 140, 240, 260, 300).unwrap(),
+            vec![(140, 270), (157, 240), (242, 240), (259, 270), (242, 299), (157, 299)]
+        );
+        assert_eq!(
+            outline("Split", 320, 160, 360, 180).unwrap(),
+            vec![(320, 160), (358, 160), (339, 179)]
+        );
+        assert_eq!(
+            outline("Join", 320, 400, 360, 420).unwrap(),
+            vec![(320, 419), (358, 419), (339, 400)]
+        );
+    }
 }
