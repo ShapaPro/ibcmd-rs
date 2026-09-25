@@ -108,6 +108,7 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("cfg:ConstantsSet", "dcfc3784-a14f-4786-ac7b-c82db5ba275f"),
     ("cfg:ReportBuilder", "0dda99d9-ae9f-43d2-b7ac-44f3fb0d4059"),
     ("cfg:ReportObject", "1dd6fdb9-553d-40d4-b2d1-c7fc31f497bb"),
+    ("cfg:DynamicList", "65abad24-838b-4987-8b35-ed9e2bd4d9c8"),
     // Type sets (`<v8:TypeSet>cfg:CatalogRef</v8:TypeSet>`): every object of
     // one family.
     ("cfg:AnyIBRef", "280f5f0e-9c8a-49cc-bf6d-4d296cc17a63"),
@@ -776,6 +777,200 @@ pub fn data_path(text: &str, context: &DescriptorContext) -> Result<Vec<Brace>> 
         }
     }
     Ok(segments)
+}
+
+/// Offline measurement of [`type_pattern`] against every type description of
+/// a tree: each `<Type>` (any element holding `v8:Type` / `v8:TypeSet` /
+/// `v8:TypeId` children) of a metadata XML is compiled and looked up in its
+/// object's stored row; each one of an owned form's `Ext/Form.xml` in the
+/// form body row (`<form uuid>.0`).
+pub mod corpus {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::Path;
+
+    use anyhow::Result;
+    use rayon::prelude::*;
+    use serde::Serialize;
+
+    use super::super::DescriptorContext;
+    use super::super::audit::{descriptor_xmls, read_stored_row};
+    use super::super::brace::{parse_row, serialize};
+    use super::super::xml::{Element, MetadataXml, parse_element_tree};
+    use super::type_pattern;
+    use crate::parallel;
+
+    #[derive(Debug, Default, Serialize)]
+    pub struct PatternAuditReport {
+        pub total: usize,
+        pub found: usize,
+        pub missing: usize,
+        pub failed: usize,
+        /// By where the description sits (`Catalog`, `Form`) and why.
+        pub missing_by: BTreeMap<String, usize>,
+        pub failures: BTreeMap<String, usize>,
+        pub samples: Vec<PatternSample>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct PatternSample {
+        pub file: String,
+        pub types: String,
+        pub compiled: String,
+    }
+
+    fn is_description(element: &Element) -> bool {
+        element.children.iter().any(|child| {
+            child.prefix == "v8" && matches!(child.name.as_str(), "Type" | "TypeSet" | "TypeId")
+        }) && element
+            .children
+            .iter()
+            .all(|child| child.children.is_empty() || child.name.ends_with("Qualifiers"))
+    }
+
+    fn descriptions<'a>(element: &'a Element, out: &mut Vec<&'a Element>) {
+        for child in &element.children {
+            if is_description(child) {
+                out.push(child);
+            } else {
+                descriptions(child, out);
+            }
+        }
+    }
+
+    fn summary(element: &Element) -> String {
+        element
+            .children
+            .iter()
+            .map(|child| format!("{}={}", child.name, child.text.trim()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    enum Outcome {
+        Found,
+        Missing(String, String, String, String),
+        Failed(String),
+    }
+
+    fn check(
+        relative: &str,
+        kind: &str,
+        element: &Element,
+        stored: &str,
+        context: &DescriptorContext,
+    ) -> Outcome {
+        match type_pattern(Some(element), context) {
+            Err(error) => Outcome::Failed(format!("{error:#}")),
+            Ok(pattern) => {
+                let text = serialize(&pattern);
+                if stored.contains(&text) {
+                    Outcome::Found
+                } else {
+                    Outcome::Missing(kind.to_string(), relative.to_string(), summary(element), text)
+                }
+            }
+        }
+    }
+
+    fn measure_object(
+        root: &Path,
+        rows: &Path,
+        path: &Path,
+        context: &DescriptorContext,
+    ) -> Result<Vec<Outcome>> {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Ok(bytes) = fs::read(path) else {
+            return Ok(Vec::new());
+        };
+        let Ok(doc) = MetadataXml::parse(&bytes) else {
+            return Ok(Vec::new());
+        };
+        let Ok(object) = doc.object() else {
+            return Ok(Vec::new());
+        };
+        let Some(uuid) = object.attr("uuid").map(str::to_ascii_lowercase) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut found = Vec::new();
+        descriptions(object, &mut found);
+        if !found.is_empty()
+            && let Some(stored) = read_stored_row(rows, &uuid)?
+            && let Ok(tree) = parse_row(&stored)
+        {
+            let stored = serialize(&tree);
+            for element in found {
+                out.push(check(&relative, &object.name, element, &stored, context));
+            }
+        }
+        // An owned form's body: `<...>/Forms/F.xml` + `<...>/Forms/F/Ext/Form.xml`.
+        if object.name == "Form" || object.name == "CommonForm" {
+            let form = path.with_extension("").join("Ext").join("Form.xml");
+            if let Ok(bytes) = fs::read(&form)
+                && let Ok(body) = parse_element_tree(&bytes)
+            {
+                let mut found = Vec::new();
+                descriptions(&body, &mut found);
+                if !found.is_empty()
+                    && let Some(stored) = read_stored_row(rows, &format!("{uuid}.0"))?
+                    && let Ok(tree) = parse_row(&stored)
+                {
+                    let stored = serialize(&tree);
+                    for element in found {
+                        out.push(check(&relative, "Form.xml", element, &stored, context));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn audit(
+        root: &Path,
+        rows: &Path,
+        version: &str,
+        max_samples: usize,
+    ) -> Result<PatternAuditReport> {
+        let context = DescriptorContext::new(root, version)?;
+        // Owned forms' descriptors sit next to their bodies, so
+        // `descriptor_xmls` already yields everything measured here.
+        let paths = descriptor_xmls(root);
+        let outcomes = parallel::install(|| {
+            paths
+                .par_iter()
+                .map(|path| measure_object(root, rows, path, &context))
+                .collect::<Result<Vec<_>>>()
+        })??;
+        let mut report = PatternAuditReport::default();
+        for outcome in outcomes.into_iter().flatten() {
+            report.total += 1;
+            match outcome {
+                Outcome::Found => report.found += 1,
+                Outcome::Failed(message) => {
+                    report.failed += 1;
+                    let key: String = message.chars().take(160).collect();
+                    *report.failures.entry(key).or_default() += 1;
+                }
+                Outcome::Missing(kind, file, types, compiled) => {
+                    report.missing += 1;
+                    *report.missing_by.entry(kind).or_default() += 1;
+                    if report.samples.len() < max_samples {
+                        report.samples.push(PatternSample {
+                            file,
+                            types,
+                            compiled,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
 }
 
 #[cfg(test)]
