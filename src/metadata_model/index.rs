@@ -103,6 +103,7 @@ pub fn kind_of_collection(folder: &str) -> Option<&'static str> {
         "Templates" => "Template",
         "Recalculations" => "Recalculation",
         "Interfaces" => "Interface",
+        "PaletteColors" => "PaletteColor",
         _ => return None,
     })
 }
