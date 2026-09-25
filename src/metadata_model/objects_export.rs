@@ -1096,7 +1096,7 @@ fn shortcut(node: &Brace) -> Result<String> {
 }
 
 /// `{1,{2,<uuid>,<command value>},{9,...}}` -> `<Command>`.
-fn command(body: &Brace, context: &ExportContext) -> Result<Element> {
+pub(crate) fn command(body: &Brace, context: &ExportContext) -> Result<Element> {
     let names = &context.names;
     let fields = list(body)?;
     let identity = list(item(fields, 1)?)?;

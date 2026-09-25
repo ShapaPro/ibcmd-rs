@@ -266,10 +266,59 @@ fn is_type_set(name: &str) -> bool {
     let Some(local) = name.strip_prefix("cfg:") else {
         return false;
     };
+    // Every object of one family (`cfg:CatalogRef`, `cfg:DocumentObject`,
+    // `cfg:InformationRegisterRecordSet`, `cfg:ConstantValueManager`) is a
+    // set; the unnamed managers (`cfg:CatalogManager`) and the four unnamed
+    // platform types are types.
     local.starts_with("DefinedType.")
         || local.starts_with("Characteristic.")
         || local == "AnyIBRef"
-        || (local.ends_with("Ref") && !local.contains('.'))
+        || local == "ConstantValueManager"
+        || (!local.contains('.')
+            && (local.ends_with("Ref") || local.ends_with("Object") || local.ends_with("RecordSet"))
+            && local != "ReportObject")
+}
+
+/// The order the XML writes family type sets in. References follow their
+/// type ids; objects and record sets follow the platform's own order, which
+/// is not their type ids' (every event subscription source of the four
+/// reference trees agrees; `ConstantValueManager` and `ExchangePlanObject`
+/// never meet, nor does `CalculationRegisterRecordSet` meet another set).
+/// Defined types and characteristics keep their stored order, ahead.
+const FAMILY_TYPE_SET_ORDER: &[&str] = &[
+    "cfg:AnyIBRef",
+    "cfg:ExchangePlanRef",
+    "cfg:BusinessProcessRoutePointRef",
+    "cfg:BusinessProcessRef",
+    "cfg:DocumentRef",
+    "cfg:EnumRef",
+    "cfg:ChartOfCalculationTypesRef",
+    "cfg:TaskRef",
+    "cfg:ChartOfCharacteristicTypesRef",
+    "cfg:ChartOfAccountsRef",
+    "cfg:CatalogRef",
+    "cfg:BusinessProcessObject",
+    "cfg:ChartOfCalculationTypesObject",
+    "cfg:ChartOfAccountsObject",
+    "cfg:ChartOfCharacteristicTypesObject",
+    "cfg:ConstantValueManager",
+    "cfg:ExchangePlanObject",
+    "cfg:CatalogObject",
+    "cfg:TaskObject",
+    "cfg:DocumentObject",
+    "cfg:InformationRegisterRecordSet",
+    "cfg:AccountingRegisterRecordSet",
+    "cfg:AccumulationRegisterRecordSet",
+    "cfg:CalculationRegisterRecordSet",
+    "cfg:SequenceRecordSet",
+    "cfg:RecalculationRecordSet",
+];
+
+fn type_set_rank(name: &str) -> usize {
+    FAMILY_TYPE_SET_ORDER
+        .iter()
+        .position(|candidate| *candidate == name)
+        .map_or(0, |position| position + 1)
 }
 
 /// The children a type description writes: `v8:Type` items in stored
@@ -374,6 +423,7 @@ pub(crate) fn type_children(pattern: &Brace, names: &NameIndex) -> Result<Vec<El
             other => bail!("unknown type pattern item {other:?}"),
         }
     }
+    sets.sort_by_key(|set| type_set_rank(&set.text));
     types.extend(sets);
     types.extend(unnamed);
     types.extend(number_q);
@@ -665,7 +715,9 @@ fn named_data_path(segments: &[Brace], owner: Owner<'_>, names: &NameIndex) -> R
                 let Some(name) = names.name(atom(uuid)?) else {
                     return Ok(None);
                 };
-                if !name.starts_with(&inside) {
+                // A top-level object (another constant a constant's link
+                // names) is named wherever it is.
+                if !name.starts_with(&inside) && name.matches('.').count() != 1 {
                     return Ok(None);
                 }
                 current = Some(name.to_string());
@@ -1043,4 +1095,200 @@ fn standard_attribute(
             payload("fcf503b8-1c06-454a-970c-06413e64aee5")?,
             names,
         )?))
+}
+
+// ---------------------------------------------------------------------------
+// The attribute body by property, in any XML order.
+
+/// The XML properties an attribute body `{27,...}` holds, by name: the md
+/// header, `Type`, and the 21 properties of its slots.
+pub(crate) const ATTRIBUTE_BODY_PROPERTIES: &[&str] = &[
+    "Name",
+    "Synonym",
+    "Comment",
+    "Type",
+    "PasswordMode",
+    "Format",
+    "EditFormat",
+    "ToolTip",
+    "MarkNegatives",
+    "Mask",
+    "MultiLine",
+    "ExtendedEdit",
+    "MinValue",
+    "MaxValue",
+    "FillFromFillingValue",
+    "FillValue",
+    "FillChecking",
+    "ChoiceFoldersAndItems",
+    "ChoiceParameterLinks",
+    "ChoiceParameters",
+    "QuickChoice",
+    "CreateOnInput",
+    "ChoiceForm",
+    "LinkByType",
+    "ChoiceHistoryOnInput",
+];
+
+/// A decoded attribute body: its header and its properties as XML elements
+/// by name, for an owner to place in its own order (a constant writes its
+/// own properties between `Type` and `PasswordMode` and has no fill value; a
+/// register dimension or resource adds its own): the general form of
+/// [`attribute_properties`].
+pub(crate) struct AttributeElements {
+    elements: Vec<(&'static str, Option<Element>)>,
+}
+
+impl AttributeElements {
+    /// The element of one property of [`ATTRIBUTE_BODY_PROPERTIES`], once.
+    pub fn take(&mut self, name: &str) -> Result<Element> {
+        self.elements
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == name)
+            .and_then(|(_, element)| element.take())
+            .ok_or_else(|| anyhow!("attribute body has no <{name}> left"))
+    }
+
+    /// The elements of `order`: body properties are taken, any other name
+    /// comes from `extra` (the owner's own properties, by name).
+    pub fn ordered(
+        mut self,
+        order: &[&str],
+        mut extra: impl FnMut(&str) -> Result<Element>,
+    ) -> Result<Vec<Element>> {
+        let mut out = Vec::with_capacity(order.len());
+        for name in order {
+            if ATTRIBUTE_BODY_PROPERTIES.contains(name) {
+                out.push(self.take(name)?);
+            } else {
+                out.push(extra(name)?);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// `{27,{2,<md base>,<pattern>},...}` -> its properties by name.
+pub(crate) fn attribute_elements(
+    body: &Brace,
+    owner: Owner<'_>,
+    context: &ExportContext,
+) -> Result<AttributeElements> {
+    let names = &context.names;
+    let slots = list(body)?;
+    if atom(item(slots, 0)?)? != "27" || slots.len() != 23 {
+        bail!("not an attribute body: {}", short(body));
+    }
+    let typed = list(item(slots, 1)?)?;
+    let head = header(item(typed, 1)?)?;
+    let [name, synonym, comment] = header_elements(&head)?;
+    let elements = vec![
+        ("Name", name),
+        ("Synonym", synonym),
+        ("Comment", comment),
+        ("Type", type_element("Type", item(typed, 2)?, names)?),
+        ("PasswordMode", leaf("PasswordMode", bool_text(&slots[2])?)),
+        ("Format", localized_element("Format", &slots[3])?),
+        ("EditFormat", localized_element("EditFormat", &slots[18])?),
+        ("ToolTip", localized_element("ToolTip", &slots[4])?),
+        ("MarkNegatives", leaf("MarkNegatives", bool_text(&slots[5])?)),
+        ("Mask", leaf("Mask", xml_text(string(&slots[6])?))),
+        ("MultiLine", leaf("MultiLine", bool_text(&slots[7])?)),
+        ("ExtendedEdit", leaf("ExtendedEdit", bool_text(&slots[17])?)),
+        ("MinValue", value_element("MinValue", &slots[8], names)?),
+        ("MaxValue", value_element("MaxValue", &slots[9], names)?),
+        (
+            "FillFromFillingValue",
+            leaf("FillFromFillingValue", bool_text(&slots[20])?),
+        ),
+        ("FillValue", value_element("FillValue", &slots[19], names)?),
+        (
+            "FillChecking",
+            leaf("FillChecking", code_text(&slots[13], FILL_CHECKING)?),
+        ),
+        (
+            "ChoiceFoldersAndItems",
+            leaf(
+                "ChoiceFoldersAndItems",
+                code_text(&slots[10], CHOICE_FOLDERS_AND_ITEMS)?,
+            ),
+        ),
+        (
+            "ChoiceParameterLinks",
+            choice_parameter_links_element("ChoiceParameterLinks", &slots[14], owner, names)?,
+        ),
+        (
+            "ChoiceParameters",
+            choice_parameters_element("ChoiceParameters", &slots[16], names)?,
+        ),
+        (
+            "QuickChoice",
+            leaf("QuickChoice", code_text(&slots[12], QUICK_CHOICE)?),
+        ),
+        (
+            "CreateOnInput",
+            leaf("CreateOnInput", code_text(&slots[21], CREATE_ON_INPUT)?),
+        ),
+        (
+            "ChoiceForm",
+            leaf("ChoiceForm", reference_name(atom(&slots[11])?, names)?),
+        ),
+        (
+            "LinkByType",
+            link_by_type_element("LinkByType", &slots[15], owner, names)?,
+        ),
+        (
+            "ChoiceHistoryOnInput",
+            leaf(
+                "ChoiceHistoryOnInput",
+                code_text(&slots[22], CHOICE_HISTORY_ON_INPUT)?,
+            ),
+        ),
+    ];
+    Ok(AttributeElements {
+        elements: elements
+            .into_iter()
+            .map(|(name, element)| (name, Some(element)))
+            .collect(),
+    })
+}
+
+/// `{2,<md base>,<pattern>}` (a session parameter, a sequence dimension, the
+/// head of every attribute body) -> the header and the `Type` element.
+pub(crate) fn typed_header_elements(node: &Brace, names: &NameIndex) -> Result<(Header, Element)> {
+    let typed = list(node)?;
+    if atom(item(typed, 0)?)? != "2" {
+        bail!("not a typed header: {}", short(node));
+    }
+    Ok((
+        header(item(typed, 1)?)?,
+        type_element("Type", item(typed, 2)?, names)?,
+    ))
+}
+
+/// `{"#",157fa490-...,{1,<uuid>}}` -> the full name it names, the uuid when
+/// nothing does.
+pub(crate) fn metadata_ref_text(node: &Brace, names: &NameIndex) -> Result<String> {
+    let fields = list(node)?;
+    if fields.first().and_then(Brace::as_str) != Some("#")
+        || atom(item(fields, 1)?)? != METADATA_OBJECT_REF_TYPE
+    {
+        bail!("not a metadata reference: {}", short(node));
+    }
+    let uuid = atom(item(list(item(fields, 2)?)?, 1)?)?;
+    Ok(names
+        .name(uuid)
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid.to_string()))
+}
+
+/// A procedure (`<module uuid>`, `"method"`) -> `CommonModule.X.method`;
+/// empty for the nil module and an empty name.
+pub(crate) fn handler_text(module: &Brace, method: &Brace, names: &NameIndex) -> Result<String> {
+    let module = atom(module)?;
+    let method = string(method)?;
+    if is_nil(module) && method.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("{}.{method}", reference_name(module, names)?))
 }
