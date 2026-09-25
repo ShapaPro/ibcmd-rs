@@ -4873,6 +4873,15 @@ fn prepare_raw_template_body_row(
             body_path.display()
         )
     })?;
+    let bytes = if matches!(
+        kind,
+        TemplateKind::DataCompositionSchema | TemplateKind::DataCompositionAppearanceTemplate
+    ) && crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        palette_namespace_dropped(bytes)
+    } else {
+        bytes
+    };
     let compiled = if kind == TemplateKind::DataCompositionSchema {
         compile_dcs_template_body(&bytes, source)
     } else {
@@ -4934,6 +4943,26 @@ fn prepare_spreadsheet_template_body_row(
         blob_sha256: hex_sha256(&packed),
         blob: packed,
     }])
+}
+
+/// A composition schema of an 8.3-compatible configuration exported by 8.5
+/// back in the 8.3.27 spelling: 8.5 declares the palette namespace beside
+/// every style namespace it writes (`declare_palette_namespace_beside_style`),
+/// the stored 8.3.27 schema does not (ERP УХ 8.5 clone: 870 schemas). A
+/// schema that uses the palette keeps it.
+fn palette_namespace_dropped(bytes: Vec<u8>) -> Vec<u8> {
+    const DECLARATION: &str = " xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"";
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return bytes;
+    };
+    if !text.contains(DECLARATION) {
+        return bytes;
+    }
+    let dropped = text.replace(DECLARATION, "");
+    if dropped.contains("pal:") {
+        return bytes;
+    }
+    dropped.into_bytes()
 }
 
 /// A spreadsheet written in dialect 2.21 (its root declares the palette
