@@ -64,11 +64,20 @@ impl Compat {
 }
 
 /// The compatibility mode of the tree's `Configuration.xml`, read once per
-/// tree. `DontUse` (or no file) means the platform the XML dialect names.
+/// state of the file. `DontUse` (or no file) means the platform the XML
+/// dialect names.
 pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Compat>>> = OnceLock::new();
+    type Key = (PathBuf, Option<std::time::SystemTime>, u64);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Compat>>> = OnceLock::new();
+    let path = context.root.join("Configuration.xml");
+    let metadata = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path.clone(),
+        metadata.as_ref().and_then(|metadata| metadata.modified().ok()),
+        metadata.as_ref().map(|metadata| metadata.len()).unwrap_or_default(),
+    );
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(value) = cache.lock().ok().and_then(|map| map.get(&context.root).copied()) {
+    if let Some(value) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
         return value;
     }
     let default = if context.is_v85() {
@@ -76,7 +85,7 @@ pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
     } else {
         Compat(8, 3, 27)
     };
-    let value = std::fs::read(context.root.join("Configuration.xml"))
+    let value = std::fs::read(&path)
         .ok()
         .and_then(|bytes| MetadataXml::parse(&bytes).ok())
         .and_then(|doc| {
@@ -87,7 +96,7 @@ pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
         })
         .unwrap_or(default);
     if let Ok(mut map) = cache.lock() {
-        map.insert(context.root.clone(), value);
+        map.insert(key, value);
     }
     value
 }
@@ -1256,5 +1265,49 @@ pub(crate) mod shared {
             Some(element) if !element.children.is_empty() => Ok(pending("link")),
             _ => Ok(brace_list![num(3), num(0), num(0)]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata_model::brace::serialize;
+
+    fn text(node: &Brace) -> String {
+        serialize(node).replace("\r\n", "")
+    }
+
+    #[test]
+    fn shortcuts_are_virtual_key_and_modifier_mask() {
+        assert_eq!(text(&shortcut("").unwrap()), "{0,0,0}");
+        assert_eq!(text(&shortcut("F3").unwrap()), "{0,114,0}");
+        assert_eq!(text(&shortcut("Ctrl+Alt+F").unwrap()), "{0,70,24}");
+        assert_eq!(text(&shortcut("Ctrl+Shift+Num +").unwrap()), "{0,107,12}");
+        assert!(shortcut("Ctrl+Pause").is_err());
+    }
+
+    #[test]
+    fn enum_value_colours_are_auto_or_palette() {
+        assert_eq!(text(&enum_value_color("auto").unwrap()), "{4,4,{0},4}");
+        assert_eq!(text(&enum_value_color("pal:Red").unwrap()), "{4,4,{2},5}");
+        assert!(enum_value_color("web:Red").is_err());
+    }
+
+    #[test]
+    fn compatibility_modes_parse_as_versions() {
+        assert_eq!(Compat::parse("Version8_3_24"), Some(Compat(8, 3, 24)));
+        assert_eq!(Compat::parse("Version8_5_1"), Some(Compat(8, 5, 1)));
+        assert_eq!(Compat::parse("DontUse"), None);
+        assert!(Compat(8, 3, 24) < Compat(8, 3, 27));
+    }
+
+    #[test]
+    fn line_breaks_get_the_stored_crlf_back() {
+        let mut tree = brace_list![Brace::str("a\nb\r\nc"), brace_list![Brace::str("x\n")]];
+        restore_crlf(&mut tree);
+        assert_eq!(
+            tree,
+            brace_list![Brace::str("a\r\nb\r\nc"), brace_list![Brace::str("x\r\n")]]
+        );
     }
 }
