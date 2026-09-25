@@ -4945,7 +4945,9 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
         .split_once("<document")
         .and_then(|(_, rest)| rest.split_once('>'))
         .is_some_and(|(open, _)| open.contains("xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\""));
-    if !root_declares_palette {
+    if !root_declares_palette
+        || crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    {
         return Ok(packed);
     }
     let plain = crate::module_blob::inflate_raw(&packed)

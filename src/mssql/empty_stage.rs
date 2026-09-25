@@ -108,6 +108,12 @@ impl EmptyStageContext {
                 .ok_or_else(|| anyhow!("Configuration.xml declares no source version"))?,
         };
         let facts = configuration_facts(&configuration)?;
+        // Body layouts follow CompatibilityMode, not the XML dialect: a 2.21
+        // tree of an 8.3-compatible configuration stores 8.3.27 bodies.
+        crate::module_blob::V85_TREE_IN_V83_LAYOUT.store(
+            version != "2.20" && facts.compatibility < 80500,
+            Ordering::Relaxed,
+        );
         let descriptors = DescriptorContext::new(root, &version)?;
         let module_group = module_group_of(&configuration);
         Ok(Self {
