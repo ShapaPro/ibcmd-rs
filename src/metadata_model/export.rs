@@ -180,6 +180,7 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::decode(kind, row, context),
+        "Configuration" => super::root::export::decode(row, context),
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -198,8 +199,16 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::names(kind, row),
+        "Configuration" => super::root::export::names(row),
         other => bail!("not yet: no row decoder for {other}"),
     }
+}
+
+/// (kind, uuid) of every object the configuration lists, read from its
+/// `Configuration` row (the row `root` names): the rows a name index built
+/// from rows reads next.
+pub fn configuration_objects(row: &Brace) -> Result<Vec<(String, String)>> {
+    super::root::export::top_level_objects(row)
 }
 
 /// A stored row (inflated, BOM optional) -> the XML file text.
