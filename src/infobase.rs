@@ -208,6 +208,7 @@ fn export_config_report(
     let output_dir = absolute_path(output_dir_arg)?;
     prepare_output_dir(&output_dir, overwrite)?;
     let dump_args = MssqlDumpConfigArgs {
+        rows_dir: None,
         sqlcmd: sqlcmd.to_path_buf(),
         bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
         runtime_journal: None,

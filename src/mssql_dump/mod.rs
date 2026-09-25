@@ -987,6 +987,7 @@ mod metadata_order_tests;
 mod moxel;
 mod mxl_ir;
 pub mod offline_context;
+mod offline_rows;
 mod refs;
 mod role_rights;
 pub(crate) use role_rights::{
@@ -2098,6 +2099,22 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
 }
 
 fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    // `--rows-dir`: every Config read of this run comes from the folder and
+    // no query reaches a server.
+    let _offline_rows = match &args.rows_dir {
+        Some(dir) => {
+            if args.include_config_save {
+                bail!("--rows-dir reads the Config table only; drop --include-config-save");
+            }
+            Some(offline_rows::activate(dir)?)
+        }
+        None => {
+            if args.database.trim().is_empty() {
+                bail!("--database is required unless --rows-dir is given");
+            }
+            None
+        }
+    };
     let legacy_adapter = MssqlLegacyAdapter::from_legacy_selector(args.source_version);
     let source_version = legacy_adapter.legacy_selector().ok_or_else(|| {
         anyhow!(

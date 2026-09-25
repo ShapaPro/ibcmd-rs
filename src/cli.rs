@@ -1290,9 +1290,14 @@ pub struct MssqlDumpConfigArgs {
     /// Environment variable containing the SQL Server password.
     #[arg(long, default_value = "IBCMD_DB_PSW")]
     pub sql_pwd_env: String,
-    /// SQL Server database name.
-    #[arg(long)]
+    /// SQL Server database name (not needed with --rows-dir).
+    #[arg(long, default_value = "")]
     pub database: String,
+    /// Read the Config table from a folder of `<FileName>__part<N>.bin`
+    /// files (the stored BinaryData, raw deflate) instead of SQL Server; no
+    /// server or database is contacted.
+    #[arg(long)]
+    pub rows_dir: Option<PathBuf>,
     /// Output directory for dumped rows and manifest.json.
     #[arg(short, long)]
     pub output_dir: PathBuf,
