@@ -19,21 +19,16 @@ use anyhow::{Result, anyhow};
 pub mod parts;
 
 use self::parts::{
-    Generation, StandardAttributes, code, collection, command, crlf_strings, generated, item,
-    md_ref_list, owned_uuids, reference, typed_header,
+    Generation, StandardAttributes, code, collection, command, generated, item, md_ref_list,
+    owned_uuids, reference,
 };
+use super::attribute;
 use super::brace::Brace;
 use super::xml::Element;
 use super::{DescriptorContext, ObjectXml, localized, md_base, parse_bool};
 use crate::brace_list;
 
 pub fn compile(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
-    let mut tree = compile_kind(object, context)?;
-    crlf_strings(&mut tree);
-    Ok(tree)
-}
-
-fn compile_kind(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
     match object.kind {
         "InformationRegister" => InformationRegister::from_xml(object, context)?.to_brace(),
         "AccumulationRegister" => AccumulationRegister::from_xml(object, context)?.to_brace(),
@@ -248,17 +243,16 @@ impl<'a> Field<'a> {
     fn reference(&self, context: &DescriptorContext, name: &str) -> Result<Brace> {
         reference(context, Some(self.text(name)))
     }
-    /// The 27-slot attribute body every register wrapper carries.
+    /// The 27-slot attribute body every register wrapper carries (the
+    /// simple-objects track's shared encoder).
     fn body(&self, context: &DescriptorContext) -> Result<Brace> {
-        attribute_body(self.element, context)
+        attribute::attribute_body(&self.uuid, self.properties, context)
     }
-}
-
-/// The attribute body (`{27,{2,<md base>,<type>},...}`) shared with object
-/// attributes; owned by the simple-objects track (`attribute::attribute_body`).
-/// Until it lands this stand-in writes only the typed header.
-fn attribute_body(element: &Element, context: &DescriptorContext) -> Result<Brace> {
-    Ok(brace_list![Brace::num(27), typed_header(element, context)?])
+    /// `{2,<md base>,<type>}`: the head of the body, all a sequence
+    /// dimension keeps.
+    fn typed_header(&self, context: &DescriptorContext) -> Result<Brace> {
+        attribute::typed_header(&self.uuid, self.properties, context)
+    }
 }
 
 /// `0,{1,<nil>}`: the tail modern non-dimension fields carry.
@@ -1144,7 +1138,7 @@ impl Sequence {
         for field in fields(object, "Dimension")? {
             dimensions.push(wrap(vec![
                 Brace::num(0),
-                typed_header(field.element, context)?,
+                field.typed_header(context)?,
                 md_ref_list(context, field.properties.child("DocumentMap"))?,
                 md_ref_list(context, field.properties.child("RegisterRecordsMap"))?,
             ]));
@@ -1224,5 +1218,100 @@ impl DocumentNumerator {
             ],
             Brace::num(0),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::parts::StandardAttributes;
+    use super::*;
+    use crate::metadata_model::brace::serialize;
+    use crate::metadata_model::index::ConfigIndex;
+    use crate::metadata_model::xml::MetadataXml;
+    use crate::module_blob::MetadataSourceContext;
+
+    const NAMESPACES: &str = r#"xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+
+    fn context(compatibility: &str) -> DescriptorContext {
+        let index = ConfigIndex {
+            compatibility_mode: Some(compatibility.to_string()),
+            ..ConfigIndex::default()
+        };
+        DescriptorContext {
+            root: PathBuf::new(),
+            index,
+            source: MetadataSourceContext::new(PathBuf::new()),
+            version: "2.20".to_string(),
+        }
+    }
+
+    fn object<'a>(doc: &'a MetadataXml, kind: &'a str) -> ObjectXml<'a> {
+        let element = doc.object().unwrap();
+        ObjectXml {
+            element,
+            kind,
+            uuid: element.attr("uuid").unwrap().to_ascii_lowercase(),
+            name: element
+                .path(&["Properties", "Name"])
+                .map(|name| name.text.clone())
+                .unwrap_or_default(),
+            path: Path::new("test.xml"),
+        }
+    }
+
+    #[test]
+    fn numerator_matches_the_stored_row() {
+        let xml = format!(
+            r#"<MetaDataObject {NAMESPACES} version="2.20"><DocumentNumerator uuid="5c85fe94-66e5-42be-852a-9c90f6242257"><Properties><Name>СчетаФактурыВыданные</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Счета-фактуры выданные</v8:content></v8:item><v8:item><v8:lang>en</v8:lang><v8:content>Issued tax invoices</v8:content></v8:item></Synonym><Comment/><NumberType>String</NumberType><NumberLength>12</NumberLength><NumberAllowedLength>Fixed</NumberAllowedLength><NumberPeriodicity>Year</NumberPeriodicity><CheckUnique>false</CheckUnique></Properties></DocumentNumerator></MetaDataObject>"#
+        );
+        let doc = MetadataXml::parse(xml.as_bytes()).unwrap();
+        let tree = compile(&object(&doc, "DocumentNumerator"), &context("Version8_3_27")).unwrap();
+        assert_eq!(
+            serialize(&tree),
+            "{1,\r\n{3,\r\n{3,\r\n{1,0,5c85fe94-66e5-42be-852a-9c90f6242257},\"СчетаФактурыВыданные\",\r\n{2,\"ru\",\"Счета-фактуры выданные\",\"en\",\"Issued tax invoices\"},\"\",0,0,00000000-0000-0000-0000-000000000000,0},1,12,1,0,0},0}"
+        );
+    }
+
+    #[test]
+    fn standard_attribute_bag_follows_the_compatibility_mode() {
+        let xml = format!(
+            r#"<MetaDataObject {NAMESPACES} version="2.20"><InformationRegister uuid="9706f479-a13c-4fed-b046-9fa602b3a01e"><Properties><Name>R</Name><StandardAttributes><xr:StandardAttribute name="Period"><xr:LinkByType/><xr:FillChecking>ShowError</xr:FillChecking><xr:MultiLine>false</xr:MultiLine><xr:FillFromFillingValue>false</xr:FillFromFillingValue><xr:CreateOnInput>Auto</xr:CreateOnInput><xr:TypeReductionMode>TransformValues</xr:TypeReductionMode><xr:MaxValue xsi:nil="true"/><xr:ToolTip><v8:item><v8:lang>ru</v8:lang><v8:content>Дата</v8:content></v8:item></xr:ToolTip><xr:ExtendedEdit>false</xr:ExtendedEdit><xr:Format/><xr:ChoiceForm/><xr:QuickChoice>Auto</xr:QuickChoice><xr:ChoiceHistoryOnInput>Auto</xr:ChoiceHistoryOnInput><xr:EditFormat/><xr:PasswordMode>false</xr:PasswordMode><xr:DataHistory>Use</xr:DataHistory><xr:MarkNegatives>false</xr:MarkNegatives><xr:MinValue xsi:nil="true"/><xr:Synonym/><xr:Comment/><xr:FullTextSearch>Use</xr:FullTextSearch><xr:ChoiceParameterLinks/><xr:FillValue xsi:nil="true"/><xr:Mask/><xr:ChoiceParameters/></xr:StandardAttribute></StandardAttributes></Properties></InformationRegister></MetaDataObject>"#
+        );
+        let doc = MetadataXml::parse(xml.as_bytes()).unwrap();
+        let object = object(&doc, "InformationRegister");
+        for (mode, header, keys) in [("Version8_3_24", "13", "24"), ("Version8_3_27", "14", "25")] {
+            let tree = StandardAttributes::from_xml(&object, &context(mode), information_register_marker)
+                .unwrap()
+                .to_brace();
+            // {1,{1,1,{-2},510405d3-...,<bag>}}
+            assert_eq!(tree.at(&[1, 2]), Some(&brace_list![Brace::num(-2)]));
+            let bag = tree.at(&[1, 4]).unwrap();
+            assert_eq!(bag.at(&[0]).and_then(Brace::as_atom), Some(header));
+            assert_eq!(bag.at(&[1]).and_then(Brace::as_atom), Some(keys));
+            let items = bag.as_list().unwrap();
+            let tool_tip = items
+                .iter()
+                .position(|item| item.as_atom() == Some("4690ff70-e3fa-4914-9127-6a9acc5fc949"))
+                .unwrap();
+            assert_eq!(
+                items[tool_tip + 1],
+                brace_list![
+                    Brace::str("#"),
+                    Brace::atom("87024738-fc2a-4436-ada1-df79d395c424"),
+                    brace_list![Brace::num(1), Brace::str("ru"), Brace::str("Дата")],
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn shortcuts_sum_the_modifiers() {
+        use super::parts::shortcut;
+        assert_eq!(serialize(&shortcut("Ctrl+Shift+S").unwrap()), "{0,83,12}");
+        assert_eq!(serialize(&shortcut("F5").unwrap()), "{0,116,0}");
+        assert_eq!(serialize(&shortcut("").unwrap()), "{0,0,0}");
+        assert!(shortcut("Ctrl+Space").is_err());
     }
 }

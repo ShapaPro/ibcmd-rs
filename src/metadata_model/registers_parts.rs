@@ -1,12 +1,16 @@
 //! Parts the register family shares: layout generation, generated types,
 //! references and collections, standard attributes, owned commands.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use crate::brace_list;
+use crate::metadata_model::attribute::{choice_parameter_links, choice_parameters, link_by_type};
 use crate::metadata_model::brace::Brace;
+use crate::metadata_model::types::{type_pattern, typed_value};
 use crate::metadata_model::xml::Element;
-use crate::metadata_model::{DescriptorContext, ObjectXml, localized, md_base, parse_bool};
+use crate::metadata_model::{
+    DescriptorContext, ObjectXml, localized, md_base, native_text, parse_bool,
+};
 
 /// Which layout generation the rows follow. It is the configuration's
 /// compatibility mode that decides, not the platform: БСП in 8.3.24
@@ -30,28 +34,6 @@ impl Generation {
     }
     pub fn is_modern(self) -> bool {
         self == Generation::Modern
-    }
-}
-
-/// Line breaks inside the row's strings are CRLF where the XML (by XML's
-/// own normalisation) carries LF: 95 696 of 95 704 multi-line strings of
-/// the ERP УХ rows. Applied to the whole tree once it is built.
-pub fn crlf_strings(node: &mut Brace) {
-    match node {
-        Brace::Str(text) if text.contains('\n') => {
-            let mut out = String::with_capacity(text.len() + 8);
-            let mut previous = '\0';
-            for ch in text.chars() {
-                if ch == '\n' && previous != '\r' {
-                    out.push('\r');
-                }
-                out.push(ch);
-                previous = ch;
-            }
-            *text = out;
-        }
-        Brace::List(items) => items.iter_mut().for_each(crlf_strings),
-        _ => {}
     }
 }
 
@@ -177,78 +159,6 @@ pub fn md_ref_list(context: &DescriptorContext, items: Option<&Element>) -> Resu
     Ok(Brace::List(list))
 }
 
-/// `{2,<md base>,<type pattern>}`: the typed header an attribute body and a
-/// sequence dimension start with.
-pub fn typed_header(element: &Element, context: &DescriptorContext) -> Result<Brace> {
-    let properties = element
-        .child("Properties")
-        .ok_or_else(|| anyhow!("<{}> has no <Properties>", element.name))?;
-    let uuid = element.attr("uuid").unwrap_or_default().to_ascii_lowercase();
-    Ok(brace_list![
-        Brace::num(2),
-        md_base(&uuid, properties),
-        type_pattern(properties.child("Type"), context)?,
-    ])
-}
-
-/// `{"Pattern",...}` of a `<Type>`/`<CommandParameterType>`. Type
-/// descriptions belong to the simple-objects track (`types::type_pattern`);
-/// this stand-in only knows references and the few primitive forms the
-/// register family shows, until that lands.
-pub fn type_pattern(element: Option<&Element>, context: &DescriptorContext) -> Result<Brace> {
-    let mut items = vec![Brace::str("Pattern")];
-    let Some(element) = element else {
-        return Ok(Brace::List(items));
-    };
-    for child in &element.children {
-        match child.name.as_str() {
-            "Type" | "TypeSet" => {
-                let text = child.text.trim();
-                let (prefix, name) = text.split_once(':').unwrap_or(("", text));
-                match (prefix, name) {
-                    ("cfg", name) => {
-                        // Stand-in: an unresolved type is written as `?`.
-                        let id = context
-                            .index
-                            .generated_type(name)
-                            .map(|generated| generated.type_id.clone())
-                            .unwrap_or_else(|| "?".to_string());
-                        items.push(brace_list![Brace::str("#"), Brace::atom(id)]);
-                    }
-                    ("xs", "boolean") => items.push(brace_list![Brace::str("B")]),
-                    ("xs", "string") => {
-                        let qualifiers = element.child("StringQualifiers");
-                        let length = qualifiers
-                            .and_then(|q| q.child_text("Length"))
-                            .unwrap_or("0")
-                            .trim()
-                            .parse::<i64>()
-                            .unwrap_or(0);
-                        if length == 0 {
-                            items.push(brace_list![Brace::str("S")]);
-                        } else {
-                            let variable = qualifiers
-                                .and_then(|q| q.child_text("AllowedLength"))
-                                .map(str::trim)
-                                == Some("Variable");
-                            items.push(brace_list![
-                                Brace::str("S"),
-                                Brace::num(length),
-                                Brace::flag(variable),
-                            ]);
-                        }
-                    }
-                    _ => items.push(brace_list![Brace::str("?"), Brace::str(text)]),
-                }
-            }
-            "StringQualifiers" | "NumberQualifiers" | "DateQualifiers"
-            | "BinaryDataQualifiers" => {}
-            _ => {}
-        }
-    }
-    Ok(Brace::List(items))
-}
-
 // ---------------------------------------------------------------------------
 // Standard attributes.
 
@@ -301,7 +211,9 @@ impl StandardAttributes {
 /// TypeReductionMode.
 pub struct StandardAttribute {
     generation: Generation,
-    link_by_type: Option<(Brace, i64)>,
+    link_by_type: Brace,
+    choice_parameter_links: Brace,
+    choice_parameters: Brace,
     fill_checking: i64,
     multi_line: bool,
     fill_from_filling_value: bool,
@@ -349,40 +261,34 @@ impl StandardAttribute {
             }
         };
         let choice = |name: &str, table: &[(&str, i64)]| enum_value(name, text(name), table);
-        let link_by_type = match element.child("LinkByType") {
-            Some(link) if link.child("DataPath").is_some() => {
-                let path = link.child_text("DataPath").unwrap_or_default().trim();
-                let attribute = path
-                    .rsplit_once(".StandardAttribute.")
-                    .map(|(_, name)| name)
-                    .ok_or_else(|| anyhow!("unsupported LinkByType data path {path}"))?;
+        // A link to another standard attribute of the same register is the
+        // register's own marker (`AccountingRegister.X.StandardAttribute.Account`
+        // -> `{-10}`); anything else is a plain field data path.
+        let link = element.child("LinkByType");
+        let path = link
+            .and_then(|link| link.child_text("DataPath"))
+            .unwrap_or_default()
+            .trim();
+        let link_by_type = match path.rsplit_once(".StandardAttribute.") {
+            Some((_, attribute)) => {
                 let target = marker(attribute)
                     .ok_or_else(|| anyhow!("unsupported LinkByType data path {path}"))?;
                 let item = link
-                    .child_text("LinkItem")
+                    .and_then(|link| link.child_text("LinkItem"))
                     .unwrap_or("0")
-                    .trim()
-                    .parse::<i64>()
-                    .map_err(|error| anyhow!("bad LinkItem: {error}"))?;
-                Some((target, item))
+                    .trim();
+                brace_list![Brace::num(3), Brace::num(1), target, Brace::atom(item)]
             }
-            _ => None,
+            None => link_by_type(link, context)?,
         };
-        if element
-            .child("ChoiceParameterLinks")
-            .is_some_and(|links| !links.children.is_empty())
-        {
-            bail!("standard attribute choice parameter links are not supported yet");
-        }
-        if element
-            .child("ChoiceParameters")
-            .is_some_and(|parameters| !parameters.children.is_empty())
-        {
-            bail!("standard attribute choice parameters are not supported yet");
-        }
         Ok(Self {
             generation,
             link_by_type,
+            choice_parameter_links: choice_parameter_links(
+                element.child("ChoiceParameterLinks"),
+                context,
+            )?,
+            choice_parameters: choice_parameters(element.child("ChoiceParameters"), context)?,
             fill_checking: choice(
                 "FillChecking",
                 &[("DontCheck", 0), ("ShowError", 1), ("ShowWarning", 2)],
@@ -401,7 +307,7 @@ impl StandardAttribute {
                 )?,
                 None => 0,
             },
-            max_value: typed_value(element.child("MaxValue"))?,
+            max_value: typed_value(element.child("MaxValue"), context)?,
             tool_tip: localized(element.child("ToolTip")),
             extended_edit: flag("ExtendedEdit")?,
             format: localized(element.child("Format")),
@@ -415,12 +321,12 @@ impl StandardAttribute {
             password_mode: flag("PasswordMode")?,
             data_history: choice("DataHistory", &[("DontUse", 0), ("Use", 1)])?,
             mark_negatives: flag("MarkNegatives")?,
-            min_value: typed_value(element.child("MinValue"))?,
+            min_value: typed_value(element.child("MinValue"), context)?,
             synonym: localized(element.child("Synonym")),
-            comment: text("Comment").to_string(),
+            comment: native_text(element.child_text("Comment").unwrap_or_default()),
             full_text_search: choice("FullTextSearch", &[("DontUse", 0), ("Use", 1)])?,
-            fill_value: typed_value(element.child("FillValue"))?,
-            mask: text("Mask").to_string(),
+            fill_value: typed_value(element.child("FillValue"), context)?,
+            mask: native_text(element.child_text("Mask").unwrap_or_default()),
         })
     }
 
@@ -438,16 +344,10 @@ impl StandardAttribute {
             brace_list![Brace::str("S"), Brace::str(value)]
         }
         let modern = self.generation.is_modern();
-        let link_by_type = match self.link_by_type {
-            None => brace_list![Brace::num(3), Brace::num(0), Brace::num(0)],
-            Some((target, item)) => {
-                brace_list![Brace::num(3), Brace::num(1), target, Brace::num(item)]
-            }
-        };
         let mut entries: Vec<(&str, Brace)> = vec![
             (
                 "1183c14f-f814-49c6-9233-a3c26b3f64cf",
-                hash("9ad557b1-249e-48dc-824b-3e149ecf10a6", link_by_type),
+                hash("9ad557b1-249e-48dc-824b-3e149ecf10a6", self.link_by_type),
             ),
             (
                 "2723eb98-b4c1-498a-a6f3-70444757902f",
@@ -525,7 +425,7 @@ impl StandardAttribute {
                 "e3da683b-c54a-457a-a243-b9b4f9bf76dd",
                 hash(
                     "b76a58b9-2a56-4e46-bb31-8e04ad9f31ae",
-                    brace_list![Brace::num(5006), Brace::num(0)],
+                    self.choice_parameter_links,
                 ),
             ),
             ("e6b3f5f3-bdf3-4ad0-bc60-7323b3feb208", self.fill_value),
@@ -534,7 +434,7 @@ impl StandardAttribute {
                 "fcf503b8-1c06-454a-970c-06413e64aee5",
                 hash(
                     "f2eaae14-91a7-47b9-9d69-097877f41580",
-                    brace_list![Brace::num(0), Brace::num(0)],
+                    self.choice_parameters,
                 ),
             ),
         ]);
@@ -548,26 +448,6 @@ impl StandardAttribute {
         }
         Brace::List(list)
     }
-}
-
-/// A typed value as a standard attribute's bag stores it (`FillValue`,
-/// `MinValue`, `MaxValue`). Typed values belong to the simple-objects track;
-/// this covers the primitive forms registers show.
-fn typed_value(element: Option<&Element>) -> Result<Brace> {
-    let Some(element) = element.filter(|element| !element.is_nil()) else {
-        return Ok(brace_list![Brace::str("U")]);
-    };
-    let text = element.text.trim();
-    Ok(match element.attr("type").unwrap_or_default() {
-        "xs:boolean" => brace_list![Brace::str("B"), Brace::flag(parse_bool(text)?)],
-        "xs:decimal" => brace_list![Brace::str("N"), Brace::atom(text)],
-        "xs:string" => brace_list![Brace::str("S"), Brace::str(element.text.clone())],
-        "xs:dateTime" => {
-            let digits: String = text.chars().filter(char::is_ascii_digit).collect();
-            brace_list![Brace::str("D"), Brace::atom(digits)]
-        }
-        other => bail!("typed value of type {other:?} needs the shared encoder"),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +592,7 @@ fn picture(element: Option<&Element>, context: &DescriptorContext) -> Result<Bra
 
 /// `{0,<virtual-key code>,<modifiers>}` with Shift 4, Ctrl 8 and Alt 16
 /// summed; `{0,0,0}` for none.
-fn shortcut(text: &str) -> Result<Brace> {
+pub fn shortcut(text: &str) -> Result<Brace> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(brace_list![Brace::num(0), Brace::num(0), Brace::num(0)]);
