@@ -293,7 +293,7 @@ fn functional_option(object: &ObjectXml<'_>, context: &DescriptorContext) -> Res
     ]))
 }
 
-/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}`
+/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}` (`{0}` when empty)
 fn functional_options_parameter(
     object: &ObjectXml<'_>,
     context: &DescriptorContext,
@@ -306,6 +306,11 @@ fn functional_options_parameter(
         }
     }
     uses[1] = Brace::num((uses.len() - 2) as i64);
+    if uses.len() == 2 {
+        // No corpus parameter is empty; the older strict codec
+        // (`compiler::families::simple`) reads an empty list as bare `{0}`.
+        uses.truncate(1);
+    }
     Ok(row(brace_list![
         Brace::num(0),
         md_base(&object.uuid, properties),
@@ -457,13 +462,9 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         }
     }
     content[1] = Brace::num((content.len() - 2) as i64);
-    let commands = object
-        .child_objects()
-        .map(|children| children.children_named("Command").count())
-        .unwrap_or(0);
-    if commands > 0 {
-        bail!("filter criterion commands are not compiled yet");
-    }
+    // Owned commands are the reference objects' `{{0,{0,0,0,<command>}},0}`.
+    let commands = super::objects::parts::Obj::new(object, context)?
+        .commands(super::objects::parts::CommandWrapper::Owner)?;
     Ok(brace_list![
         Brace::num(1),
         brace_list![
@@ -493,7 +494,7 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         ],
         Brace::num(2),
         collection(FORMS, owned_object_uuids(object, "Form", context)?),
-        collection(COMMANDS, Vec::new()),
+        collection(COMMANDS, commands),
     ])
 }
 
