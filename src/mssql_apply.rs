@@ -341,6 +341,7 @@ pub fn apply_source_change(
                 // than the handful of per-object queries it replaces.
                 per_row: true,
                 bcp_executable: None,
+                base_free: false,
             },
         )?)?
     };

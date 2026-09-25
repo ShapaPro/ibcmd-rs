@@ -8303,6 +8303,14 @@ fn format_native_form_body(
 }
 
 /// Builds the body text of one Form.xml in the shape the platform stores it.
+/// Set by a base-free stage whose tree is dialect 2.21 while its
+/// configuration keeps an 8.3 compatibility mode: the bodies are then stored
+/// in the 8.3.27 layouts, as every form and spreadsheet of the ERP УХ 8.5
+/// clone (`Version8_3_27`) is. The layouts follow `CompatibilityMode`, not
+/// the XML dialect; a load onto a database leaves this off.
+pub(crate) static V85_TREE_IN_V83_LAYOUT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn compile_native_form_body(
     form_xml: &[u8],
     module_text: Option<&[u8]>,
@@ -8310,7 +8318,18 @@ pub fn compile_native_form_body(
     items_root: Option<&Path>,
 ) -> Result<String> {
     // A 2.21 Form.xml is a platform 8.5 form: it is compiled through its
-    // 8.3.27 reading and stored in the 8.5 layout.
+    // 8.3.27 reading and stored in the 8.5 layout -- or in the 8.3.27 one,
+    // for a configuration kept in an 8.3 compatibility mode.
+    if crate::mssql_dump::is_v85_form_xml(form_xml)
+        && V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return crate::mssql_dump::compile_v85_form_body_in_v83_layout(
+            form_xml,
+            module_text,
+            source,
+            items_root,
+        );
+    }
     if crate::mssql_dump::is_v85_form_xml(form_xml) {
         return crate::mssql_dump::compile_v85_native_form_body(
             form_xml,
