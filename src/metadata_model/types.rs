@@ -34,6 +34,9 @@ use super::brace::{Brace, NIL_UUID};
 use super::xml::{Element, parse_element_tree};
 use crate::brace_list;
 
+#[path = "types_export.rs"]
+pub(crate) mod export;
+
 /// `{"#",<this>,{0,<type>,<value>}}`: a design-time reference value.
 pub const DESIGN_TIME_REF_TYPE: &str = "5c14e26f-099b-4d37-84a6-b433d87400da";
 /// `{"#",<this>,{<count>,<value>...}}`: `v8:FixedArray`.
@@ -201,18 +204,19 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
 ];
 
 /// Platform types whose prefix is generated per document (`d5p1:Chart`,
-/// `d7p1:Chart`): matched by local name.
+/// `d7p1:Chart`): matched by local name; the export writes `d0p1:` and the
+/// writer puts the element's depth in.
 const BUILTIN_LOCAL_TYPES: &[(&str, &str)] = &[
-    ("Chart", "3543ef08-3316-4f7e-9447-0cd0a1cbf1d5"),
-    ("GanttChart", "3a6e63bf-16aa-42eb-b48c-2fff9670ad2f"),
-    ("TextDocument", "ebf766b1-f32c-11d3-9851-008048da1252"),
-    ("GeographicalSchema", "95de81b0-81c3-4936-9dbb-6400e5c90378"),
-    ("FlowchartContextType", "4af83795-fc2a-48cd-9bea-ce665789a62c"),
+    ("d0p1:Chart", "3543ef08-3316-4f7e-9447-0cd0a1cbf1d5"),
+    ("d0p1:GanttChart", "3a6e63bf-16aa-42eb-b48c-2fff9670ad2f"),
+    ("d0p1:TextDocument", "ebf766b1-f32c-11d3-9851-008048da1252"),
+    ("d0p1:GeographicalSchema", "95de81b0-81c3-4936-9dbb-6400e5c90378"),
+    ("d0p1:FlowchartContextType", "4af83795-fc2a-48cd-9bea-ce665789a62c"),
     (
-        "DataAnalysisTimeIntervalUnitType",
+        "d0p1:DataAnalysisTimeIntervalUnitType",
         "77a01c71-e9b2-4617-af07-c95a4b74548a",
     ),
-    ("ConditionalAppearance", "7dd764b6-b22f-4712-8edc-c0d634340e60"),
+    ("d0p1:ConditionalAppearance", "7dd764b6-b22f-4712-8edc-c0d634340e60"),
 ];
 
 fn builtin_type_id(name: &str) -> Option<&'static str> {
@@ -225,8 +229,16 @@ fn builtin_type_id(name: &str) -> Option<&'static str> {
     }
     BUILTIN_LOCAL_TYPES
         .iter()
-        .find(|(candidate, _)| *candidate == local)
+        .find(|(candidate, _)| candidate.split_once(':').map(|(_, own)| own) == Some(local))
         .map(|(_, id)| *id)
+}
+
+/// The inverse: a platform type's id -> the name `<v8:Type>` writes.
+pub fn builtin_type_qname(type_id: &str) -> Option<&'static str> {
+    BUILTIN_TYPES
+        .iter()
+        .chain(BUILTIN_LOCAL_TYPES)
+        .find_map(|(name, id)| (*id == type_id).then_some(*name))
 }
 
 /// A type the configuration generates (`CatalogRef.X`, `DefinedType.Y`,
@@ -459,21 +471,32 @@ pub fn date_digits(text: &str) -> Result<String> {
     Ok(digits)
 }
 
-/// Reference families: the metadata kind -> its `...Ref` generated type
+/// Reference families: the metadata kind and its `...Ref` generated type
 /// prefix.
+const REF_FAMILIES: &[(&str, &str)] = &[
+    ("Catalog", "CatalogRef"),
+    ("Document", "DocumentRef"),
+    ("Enum", "EnumRef"),
+    ("ExchangePlan", "ExchangePlanRef"),
+    ("ChartOfCharacteristicTypes", "ChartOfCharacteristicTypesRef"),
+    ("ChartOfAccounts", "ChartOfAccountsRef"),
+    ("ChartOfCalculationTypes", "ChartOfCalculationTypesRef"),
+    ("BusinessProcess", "BusinessProcessRef"),
+    ("Task", "TaskRef"),
+];
+
+/// `Catalog` -> `CatalogRef`.
 pub fn ref_type_prefix(kind: &str) -> Option<&'static str> {
-    Some(match kind {
-        "Catalog" => "CatalogRef",
-        "Document" => "DocumentRef",
-        "Enum" => "EnumRef",
-        "ExchangePlan" => "ExchangePlanRef",
-        "ChartOfCharacteristicTypes" => "ChartOfCharacteristicTypesRef",
-        "ChartOfAccounts" => "ChartOfAccountsRef",
-        "ChartOfCalculationTypes" => "ChartOfCalculationTypesRef",
-        "BusinessProcess" => "BusinessProcessRef",
-        "Task" => "TaskRef",
-        _ => return None,
-    })
+    REF_FAMILIES
+        .iter()
+        .find_map(|(family, prefix)| (*family == kind).then_some(*prefix))
+}
+
+/// The inverse: `CatalogRef` -> `Catalog`.
+pub fn ref_family(prefix: &str) -> Option<&'static str> {
+    REF_FAMILIES
+        .iter()
+        .find_map(|(family, candidate)| (*candidate == prefix).then_some(*family))
 }
 
 /// `Catalog`, `X` -> the TypeId of `CatalogRef.X`.
@@ -631,79 +654,19 @@ pub fn form_uuid(full_name: &str, context: &DescriptorContext) -> Result<String>
     object_uuid(full_name, context)
 }
 
-/// The negative code a data path names a standard attribute by, per owner
-/// kind.
-pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
-    let table: &[(&str, i64)] = match owner_kind {
-        "Catalog" => &[
-            ("PredefinedDataName", -13),
-            ("Predefined", -10),
-            ("Ref", -8),
-            ("DeletionMark", -7),
-            ("IsFolder", -6),
-            ("Owner", -5),
-            ("Parent", -4),
-            ("Description", -3),
-            ("Code", -2),
-        ],
-        "Document" => &[
-            ("Posted", -7),
-            ("Ref", -5),
-            ("DeletionMark", -4),
-            ("Date", -3),
-            ("Number", -2),
-        ],
-        "ChartOfCharacteristicTypes" => &[
-            ("PredefinedDataName", -14),
-            ("ValueType", -11),
-            ("Description", -9),
-            ("Code", -8),
-            ("IsFolder", -7),
-            ("Parent", -6),
-            ("Predefined", -5),
-            ("DeletionMark", -4),
-            ("Ref", -2),
-        ],
-        "ChartOfAccounts" => &[
-            ("PredefinedDataName", -28),
-            ("Order", -17),
-            ("OffBalance", -11),
-            ("Type", -10),
-            ("Description", -8),
-            ("Code", -7),
-            ("Parent", -6),
-            ("Predefined", -5),
-            ("DeletionMark", -4),
-            ("Ref", -2),
-        ],
-        "ChartOfCalculationTypes" => &[
-            ("PredefinedDataName", -11),
-            ("Predefined", -8),
-            ("Ref", -6),
-            ("DeletionMark", -5),
-            ("ActionPeriodIsBasic", -4),
-            ("Description", -3),
-            ("Code", -2),
-        ],
-        "BusinessProcess" => &[
-            ("Started", -9),
-            ("HeadTask", -8),
-            ("Completed", -7),
-            ("Ref", -5),
-            ("DeletionMark", -4),
-            ("Date", -3),
-            ("Number", -2),
-        ],
-        "Task" => &[
-            ("Executed", -10),
-            ("Description", -9),
-            ("RoutePoint", -8),
-            ("BusinessProcess", -7),
-            ("Ref", -5),
-            ("DeletionMark", -4),
-            ("Date", -3),
-            ("Number", -2),
-        ],
+/// A family's standard attributes by the code a data path or a
+/// standard-attribute block names them with.
+pub fn standard_attribute_codes(kind: &str) -> Option<&'static [(&'static str, i64)]> {
+    Some(match kind {
+        "Catalog" => crate::metadata_model::objects::CATALOG_STANDARD,
+        "Document" => crate::metadata_model::objects::DOCUMENT_STANDARD,
+        "ExchangePlan" => crate::metadata_model::objects::EXCHANGE_PLAN_STANDARD,
+        "ChartOfCharacteristicTypes" => crate::metadata_model::objects::CCT_STANDARD,
+        "ChartOfAccounts" => crate::metadata_model::objects::COA_STANDARD,
+        "ChartOfCalculationTypes" => crate::metadata_model::objects::CCALC_STANDARD,
+        "BusinessProcess" => crate::metadata_model::objects::BUSINESS_PROCESS_STANDARD,
+        "Task" => crate::metadata_model::objects::TASK_STANDARD,
+        "Enum" => crate::metadata_model::objects::ENUM_STANDARD,
         "InformationRegister" => &[
             ("Active", -5),
             ("LineNumber", -4),
@@ -717,8 +680,6 @@ pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
             ("Recorder", -3),
             ("Period", -2),
         ],
-        // `ExtDimensionN` / `ExtDimensionTypeN` are not codes: see
-        // `ext_dimension_segment`.
         "AccountingRegister" => &[
             ("PeriodAdjustment", -30),
             ("Account", -10),
@@ -750,8 +711,13 @@ pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
             ("Number", -2),
         ],
         _ => return None,
-    };
-    table
+    })
+}
+
+/// The negative code a data path names a standard attribute by, per owner
+/// kind (`LineNumber` of a tabular section: the family's marker).
+pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
+    standard_attribute_codes(owner_kind)?
         .iter()
         .find(|(candidate, _)| *candidate == name)
         .map(|(_, code)| *code)
@@ -808,16 +774,23 @@ pub fn data_path(text: &str, context: &DescriptorContext) -> Result<Vec<Brace>> 
     }
     let mut segments = Vec::new();
     let mut prefix = owner;
-    let mut section_kind = parts[0];
+    let owner_kind = parts[0];
+    let mut in_section = false;
     for pair in parts[2..].chunks(2) {
         let (member_kind, member) = (pair[0], pair[1]);
         if member_kind == "StandardAttribute" {
-            if let Some(segment) = ext_dimension_segment(section_kind, member) {
+            if let Some(segment) = ext_dimension_segment(owner_kind, member) {
                 segments.push(segment);
                 continue;
             }
-            let code = standard_attribute_code(section_kind, member).ok_or_else(|| {
-                anyhow!("unknown standard attribute {member} of {section_kind} in {text}")
+            let code = if in_section {
+                (member == "LineNumber")
+                    .then(|| crate::metadata_model::objects::line_number_marker(owner_kind))
+            } else {
+                standard_attribute_code(owner_kind, member)
+            }
+            .ok_or_else(|| {
+                anyhow!("unknown standard attribute {member} of {owner_kind} in {text}")
             })?;
             segments.push(brace_list![Brace::num(code)]);
         } else {
@@ -827,7 +800,7 @@ pub fn data_path(text: &str, context: &DescriptorContext) -> Result<Vec<Brace>> 
                 Brace::uuid(&object_uuid(&prefix, context)?)
             ]);
             if member_kind == "TabularSection" {
-                section_kind = "TabularSection";
+                in_section = true;
             }
         }
     }

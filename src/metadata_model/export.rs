@@ -190,6 +190,7 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "DocumentJournal"
         | "Sequence"
         | "DocumentNumerator" => super::registers::export::decode(kind, row, context),
+        "Constant" | "DefinedType" | "SessionParameter" | "CommonAttribute" | "FunctionalOption" | "FunctionalOptionsParameter" | "EventSubscription" | "ScheduledJob" | "SettingsStorage" | "FilterCriterion" | "Language" => super::simple::export::decode(kind, row, context),
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -216,6 +217,7 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "DocumentJournal"
         | "Sequence"
         | "DocumentNumerator" => super::registers::export::names(kind, row),
+        "Constant" | "DefinedType" | "SessionParameter" | "CommonAttribute" | "FunctionalOption" | "FunctionalOptionsParameter" | "EventSubscription" | "ScheduledJob" | "SettingsStorage" | "FilterCriterion" | "Language" => super::simple::export::names(kind, row),
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
