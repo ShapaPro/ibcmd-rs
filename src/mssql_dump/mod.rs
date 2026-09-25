@@ -2186,6 +2186,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             args.extract_metadata_xml,
             source_version,
             args.collect_all_source_asset_diagnostics,
+            model_export::requested(args.model_export),
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -2787,6 +2788,8 @@ struct DumpedRow {
 }
 
 struct DumpRowContext<'a> {
+    /// `--model-export`: descriptors of the modelled kinds go through it.
+    model_export: Option<&'a model_export::ModelExport>,
     output_dir: &'a Path,
     table: &'a str,
     source_version: InfobaseConfigSourceVersion,
@@ -3463,6 +3466,7 @@ fn dump_table_rows_with_options_mode(
     }
 
     let context = DumpRowContext {
+        model_export: None,
         type_set_leaves: &type_set_leaves,
         output_dir,
         table,
@@ -3708,6 +3712,7 @@ fn dump_table_rows_streamed(
     extract_metadata_xml: bool,
     source_version: InfobaseConfigSourceVersion,
     collect_all_source_asset_diagnostics: bool,
+    model_export: bool,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
@@ -4717,9 +4722,49 @@ fn dump_table_rows_streamed(
         }
     }
     timings.prepare_reference_indexes_ms += elapsed_ms(reference_indexes_started);
+    // `--model-export`: the descriptors of the modelled kinds are decoded
+    // from their rows; names come from an index of the whole row set, so a
+    // run that fetched only part of it keeps the legacy converters.
+    let model = if model_export && extract_metadata_xml && broad_metadata_indexes {
+        let started = Instant::now();
+        let predefined_names =
+            model_export::predefined_body_file_names(&metadata_rows, &index_metadata_texts);
+        let predefined_rows = if predefined_names.is_empty() {
+            Vec::new()
+        } else {
+            fetch_config_rows_bcp(
+                sqlcmd,
+                bcp,
+                server,
+                user,
+                password,
+                database,
+                table,
+                &predefined_names,
+            )?
+        };
+        let model = model_export::ModelExport::build(
+            &metadata_rows,
+            &index_metadata_texts,
+            &predefined_rows,
+            &model_export::LegacyNames {
+                object_refs: &object_refs,
+                type_index: &type_index,
+                form_refs: &form_refs,
+                template_refs: &template_refs,
+            },
+            source_version,
+        )?;
+        timings.prepare_model_index_ms += elapsed_ms(started);
+        model.log_summary(elapsed_ms(started));
+        Some(model)
+    } else {
+        None
+    };
     timings.prepare_indexes_ms = elapsed_ms(prepare_started);
 
     let context = DumpRowContext {
+        model_export: model.as_ref(),
         type_set_leaves: &type_set_leaves,
         output_dir,
         table,
@@ -5623,6 +5668,7 @@ fn dump_table_row_bytes(
 
     let mut metadata_xml_rows = 0;
     let mut metadata_xml_diagnostic = None;
+    let mut model_row = false;
     let metadata_xml_relative = if context.extract_metadata_xml {
         let started = Instant::now();
         let extracted = if context
@@ -5641,6 +5687,22 @@ fn dump_table_row_bytes(
                 "unknown",
                 "output_path_collision",
             ))
+        } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name)
+            && let Some(modelled) = context
+                .model_export
+                .and_then(|model| model.export_row(row, bytes))
+                .and_then(|result| match result {
+                    Ok(extracted) => Some(extracted),
+                    Err(error) => {
+                        model_export::report_fallback(file_name, &error);
+                        timings.model_fallback_rows += 1;
+                        None
+                    }
+                })
+        {
+            timings.model_metadata_xml_rows += 1;
+            model_row = true;
+            Ok(modelled)
         } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name) {
             extract_metadata_source_xml_from_text_row_audited_with_object_ref_resolutions(
                 row,
@@ -5696,6 +5758,9 @@ fn dump_table_row_bytes(
                 write_source_xml_file(&path, extracted.xml, context.source_version)?;
                 metadata_xml_rows = 1;
                 timings.metadata_xml_cpu_ms += elapsed_ms(started);
+                if model_row {
+                    timings.model_metadata_xml_cpu_ms += elapsed_ms(started);
+                }
                 Some(extracted.relative_path.to_string_lossy().replace('\\', "/"))
             }
             Err(diagnostic) => {

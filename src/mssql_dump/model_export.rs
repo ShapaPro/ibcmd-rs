@@ -13,8 +13,8 @@
 use super::*;
 use crate::metadata_model::brace::parse_row;
 use crate::metadata_model::export::names::{
-    IndexComparison, compare, has_decoder, has_names, predefined_items, predefined_suffix,
-    root_kinds,
+    IndexComparison, compare, has_decoder, has_names, may_own_objects, owned_objects,
+    predefined_items, predefined_suffix, root_kinds,
 };
 use crate::metadata_model::export::{ExportContext, NameIndex, decode_object, write_document};
 use crate::metadata_model::index::ConfigIndex;
@@ -49,6 +49,11 @@ pub(super) struct ModelIndexReport {
     pub(super) names: usize,
     pub(super) types: usize,
     pub(super) predefined: usize,
+    /// Owned objects (forms, templates, recalculations, nested subsystems)
+    /// named through their owner's row, and those only the legacy path
+    /// indexes named.
+    pub(super) owned_names: usize,
+    pub(super) legacy_owned_names: usize,
     /// Of `names`/`types`, what the legacy indexes gave.
     pub(super) legacy_names: usize,
     pub(super) legacy_types: usize,
@@ -187,16 +192,64 @@ impl ModelExport {
             }
         }
 
-        // Owned forms and templates: their owner's row lists them, their own
-        // row names them; the legacy path index joins the two.
+        // Owned objects with rows of their own (forms, templates,
+        // recalculations, nested subsystems): the owner's row lists them by
+        // uuid, their own row names them. Owners first, then what they own.
+        let texts_by_name = texts
+            .iter()
+            .map(|row| (row.file_name.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        let owned_lists = |uuid: &str| -> Vec<(&'static str, String)> {
+            raw_by_name
+                .get(uuid)
+                .and_then(|raw| raw_row_text(raw).ok())
+                .filter(|text| std::str::from_utf8(text).is_ok_and(may_own_objects))
+                .and_then(|text| parse_row(&text).ok())
+                .map(|tree| owned_objects(&tree))
+                .unwrap_or_default()
+        };
+        let mut queue = parallel::install_memory_bound_or_inline(|| {
+            texts
+                .par_iter()
+                .filter(|row| kinds.contains_key(row.file_name.as_str()))
+                .map(|row| (row.file_name.as_str(), owned_lists(&row.file_name)))
+                .filter(|(_, owned)| !owned.is_empty())
+                .collect::<Vec<_>>()
+        });
+        while let Some((owner, owned)) = queue.pop() {
+            let Some(owner_name) = index.name(owner).map(str::to_string) else {
+                continue;
+            };
+            for (kind, uuid) in owned {
+                let Some(row) = texts_by_name.get(uuid.as_str()) else {
+                    continue;
+                };
+                let Some(header) = row.header.as_ref() else {
+                    continue;
+                };
+                index.set_name(&uuid, &format!("{owner_name}.{kind}.{}", header.name));
+                report.owned_names += 1;
+                if kind == "Subsystem" {
+                    let nested = owned_lists(&row.file_name);
+                    if !nested.is_empty() {
+                        queue.push((row.file_name.as_str(), nested));
+                    }
+                }
+            }
+        }
+        // What the owner lists did not name, from the legacy path indexes.
         for (uuid, form_ref) in legacy.form_refs {
-            if let Some(name) = form_source_reference_name(form_ref) {
-                index.set_name(uuid, &name);
+            if let Some(name) = form_source_reference_name(form_ref)
+                && index.insert_name(uuid, &name)
+            {
+                report.legacy_owned_names += 1;
             }
         }
         for (uuid, template_ref) in legacy.template_refs {
-            if let Some(name) = template_source_reference_name(template_ref) {
-                index.set_name(uuid, &name);
+            if let Some(name) = template_source_reference_name(template_ref)
+                && index.insert_name(uuid, &name)
+            {
+                report.legacy_owned_names += 1;
             }
         }
 
@@ -204,8 +257,7 @@ impl ModelExport {
         // nested subsystems, recalculations, generated types): the legacy
         // object references and type index.
         for (uuid, name) in legacy.object_refs {
-            let kind = root_kind(name);
-            if kind == "Configuration" || has_names(kind) {
+            if root_kind(name) == "Configuration" {
                 continue;
             }
             if index.insert_name(uuid, name) {
@@ -219,7 +271,7 @@ impl ModelExport {
             }
         }
 
-        // Predefined items, from the bodies.
+        // Predefined items, from the bodies, under their owner's full name.
         let items = parallel::install_memory_bound_or_inline(|| {
             predefined_rows
                 .par_iter()
@@ -232,13 +284,18 @@ impl ModelExport {
                         return None;
                     }
                     let body = parse_row(&text).ok()?;
-                    predefined_items(kind, &body).ok()
+                    Some((owner, predefined_items(kind, &body).ok()?))
                 })
                 .collect::<Vec<_>>()
         });
         report.predefined_bodies = items.len();
-        for (uuid, name) in items.into_iter().flatten() {
-            index.insert_predefined(&uuid, &name);
+        for (owner, owner_items) in items {
+            let Some(owner) = index.name(owner).map(str::to_string) else {
+                continue;
+            };
+            for (uuid, name) in owner_items {
+                index.insert_predefined(&owner, &uuid, &name);
+            }
         }
 
         let (names, types, predefined) = index.sizes();
@@ -399,4 +456,40 @@ pub fn audit_name_index(
         legacy_ms,
         model_ms,
     })
+}
+
+impl ModelExport {
+    /// One line on stderr: what the index holds and where it came from.
+    pub(super) fn log_summary(&self, elapsed_ms: u64) {
+        let report = &self.report;
+        let rows = report.rows_by_kind.values().sum::<usize>();
+        let failed = report.failures.values().sum::<usize>();
+        eprintln!(
+            "model export: name index of {} names, {} types, {} predefined items in {elapsed_ms} ms; \
+             object_names read {rows} rows ({failed} failed) of {} kinds, the legacy indexes gave {} names and {} types",
+            report.names,
+            report.types,
+            report.predefined,
+            report.rows_by_kind.len(),
+            report.legacy_names,
+            report.legacy_types,
+        );
+        for (failure, count) in report.failures.iter().take(10) {
+            eprintln!("model export: object_names failed {count}x: {failure}");
+        }
+    }
+}
+
+/// A row of a modelled kind the model could not write: said once per row on
+/// stderr (the first twenty), and the legacy converter writes it.
+pub(super) fn report_fallback(file_name: &str, error: &anyhow::Error) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static REPORTED: AtomicUsize = AtomicUsize::new(0);
+    if REPORTED.fetch_add(1, Ordering::Relaxed) < 20 {
+        let text = format!("{error:#}");
+        eprintln!(
+            "model export: {file_name}: {}; the legacy converter writes it",
+            text.lines().next().unwrap_or_default()
+        );
+    }
 }
