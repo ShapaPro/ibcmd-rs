@@ -3395,6 +3395,10 @@ pub fn stage_source_objects(
         user: args.sql_user.as_deref(),
         password: sql_password.as_deref(),
     };
+    // `--script-only` with the base rows in files reaches no database at all.
+    if args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some() {
+        OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // A bulk stage reads the base rows it patches with one bcp query instead
     // of one sqlcmd call per object (ERP УХ: over an hour without it).
     if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
@@ -3464,13 +3468,18 @@ pub fn stage_source_objects(
     } else {
         build_source_stage_batches(metadata_objects.clone(), common_modules.clone(), batch_size)
     };
-    let before = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    // A script-only run changes nothing, so it measures nothing either.
+    let before = if args.script_only {
+        unqueried_storage_table_stats("ConfigSave")
+    } else {
+        storage_table_stats_with_auth(
+            &args.sqlcmd,
+            &args.server,
+            sql_auth,
+            &args.database,
+            "ConfigSave",
+        )?
+    };
     let mut scripts = Vec::with_capacity(batches.len().max(2));
     let mut running_rows = 0usize;
     let mut after = before.clone();
@@ -4873,6 +4882,15 @@ fn prepare_raw_template_body_row(
             body_path.display()
         )
     })?;
+    let bytes = if matches!(
+        kind,
+        TemplateKind::DataCompositionSchema | TemplateKind::DataCompositionAppearanceTemplate
+    ) && crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        palette_namespace_dropped(bytes)
+    } else {
+        bytes
+    };
     let compiled = if kind == TemplateKind::DataCompositionSchema {
         compile_dcs_template_body(&bytes, source)
     } else {
@@ -4934,6 +4952,26 @@ fn prepare_spreadsheet_template_body_row(
         blob_sha256: hex_sha256(&packed),
         blob: packed,
     }])
+}
+
+/// A composition schema of an 8.3-compatible configuration exported by 8.5
+/// back in the 8.3.27 spelling: 8.5 declares the palette namespace beside
+/// every style namespace it writes (`declare_palette_namespace_beside_style`),
+/// the stored 8.3.27 schema does not (ERP УХ 8.5 clone: 870 schemas). A
+/// schema that uses the palette keeps it.
+fn palette_namespace_dropped(bytes: Vec<u8>) -> Vec<u8> {
+    const DECLARATION: &str = " xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"";
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return bytes;
+    };
+    if !text.contains(DECLARATION) {
+        return bytes;
+    }
+    let dropped = text.replace(DECLARATION, "");
+    if dropped.contains("pal:") {
+        return bytes;
+    }
+    dropped.into_bytes()
 }
 
 /// A spreadsheet written in dialect 2.21 (its root declares the palette
@@ -5098,6 +5136,7 @@ fn prepare_configuration_asset_body_rows(
     source: Option<&MetadataSourceContext>,
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
+    let configuration_uuid = properties.uuid.clone();
     let owner = configuration_asset_owner_uuid(xml_path).map(|uuid| SimpleMetadataXmlProperties {
         uuid,
         ..properties.clone()
@@ -5198,7 +5237,112 @@ fn prepare_configuration_asset_body_rows(
         source,
         axes,
     )?);
+    rows.extend(prepare_parent_configuration_rows(
+        &configuration_uuid,
+        xml_path,
+    )?);
     Ok(rows)
+}
+
+/// `Ext/ParentConfigurations/<name>.cf`: a configuration on vendor support
+/// keeps each parent configuration whole, deflated twice, in the row named
+/// by the configuration's own uuid and the parent's uuid, which
+/// `Ext/ParentConfigurations.bin` pairs with the name:
+/// `{6,0,<count>,<parent uuid>,0,<uuid>,"<version>","<vendor>","<name>",...}`.
+/// The reverse of the exporter's `ParentConfigurationFile`; БСП 8.5.1.1150
+/// 3.2.1.356 keeps one parent of 103 199 340 bytes (its stored row is zlib
+/// level 9, memLevel 9 inside and again outside). A list naming more than
+/// one parent is refused, as the exporter leaves it: where the next entry
+/// starts is not on record.
+fn prepare_parent_configuration_rows(
+    configuration_uuid: &str,
+    xml_path: &Path,
+) -> Result<Vec<PreparedMetadataBodyStage>> {
+    let dir = infer_configuration_ext_body_path(xml_path, "ParentConfigurations");
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = fs::read_dir(&dir)
+        .with_context(|| format!("failed to list {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cf"))
+        })
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    files.sort();
+    let list_path = infer_configuration_ext_body_path(xml_path, "ParentConfigurations.bin");
+    let list = fs::read(&list_path)
+        .with_context(|| format!("failed to read {}", list_path.display()))?;
+    let parents = parse_parent_configuration_list(&list)
+        .with_context(|| format!("failed to read {}", list_path.display()))?;
+    let mut rows = Vec::with_capacity(files.len());
+    for path in files {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| anyhow!("parent configuration file has no UTF-8 name: {}", path.display()))?;
+        let (uuid, _) = parents
+            .iter()
+            .find(|(_, listed)| listed == name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "parent configuration {} is not listed in {}",
+                    path.display(),
+                    list_path.display()
+                )
+            })?;
+        let cf = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let inner = crate::module_blob::deflate_raw(&cf)?;
+        let blob = crate::module_blob::deflate_raw(&inner)?;
+        rows.push(PreparedMetadataBodyStage {
+            body_id: format!("{configuration_uuid}.{uuid}"),
+            path,
+            blob_sha256: hex_sha256(&blob),
+            blob,
+        });
+    }
+    Ok(rows)
+}
+
+/// `(parent uuid, name)` of every parent `Ext/ParentConfigurations.bin`
+/// lists (0 or 1 of them).
+fn parse_parent_configuration_list(bytes: &[u8]) -> Result<Vec<(String, String)>> {
+    let list = crate::metadata_model::brace::parse_row(bytes)?;
+    let items = list
+        .as_list()
+        .ok_or_else(|| anyhow!("the parent configuration list is not a list"))?;
+    let field = |index: usize| items.get(index);
+    if field(0).and_then(|item| item.as_atom()) != Some("6") {
+        bail!("the parent configuration list does not open with 6");
+    }
+    let count = field(2)
+        .and_then(|item| item.as_atom())
+        .and_then(|count| count.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("the parent configuration list has no count"))?;
+    match count {
+        0 => Ok(Vec::new()),
+        1 => {
+            let uuid = field(3)
+                .and_then(|item| item.as_atom())
+                .filter(|uuid| uuid::Uuid::parse_str(uuid).is_ok())
+                .ok_or_else(|| anyhow!("the parent configuration has no uuid"))?;
+            let name = field(8)
+                .and_then(|item| item.as_str())
+                .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+                .ok_or_else(|| anyhow!("the parent configuration has no name"))?;
+            Ok(vec![(uuid.to_ascii_lowercase(), name.to_string())])
+        }
+        more => bail!(
+            "{more} parent configurations are listed; where the entry after the first starts is not on record"
+        ),
+    }
 }
 
 /// A command interface compiled from the source alone, names resolved
@@ -5548,10 +5692,9 @@ fn prepare_form_body_row(
     let module_path = infer_form_module_body_path(xml_path);
     if !form_path.exists() && !module_path.exists() {
         // An ordinary form's body is `Ext/Form.bin`, the stored row
-        // inflated (ERP УХ: all 9). A load onto a database keeps the
-        // target's row; an empty infobase has none to keep.
+        // inflated (ERP УХ: all 9, byte for byte), staged deflated again.
         let ordinary = form_path.with_extension("bin");
-        if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) && ordinary.is_file() {
+        if ordinary.is_file() {
             let bytes = fs::read(&ordinary)
                 .with_context(|| format!("failed to read {}", ordinary.display()))?;
             let blob = crate::module_blob::deflate_raw(&bytes)?;
@@ -6167,12 +6310,7 @@ fn nested_command_module_sources(
     xml: &[u8],
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<NestedCommandModuleSource>> {
-    // A filter criterion owns commands too (ERP УХ: two command modules); a
-    // load onto a database has always left their rows to the target, an
-    // empty infobase needs them staged.
-    let filter_criterion_in_empty_stage = properties.kind == "FilterCriterion"
-        && BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed);
-    if !metadata_kind_can_own_commands(&properties.kind) && !filter_criterion_in_empty_stage {
+    if !metadata_kind_can_own_commands(&properties.kind) {
         return Ok(Vec::new());
     }
     let commands_dir = xml_path.with_extension("").join("Commands");
@@ -6235,6 +6373,9 @@ fn metadata_kind_can_own_commands(kind: &str) -> bool {
             | "DocumentJournal"
             | "Enum"
             | "ExchangePlan"
+            // ERP УХ: two filter criteria own a command each; the exporter
+            // has always written their modules, the loader skipped them.
+            | "FilterCriterion"
             | "InformationRegister"
             | "Report"
             | "SettingsStorage"
@@ -7046,6 +7187,32 @@ fn fetch_config_blobs_for_files(
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(String, std::collections::HashMap<String, Vec<u8>>)> =
     std::sync::OnceLock::new();
 
+/// Set by a stage that must not reach SQL Server: `--script-only` with its
+/// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
+/// --script-only`. A base row missing from the directory is then a missing
+/// row, not a query, and every sqlcmd or bcp run fails instead of
+/// connecting.
+static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_online(action: &str) -> Result<()> {
+    if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("an offline --script-only stage would connect to SQL Server to {action}");
+    }
+    Ok(())
+}
+
+/// ConfigSave statistics a run did not query (a `--script-only` stage
+/// changes nothing to measure).
+fn unqueried_storage_table_stats(table: &str) -> StorageTableManifest {
+    StorageTableManifest {
+        table_name: table.to_string(),
+        file_name: String::new(),
+        row_count: -1,
+        binary_bytes: -1,
+        row_checksum: None,
+    }
+}
+
 /// Set by a base-free stage (`mssql-stage-source-objects --base-free`,
 /// `audit-empty-stage`): the target is an empty infobase with no rows to
 /// patch, so every base-row read fails, naming its row, without touching a
@@ -7082,6 +7249,11 @@ fn fetch_config_blob_with_auth(
         let path = PathBuf::from(dir).join(format!("{file_name}__part0.bin"));
         if let Ok(bytes) = fs::read(&path) {
             return Ok(bytes);
+        }
+        // Offline, the directory is the whole table: what it lacks, the
+        // database lacks.
+        if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("Config row not found: {file_name}");
         }
     }
     let sql = format!(
@@ -7149,6 +7321,7 @@ fn run_sql(sqlcmd: &Path, server: &str, sql: &str) -> Result<()> {
 }
 
 fn run_sql_with_auth(sqlcmd: &Path, server: &str, sql_auth: SqlAuth<'_>, sql: &str) -> Result<()> {
+    ensure_online("run a statement")?;
     let output = sqlcmd_command_with_auth(sqlcmd, server, sql_auth, sql)
         .output()
         .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
@@ -7173,6 +7346,7 @@ fn run_sql_capture_with_auth(
     sql_auth: SqlAuth<'_>,
     sql: &str,
 ) -> Result<String> {
+    ensure_online("run a query")?;
     // A connection that never logged in ran nothing, so it is retried: an
     // ERP УХ audit issues thousands of these calls and died after 80 minutes
     // on one login timeout while the machine was busy.
@@ -7218,6 +7392,7 @@ fn run_sql_file_with_auth(
     sql_auth: SqlAuth<'_>,
     script: &Path,
 ) -> Result<()> {
+    ensure_online("run a script")?;
     let output = sqlcmd_file_command_with_auth(sqlcmd, server, sql_auth, script)
         .output()
         .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
@@ -7284,6 +7459,7 @@ fn bcp_command(
 }
 
 fn run_bcp(mut command: Command) -> Result<()> {
+    ensure_online("run bcp")?;
     let program = command.get_program().to_string_lossy().to_string();
     let output = command
         .output()
