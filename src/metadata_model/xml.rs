@@ -17,6 +17,10 @@ pub struct Element {
     pub children: Vec<Element>,
     /// Concatenated direct text (unescaped).
     pub text: String,
+    /// `xmlns:<prefix>="<uri>"` declared on this very element (`""` for a
+    /// default `xmlns`), in document order: a QName value such as a web
+    /// service's `d6p1:ExchangeFeatures` resolves its prefix here.
+    pub namespaces: Vec<(String, String)>,
 }
 
 impl Element {
@@ -100,10 +104,17 @@ fn split_name(raw: &[u8]) -> (String, String) {
 fn element_from_start(start: &BytesStart<'_>) -> Result<Element> {
     let (name, prefix) = split_name(start.name().as_ref());
     let mut attrs = Vec::new();
+    let mut namespaces = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.context("bad XML attribute")?;
         let (key, key_prefix) = split_name(attribute.key.as_ref());
         if key_prefix == "xmlns" || key == "xmlns" {
+            let uri = attribute
+                .unescape_value()
+                .context("bad XML namespace value")?
+                .into_owned();
+            let declared = if key_prefix == "xmlns" { key } else { String::new() };
+            namespaces.push((declared, uri));
             continue;
         }
         let value = attribute
@@ -118,6 +129,7 @@ fn element_from_start(start: &BytesStart<'_>) -> Result<Element> {
         attrs,
         children: Vec::new(),
         text: String::new(),
+        namespaces,
     })
 }
 
