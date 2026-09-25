@@ -982,9 +982,9 @@ mod forms;
 pub mod help_audit;
 pub mod interface_audit;
 mod metadata;
+pub mod model_export;
 #[cfg(test)]
 mod metadata_order_tests;
-pub mod model_export;
 mod moxel;
 mod mxl_ir;
 pub mod offline_context;
@@ -1121,21 +1121,21 @@ pub(crate) fn resolve_form_item_picture_owner(
     form_body::form_item_picture_owner_at(text, marker_start)
 }
 
-pub(crate) use form_body::form_dynamic_list_std_attribute_pairs;
-/// The one table that names a form standard command uuid, shared with the
-/// source compiler so both directions read the same fact.
-pub(crate) use form_body::form_standard_command_suffix;
-#[cfg(test)]
-pub(crate) use form_body::render_form_body_xml_offline;
 pub(crate) use form_body::{
     FormItemSchemaTraceEvent, FormItemTraceEvent, FormItemTraceSink, trace_form_body_with_context,
 };
 pub(crate) use form_body::{extract_form_body_xml, unpack_form_body_module_text};
+pub(crate) use form_body::form_dynamic_list_std_attribute_pairs;
+/// The one table that names a form standard command uuid, shared with the
+/// source compiler so both directions read the same fact.
+pub(crate) use form_body::form_standard_command_suffix;
 /// The exporter's reading of a chart attribute's member 14, which the form
 /// writer's chart codec checks every value it builds against.
 pub(crate) use form_body::{
     render_form_chart_settings_value, render_form_gantt_chart_settings_value,
 };
+#[cfg(test)]
+pub(crate) use form_body::render_form_body_xml_offline;
 
 pub(crate) fn extract_standalone_metadata_source_xml(
     blob: &[u8],
@@ -3378,8 +3378,9 @@ fn dump_table_rows_with_options_mode(
     };
     let standalone_refs = {
         let mut refs = standalone_refs;
-        refs.storage_record_uuids =
-            storage_record_uuids_from_file_names(file_names_owned.iter().map(String::as_str));
+        refs.storage_record_uuids = storage_record_uuids_from_file_names(
+            file_names_owned.iter().map(String::as_str),
+        );
         refs
     };
     let needs_predefined_item_refs =
@@ -3749,15 +3750,7 @@ fn dump_table_rows_streamed(
     // publishes; without one this leaves the headers and every later query
     // exactly as they were.
     let headers = install_dynamic_generation_overlay(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-        headers,
+        sqlcmd, bcp, server, user, password, database, table, selected_file_names, headers,
     )?;
     let fetch_headers_ms = elapsed_ms(headers_started);
     let mut timings = MssqlDumpTimingReport {
@@ -4418,8 +4411,7 @@ fn dump_table_rows_streamed(
                 &type_index,
                 &object_refs,
                 &form_refs,
-                V85_PRESERVES_RAW_REGISTER_DATA_PATHS
-                    && source_version == InfobaseConfigSourceVersion::V2_21,
+                V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
             )
         } else {
             InformationRegisterMasterDimensionIndex::new()
@@ -4437,20 +4429,18 @@ fn dump_table_rows_streamed(
     };
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
-    let functional_option_refs = if extract_metadata_xml
-        && source_reference_needs.functional_option_refs
-        && !descriptors_modelled
-    {
-        build_functional_option_reference_index_from_texts(
-            &index_metadata_texts,
-            &object_refs,
-            &form_refs,
-            &template_refs,
-            &subsystem_refs,
-        )
-    } else {
-        BTreeMap::new()
-    };
+    let functional_option_refs =
+        if extract_metadata_xml && source_reference_needs.functional_option_refs && !descriptors_modelled {
+            build_functional_option_reference_index_from_texts(
+                &index_metadata_texts,
+                &object_refs,
+                &form_refs,
+                &template_refs,
+                &subsystem_refs,
+            )
+        } else {
+            BTreeMap::new()
+        };
     timings.prepare_functional_option_refs_ms += elapsed_ms(index_part_started);
     let source_asset_metadata_texts = &index_metadata_texts;
     let index_part_started = Instant::now();
@@ -4473,14 +4463,7 @@ fn dump_table_rows_streamed(
         .collect::<BTreeSet<_>>();
     if !parent_list_ids.is_empty() {
         let list_rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &parent_list_ids,
+            sqlcmd, bcp, server, user, password, database, table, &parent_list_ids,
         )?;
         let list_texts = list_rows
             .iter()
@@ -5918,8 +5901,7 @@ fn dump_table_row_bytes(
                         raw_sha256: diagnostic.raw_sha256,
                     })
                     .collect::<Vec<_>>();
-                if let Some((family, code, classification, raw_length, raw_sha256)) =
-                    typed_rejection
+                if let Some((family, code, classification, raw_length, raw_sha256)) = typed_rejection
                 {
                     // One entry per refused asset: the codec classified the
                     // whole body, not an individual property slot.
@@ -16144,8 +16126,7 @@ fn parse_register_properties_from_text(
                 type_index,
                 object_refs,
                 form_refs,
-                V85_PRESERVES_RAW_REGISTER_DATA_PATHS
-                    && source_version == InfobaseConfigSourceVersion::V2_21,
+                V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
             );
             let tag = strict_tag
                 .or_else(|| strict_payload.as_ref().map(|payload| payload.tag))
@@ -16162,8 +16143,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
-                        && source_version == InfobaseConfigSourceVersion::V2_21,
+                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
                 ) {
                     Some((value_types, properties)) => {
                         let emit_empty_type = tag == "Attribute" && value_types.is_empty();
@@ -16189,8 +16169,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
-                        && source_version == InfobaseConfigSourceVersion::V2_21,
+                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
                 )
             {
                 (value_types, Some(properties), None, false)
@@ -16206,8 +16185,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
-                        && source_version == InfobaseConfigSourceVersion::V2_21,
+                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
                 )
                 .or_else(|| {
                     parse_metadata_child_properties(
@@ -31136,10 +31114,7 @@ fn parse_strict_report_root_fields<'a>(
     let header_wrapper = split_information_register_braced_fields(owner_fields.get(3)?)?;
     let parsed_header = parse_information_register_owner_header(header_wrapper.get(1)?)?;
     if !matches!(
-        (
-            owner_fields.first().map(|field| field.trim()),
-            owner_fields.len()
-        ),
+        (owner_fields.first().map(|field| field.trim()), owner_fields.len()),
         (Some("19"), 18) | (Some("20"), 19)
     ) || metadata_header_field_index(&owner_fields, &expected_header.uuid) != Some(3)
         || header_wrapper.len() != 2
@@ -34401,44 +34376,17 @@ fn parse_common_command_parameter_types(
 /// them under; these are not configuration-specific ids. The command-interface
 /// writer reads the same table backwards.
 pub(crate) const COMMON_COMMAND_GROUPS: [(&str, &str); 11] = [
-    (
-        "77ea1b8f-dd79-4717-9dba-5628e7f348cf",
-        "NavigationPanelOrdinary",
-    ),
-    (
-        "bc80566a-86a5-4e87-acd4-872239385a2e",
-        "NavigationPanelSeeAlso",
-    ),
-    (
-        "1af6d528-0b86-4fba-ab95-bd7475db03ba",
-        "NavigationPanelImportant",
-    ),
+    ("77ea1b8f-dd79-4717-9dba-5628e7f348cf", "NavigationPanelOrdinary"),
+    ("bc80566a-86a5-4e87-acd4-872239385a2e", "NavigationPanelSeeAlso"),
+    ("1af6d528-0b86-4fba-ab95-bd7475db03ba", "NavigationPanelImportant"),
     ("4f499c31-050b-47c5-aa84-d0366c0a0da8", "ActionsPanelCreate"),
-    (
-        "5b360bff-01a1-49b6-93d2-26e7e8e3a038",
-        "ActionsPanelReports",
-    ),
+    ("5b360bff-01a1-49b6-93d2-26e7e8e3a038", "ActionsPanelReports"),
     ("aabb34e1-98c1-4bd0-bf7f-243f95437b44", "ActionsPanelTools"),
-    (
-        "dc2ade0f-383e-4c78-85f2-c0dabc0e2dc0",
-        "FormCommandBarCreateBasedOn",
-    ),
-    (
-        "cb50f5c0-8013-4262-93a2-f0db379d6b6b",
-        "FormCommandBarImportant",
-    ),
-    (
-        "eacad741-96b9-4b3a-bf79-dde9ecead1a1",
-        "FormNavigationPanelGoTo",
-    ),
-    (
-        "8ab1540c-0bfa-4fa6-a1e1-5d5069efc7d8",
-        "FormNavigationPanelSeeAlso",
-    ),
-    (
-        "dc11a6be-de1f-4b64-a7a5-9b17bf4ec9f2",
-        "FormNavigationPanelImportant",
-    ),
+    ("dc2ade0f-383e-4c78-85f2-c0dabc0e2dc0", "FormCommandBarCreateBasedOn"),
+    ("cb50f5c0-8013-4262-93a2-f0db379d6b6b", "FormCommandBarImportant"),
+    ("eacad741-96b9-4b3a-bf79-dde9ecead1a1", "FormNavigationPanelGoTo"),
+    ("8ab1540c-0bfa-4fa6-a1e1-5d5069efc7d8", "FormNavigationPanelSeeAlso"),
+    ("dc11a6be-de1f-4b64-a7a5-9b17bf4ec9f2", "FormNavigationPanelImportant"),
 ];
 
 fn common_command_group_name(uuid: &str) -> Option<&'static str> {
@@ -34776,8 +34724,8 @@ fn standard_style_item_for_code(code: i32) -> Option<(usize, &'static str)> {
 
 const STANDARD_STYLE_ITEM_CODES: &[i32] = &[
     -1, -11, -3, -15, -7, -13, -21, -10, -14, -23, -24, -16, -17, -22, -25, -26, -27, -28, -18,
-    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -42, -43, -44, -50, -52, -53, -54, -55, -56,
-    -59,
+    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -42, -43, -44, -50, -52, -53, -54, -55,
+    -56, -59,
 ];
 
 fn parse_style_body_color_value(
@@ -43829,22 +43777,13 @@ fn install_dynamic_generation_overlay(
     }
     let marker_name = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
     let marker = fetch_config_rows_bcp(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        &marker_name,
+        sqlcmd, bcp, server, user, password, database, table, &marker_name,
     )?;
     let Some(marker) = marker.into_iter().find(|row| row.part_no == 0) else {
         return Ok(headers);
     };
     let history = dynamic_generation::dynamic_generation_history(&marker.binary_bytes()?)
-        .ok_or_else(|| {
-            anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history")
-        })?;
+        .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))?;
 
     // The overlay is a property of the whole table, so a run that selected a
     // few rows by name still resolves it against every row there is.

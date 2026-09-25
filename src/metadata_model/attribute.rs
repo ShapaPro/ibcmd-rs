@@ -32,7 +32,9 @@
 use anyhow::{Result, anyhow, bail};
 
 use super::brace::Brace;
-use super::types::{data_path, empty_string_value, form_uuid, type_pattern, typed_value};
+use super::types::{
+    data_path, empty_string_value, form_uuid, type_pattern, typed_value,
+};
 use super::xml::Element;
 use super::{DescriptorContext, localized, md_base, native_text, parse_bool};
 use crate::brace_list;
@@ -49,11 +51,7 @@ pub(crate) const CREATE_ON_INPUT: &[(&str, i64)] = &[("Auto", 0), ("DontUse", 1)
 pub(crate) const CHOICE_HISTORY_ON_INPUT: &[(&str, i64)] = &[("Auto", 0), ("DontUse", 1)];
 
 /// `{2,<md_base>,<type pattern>}`.
-pub fn typed_header(
-    uuid: &str,
-    properties: &Element,
-    context: &DescriptorContext,
-) -> Result<Brace> {
+pub fn typed_header(uuid: &str, properties: &Element, context: &DescriptorContext) -> Result<Brace> {
     Ok(brace_list![
         Brace::num(2),
         md_base(uuid, properties),
@@ -122,12 +120,7 @@ pub fn string_prop(properties: &Element, name: &str) -> Brace {
     Brace::str(native_text(properties.child_text(name).unwrap_or_default()))
 }
 
-fn enumerated(
-    value: Option<&str>,
-    name: &str,
-    table: &[(&str, i64)],
-    absent: i64,
-) -> Result<Brace> {
+fn enumerated(value: Option<&str>, name: &str, table: &[(&str, i64)], absent: i64) -> Result<Brace> {
     let Some(value) = value else {
         return Ok(Brace::num(absent));
     };
@@ -222,8 +215,8 @@ pub fn choice_parameters(
 #[cfg(test)]
 mod tests {
     use super::super::brace::{NIL_UUID, serialize};
-    use super::super::types::DESIGN_TIME_REF_TYPE;
     use super::super::types::tests::{VALUTA_TYPE, context, element};
+    use super::super::types::DESIGN_TIME_REF_TYPE;
     use super::*;
 
     const UUID: &str = "63eb6a1b-5f48-461a-9a6f-821db663c9d3";
@@ -430,11 +423,7 @@ pub mod corpus {
             let outcome = match attribute_body(&child_uuid, properties, context) {
                 Err(error) => Outcome::Failed(
                     relative.clone(),
-                    format!("{error:#}")
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .to_string(),
+                    format!("{error:#}").lines().next().unwrap_or("").to_string(),
                 ),
                 Ok(actual) if &actual == expected => Outcome::Identical,
                 Ok(actual) => Outcome::Different(

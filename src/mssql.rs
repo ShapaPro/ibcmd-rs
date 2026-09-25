@@ -60,22 +60,7 @@ use crate::module_blob::{
     SimpleMetadataXmlProperties, VersionReplacement, business_process_flowchart_base_free_blockers,
     command_interface_base_free_blockers, command_interface_xml_can_pack_without_base,
     common_module_metadata_base_free_blockers, form_body_base_free_blockers,
-    form_body_base_free_compilation_blockers, hex_sha256, interface_asset_plaintext,
-    metadata_xml_base_free_blockers, module_blob_text_sha256,
-    pack_business_process_flowchart_blob_from_xml, pack_command_interface_blob_from_xml,
-    pack_common_module_metadata_blob_from_xml, pack_exchange_plan_content_blob_from_xml,
-    pack_ext_picture_blob_from_xml_and_bytes, pack_form_body_blob_from_form_xml_base_free,
-    pack_form_body_blob_from_form_xml_with_source_and_assets, pack_help_blob_from_parts,
-    pack_interface_asset_blob, pack_module_blob_container_bytes, pack_native_form_body_blob,
-    pack_predefined_data_blob_from_xml, pack_role_rights_blob_base_free,
-    pack_role_rights_blob_from_xml_with_source, pack_schedule_blob_from_xml,
-    pack_simple_metadata_blob_from_xml_with_source, pack_style_body_blob_from_xml,
-    parse_common_module_xml_properties, parse_ext_picture_file_name_from_xml,
-    parse_help_pages_from_xml, parse_simple_metadata_xml_properties, parse_template_type_from_xml,
-    patch_versions_blob_bytes, patch_versions_blob_bytes_allowing_additions,
-    predefined_data_base_free_blockers, raw_deflated_first_base64_payload_sha256,
-    raw_deflated_help_content_sha256, raw_deflated_plain_sha256, role_rights_base_free_blockers,
-    versions_base_free_blockers,
+    form_body_base_free_compilation_blockers, hex_sha256, interface_asset_plaintext, metadata_xml_base_free_blockers, module_blob_text_sha256, pack_business_process_flowchart_blob_from_xml, pack_command_interface_blob_from_xml, pack_common_module_metadata_blob_from_xml, pack_exchange_plan_content_blob_from_xml, pack_ext_picture_blob_from_xml_and_bytes, pack_form_body_blob_from_form_xml_base_free, pack_form_body_blob_from_form_xml_with_source_and_assets, pack_help_blob_from_parts, pack_interface_asset_blob, pack_module_blob_container_bytes, pack_native_form_body_blob, pack_predefined_data_blob_from_xml, pack_role_rights_blob_base_free, pack_role_rights_blob_from_xml_with_source, pack_schedule_blob_from_xml, pack_simple_metadata_blob_from_xml_with_source, pack_style_body_blob_from_xml, parse_common_module_xml_properties, parse_ext_picture_file_name_from_xml, parse_help_pages_from_xml, parse_simple_metadata_xml_properties, parse_template_type_from_xml, patch_versions_blob_bytes, patch_versions_blob_bytes_allowing_additions, predefined_data_base_free_blockers, raw_deflated_first_base64_payload_sha256, raw_deflated_help_content_sha256, raw_deflated_plain_sha256, role_rights_base_free_blockers, versions_base_free_blockers,
 };
 use crate::module_blob::{HtmlPageOwner, html_page_storage_bytes};
 use crate::mssql_main_activation::{
@@ -4523,9 +4508,9 @@ fn prepare_metadata_body_family(
         MetadataBodyFamily::CommandInterface => prepare_command_interface_body_row(
             sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
         ),
-        MetadataBodyFamily::AdditionalIndexes => prepare_additional_indexes_body_row(
-            sqlcmd, server, database, xml_path, properties, axes,
-        ),
+        MetadataBodyFamily::AdditionalIndexes => {
+            prepare_additional_indexes_body_row(sqlcmd, server, database, xml_path, properties, axes)
+        }
     }
 }
 
@@ -4609,8 +4594,8 @@ fn prepare_additional_indexes_body_row(
         .with_context(|| format!("failed to read AdditionalIndexes {}", body_path.display()))?;
     if matches!(mapping, AdditionalIndexesMapping::Confirmed) {
         // The platform stores brace text, not the XML: compile it.
-        let owner_xml =
-            fs::read(xml_path).with_context(|| format!("failed to read {}", xml_path.display()))?;
+        let owner_xml = fs::read(xml_path)
+            .with_context(|| format!("failed to read {}", xml_path.display()))?;
         let blob = crate::module_blob::pack_additional_indexes_blob_from_xml(
             &bytes,
             &owner_xml,
@@ -4618,12 +4603,7 @@ fn prepare_additional_indexes_body_row(
             &properties.name,
             &properties.uuid,
         )
-        .with_context(|| {
-            format!(
-                "failed to compile AdditionalIndexes {}",
-                body_path.display()
-            )
-        })?;
+        .with_context(|| format!("failed to compile AdditionalIndexes {}", body_path.display()))?;
         return Ok(vec![PreparedMetadataBodyStage {
             body_id,
             path: body_path,
@@ -4725,12 +4705,8 @@ fn prepare_ws_reference_body_row(
     if !body_path.exists() {
         return Ok(Vec::new());
     }
-    let definition = fs::read(&body_path).with_context(|| {
-        format!(
-            "failed to read WSReference definition {}",
-            body_path.display()
-        )
-    })?;
+    let definition = fs::read(&body_path)
+        .with_context(|| format!("failed to read WSReference definition {}", body_path.display()))?;
     let definition = definition
         .strip_prefix(b"\xEF\xBB\xBF")
         .unwrap_or(&definition)
@@ -4740,12 +4716,9 @@ fn prepare_ws_reference_body_row(
         header: make_v8_element_header("0.wsdl"),
         data: definition,
     }];
-    let ext = body_path.parent().ok_or_else(|| {
-        anyhow!(
-            "WSReference definition has no folder: {}",
-            body_path.display()
-        )
-    })?;
+    let ext = body_path
+        .parent()
+        .ok_or_else(|| anyhow!("WSReference definition has no folder: {}", body_path.display()))?;
     let mut imports = fs::read_dir(ext)
         .with_context(|| format!("failed to list {}", ext.display()))?
         .filter_map(|entry| entry.ok())
@@ -4767,12 +4740,8 @@ fn prepare_ws_reference_body_row(
             data,
         });
     }
-    let container = build_v8_container(&elements).with_context(|| {
-        format!(
-            "failed to build WSReference container {}",
-            body_path.display()
-        )
-    })?;
+    let container = build_v8_container(&elements)
+        .with_context(|| format!("failed to build WSReference container {}", body_path.display()))?;
     let packed = crate::module_blob::pack_raw_deflated_blob_from_bytes(&container)?;
     Ok(vec![PreparedMetadataBodyStage {
         body_id: format!("{}.0", properties.uuid),
@@ -4836,29 +4805,20 @@ fn prepare_template_body_row(
                 return Ok(Vec::new());
             };
             let body_id = format!("{}.0", properties.uuid);
-            let base =
-                fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, &body_id).ok();
+            let base = fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, &body_id).ok();
             let brace_base = base.filter(|blob| {
                 crate::compiler::families::native::inflate(blob).is_ok_and(|plain| {
                     let text = String::from_utf8_lossy(&plain);
-                    text.trim_start_matches('\u{feff}')
-                        .trim_start()
-                        .starts_with("{5,")
+                    text.trim_start_matches('\u{feff}').trim_start().starts_with("{5,")
                 })
             });
             if let Some(base) = brace_base {
                 let xml = fs::read(&body_path).with_context(|| {
-                    format!(
-                        "failed to read GraphicalSchema Template {}",
-                        body_path.display()
-                    )
+                    format!("failed to read GraphicalSchema Template {}", body_path.display())
                 })?;
                 let packed = pack_business_process_flowchart_blob_from_xml(&base, &xml)
                     .with_context(|| {
-                        format!(
-                            "failed to pack GraphicalSchema Template {}",
-                            body_path.display()
-                        )
+                        format!("failed to pack GraphicalSchema Template {}", body_path.display())
                     })?;
                 return Ok(vec![PreparedMetadataBodyStage {
                     body_id,
@@ -4925,8 +4885,7 @@ fn prepare_raw_template_body_row(
     let bytes = if matches!(
         kind,
         TemplateKind::DataCompositionSchema | TemplateKind::DataCompositionAppearanceTemplate
-    ) && crate::module_blob::V85_TREE_IN_V83_LAYOUT
-        .load(std::sync::atomic::Ordering::Relaxed)
+    ) && crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
     {
         palette_namespace_dropped(bytes)
     } else {
@@ -5023,9 +4982,7 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
     let root_declares_palette = String::from_utf8_lossy(head)
         .split_once("<document")
         .and_then(|(_, rest)| rest.split_once('>'))
-        .is_some_and(|(open, _)| {
-            open.contains("xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"")
-        });
+        .is_some_and(|(open, _)| open.contains("xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\""));
     if !root_declares_palette
         || crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
     {
@@ -5033,10 +4990,7 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
     }
     let plain = crate::module_blob::inflate_raw(&packed)
         .context("failed to inflate a compiled spreadsheet template")?;
-    let Some(text_start) = plain
-        .windows(3)
-        .position(|window| window == b"\xef\xbb\xbf")
-    else {
+    let Some(text_start) = plain.windows(3).position(|window| window == b"\xef\xbb\xbf") else {
         bail!("a compiled spreadsheet template carries no text");
     };
     let text = std::str::from_utf8(&plain[text_start + 3..])
@@ -5324,8 +5278,8 @@ fn prepare_parent_configuration_rows(
     }
     files.sort();
     let list_path = infer_configuration_ext_body_path(xml_path, "ParentConfigurations.bin");
-    let list =
-        fs::read(&list_path).with_context(|| format!("failed to read {}", list_path.display()))?;
+    let list = fs::read(&list_path)
+        .with_context(|| format!("failed to read {}", list_path.display()))?;
     let parents = parse_parent_configuration_list(&list)
         .with_context(|| format!("failed to read {}", list_path.display()))?;
     let mut rows = Vec::with_capacity(files.len());
@@ -5333,12 +5287,7 @@ fn prepare_parent_configuration_rows(
         let name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .ok_or_else(|| {
-                anyhow!(
-                    "parent configuration file has no UTF-8 name: {}",
-                    path.display()
-                )
-            })?;
+            .ok_or_else(|| anyhow!("parent configuration file has no UTF-8 name: {}", path.display()))?;
         let (uuid, _) = parents
             .iter()
             .find(|(_, listed)| listed == name)
@@ -5429,14 +5378,12 @@ fn base_free_command_interface_refusal(
     if !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(());
     }
-    let refusal =
-        match pack_interface_asset_blob(InterfaceAssetSource::CommandInterface, xml, source) {
-            Ok(_) => "the writer accepts it, but not for this XML dialect".to_string(),
-            Err(error) => format!("{error:#}"),
-        };
-    bail!(
-        "{BASE_FREE_MISSING_ROW} {body_id}: the base-free command interface writer refuses it: {refusal}"
-    )
+    let refusal = match pack_interface_asset_blob(InterfaceAssetSource::CommandInterface, xml, source)
+    {
+        Ok(_) => "the writer accepts it, but not for this XML dialect".to_string(),
+        Err(error) => format!("{error:#}"),
+    };
+    bail!("{BASE_FREE_MISSING_ROW} {body_id}: the base-free command interface writer refuses it: {refusal}")
 }
 
 /// `Ext/HomePageWorkArea.xml`, `Ext/ClientApplicationInterface.xml` and
@@ -5972,9 +5919,7 @@ fn prepare_role_rights_body_row(
             },
             None => "no source tree to resolve names against".to_string(),
         };
-        bail!(
-            "{BASE_FREE_MISSING_ROW} {body_id}: the base-free rights writer refuses it: {refusal}"
-        );
+        bail!("{BASE_FREE_MISSING_ROW} {body_id}: the base-free rights writer refuses it: {refusal}");
     }
     let reason = role_rights_base_free_blocker_reason(&body_path, source)?;
     let required = classify_required_base(axes, &body_id, &body_path, &reason, "Role Rights")?;
@@ -7239,10 +7184,8 @@ fn fetch_config_blobs_for_files(
 
 /// Part 0 of every Config row of one database, read in bulk before a
 /// `--bulk` stage; `fetch_config_blob_with_auth` answers from it first.
-static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
-    String,
-    std::collections::HashMap<String, Vec<u8>>,
-)> = std::sync::OnceLock::new();
+static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(String, std::collections::HashMap<String, Vec<u8>>)> =
+    std::sync::OnceLock::new();
 
 /// Set by a stage that must not reach SQL Server: `--script-only` with its
 /// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
@@ -8260,10 +8203,7 @@ fn write_bulk_stage_rows(path: &Path, rows: &[BulkStageRow<'_>]) -> Result<()> {
     for row in rows {
         let name = row.file_name.encode_utf16().collect::<Vec<_>>();
         if name.len() > 128 {
-            bail!(
-                "Config file name longer than 128 characters: {}",
-                row.file_name
-            );
+            bail!("Config file name longer than 128 characters: {}", row.file_name);
         }
         out.write_all(&((name.len() * 2) as u16).to_le_bytes())?;
         for unit in name {
@@ -8791,7 +8731,8 @@ fn source_stage_batch_reports(batches: &[SourceStageBatch]) -> Vec<MssqlSourcePa
             let include_versions_row = index + 1 == batches.len();
             // `root` and `version` are copied by the first batch and stay in
             // ConfigSave for every later one.
-            let expected_total_rows = running_rows + 2 + if include_versions_row { 1 } else { 0 };
+            let expected_total_rows =
+                running_rows + 2 + if include_versions_row { 1 } else { 0 };
             MssqlSourceParityBatchReport {
                 index,
                 metadata_objects: batch.metadata_objects.len(),
@@ -8858,11 +8799,7 @@ impl SourceStageItem {
         match self {
             SourceStageItem::Metadata(object) => {
                 object.metadata_blob.len()
-                    + object
-                        .body_rows
-                        .iter()
-                        .map(|body| body.blob.len())
-                        .sum::<usize>()
+                    + object.body_rows.iter().map(|body| body.blob.len()).sum::<usize>()
             }
             SourceStageItem::CommonModule(module) => {
                 module.metadata_blob.len()
@@ -9105,17 +9042,17 @@ fn quote_string_path(path: &Path) -> String {
 mod tests {
     use super::{
         BinaryBlobRow, BulkStageRow, ColumnShape, CommonModuleStageSpec, ConfigSaveRowDigest,
+        build_bulk_stage_apply_sql, write_bulk_stage_rows,
         DeltaBundleManifest, PreparedCommonModuleObjectStage, PreparedCommonModuleStage,
         PreparedMetadataBodyStage, PreparedMetadataObjectStage, SqlAuth, StorageBundleManifest,
-        StorageTableManifest, TableShape, activate_staged_main, build_bulk_stage_apply_sql,
-        build_source_stage_batches, build_source_stage_batches_within, compare_shapes,
-        compare_storage_table_manifests, diff_activation_rows, encode_hex,
+        StorageTableManifest, TableShape, activate_staged_main, build_source_stage_batches,
+        build_source_stage_batches_within, compare_shapes, compare_storage_table_manifests,
+        diff_activation_rows, encode_hex, sqlcmd_file_command_with_auth,
         filter_source_paths_by_prefix, infer_common_module_text_path, is_root_common_module_xml,
         is_root_metadata_xml, is_stage_metadata_xml, quote_ident, quote_string,
         require_non_lab_confirmation, source_common_module_xmls, source_metadata_xmls,
-        source_stage_batch_reports, source_xml_version_from_bytes, sqlcmd_file_command_with_auth,
-        validate_delta_manifest, validate_selected_source_versions, validate_storage_manifest,
-        write_bulk_stage_rows,
+        source_stage_batch_reports, source_xml_version_from_bytes, validate_delta_manifest,
+        validate_selected_source_versions, validate_storage_manifest,
     };
     use crate::cli::{
         InfobaseConfigSourceVersion, MssqlActivateStagedMainArgs, MssqlMainActivationModeArg,
@@ -10012,19 +9949,13 @@ mod tests {
 
     #[test]
     fn bulk_stage_rows_are_written_in_bcp_native_layout() {
-        let path =
-            std::env::temp_dir().join(format!("ibcmd-rs-bulk-layout-{}.bcp", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "ibcmd-rs-bulk-layout-{}.bcp",
+            std::process::id()
+        ));
         let rows = [
-            BulkStageRow {
-                file_name: "ab",
-                requires_config_row: true,
-                blob: &[1, 2, 3],
-            },
-            BulkStageRow {
-                file_name: "Я",
-                requires_config_row: false,
-                blob: &[],
-            },
+            BulkStageRow { file_name: "ab", requires_config_row: true, blob: &[1, 2, 3] },
+            BulkStageRow { file_name: "Я", requires_config_row: false, blob: &[] },
         ];
         write_bulk_stage_rows(&path, &rows).unwrap();
         let bytes = fs::read(&path).unwrap();
@@ -10048,10 +9979,7 @@ mod tests {
         assert!(sql.contains("ISNULL(c.Attributes, 0)"));
         assert!(sql.contains("s.Kind = 1 AND NOT EXISTS"));
         assert!(sql.contains("FROM dbo.ConfigSave) <> 12"));
-        assert!(
-            sql.trim_end()
-                .ends_with("DROP TABLE tempdb.dbo.[ibcmd_rs_stage_Db_1];")
-        );
+        assert!(sql.trim_end().ends_with("DROP TABLE tempdb.dbo.[ibcmd_rs_stage_Db_1];"));
     }
 
     #[test]
@@ -11119,28 +11047,17 @@ mod tests {
                     .metadata_objects
                     .iter()
                     .map(|object| object.properties.name.clone())
-                    .chain(
-                        batch
-                            .common_modules
-                            .iter()
-                            .map(|module| module.properties.name.clone()),
-                    )
+                    .chain(batch.common_modules.iter().map(|module| module.properties.name.clone()))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![vec!["A"], vec!["B", "C"], vec!["D", "E"]]);
         assert_eq!(
-            reports
-                .iter()
-                .map(|report| report.staged_rows)
-                .collect::<Vec<_>>(),
+            reports.iter().map(|report| report.staged_rows).collect::<Vec<_>>(),
             vec![3, 3, 4]
         );
         assert_eq!(
-            reports
-                .iter()
-                .map(|report| report.expected_total_rows)
-                .collect::<Vec<_>>(),
+            reports.iter().map(|report| report.expected_total_rows).collect::<Vec<_>>(),
             vec![5, 8, 13]
         );
         assert!(reports[0].include_stable_rows);
@@ -11154,11 +11071,9 @@ mod tests {
         let reports = source_stage_batch_reports(&batches);
 
         assert_eq!(batches.len(), 5);
-        assert!(
-            batches
-                .iter()
-                .all(|batch| batch.metadata_objects.len() + batch.common_modules.len() == 1)
-        );
+        assert!(batches
+            .iter()
+            .all(|batch| batch.metadata_objects.len() + batch.common_modules.len() == 1));
         assert_eq!(reports.last().unwrap().running_staged_rows, 10);
         assert_eq!(reports.last().unwrap().expected_total_rows, 13);
     }
@@ -11186,10 +11101,7 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let packet = args
-            .iter()
-            .position(|arg| arg == "-a")
-            .expect("-a is passed");
+        let packet = args.iter().position(|arg| arg == "-a").expect("-a is passed");
         assert_eq!(args[packet + 1], "32767");
     }
 

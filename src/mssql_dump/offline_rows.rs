@@ -170,10 +170,7 @@ impl OfflineRows {
     }
 
     fn check_table(&self, table: &str) -> Result<()> {
-        if table
-            .trim_matches(['[', ']'])
-            .eq_ignore_ascii_case("Config")
-        {
+        if table.trim_matches(['[', ']']).eq_ignore_ascii_case("Config") {
             Ok(())
         } else {
             Err(refuse(&format!("the {table} table")))
@@ -216,11 +213,7 @@ impl OfflineRows {
 
     /// The rows of a view whose published name passes `keep`, in published
     /// name order.
-    fn select<'a>(
-        &'a self,
-        view: &'a View,
-        keep: impl Fn(&str) -> bool,
-    ) -> Vec<(&'a str, &'a Parts)> {
+    fn select<'a>(&'a self, view: &'a View, keep: impl Fn(&str) -> bool) -> Vec<(&'a str, &'a Parts)> {
         match view {
             View::Plain => self
                 .rows
@@ -240,11 +233,7 @@ impl OfflineRows {
     /// The rows of a view with these published names, looked up, in name
     /// order; a name the view lacks is skipped, as `WHERE FileName IN (...)`
     /// skips it.
-    fn lookup<'a>(
-        &'a self,
-        view: &'a View,
-        names: &'a BTreeSet<String>,
-    ) -> Vec<(&'a str, &'a Parts)> {
+    fn lookup<'a>(&'a self, view: &'a View, names: &'a BTreeSet<String>) -> Vec<(&'a str, &'a Parts)> {
         names
             .iter()
             .filter_map(|name| {

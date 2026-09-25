@@ -209,8 +209,7 @@ fn verify_schema_round_trip(
             object_refs,
             &ProfileId::parse("provider:mssql-legacy")
                 .map_err(|error| DcsCodecError::RoundTrip(error.to_string()))?,
-            &ProfileId::parse(dialect)
-                .map_err(|error| DcsCodecError::RoundTrip(error.to_string()))?,
+            &ProfileId::parse(dialect).map_err(|error| DcsCodecError::RoundTrip(error.to_string()))?,
         )
         .map_err(|error| {
             DcsCodecError::RoundTrip(format!("the compiled body does not export: {error}"))

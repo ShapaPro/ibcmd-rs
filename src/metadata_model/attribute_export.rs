@@ -10,7 +10,8 @@ use super::{
 };
 use crate::metadata_model::brace::Brace;
 use crate::metadata_model::export::values::{
-    Header, Owner, bool_text, code_text, header, header_elements, localized_element, reference_name,
+    Header, Owner, bool_text, code_text, header, header_elements, localized_element,
+    reference_name,
 };
 use crate::metadata_model::export::{
     Build, ExportContext, NameIndex, atom, el, item, leaf, list, number, short, string, xml_text,
@@ -285,10 +286,7 @@ pub(crate) fn attribute_elements(
         ("Format", localized_element("Format", &slots[3])?),
         ("EditFormat", localized_element("EditFormat", &slots[18])?),
         ("ToolTip", localized_element("ToolTip", &slots[4])?),
-        (
-            "MarkNegatives",
-            leaf("MarkNegatives", bool_text(&slots[5])?),
-        ),
+        ("MarkNegatives", leaf("MarkNegatives", bool_text(&slots[5])?)),
         ("Mask", leaf("Mask", xml_text(string(&slots[6])?))),
         ("MultiLine", leaf("MultiLine", bool_text(&slots[7])?)),
         ("ExtendedEdit", leaf("ExtendedEdit", bool_text(&slots[17])?)),

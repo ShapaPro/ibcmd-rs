@@ -62,12 +62,10 @@ pub(crate) fn write_native_moxel_body(
     let xml = xml.strip_prefix(b"\xef\xbb\xbf").unwrap_or(xml);
     let root = parse_dom(xml)?;
     if root.name != "document" {
-        bail!(
-            "SpreadsheetDocument XML root is <{}>, not <document>",
-            root.name
-        );
+        bail!("SpreadsheetDocument XML root is <{}>, not <document>", root.name);
     }
-    let source_text = std::str::from_utf8(xml).context("SpreadsheetDocument XML is not UTF-8")?;
+    let source_text =
+        std::str::from_utf8(xml).context("SpreadsheetDocument XML is not UTF-8")?;
     let document = Document::collect(&root, source_text)?;
     let mut writer = BodyWriter::new(&document, source);
     let body = writer.write()?;
@@ -278,17 +276,11 @@ fn required_text<'a>(node: &'a Node, name: &str, owner: &str) -> Result<&'a str>
 }
 
 fn required_i64(node: &Node, name: &str, owner: &str) -> Result<i64> {
-    parse_i64(
-        required_text(node, name, owner)?,
-        &format!("<{owner}><{name}>"),
-    )
+    parse_i64(required_text(node, name, owner)?, &format!("<{owner}><{name}>"))
 }
 
 fn required_usize(node: &Node, name: &str, owner: &str) -> Result<usize> {
-    parse_usize(
-        required_text(node, name, owner)?,
-        &format!("<{owner}><{name}>"),
-    )
+    parse_usize(required_text(node, name, owner)?, &format!("<{owner}><{name}>"))
 }
 
 fn optional_usize(node: &Node, name: &str, owner: &str) -> Result<Option<usize>> {
@@ -1021,10 +1013,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
         if note.text_of("id").is_some_and(|id| id != "0") {
             bail!("a cell <note> carries an id");
         }
-        if note
-            .text_of("pictureSize")
-            .is_some_and(|size| size != "Stretch")
-        {
+        if note.text_of("pictureSize").is_some_and(|size| size != "Stretch") {
             bail!("a cell <note> sizes a picture");
         }
         let format = required_usize(note, "formatIndex", "note")?;
@@ -1079,10 +1068,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
         let mut text = self.column_set_record(default_set, None)?;
         let height = document.height.unwrap_or(0);
         if document.vg_rows.unwrap_or(0) != height {
-            bail!(
-                "<vgRows> {:?} disagrees with <height> {height}",
-                document.vg_rows
-            );
+            bail!("<vgRows> {:?} disagrees with <height> {height}", document.vg_rows);
         }
         text.push_str(&format!(",{height},{}", additional.len()));
         let mut ids = Vec::with_capacity(additional.len());
@@ -1104,9 +1090,10 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                 continue;
             };
             let columns_id = uuid_text(columns_id, "a <row><columnsID>")?;
-            let set = ids.iter().position(|id| *id == columns_id).ok_or_else(|| {
-                anyhow!("a row names column set {columns_id}, which the document does not spell")
-            })?;
+            let set = ids
+                .iter()
+                .position(|id| *id == columns_id)
+                .ok_or_else(|| anyhow!("a row names column set {columns_id}, which the document does not spell"))?;
             for row_index in index..=index_to {
                 pairs.push(format!("{row_index},{set}"));
             }
@@ -1126,11 +1113,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
         let format = optional_usize(set, "formatIndex", "columns")?.unwrap_or(0);
         let format = self.format_ref(format, "a <columns>")?;
         let items = set.children_named("columnsItem").collect::<Vec<_>>();
-        let mut record = format!(
-            "{{{size},{format},{},{}",
-            id.unwrap_or(NIL_UUID),
-            items.len()
-        );
+        let mut record = format!("{{{size},{format},{},{}", id.unwrap_or(NIL_UUID), items.len());
         for item in items {
             item.only_children(&["index", "column"], "columnsItem")?;
             let index = required_i64(item, "index", "columnsItem")?;
@@ -1304,11 +1287,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
         const CHART_VALUE: &str = "{0,1,\"Chart\",{\"#\",3543ef08-3316-4f7e-9447-0cd0a1cbf1d5,";
         const GANTT_CHART_VALUE: &str =
             "{0,1,\"GanttChart\",{\"#\",3a6e63bf-16aa-42eb-b48c-2fff9670ad2f,";
-        let expected = if gantt {
-            "d3p1:GanttChart"
-        } else {
-            "d3p1:Chart"
-        };
+        let expected = if gantt { "d3p1:GanttChart" } else { "d3p1:Chart" };
         if object.xsi_type() != Some(expected) {
             bail!("a chart drawing's <object> is not {expected}");
         }
@@ -1355,18 +1334,11 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
             Some(source) => source.moxel_object_refs()?,
             None => std::collections::BTreeMap::new(),
         };
-        let rendered =
-            crate::mssql_dump::render_moxel_chart_object_xml(&field, gantt, &object_refs)
-                .ok_or_else(|| {
-                    anyhow!("the exporter cannot read back the chart the writer built")
-                })?;
+        let rendered = crate::mssql_dump::render_moxel_chart_object_xml(&field, gantt, &object_refs)
+            .ok_or_else(|| anyhow!("the exporter cannot read back the chart the writer built"))?;
         let significant = |text: &str| {
             text.lines()
-                .map(|line| {
-                    line.trim_start_matches([' ', '\t'])
-                        .trim_end_matches('\r')
-                        .to_string()
-                })
+                .map(|line| line.trim_start_matches([' ', '\t']).trim_end_matches('\r').to_string())
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
         };
@@ -1511,10 +1483,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                         if columns_id.is_some() || kind != 0 {
                             bail!("a row-range <{tag}> spells what no stored row merge carries");
                         }
-                        (
-                            1,
-                            format!("{{{column},{row},{},{},0}}", column + width, row + height),
-                        )
+                        (1, format!("{{{column},{row},{},{},0}}", column + width, row + height))
                     }
                     (true, false) => {
                         if kind != 0 {
@@ -1756,10 +1725,9 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                 | "drawingHaveRightBorder"
                 | "drawingHaveBottomBorder"
                     if drawing => {}
-                "print" if drawing => put(
-                    4,
-                    if parse_bool(text, &what)? { "0" } else { "1" }.to_string(),
-                ),
+                "print" if drawing => {
+                    put(4, if parse_bool(text, &what)? { "0" } else { "1" }.to_string())
+                }
                 "borderColor" => put(5, self.color_slot(member, text)?.to_string()),
                 "height" => put(6, parse_i64(text, &what)?.to_string()),
                 "width" => put(7, parse_usize(text, &what)?.to_string()),
@@ -1810,10 +1778,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                     }
                     .to_string(),
                 ),
-                "protection" => put(
-                    16,
-                    if parse_bool(text, &what)? { "0" } else { "1" }.to_string(),
-                ),
+                "protection" => put(16, if parse_bool(text, &what)? { "0" } else { "1" }.to_string()),
                 "hidden" => put(17, u8::from(parse_bool(text, &what)?).to_string()),
                 "textOrientation" => put(18, parse_usize(text, &what)?.to_string()),
                 "detailsUse" => put(
@@ -2008,13 +1973,8 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                         // default: `Length 0`/`Variable`, `Digits 0`/`0`/`Any`.
                         "xs:string" => match string {
                             Some(qualifiers) => {
-                                let length =
-                                    required_usize(qualifiers, "Length", "StringQualifiers")?;
-                                let allowed = match required_text(
-                                    qualifiers,
-                                    "AllowedLength",
-                                    "StringQualifiers",
-                                )? {
+                                let length = required_usize(qualifiers, "Length", "StringQualifiers")?;
+                                let allowed = match required_text(qualifiers, "AllowedLength", "StringQualifiers")? {
                                     "Fixed" => 0,
                                     "Variable" => 1,
                                     other => bail!("<AllowedLength> {other} has no stored code"),
@@ -2029,18 +1989,9 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                         },
                         "xs:decimal" => match number {
                             Some(qualifiers) => {
-                                let digits =
-                                    required_usize(qualifiers, "Digits", "NumberQualifiers")?;
-                                let fraction = required_usize(
-                                    qualifiers,
-                                    "FractionDigits",
-                                    "NumberQualifiers",
-                                )?;
-                                let sign = match required_text(
-                                    qualifiers,
-                                    "AllowedSign",
-                                    "NumberQualifiers",
-                                )? {
+                                let digits = required_usize(qualifiers, "Digits", "NumberQualifiers")?;
+                                let fraction = required_usize(qualifiers, "FractionDigits", "NumberQualifiers")?;
+                                let sign = match required_text(qualifiers, "AllowedSign", "NumberQualifiers")? {
                                     "Any" => 0,
                                     "Nonnegative" => 1,
                                     other => bail!("<AllowedSign> {other} has no stored code"),
@@ -2054,15 +2005,12 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                             None => "{\"N\"}".to_string(),
                         },
                         "xs:dateTime" => match date {
-                            Some(qualifiers) => {
-                                match required_text(qualifiers, "DateFractions", "DateQualifiers")?
-                                {
-                                    "DateTime" => "{\"D\"}".to_string(),
-                                    "Date" => "{\"D\",\"D\"}".to_string(),
-                                    "Time" => "{\"D\",\"T\"}".to_string(),
-                                    other => bail!("<DateFractions> {other} has no stored code"),
-                                }
-                            }
+                            Some(qualifiers) => match required_text(qualifiers, "DateFractions", "DateQualifiers")? {
+                                "DateTime" => "{\"D\"}".to_string(),
+                                "Date" => "{\"D\",\"D\"}".to_string(),
+                                "Time" => "{\"D\",\"T\"}".to_string(),
+                                other => bail!("<DateFractions> {other} has no stored code"),
+                            },
                             None => "{\"D\"}".to_string(),
                         },
                         other => {
@@ -2072,21 +2020,17 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                             if child.own_namespace(prefix) != Some(CURRENT_CONFIG_NS) {
                                 bail!("<v8:Type> {other} is not a configuration type");
                             }
-                            let source = self.source.ok_or_else(|| {
-                                anyhow!("<v8:Type> {other} needs the configuration")
-                            })?;
-                            let type_id =
-                                source.resolve_metadata_type_id(&format!("cfg:{name}"))?;
+                            let source = self
+                                .source
+                                .ok_or_else(|| anyhow!("<v8:Type> {other} needs the configuration"))?;
+                            let type_id = source.resolve_metadata_type_id(&format!("cfg:{name}"))?;
                             format!("{{\"#\",{}}}", type_id.to_ascii_lowercase())
                         }
                     };
                     descriptors.push(descriptor);
                 }
                 "TypeId" => {
-                    descriptors.push(format!(
-                        "{{\"#\",{}}}",
-                        uuid_text(&child.text, "<v8:TypeId>")?
-                    ));
+                    descriptors.push(format!("{{\"#\",{}}}", uuid_text(&child.text, "<v8:TypeId>")?));
                 }
                 _ => {}
             }
@@ -2113,11 +2057,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
     /// A report colour's slot stores the same value an explicit colour of that
     /// value stores, and only its override tells the two apart: they are two
     /// palette entries, never one.
-    fn palette_slot_for_spelling(
-        &mut self,
-        spelled: &str,
-        namespace: Option<&str>,
-    ) -> Result<usize> {
+    fn palette_slot_for_spelling(&mut self, spelled: &str, namespace: Option<&str>) -> Result<usize> {
         let (slot, overridden) = self.palette_entry(spelled, namespace)?;
         let key = match &overridden {
             Some(style) => format!("{slot}|{style}"),
@@ -2137,11 +2077,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
 
     /// The palette slot a colour spelling stores, and the style record a
     /// report colour overrides that slot with.
-    fn palette_entry(
-        &self,
-        spelled: &str,
-        namespace: Option<&str>,
-    ) -> Result<(String, Option<String>)> {
+    fn palette_entry(&self, spelled: &str, namespace: Option<&str>) -> Result<(String, Option<String>)> {
         if spelled == "auto" {
             return Ok(("{3,4,{0}}".to_string(), None));
         }
@@ -2151,10 +2087,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
             }
             let value = u32::from_str_radix(hex, 16)?;
             let (red, green, blue) = (value >> 16 & 0xff, value >> 8 & 0xff, value & 0xff);
-            return Ok((
-                format!("{{3,0,{{{}}}}}", red | green << 8 | blue << 16),
-                None,
-            ));
+            return Ok((format!("{{3,0,{{{}}}}}", red | green << 8 | blue << 16), None));
         }
         if let Some(name) = spelled.strip_prefix("style:") {
             if let Some((code, rgb)) = report_style_color(name) {
@@ -2177,8 +2110,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
         };
         match namespace {
             Some(WEB_COLORS_NS) => {
-                let code = web_color_code(name)
-                    .ok_or_else(|| anyhow!("web colour {name} has no stored code"))?;
+                let code = web_color_code(name).ok_or_else(|| anyhow!("web colour {name} has no stored code"))?;
                 Ok((format!("{{3,2,{{{code}}}}}"), None))
             }
             Some(WINDOWS_COLORS_NS) => {
@@ -2282,15 +2214,8 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                 if node.attribute("ref").is_some() {
                     bail!("an Absolute <font> names a ref");
                 }
-                let (
-                    Some(face),
-                    Some(height),
-                    Some(weight),
-                    Some(italic),
-                    Some(underline),
-                    Some(strikeout),
-                    Some(scale),
-                ) = (face, height, weight, italic, underline, strikeout, scale)
+                let (Some(face), Some(height), Some(weight), Some(italic), Some(underline), Some(strikeout), Some(scale)) =
+                    (face, height, weight, italic, underline, strikeout, scale)
                 else {
                     bail!("an Absolute <font> leaves a member unspelled");
                 };
@@ -2316,9 +2241,7 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                         other => bail!("system font {other} has no stored code"),
                     };
                     if !reference.starts_with("sys:")
-                        || node
-                            .own_namespace("sys")
-                            .is_some_and(|ns| ns != SYSTEM_FONTS_NS)
+                        || node.own_namespace("sys").is_some_and(|ns| ns != SYSTEM_FONTS_NS)
                     {
                         bail!("system font {reference} names an unknown namespace");
                     }
@@ -2334,11 +2257,10 @@ impl<'a, 'd> BodyWriter<'a, 'd> {
                         "LargeTextFont" => "{-32}".to_string(),
                         "ExtraLargeTextFont" => "{-33}".to_string(),
                         _ => {
-                            let source = self.source.ok_or_else(|| {
-                                anyhow!("style font {reference} needs the configuration")
-                            })?;
-                            let uuid =
-                                source.resolve_style_item_uuid(&format!("StyleItem.{name}"))?;
+                            let source = self
+                                .source
+                                .ok_or_else(|| anyhow!("style font {reference} needs the configuration"))?;
+                            let uuid = source.resolve_style_item_uuid(&format!("StyleItem.{name}"))?;
                             format!("{{0,{}}}", uuid.to_ascii_lowercase())
                         }
                     };
@@ -2553,9 +2475,7 @@ fn group_records(groups: &[&Node], tag: &str) -> Result<GroupRecords> {
             Some(other) => bail!("<{tag}><g> {other} has no stored code"),
             None => 0,
         };
-        records.push(format!(
-            "{{{begin},{end},{level},{text},{closed},{group_begin}}}"
-        ));
+        records.push(format!("{{{begin},{end},{level},{text},{closed},{group_begin}}}"));
         ranges.push((begin, end));
         levels.push(level);
     }
@@ -2738,7 +2658,10 @@ fn typed_value(node: &Node) -> Result<String> {
             Ok(format!("{{\"D\",{digits}}}"))
         }
         "v8:Structure" => {
-            let mut record = format!("{{\"#\",{STRUCTURE_VALUE_TYPE},{{{}", node.children.len());
+            let mut record = format!(
+                "{{\"#\",{STRUCTURE_VALUE_TYPE},{{{}",
+                node.children.len()
+            );
             for property in &node.children {
                 if property.name != "Property" {
                     bail!("a Structure value carries <{}>", property.name);
@@ -2749,11 +2672,7 @@ fn typed_value(node: &Node) -> Result<String> {
                 let value = property
                     .child("Value")
                     .ok_or_else(|| anyhow!("a Structure property has no value"))?;
-                record.push_str(&format!(
-                    ",{{{{\"S\",{}}},{}}}",
-                    quote(name),
-                    typed_value(value)?
-                ));
+                record.push_str(&format!(",{{{{\"S\",{}}},{}}}", quote(name), typed_value(value)?));
             }
             record.push_str("}}");
             Ok(record)
@@ -3120,9 +3039,7 @@ mod tests {
 	<format><backColor>style:ReportHeaderBackColor</backColor></format>
 	<format><backColor>#F4ECC5</backColor></format>
 </document>"#;
-        let body = write_native_moxel_body(xml, None)
-            .unwrap()
-            .replace("\r\n", "");
+        let body = write_native_moxel_body(xml, None).unwrap().replace("\r\n", "");
         assert!(body.contains("4,{3,3,{-1}},{3,3,{-3}},{3,0,{12971252}},{3,0,{12971252}},"));
         assert!(body.contains("{1,2,{3,3,{-25}}}"));
         let exported = read_back(&body);

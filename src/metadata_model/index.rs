@@ -197,16 +197,9 @@ impl ConfigIndex {
     /// The configuration's compatibility mode as `(major, minor, release)`
     /// (`Version8_3_24` -> `(8, 3, 24)`); `None` when absent or `DontUse`.
     pub fn compatibility_version(&self) -> Option<(u32, u32, u32)> {
-        let mode = self
-            .compatibility_mode
-            .as_deref()?
-            .strip_prefix("Version")?;
+        let mode = self.compatibility_mode.as_deref()?.strip_prefix("Version")?;
         let mut parts = mode.split('_').map(|part| part.parse::<u32>().ok());
-        Some((
-            parts.next()??,
-            parts.next()??,
-            parts.next().flatten().unwrap_or(0),
-        ))
+        Some((parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(0)))
     }
 }
 

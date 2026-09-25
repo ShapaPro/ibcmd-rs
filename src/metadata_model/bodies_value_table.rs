@@ -193,10 +193,7 @@ mod tests {
             Column::new(1, "x", pattern(Vec::new()), 1),
         ];
         let text = serialize(&value_table(&columns, &[])).replace("\r\n", "");
-        assert!(
-            text.ends_with(r#"{2,2,0,0,1,1,{1,0},1,-1},{0,0}}"#),
-            "{text}"
-        );
+        assert!(text.ends_with(r#"{2,2,0,0,1,1,{1,0},1,-1},{0,0}}"#), "{text}");
         let text = serialize(&value_table(&[], &[])).replace("\r\n", "");
         assert_eq!(text, "{9,{0},{2,0,{1,0},-1,-1},{0,0}}");
     }

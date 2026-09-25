@@ -6509,7 +6509,10 @@ fn extracts_standalone_content_used_items() {
                 "CommonCommand.OpenAllReports".to_string(),
             ),
         ]),
-        storage_record_uuids: BTreeSet::from([first_uuid.to_string(), second_uuid.to_string()]),
+        storage_record_uuids: BTreeSet::from([
+            first_uuid.to_string(),
+            second_uuid.to_string(),
+        ]),
     };
 
     let xml =
@@ -6556,7 +6559,10 @@ fn standalone_content_refuses_an_unnamed_item_that_owns_a_record() {
     let body = deflate_for_test(format!("{{2,2,{first_uuid},{unnamed_uuid},0}}").as_bytes());
     let references = StandaloneContentReferences {
         object_refs: BTreeMap::from([(first_uuid.to_string(), "Role.ReadOnlyUsers".to_string())]),
-        storage_record_uuids: BTreeSet::from([first_uuid.to_string(), unnamed_uuid.to_string()]),
+        storage_record_uuids: BTreeSet::from([
+            first_uuid.to_string(),
+            unnamed_uuid.to_string(),
+        ]),
     };
 
     let error = extract_standalone_content_xml(&body, &references)
@@ -7826,8 +7832,9 @@ fn unadmitted_dcs_schema_template_body_for_test() -> Vec<u8> {
         "\t</dataCompositionSchema>\r\n",
         "</SchemaFile>"
     ));
-    let settings =
-        document("<settings xmlns=\"http://v8.1c.ru/8.1/data-composition-system/settings\"/>");
+    let settings = document(
+        "<settings xmlns=\"http://v8.1c.ru/8.1/data-composition-system/settings\"/>",
+    );
     let terminal = document("<AreaTemplate xmlns=\"\"/>");
 
     let mut plain = Vec::new();
@@ -16405,11 +16412,7 @@ fn a_table_hiding_both_search_controls_drops_the_search_history_command() {
         hidden.command_set_excluded_commands
     );
     // The rest of the remembered list is untouched.
-    assert!(
-        hidden
-            .command_set_excluded_commands
-            .contains(&"SortListAsc")
-    );
+    assert!(hidden.command_set_excluded_commands.contains(&"SortListAsc"));
 
     let with_control = parse_form_child_item_with_attrs(
             r#"{55,{56,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"Rows",0,0,1,{1,1,{"ru","Rows"}},{1,0},{1,{2}},0,0,0,0,0,0,0,0,0,2,0,0,1,0,1,1,0,1,2,2,1,1,0,0,1,1,2,0,0,1,1,{1,{8}},{4,1,{0,e112dfa4-4cb7-402d-85b9-f0234915989b},"",-1,-1,0,0,""},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{3,4,{0}},{7,3,0,1,100},{0,0,0},1,1,2,13,{"U"},19,{"S",""},{1,1282f000-23b6-4887-87f4-9e8e79db3d32,"RowsSelection",1,0,1282f000-23b6-4887-87f4-9e8e79db3d32,0,1},{9,0ae4bea5-23be-42a7-b69e-97b11b29c453,2bbe4e12-06d2-409b-a972-eea585125d83,37740564-9e86-44a0-bea9-3f485a5a3f91,58b2a785-23f6-4b0e-a324-9a1323285595,8d772f97-c0ef-47c0-9cb0-efea28c61341,9ef79140-3de6-436a-8dda-610bb963f5db,b0016a68-ec64-4e6d-b905-c71fd62efc4c,d96b0c03-b209-4d01-a3fc-17a14f873b64,fa51b106-eae6-44c7-8054-76cbb3100603},1,{22,{57,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,8,"RowsContext",{1,0},{1,0},0,1,0,0,0,2,2,{3,4,{0}},{7,3,0,1,100},{0,0,0},1,{1,1},0,1,0,0,0,3,3,0},1,{22,{58,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,9,"RowsBar",{1,0},{1,0},0,1,0,0,0,2,2,{3,4,{0}},{7,3,0,1,100},{0,0,0},1,{0,0,0},0,1,0,0,0,3,3,0},0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}"#,
@@ -19927,7 +19930,9 @@ fn minimal_radio_button_nil_choice_list_is_typed_and_matches_native_xml() {
     let mode_zero_item = format!(
         r##"{{"#",{discriminator},{{0,0,{{"U"}},{nil},{nil},{{1,1,{{"en","Synthetic nil choice"}}}}}}}}"##
     );
-    let mode_zero = format!(r#"{{3,1,"",{mode_zero_item},{{0,{{4,0,{{0}},"",-1,-1,1,0,""}}}}}}"#);
+    let mode_zero = format!(
+        r#"{{3,1,"",{mode_zero_item},{{0,{{4,0,{{0}},"",-1,-1,1,0,""}}}}}}"#
+    );
     let mut options = vec!["0"; 12];
     options[fixture.slot] = &mode_zero;
     let canonical = canonical_form_radio_button_choice_list(
@@ -31639,8 +31644,7 @@ fn metadata_choice_parameter_keeps_a_pair_whose_type_the_configuration_lost() {
     let live_type = "b3d3fa57-e3db-46d3-b7a9-68e89ebae723";
     let approved = "e8218ef1-026a-48b5-b5ca-934efd6df05e";
     let cash = "d450cea1-6bc0-427b-b3f6-68344c8dba57";
-    let type_index =
-        BTreeMap::from([(live_type.to_string(), "cfg:EnumRef.ФормыОплаты".to_string())]);
+    let type_index = BTreeMap::from([(live_type.to_string(), "cfg:EnumRef.ФормыОплаты".to_string())]);
     let object_refs = BTreeMap::from([
         (
             approved.to_string(),

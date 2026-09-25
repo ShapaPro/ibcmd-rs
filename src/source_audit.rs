@@ -1416,6 +1416,7 @@ fn form_blocker_reason_shape(message: &str) -> String {
     shaped
 }
 
+
 /// How many forms the native body writer reproduces, and why the rest are not.
 ///
 /// This is the end-to-end load-parity measurement: it reads each `Form.xml` of
@@ -2557,7 +2558,8 @@ enum MxlRoundTrip {
 /// load from XML writes as 1 and a Designer save as 0, and the last -- folded
 /// to `_`.
 fn normalize_moxel_plain(plain: &[u8]) -> String {
-    let text = String::from_utf8_lossy(plain).replace(['\r', '\n'], "");
+    let text = String::from_utf8_lossy(plain)
+        .replace(['\r', '\n'], "");
     let Some(start) = text.find("{8,1,12,{") else {
         return text;
     };
@@ -2655,12 +2657,7 @@ fn audit_one_mxl_template(
                 .unwrap_or_else(|| ours_lines.len().min(native_lines.len()));
             MxlRoundTrip::Different {
                 line: line + 1,
-                ours: ours_lines
-                    .get(line)
-                    .copied()
-                    .unwrap_or("<end>")
-                    .trim()
-                    .to_string(),
+                ours: ours_lines.get(line).copied().unwrap_or("<end>").trim().to_string(),
                 native: native_lines
                     .get(line)
                     .copied()
@@ -2728,10 +2725,7 @@ pub fn audit_mxl_writer(root: &Path, bodies: &Path) -> Result<MxlWriterReport> {
     // one of the substrings -- a quick rerun of the ones a change touches.
     if let Some(filter) = std::env::var_os("IBCMD_RS_MXL_AUDIT_FILTER") {
         let filter = filter.to_string_lossy().to_string();
-        let needles = filter
-            .split('|')
-            .filter(|needle| !needle.is_empty())
-            .collect::<Vec<_>>();
+        let needles = filter.split('|').filter(|needle| !needle.is_empty()).collect::<Vec<_>>();
         templates.retain(|(_, template_xml, _)| {
             let relative = relative_path_string(root, template_xml);
             needles.iter().any(|needle| relative.contains(needle))
@@ -2827,11 +2821,7 @@ pub fn audit_mxl_writer(root: &Path, bodies: &Path) -> Result<MxlWriterReport> {
                 native_lines,
             } => {
                 report.round_trip_different += 1;
-                let shape = format!(
-                    "ours {} | native {}",
-                    fold_digits(&ours),
-                    fold_digits(&native)
-                );
+                let shape = format!("ours {} | native {}", fold_digits(&ours), fold_digits(&native));
                 *report.shapes.entry(shape).or_insert(0) += 1;
                 report.differences.push(MxlWriterDifference {
                     template,
@@ -2869,7 +2859,11 @@ pub fn audit_form_body_blockers(root: &Path) -> Result<FormBodyBlockerAuditRepor
                 let form_xml = match fs::read(path) {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        return (relative, bytes, vec![(error.to_string(), "read")]);
+                        return (
+                            relative,
+                            bytes,
+                            vec![(error.to_string(), "read")],
+                        );
                     }
                 };
                 let module_path = path.with_file_name("Form").join("Module.bsl");

@@ -534,11 +534,9 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
                 type_index,
                 builtin_type_reference,
             );
-            let [
-                ConstantValueType::Reference {
-                    reference: type_reference,
-                },
-            ] = value_types.as_slice()
+            let [ConstantValueType::Reference {
+                reference: type_reference,
+            }] = value_types.as_slice()
             else {
                 continue;
             };
@@ -2595,7 +2593,9 @@ pub(super) fn build_metadata_type_set_leaf_index_from_texts(
     rows: &[MetadataTextRow],
     type_index: &BTreeMap<String, String>,
 ) -> MetadataTypeSetLeafIndex {
-    let per_row = |row: &MetadataTextRow| type_set_leaf_entry(row, type_index);
+    let per_row = |row: &MetadataTextRow| {
+        type_set_leaf_entry(row, type_index)
+    };
     parallel::install(|| rows.par_iter().filter_map(per_row).collect::<Vec<_>>())
         .unwrap_or_else(|_| rows.iter().filter_map(per_row).collect())
         .into_iter()
@@ -3373,12 +3373,7 @@ fn insert_v85_configuration_properties_xml(
     }
     let mut captions = String::new();
     push_localized_property(&mut captions, "\t\t\t", "Caption", &properties.caption);
-    push_localized_property(
-        &mut captions,
-        "\t\t\t",
-        "ShortCaption",
-        &properties.short_caption,
-    );
+    push_localized_property(&mut captions, "\t\t\t", "ShortCaption", &properties.short_caption);
     let candidates = [
         ("DefaultCollaborationSystemUsersChoiceForm", forms),
         (
@@ -3630,10 +3625,7 @@ pub(super) fn parse_configuration_properties_from_text(
         && !v85_tuple
         && (is_native_68_shape || is_normalized_67_shape)
     {
-        configuration_compatibility_mode_xml_under(
-            &V85_PACKED_PLATFORM_VERSION.to_string(),
-            ceiling,
-        )
+        configuration_compatibility_mode_xml_under(&V85_PACKED_PLATFORM_VERSION.to_string(), ceiling)
     } else if is_native_68_shape {
         stored_compatibility_mode.clone()
     } else if is_normalized_67_shape {

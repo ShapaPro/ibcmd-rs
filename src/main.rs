@@ -334,12 +334,7 @@ fn run() -> Result<()> {
             ] {
                 println!(
                     "{label:<11} expected {:>7} built {:>7} equal {:>7} missing {:>6} extra {:>6} different {:>6}",
-                    part.expected,
-                    part.actual,
-                    part.equal,
-                    part.missing,
-                    part.extra,
-                    part.different
+                    part.expected, part.actual, part.equal, part.missing, part.extra, part.different
                 );
                 for (kind, counts) in &part.by_kind {
                     println!(

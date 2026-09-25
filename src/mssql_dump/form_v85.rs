@@ -399,7 +399,10 @@ pub(super) fn v85_palette_color(text: &str) -> Option<&'static str> {
 pub(super) fn v85_palette_color_index(text: &str) -> Option<i64> {
     let node = parse_node(text).ok()?;
     let members = node.list()?;
-    if !is_v85_color(members) || members[1].leaf() != Some("4") || members[3].leaf() != Some("5") {
+    if !is_v85_color(members)
+        || members[1].leaf() != Some("4")
+        || members[3].leaf() != Some("5")
+    {
         return None;
     }
     match members[2].list()? {
@@ -518,10 +521,7 @@ pub(super) fn down_convert_v85_primitives_text(text: &str) -> Result<String> {
     let mut facts = FormV85Facts::default();
     let node = convert_primitives(parse_node(text)?, &mut facts);
     if facts.palette_colors != 0 {
-        bail!(
-            "8.5 tuple carries {} palette colour(s)",
-            facts.palette_colors
-        );
+        bail!("8.5 tuple carries {} palette colour(s)", facts.palette_colors);
     }
     Ok(node.to_text())
 }
@@ -550,9 +550,7 @@ fn convert_primitives(node: Node, facts: &mut FormV85Facts) -> Node {
             || members[3].leaf() != Some("5")
             || index.and_then(v85_palette_color_name).is_none()
         {
-            facts
-                .unknown_palette_colors
-                .push(Node::List(members.clone()).to_text());
+            facts.unknown_palette_colors.push(Node::List(members.clone()).to_text());
         }
         return Node::List(members);
     }
@@ -751,9 +749,9 @@ fn convert_values_and_commands(node: Node, facts: &mut FormV85Facts) -> Result<N
                 members[0] = Node::Leaf("9".to_owned());
                 facts.commands.insert(id, tail);
             }
-            (lead, len) => {
-                bail!("8.5 form command {id} declares unknown revision {lead:?} with {len} members")
-            }
+            (lead, len) => bail!(
+                "8.5 form command {id} declares unknown revision {lead:?} with {len} members"
+            ),
         }
         return Ok(Node::List(members));
     }

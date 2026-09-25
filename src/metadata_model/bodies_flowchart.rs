@@ -163,34 +163,15 @@ impl<'a> Flowchart<'a> {
             Brace::num(1),
             self.color(text(schema, "BackColor"))?,
             Brace::flag(flag(schema, "GridEnabled")),
-            Brace::num(number(
-                text(schema, "GridHorizontalStep"),
-                "GridHorizontalStep",
-            )?),
-            Brace::num(number(
-                text(schema, "GridVerticalStep"),
-                "GridVerticalStep",
-            )?),
-            Brace::num(code(
-                DRAW_GRID_MODES,
-                text(schema, "DrawGridMode"),
-                "DrawGridMode",
-            )?),
+            Brace::num(number(text(schema, "GridHorizontalStep"), "GridHorizontalStep")?),
+            Brace::num(number(text(schema, "GridVerticalStep"), "GridVerticalStep")?),
+            Brace::num(code(DRAW_GRID_MODES, text(schema, "DrawGridMode"), "DrawGridMode")?),
             Brace::num(6),
         ];
         items.extend(parameter(6, number(text(print, "TopMargin"), "TopMargin")?));
-        items.extend(parameter(
-            7,
-            number(text(print, "LeftMargin"), "LeftMargin")?,
-        ));
-        items.extend(parameter(
-            8,
-            number(text(print, "BottomMargin"), "BottomMargin")?,
-        ));
-        items.extend(parameter(
-            9,
-            number(text(print, "RightMargin"), "RightMargin")?,
-        ));
+        items.extend(parameter(7, number(text(print, "LeftMargin"), "LeftMargin")?));
+        items.extend(parameter(8, number(text(print, "BottomMargin"), "BottomMargin")?));
+        items.extend(parameter(9, number(text(print, "RightMargin"), "RightMargin")?));
         items.extend(parameter(13, i64::from(flag(print, "BlackAndWhite"))));
         items.extend(parameter(
             16,
@@ -397,10 +378,7 @@ impl<'a> Flowchart<'a> {
             Ok(brace_list![Brace::List(wrapper)])
         };
         Ok(match tag {
-            "Decoration" => (
-                0,
-                brace_list![base.clone(), Brace::num(2), self.decoration(properties)?],
-            ),
+            "Decoration" => (0, brace_list![base.clone(), Brace::num(2), self.decoration(properties)?]),
             "ConnectionLine" => (1, self.line(base.clone(), properties)?),
             "Start" => (
                 2,
@@ -428,10 +406,7 @@ impl<'a> Flowchart<'a> {
                     shape(vec![
                         Brace::num(3),
                         Brace::num(number(text(properties, "TruePortIndex"), "TruePortIndex")?),
-                        Brace::num(number(
-                            text(properties, "FalsePortIndex"),
-                            "FalsePortIndex"
-                        )?),
+                        Brace::num(number(text(properties, "FalsePortIndex"), "FalsePortIndex")?),
                     ])?,
                     events(item, &["ConditionCheck"])
                 ],
@@ -590,16 +565,8 @@ impl<'a> Flowchart<'a> {
                 "segment index",
             )?));
         }
-        geometry.push(Brace::num(code(
-            ARROWS,
-            text(properties, "BeginArrow"),
-            "BeginArrow",
-        )?));
-        geometry.push(Brace::num(code(
-            ARROWS,
-            text(properties, "EndArrow"),
-            "EndArrow",
-        )?));
+        geometry.push(Brace::num(code(ARROWS, text(properties, "BeginArrow"), "BeginArrow")?));
+        geometry.push(Brace::num(code(ARROWS, text(properties, "EndArrow"), "EndArrow")?));
 
         Ok(brace_list![
             base,
@@ -630,10 +597,13 @@ impl<'a> Flowchart<'a> {
     fn is_true_branch(&self, from_item: &str, from_port: i64) -> bool {
         self.items.iter().any(|item| {
             item.name == "Condition"
-                && item.child("Properties").is_some_and(|properties| {
-                    properties.child_text("Name") == Some(from_item)
-                        && text(properties, "TruePortIndex").trim() == from_port.to_string()
-                })
+                && item
+                    .child("Properties")
+                    .is_some_and(|properties| {
+                        properties.child_text("Name") == Some(from_item)
+                            && text(properties, "TruePortIndex").trim()
+                                == from_port.to_string()
+                    })
         })
     }
 
@@ -760,14 +730,7 @@ mod tests {
         );
         assert_eq!(
             outline("Condition", 140, 240, 260, 300).unwrap(),
-            vec![
-                (140, 270),
-                (157, 240),
-                (242, 240),
-                (259, 270),
-                (242, 299),
-                (157, 299)
-            ]
+            vec![(140, 270), (157, 240), (242, 240), (259, 270), (242, 299), (157, 299)]
         );
         assert_eq!(
             outline("Split", 320, 160, 360, 180).unwrap(),
