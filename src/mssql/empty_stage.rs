@@ -1245,7 +1245,18 @@ pub(super) fn stage_source_objects_base_free(
     let version = args.source_version.map(|version| version.as_str());
     let stage = prepare_empty_stage(&args.source_root, version)?;
     let failures = stage.failures().collect::<Vec<_>>();
-    if !failures.is_empty() {
+    // A partial row set is only ever written, never loaded: it lets the
+    // bcp file be checked against the audit before every writer is done.
+    let partial = args.script_only
+        && std::env::var_os("IBCMD_RS_BASE_FREE_ALLOW_FAILURES").is_some_and(|value| value == "1");
+    if !failures.is_empty() && partial {
+        eprintln!(
+            "IBCMD_RS_BASE_FREE_ALLOW_FAILURES=1: writing the {} rows produced, {} failed (script only)",
+            stage.rows().count(),
+            failures.len()
+        );
+    }
+    if !failures.is_empty() && !partial {
         let mut reasons = BTreeMap::<String, usize>::new();
         for failure in &failures {
             *reasons

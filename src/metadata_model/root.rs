@@ -981,29 +981,38 @@ fn functionality_table(used: &BTreeSet<u32>, shape: ConfigurationShape) -> Brace
 
 /// The platform's older permission ids a functionality implies (fields 40
 /// and 51 carry them; no XML prints them, the platform derives them).
-/// Proven singly: Biometrics 29, Camera 22, OSBackup 28, Videoconferences
-/// 33, NFC 34. Proven only as groups, split here by name: {BluetoothPrinters,
-/// WiFiPrinters, PictureAndVideoLibraries, AudioPlaybackAndVibration} ->
-/// {7,25,26,30,31}; {NumberDialing, Microphone, MusicLibrary} ->
-/// {13,16,23,24}; {BackgroundAudioPlaybackAndVibration, InstallPackages} ->
-/// {27}. Measured on ERP УХ, БСП 8.3.27 and 8.5, the native evidence and
-/// CF-stored configurations.
+/// Measured on ERP УХ, БСП 8.3.27 and 8.5, the native evidence and 16
+/// CF-stored configurations. Proven singly: Biometrics 29, Camera 22,
+/// AudioPlaybackAndVibration 26, OSBackup 28, Videoconferences 33, NFC 34,
+/// IncomingShareRequests 37, NumberDialing {13,16}. Proven only as groups
+/// (always set together in every corpus), split here by name:
+/// {BluetoothPrinters, WiFiPrinters, PictureAndVideoLibraries} ->
+/// {7,25,30,31}; {PushNotifications, LocalNotifications} -> {5,6,35};
+/// {CallProcessing, CallLog, DocumentScanning} -> {14,17,18}; {Microphone,
+/// MusicLibrary} -> {23,24}; {BackgroundAudioPlaybackAndVibration,
+/// InstallPackages} -> {27}.
 fn permissions_of(functionalities: &BTreeSet<u32>) -> BTreeSet<u32> {
     const MAP: &[(u32, &[u32])] = &[
         (0, &[29]),
         (3, &[30]),
         (4, &[31]),
-        (12, &[13]),
+        (7, &[5, 35]),
+        (8, &[6]),
+        (12, &[13, 16]),
+        (13, &[14]),
+        (14, &[17]),
         (18, &[22]),
-        (19, &[16]),
-        (20, &[23, 24]),
-        (21, &[25, 26]),
-        (22, &[7]),
+        (19, &[23]),
+        (20, &[24]),
+        (21, &[7, 25]),
+        (22, &[26]),
         (23, &[27]),
         (24, &[27]),
         (25, &[28]),
         (34, &[33]),
         (35, &[34]),
+        (36, &[18]),
+        (39, &[37]),
     ];
     let mut permissions = BTreeSet::new();
     for (functionality, implied) in MAP {
@@ -1014,12 +1023,12 @@ fn permissions_of(functionalities: &BTreeSet<u32>) -> BTreeSet<u32> {
     permissions
 }
 
-/// Field 51: `{2,<n>,{<id>,<flag>,0}...}` over ids 1..38 but 4, 14 and 15;
-/// 13 is listed only when set.
+/// Field 51: `{2,<n>,{<id>,<flag>,0}...}` over ids 1..38 but 4 and 15; 13
+/// and 14 are listed only when set.
 fn permission_flags(permissions: &BTreeSet<u32>) -> Brace {
     let ids = (1..=38u32)
-        .filter(|id| !matches!(id, 4 | 14 | 15))
-        .filter(|id| *id != 13 || permissions.contains(id))
+        .filter(|id| !matches!(id, 4 | 15))
+        .filter(|id| !matches!(id, 13 | 14) || permissions.contains(id))
         .collect::<Vec<_>>();
     let mut items = vec![Brace::num(2), Brace::num(ids.len() as i64)];
     for id in ids {
@@ -1033,10 +1042,11 @@ fn permission_flags(permissions: &BTreeSet<u32>) -> Brace {
 }
 
 /// Field 40: the same flags for ids up to 31 as a typed-value map, in the
-/// map's own bucket order (which shifts when 13 joins it); `None` is the
-/// map's `Undefined` key.
+/// map's own bucket order; `None` is the map's `Undefined` key. 13 (after
+/// 17) and 14 (after 9) join it only when set, and either one moves 20
+/// before 7 -- every CF and database row shows exactly these three orders.
 fn permission_table(permissions: &BTreeSet<u32>) -> Brace {
-    const WITHOUT_13: [Option<u32>; 28] = [
+    const BASE: [Option<u32>; 28] = [
         Some(28),
         None,
         Some(25),
@@ -1066,44 +1076,24 @@ fn permission_table(permissions: &BTreeSet<u32>) -> Brace {
         Some(23),
         Some(1),
     ];
-    const WITH_13: [Option<u32>; 29] = [
-        Some(28),
-        None,
-        Some(25),
-        Some(30),
-        Some(24),
-        Some(22),
-        Some(21),
-        Some(19),
-        Some(18),
-        Some(17),
-        Some(13),
-        Some(12),
-        Some(27),
-        Some(10),
-        Some(31),
-        Some(26),
-        Some(9),
-        Some(8),
-        Some(20),
-        Some(7),
-        Some(29),
-        Some(16),
-        Some(6),
-        Some(5),
-        Some(3),
-        Some(2),
-        Some(11),
-        Some(23),
-        Some(1),
-    ];
-    let order: &[Option<u32>] = if permissions.contains(&13) {
-        &WITH_13
-    } else {
-        &WITHOUT_13
-    };
+    let with_13 = permissions.contains(&13);
+    let with_14 = permissions.contains(&14);
+    let mut order = Vec::with_capacity(BASE.len() + 2);
+    for id in BASE {
+        match id {
+            Some(7) if with_13 || with_14 => order.push(Some(20)),
+            Some(20) if with_13 || with_14 => order.push(Some(7)),
+            other => order.push(other),
+        }
+        if id == Some(17) && with_13 {
+            order.push(Some(13));
+        }
+        if id == Some(9) && with_14 {
+            order.push(Some(14));
+        }
+    }
     let mut items = vec![Brace::num(order.len() as i64)];
-    for id in order {
+    for id in &order {
         let key = match id {
             Some(id) => brace_list![
                 Brace::str("#"),
