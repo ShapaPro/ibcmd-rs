@@ -1302,6 +1302,9 @@ pub(super) fn stage_source_objects_base_free(
             "--base-free stages the whole tree (an empty infobase needs every row); drop --path-prefix"
         );
     }
+    if args.script_only {
+        super::OFFLINE_STAGE.store(true, Ordering::Relaxed);
+    }
     let version = args.source_version.map(|version| version.as_str());
     let stage = prepare_empty_stage(&args.source_root, version)?;
     let failures = stage.failures().collect::<Vec<_>>();

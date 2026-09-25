@@ -3395,6 +3395,10 @@ pub fn stage_source_objects(
         user: args.sql_user.as_deref(),
         password: sql_password.as_deref(),
     };
+    // `--script-only` with the base rows in files reaches no database at all.
+    if args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some() {
+        OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // A bulk stage reads the base rows it patches with one bcp query instead
     // of one sqlcmd call per object (ERP УХ: over an hour without it).
     if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
@@ -3464,13 +3468,18 @@ pub fn stage_source_objects(
     } else {
         build_source_stage_batches(metadata_objects.clone(), common_modules.clone(), batch_size)
     };
-    let before = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    // A script-only run changes nothing, so it measures nothing either.
+    let before = if args.script_only {
+        unqueried_storage_table_stats("ConfigSave")
+    } else {
+        storage_table_stats_with_auth(
+            &args.sqlcmd,
+            &args.server,
+            sql_auth,
+            &args.database,
+            "ConfigSave",
+        )?
+    };
     let mut scripts = Vec::with_capacity(batches.len().max(2));
     let mut running_rows = 0usize;
     let mut after = before.clone();
@@ -7075,6 +7084,32 @@ fn fetch_config_blobs_for_files(
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(String, std::collections::HashMap<String, Vec<u8>>)> =
     std::sync::OnceLock::new();
 
+/// Set by a stage that must not reach SQL Server: `--script-only` with its
+/// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
+/// --script-only`. A base row missing from the directory is then a missing
+/// row, not a query, and every sqlcmd or bcp run fails instead of
+/// connecting.
+static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_online(action: &str) -> Result<()> {
+    if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("an offline --script-only stage would connect to SQL Server to {action}");
+    }
+    Ok(())
+}
+
+/// ConfigSave statistics a run did not query (a `--script-only` stage
+/// changes nothing to measure).
+fn unqueried_storage_table_stats(table: &str) -> StorageTableManifest {
+    StorageTableManifest {
+        table_name: table.to_string(),
+        file_name: String::new(),
+        row_count: -1,
+        binary_bytes: -1,
+        row_checksum: None,
+    }
+}
+
 /// Set by a base-free stage (`mssql-stage-source-objects --base-free`,
 /// `audit-empty-stage`): the target is an empty infobase with no rows to
 /// patch, so every base-row read fails, naming its row, without touching a
@@ -7111,6 +7146,11 @@ fn fetch_config_blob_with_auth(
         let path = PathBuf::from(dir).join(format!("{file_name}__part0.bin"));
         if let Ok(bytes) = fs::read(&path) {
             return Ok(bytes);
+        }
+        // Offline, the directory is the whole table: what it lacks, the
+        // database lacks.
+        if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("Config row not found: {file_name}");
         }
     }
     let sql = format!(
@@ -7178,6 +7218,7 @@ fn run_sql(sqlcmd: &Path, server: &str, sql: &str) -> Result<()> {
 }
 
 fn run_sql_with_auth(sqlcmd: &Path, server: &str, sql_auth: SqlAuth<'_>, sql: &str) -> Result<()> {
+    ensure_online("run a statement")?;
     let output = sqlcmd_command_with_auth(sqlcmd, server, sql_auth, sql)
         .output()
         .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
@@ -7202,6 +7243,7 @@ fn run_sql_capture_with_auth(
     sql_auth: SqlAuth<'_>,
     sql: &str,
 ) -> Result<String> {
+    ensure_online("run a query")?;
     // A connection that never logged in ran nothing, so it is retried: an
     // ERP УХ audit issues thousands of these calls and died after 80 minutes
     // on one login timeout while the machine was busy.
@@ -7247,6 +7289,7 @@ fn run_sql_file_with_auth(
     sql_auth: SqlAuth<'_>,
     script: &Path,
 ) -> Result<()> {
+    ensure_online("run a script")?;
     let output = sqlcmd_file_command_with_auth(sqlcmd, server, sql_auth, script)
         .output()
         .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
@@ -7313,6 +7356,7 @@ fn bcp_command(
 }
 
 fn run_bcp(mut command: Command) -> Result<()> {
+    ensure_online("run bcp")?;
     let program = command.get_program().to_string_lossy().to_string();
     let output = command
         .output()
