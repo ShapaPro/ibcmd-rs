@@ -40,6 +40,10 @@ pub const DESIGN_TIME_REF_TYPE: &str = "5c14e26f-099b-4d37-84a6-b433d87400da";
 pub const FIXED_ARRAY_TYPE: &str = "4500381b-db30-4a10-9db4-990038032acf";
 /// `{"#",<this>,{1,<uuid>}}`: a metadata object reference (`xr:MDObjectRef`).
 pub const METADATA_OBJECT_REF_TYPE: &str = "157fa490-4ce9-11d4-9415-008048da11f9";
+/// `{"#",<this>,<pattern>}`: a `v8:TypeDescription` value.
+pub const TYPE_DESCRIPTION_TYPE: &str = "f5c65050-3bbb-11d5-b988-0050bae0a95d";
+/// `{"#",<this>,<0 active | 1 passive | 2 active-passive>}`: `ent:AccountType`.
+pub const ACCOUNT_TYPE_TYPE: &str = "872f7198-7083-4e3e-b57e-a2a9802c769e";
 
 /// Where the platform sorts its primitive pattern items among the uuid-typed
 /// ones. A pattern is ordered by type id and the primitives sort as if their
@@ -398,6 +402,26 @@ pub fn typed_value(value: Option<&Element>, context: &DescriptorContext) -> Resu
         ]),
         Some("xr:DesignTimeRef") => design_time_ref(text, context),
         Some("xr:MDObjectRef") => metadata_ref(text, context),
+        // A characteristic chart's `ValueType`: `{"#",<type description>,<pattern>}`.
+        Some("v8:TypeDescription") => Ok(brace_list![
+            Brace::str("#"),
+            Brace::uuid(TYPE_DESCRIPTION_TYPE),
+            type_pattern(Some(value), context)?,
+        ]),
+        // A chart of accounts' `Type`: `{"#",<account type>,<code>}`.
+        Some("ent:AccountType") => {
+            let code = match text.trim() {
+                "Active" => 0,
+                "Passive" => 1,
+                "ActivePassive" => 2,
+                other => bail!("unsupported account type {other}"),
+            };
+            Ok(brace_list![
+                Brace::str("#"),
+                Brace::uuid(ACCOUNT_TYPE_TYPE),
+                Brace::num(code)
+            ])
+        }
         Some("v8:FixedArray") => {
             let mut items = vec![Brace::num(0)];
             for member in value.children_named("Value") {
@@ -693,6 +717,17 @@ pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
             ("Recorder", -3),
             ("Period", -2),
         ],
+        // `ExtDimensionN` / `ExtDimensionTypeN` are not codes: see
+        // `ext_dimension_segment`.
+        "AccountingRegister" => &[
+            ("PeriodAdjustment", -30),
+            ("Account", -10),
+            ("RecordType", -9),
+            ("Active", -5),
+            ("LineNumber", -4),
+            ("Recorder", -3),
+            ("Period", -2),
+        ],
         "CalculationRegister" => &[
             ("RegistrationPeriod", -13),
             ("ReversingEntry", -11),
@@ -720,6 +755,22 @@ pub fn standard_attribute_code(owner_kind: &str, name: &str) -> Option<i64> {
         .iter()
         .find(|(candidate, _)| *candidate == name)
         .map(|(_, code)| *code)
+}
+
+/// An accounting register's `ExtDimensionN` / `ExtDimensionTypeN` standard
+/// attribute: `{N-1,<class>}`.
+fn ext_dimension_segment(owner_kind: &str, name: &str) -> Option<Brace> {
+    const EXT_DIMENSION: &str = "91162600-3161-4326-89a0-4a7cecd5092a";
+    const EXT_DIMENSION_TYPE: &str = "b3b48b29-d652-47ab-9d21-7e06768c31b5";
+    if owner_kind != "AccountingRegister" {
+        return None;
+    }
+    let (class, number) = match name.strip_prefix("ExtDimensionType") {
+        Some(number) => (EXT_DIMENSION_TYPE, number),
+        None => (EXT_DIMENSION, name.strip_prefix("ExtDimension")?),
+    };
+    let number: i64 = number.parse().ok()?;
+    Some(brace_list![Brace::num(number - 1), Brace::uuid(class)])
 }
 
 /// A field data path -> its segments.
@@ -761,6 +812,10 @@ pub fn data_path(text: &str, context: &DescriptorContext) -> Result<Vec<Brace>> 
     for pair in parts[2..].chunks(2) {
         let (member_kind, member) = (pair[0], pair[1]);
         if member_kind == "StandardAttribute" {
+            if let Some(segment) = ext_dimension_segment(section_kind, member) {
+                segments.push(segment);
+                continue;
+            }
             let code = standard_attribute_code(section_kind, member).ok_or_else(|| {
                 anyhow!("unknown standard attribute {member} of {section_kind} in {text}")
             })?;
@@ -974,8 +1029,61 @@ pub mod corpus {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use super::super::brace::serialize;
+    use super::super::index::{ConfigIndex, GeneratedType};
+    use super::super::xml::parse_element_tree;
     use super::*;
+    use crate::module_blob::MetadataSourceContext;
+
+    pub(crate) const VALUTA_TYPE: &str = "41dbb66b-ff77-4b8f-aaf8-0ca2012d3a6f";
+    pub(crate) const ENUM_TYPE: &str = "31af3c5b-3472-4ad9-86b2-453cc31d397e";
+    pub(crate) const ENUM_VALUE: &str = "b8b7b82f-9a9b-4688-8045-dcfa3d202fa6";
+    pub(crate) const ATTRIBUTE: &str = "9e7b0920-3d4f-481a-9dce-a789a4e9ef73";
+    pub(crate) const SECTION: &str = "34c16381-7743-4b26-a54e-6b35290ab531";
+    pub(crate) const SECTION_ATTRIBUTE: &str = "d1280594-c1ac-4b9a-b5ff-9a768102422a";
+
+    /// A context whose index knows a handful of names.
+    pub(crate) fn context() -> DescriptorContext {
+        let mut index = ConfigIndex::default();
+        for (name, type_id) in [
+            ("CatalogRef.Валюты", VALUTA_TYPE),
+            ("EnumRef.Виды", ENUM_TYPE),
+            ("DefinedType.Сумма", "5ddef559-eb73-4233-842e-6548a5404b56"),
+        ] {
+            index.generated_types.insert(
+                name.to_string(),
+                GeneratedType {
+                    name: name.to_string(),
+                    category: String::new(),
+                    type_id: type_id.to_string(),
+                    value_id: NIL_UUID.to_string(),
+                },
+            );
+        }
+        for (name, uuid) in [
+            ("Enum.Виды.EnumValue.Первый", ENUM_VALUE),
+            ("Catalog.Счета.Attribute.Банк", ATTRIBUTE),
+            ("Catalog.Счета.TabularSection.Строки", SECTION),
+            ("Catalog.Счета.TabularSection.Строки.Attribute.Свойство", SECTION_ATTRIBUTE),
+        ] {
+            index.children.insert(name.to_string(), uuid.to_string());
+        }
+        DescriptorContext {
+            root: PathBuf::from("."),
+            index,
+            source: MetadataSourceContext::new(PathBuf::from(".")),
+            version: "2.20".to_string(),
+        }
+    }
+
+    pub(crate) fn element(xml: &str) -> Element {
+        parse_element_tree(xml.as_bytes()).unwrap()
+    }
+
+    fn text(brace: Result<Brace>) -> String {
+        serialize(&brace.unwrap()).replace("\r\n", "")
+    }
 
     #[test]
     fn dates_uuids_and_builtins() {
@@ -992,5 +1100,96 @@ mod tests {
         );
         assert_eq!(standard_attribute_code("Catalog", "Owner"), Some(-5));
         assert_eq!(standard_attribute_code("Document", "Date"), Some(-3));
+    }
+
+    #[test]
+    fn patterns_sort_by_type_id_with_qualified_primitives() {
+        let context = context();
+        let description = element(
+            r##"<Type xmlns:v8="v8"><v8:Type>xs:string</v8:Type><v8:Type>xs:boolean</v8:Type><v8:TypeSet>cfg:CatalogRef</v8:TypeSet><v8:Type>cfg:CatalogRef.Валюты</v8:Type><v8:Type>xs:decimal</v8:Type><v8:Type>xs:dateTime</v8:Type><v8:StringQualifiers><v8:Length>10</v8:Length><v8:AllowedLength>Fixed</v8:AllowedLength></v8:StringQualifiers><v8:NumberQualifiers><v8:Digits>15</v8:Digits><v8:FractionDigits>2</v8:FractionDigits><v8:AllowedSign>Nonnegative</v8:AllowedSign></v8:NumberQualifiers><v8:DateQualifiers><v8:DateFractions>Date</v8:DateFractions></v8:DateQualifiers></Type>"##,
+        );
+        assert_eq!(
+            text(type_pattern(Some(&description), &context)),
+            format!(
+                r##"{{"Pattern",{{"#",{VALUTA_TYPE}}},{{"B"}},{{"S",10,0}},{{"D","D"}},{{"N",15,2,1}},{{"#",e61ef7b8-f3e1-4f4b-8ac7-676e90524997}}}}"##
+            )
+        );
+        let unlimited = element(
+            r##"<Type><v8:Type>xs:string</v8:Type><v8:Type>xs:decimal</v8:Type><v8:StringQualifiers><v8:Length>0</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers><v8:NumberQualifiers><v8:Digits>0</v8:Digits><v8:FractionDigits>0</v8:FractionDigits><v8:AllowedSign>Any</v8:AllowedSign></v8:NumberQualifiers></Type>"##,
+        );
+        assert_eq!(
+            text(type_pattern(Some(&unlimited), &context)),
+            r##"{"Pattern",{"S"},{"N"}}"##
+        );
+        let defined = element(r##"<Type><v8:TypeSet>cfg:DefinedType.Сумма</v8:TypeSet></Type>"##);
+        assert_eq!(
+            text(type_pattern(Some(&defined), &context)),
+            r##"{"Pattern",{"#",5ddef559-eb73-4233-842e-6548a5404b56}}"##
+        );
+        assert_eq!(text(type_pattern(None, &context)), r##"{"Pattern"}"##);
+    }
+
+    #[test]
+    fn typed_values() {
+        let context = context();
+        let value = |xml: &str| text(typed_value(Some(&element(xml)), &context));
+        assert_eq!(value(r##"<FillValue xsi:nil="true"/>"##), r##"{"U"}"##);
+        assert_eq!(value(r##"<FillValue xsi:type="xs:string"/>"##), r##"{"S",""}"##);
+        assert_eq!(
+            serialize(&typed_value(Some(&element("<V xsi:type=\"xs:string\">a\nb</V>")), &context).unwrap()),
+            "{\"S\",\"a\r\nb\"}"
+        );
+        assert_eq!(value(r##"<V xsi:type="xs:decimal">0.5</V>"##), r##"{"N",0.5}"##);
+        assert_eq!(value(r##"<V xsi:type="xs:boolean">true</V>"##), r##"{"B",1}"##);
+        assert_eq!(
+            value(r##"<V xsi:type="xs:dateTime">0001-01-01T23:59:59</V>"##),
+            r##"{"D",00010101235959}"##
+        );
+        assert_eq!(
+            value(r##"<V xsi:type="xr:DesignTimeRef">Catalog.Валюты.EmptyRef</V>"##),
+            format!(r##"{{"#",{DESIGN_TIME_REF_TYPE},{{0,{VALUTA_TYPE},{NIL_UUID}}}}}"##)
+        );
+        assert_eq!(
+            value(r##"<V xsi:type="xr:DesignTimeRef"/>"##),
+            format!(r##"{{"#",{DESIGN_TIME_REF_TYPE},{{0,{NIL_UUID},{NIL_UUID}}}}}"##)
+        );
+        assert_eq!(
+            value(
+                r##"<V xsi:type="v8:FixedArray"><v8:Value xsi:type="xr:DesignTimeRef">Enum.Виды.EnumValue.Первый</v8:Value><v8:Value xsi:type="xs:decimal">30</v8:Value></V>"##
+            ),
+            format!(
+                r##"{{"#",{FIXED_ARRAY_TYPE},{{2,{{"#",{DESIGN_TIME_REF_TYPE},{{0,{ENUM_TYPE},{ENUM_VALUE}}}}},{{"N",30}}}}}}"##
+            )
+        );
+    }
+
+    #[test]
+    fn data_paths() {
+        let context = context();
+        let path = |text: &str| {
+            data_path(text, &context)
+                .unwrap()
+                .iter()
+                .map(serialize)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(path("Catalog.Счета.Attribute.Банк"), format!("{{0,{ATTRIBUTE}}}"));
+        assert_eq!(
+            path("Catalog.Счета.TabularSection.Строки.Attribute.Свойство"),
+            format!("{{0,{SECTION}}}|{{0,{SECTION_ATTRIBUTE}}}")
+        );
+        assert_eq!(path("Catalog.Счета.StandardAttribute.Owner"), "{-5}");
+        assert_eq!(path("Document.Акт.StandardAttribute.Date"), "{-3}");
+        assert_eq!(
+            path("AccountingRegister.Хозрасчетный.StandardAttribute.ExtDimension2"),
+            "{1,91162600-3161-4326-89a0-4a7cecd5092a}"
+        );
+        assert_eq!(path("-8"), "{-8}");
+        assert_eq!(path("0"), "{0}");
+        assert_eq!(
+            path(&format!("0:{SECTION}/0:{ATTRIBUTE}")),
+            format!("{{0,{SECTION}}}|{{0,{ATTRIBUTE}}}")
+        );
     }
 }
