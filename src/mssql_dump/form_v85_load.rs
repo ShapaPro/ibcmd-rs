@@ -1925,6 +1925,21 @@ pub(crate) fn compile_v85_native_form_body(
     up_convert_v83_form_body(&body, &facts)
 }
 
+/// A 2.21 Form.xml stored in the 8.3.27 layout: its 8.3.27 reading through
+/// the 8.3.27 writer, without the 8.5 up-conversion -- what a configuration
+/// kept in an 8.3 compatibility mode stores under 8.5 (every form of the
+/// ERP УХ 8.5 clone).
+pub(crate) fn compile_v85_form_body_in_v83_layout(
+    form_xml: &[u8],
+    module_text: Option<&[u8]>,
+    source: Option<&MetadataSourceContext>,
+    items_root: Option<&Path>,
+) -> Result<String> {
+    let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
+    let (xml20, _) = down_convert_v85_form_xml(xml, source, items_root)?;
+    crate::module_blob::compile_native_form_body_v83(xml20.as_bytes(), module_text, source, items_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
