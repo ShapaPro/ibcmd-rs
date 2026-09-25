@@ -9,6 +9,7 @@
 //! kind against the rows a platform stored.
 
 pub mod audit;
+pub mod export;
 pub mod brace;
 pub mod index;
 pub mod xml;
@@ -20,6 +21,12 @@ pub mod types;
 
 // Kind families, one track each.
 pub mod common;
+// Base-free body rows of track D: predefined data, flowcharts, aggregates.
+pub mod bodies_aggregates;
+pub mod bodies_flowchart;
+pub mod bodies_predefined;
+pub mod bodies_rows;
+pub mod bodies_value_table;
 pub mod objects;
 pub mod registers;
 pub mod root;
@@ -112,9 +119,28 @@ pub fn localized(element: Option<&Element>) -> Brace {
     let mut items = vec![Brace::num(pairs.len() as i64)];
     for (lang, content) in pairs {
         items.push(Brace::str(lang));
-        items.push(Brace::str(content));
+        items.push(Brace::str(native_text(&content)));
     }
     Brace::List(items)
+}
+
+/// XML text -> the stored string: the XML carries a line break as a bare LF,
+/// the row as CRLF (every multi-line string of the 4 932 BSP descriptor rows
+/// is CRLF-only).
+pub fn native_text(text: &str) -> String {
+    if !text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut previous = ' ';
+    for ch in text.chars() {
+        if ch == '\n' && previous != '\r' {
+            out.push('\r');
+        }
+        out.push(ch);
+        previous = ch;
+    }
+    out
 }
 
 /// The block every metadata object and child object starts with:
@@ -125,7 +151,9 @@ pub fn md_base(uuid: &str, properties: &Element) -> Brace {
         brace_list![Brace::num(1), Brace::num(0), Brace::uuid(uuid)],
         Brace::str(properties.child_text("Name").unwrap_or_default()),
         localized(properties.child("Synonym")),
-        Brace::str(properties.child_text("Comment").unwrap_or_default()),
+        Brace::str(native_text(
+            properties.child_text("Comment").unwrap_or_default()
+        )),
         Brace::num(0),
         Brace::num(0),
         Brace::nil_uuid(),
@@ -196,7 +224,9 @@ pub fn compile_object(object: &ObjectXml<'_>, context: &DescriptorContext) -> Re
         "CommonModule" | "CommonPicture" | "CommonTemplate" | "CommonCommand" | "CommandGroup"
         | "Role" | "XDTOPackage" | "StyleItem" | "Style" | "WebService" | "HTTPService"
         | "WSReference" | "IntegrationService" | "Bot" | "ExternalDataSource" | "Subsystem"
-        | "Form" | "Template" | "CommonForm" | "Interface" => common::compile(object, context),
+        | "Form" | "Template" | "CommonForm" | "Interface" | "PaletteColor" => {
+            common::compile(object, context)
+        }
         "Configuration" => root::compile(object, context),
         other => bail!("unknown metadata kind {other}"),
     }

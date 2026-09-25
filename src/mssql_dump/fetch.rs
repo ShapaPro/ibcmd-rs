@@ -11,6 +11,7 @@ use serde::Serialize;
 
 #[cfg(test)]
 use super::encode_hex_lower;
+use super::offline_rows;
 use super::{
     BinaryConfigRow, ConfigChunkRow, ConfigRow, ConfigRowHeader, qualified_storage_table,
     quote_string,
@@ -315,6 +316,11 @@ pub(super) fn fetch_rows(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRow>> {
+    if let Some(offline) = offline_rows::active() {
+        return Ok(config_rows_from_binary(
+            offline.rows_named(table, selected_file_names)?,
+        ));
+    }
     let sql = build_fetch_rows_sql(database, table, selected_file_names);
     let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
     let chunks = parse_config_chunk_rows(&stdout)
@@ -333,6 +339,11 @@ pub(super) fn fetch_rows_direct_hex(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRow>> {
+    if let Some(offline) = offline_rows::active() {
+        return Ok(config_rows_from_binary(
+            offline.rows_named(table, selected_file_names)?,
+        ));
+    }
     let sql = build_fetch_rows_direct_hex_sql(database, table, selected_file_names);
     let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
     parse_config_direct_rows(&stdout)
@@ -350,6 +361,14 @@ pub(super) fn fetch_binary_rows_bcp(
     selected_file_names: &BTreeSet<String>,
     use_range_filter: bool,
 ) -> Result<Vec<BinaryConfigRow>> {
+    if let Some(offline) = offline_rows::active() {
+        // A range filter only stands in for the exact batch it was built
+        // from, so the folder answers the batch itself.
+        return Ok(apply_row_overrides(
+            table,
+            offline.rows_named(table, selected_file_names)?,
+        ));
+    }
     if !selected_file_names.is_empty() && !use_range_filter {
         let batches = split_selected_file_names_for_bcp_query(
             database,
@@ -405,6 +424,9 @@ pub(crate) fn fetch_config_part0_rows_bcp(
     password: Option<&str>,
     database: &str,
 ) -> Result<std::collections::HashMap<String, Vec<u8>>> {
+    if let Some(offline) = offline_rows::active() {
+        return offline.part0_rows();
+    }
     let query = format!(
         "SELECT FileName, PartNo, DataSize, BinaryData FROM {}.dbo.Config WHERE PartNo = 0",
         super::quote_ident(database)
@@ -428,6 +450,12 @@ fn fetch_binary_row_parts_bcp_query(
     table: &str,
     query: &str,
 ) -> Result<Vec<BinaryConfigRow>> {
+    if offline_rows::active().is_some() {
+        return Err(offline_rows::refuse(&format!(
+            "the bcp query {}",
+            query_marker(query)
+        )));
+    }
     let output_path = std::env::temp_dir().join(format!(
         "ibcmd-rs-bcp-{}-{}.bcp",
         std::process::id(),
@@ -566,6 +594,11 @@ pub(super) fn fetch_metadata_rows(
     database: &str,
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
+    if let Some(offline) = offline_rows::active() {
+        return Ok(config_rows_from_binary(
+            offline.rows(table, |file_name| !file_name.contains('.'))?,
+        ));
+    }
     let sql = build_fetch_metadata_rows_sql(database, table);
     let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
     let chunks = parse_config_chunk_rows(&stdout)
@@ -583,6 +616,10 @@ pub(super) fn fetch_metadata_rows_bcp(
     database: &str,
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
+    if let Some(offline) = offline_rows::active() {
+        let rows = offline.rows(table, |file_name| !file_name.contains('.'))?;
+        return Ok(config_rows_from_binary(apply_row_overrides(table, rows)));
+    }
     let query = build_fetch_metadata_rows_bcp_query(database, table);
     let rows = fetch_binary_rows_bcp_query(bcp, server, user, password, database, table, &query)?;
     Ok(config_rows_from_binary(rows))
@@ -600,6 +637,18 @@ pub(super) fn fetch_metadata_owner_rows_bcp(
 ) -> Result<Vec<ConfigRow>> {
     if metadata_file_names.is_empty() {
         return Ok(Vec::new());
+    }
+    if let Some(offline) = offline_rows::active() {
+        // `FileName = N'<name>' OR FileName LIKE N'<name>.%'`; the names
+        // carry no dot, so the owner of a dotted row is what precedes its
+        // first dot.
+        let rows = offline.rows(table, |file_name| {
+            metadata_file_names.contains(file_name)
+                || file_name
+                    .split_once('.')
+                    .is_some_and(|(owner, _)| metadata_file_names.contains(owner))
+        })?;
+        return Ok(config_rows_from_binary(apply_row_overrides(table, rows)));
     }
 
     let batches = split_selected_file_names_for_owner_rows_query(
@@ -862,6 +911,9 @@ pub(super) fn fetch_row_headers(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRowHeader>> {
+    if let Some(offline) = offline_rows::active() {
+        return offline.headers(table, selected_file_names);
+    }
     if !selected_file_names.is_empty() {
         let batches = split_selected_file_names_for_row_headers_query(
             database,
@@ -1487,6 +1539,12 @@ pub(super) fn run_sql_capture_tsv_with_policy(
     trust_server_certificate: bool,
     sql: &str,
 ) -> Result<String> {
+    if offline_rows::active().is_some() {
+        return Err(offline_rows::refuse(&format!(
+            "the sqlcmd query {}",
+            query_marker(sql)
+        )));
+    }
     let mut arguments = vec!["-S".to_owned(), server.to_owned()];
     if trust_server_certificate {
         arguments.insert(0, "-C".to_owned());

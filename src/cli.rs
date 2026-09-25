@@ -74,6 +74,10 @@ pub enum Commands {
     /// rows, no database) and compare it with a stored Config row set.
     #[command(hide = true)]
     AuditEmptyStage(AuditEmptyStageArgs),
+    /// Measure the export direction of the descriptor model: decode every
+    /// stored row, write its XML and compare it with the tree's file.
+    #[command(hide = true)]
+    AuditMetadataExport(AuditMetadataExportArgs),
     /// Build a load plan by comparing manifests.
     Plan(PlanArgs),
     /// Compare two 1C XML source trees by path and content hash.
@@ -1017,6 +1021,34 @@ pub struct AuditMetadataCompilerArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AuditMetadataExportArgs {
+    /// Root folder with the native 1C XML sources (the oracle).
+    pub root: PathBuf,
+    /// Folder with the stored Config rows of the same database
+    /// (`<FileName>__part0.bin`, raw deflate, or `<FileName>__part0.txt`).
+    pub rows: PathBuf,
+    /// XML dialect of the tree: 2.20 (8.3.27) or 2.21 (8.5); read from
+    /// Configuration.xml when omitted.
+    #[arg(long)]
+    pub source_version: Option<String>,
+    /// Only this kind, e.g. `Catalog` (repeatable).
+    #[arg(long = "kind")]
+    pub kinds: Vec<String>,
+    /// Write the expected and the written XML of differing samples here.
+    #[arg(long)]
+    pub diff_dir: Option<PathBuf>,
+    /// Differing samples kept per kind.
+    #[arg(long, default_value_t = 5)]
+    pub max_samples: usize,
+    /// Also time decode + write over preloaded rows with this many threads.
+    #[arg(long)]
+    pub timing_threads: Option<usize>,
+    /// Optional JSON report.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct AuditEmptyStageArgs {
     /// Root folder with the native 1C XML sources.
     pub root: PathBuf,
@@ -1323,9 +1355,14 @@ pub struct MssqlDumpConfigArgs {
     /// Environment variable containing the SQL Server password.
     #[arg(long, default_value = "IBCMD_DB_PSW")]
     pub sql_pwd_env: String,
-    /// SQL Server database name.
-    #[arg(long)]
+    /// SQL Server database name (not needed with --rows-dir).
+    #[arg(long, default_value = "")]
     pub database: String,
+    /// Read the Config table from a folder of `<FileName>__part<N>.bin`
+    /// files (the stored BinaryData, raw deflate) instead of SQL Server; no
+    /// server or database is contacted.
+    #[arg(long)]
+    pub rows_dir: Option<PathBuf>,
     /// Output directory for dumped rows and manifest.json.
     #[arg(short, long)]
     pub output_dir: PathBuf,
