@@ -34164,7 +34164,7 @@ const STANDARD_PICTURES: &[(&str, &str)] = &[
 static STANDARD_PICTURE_NAMES: LazyLock<HashMap<&'static str, &'static str>> =
     LazyLock::new(|| STANDARD_PICTURES.iter().copied().collect());
 
-fn standard_picture_name(uuid: &str) -> Option<&'static str> {
+pub(crate) fn standard_picture_name(uuid: &str) -> Option<&'static str> {
     STANDARD_PICTURE_NAMES
         .get(uuid.to_ascii_lowercase().as_str())
         .copied()
