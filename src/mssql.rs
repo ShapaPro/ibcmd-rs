@@ -4945,7 +4945,9 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
         .split_once("<document")
         .and_then(|(_, rest)| rest.split_once('>'))
         .is_some_and(|(open, _)| open.contains("xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\""));
-    if !root_declares_palette {
+    if !root_declares_palette
+        || crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    {
         return Ok(packed);
     }
     let plain = crate::module_blob::inflate_raw(&packed)
@@ -5545,6 +5547,21 @@ fn prepare_form_body_row(
     let form_path = infer_form_body_path(xml_path);
     let module_path = infer_form_module_body_path(xml_path);
     if !form_path.exists() && !module_path.exists() {
+        // An ordinary form's body is `Ext/Form.bin`, the stored row
+        // inflated (ERP УХ: all 9). A load onto a database keeps the
+        // target's row; an empty infobase has none to keep.
+        let ordinary = form_path.with_extension("bin");
+        if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) && ordinary.is_file() {
+            let bytes = fs::read(&ordinary)
+                .with_context(|| format!("failed to read {}", ordinary.display()))?;
+            let blob = crate::module_blob::deflate_raw(&bytes)?;
+            return Ok(vec![PreparedMetadataBodyStage {
+                body_id: format!("{}.0", properties.uuid),
+                path: ordinary,
+                blob_sha256: hex_sha256(&blob),
+                blob,
+            }]);
+        }
         return Ok(Vec::new());
     }
     if let Some(reason) = crate::compiler::unsupported_axes_reason(axes) {
@@ -6150,7 +6167,12 @@ fn nested_command_module_sources(
     xml: &[u8],
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<NestedCommandModuleSource>> {
-    if !metadata_kind_can_own_commands(&properties.kind) {
+    // A filter criterion owns commands too (ERP УХ: two command modules); a
+    // load onto a database has always left their rows to the target, an
+    // empty infobase needs them staged.
+    let filter_criterion_in_empty_stage = properties.kind == "FilterCriterion"
+        && BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed);
+    if !metadata_kind_can_own_commands(&properties.kind) && !filter_criterion_in_empty_stage {
         return Ok(Vec::new());
     }
     let commands_dir = xml_path.with_extension("").join("Commands");

@@ -223,7 +223,9 @@ pub fn compile_object(object: &ObjectXml<'_>, context: &DescriptorContext) -> Re
         "CommonModule" | "CommonPicture" | "CommonTemplate" | "CommonCommand" | "CommandGroup"
         | "Role" | "XDTOPackage" | "StyleItem" | "Style" | "WebService" | "HTTPService"
         | "WSReference" | "IntegrationService" | "Bot" | "ExternalDataSource" | "Subsystem"
-        | "Form" | "Template" | "CommonForm" | "Interface" => common::compile(object, context),
+        | "Form" | "Template" | "CommonForm" | "Interface" | "PaletteColor" => {
+            common::compile(object, context)
+        }
         "Configuration" => root::compile(object, context),
         other => bail!("unknown metadata kind {other}"),
     }

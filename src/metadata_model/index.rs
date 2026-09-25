@@ -46,6 +46,8 @@ pub struct ConfigIndex {
     pub generated_types: HashMap<String, GeneratedType>,
     /// The tree's `Configuration.xml` uuid.
     pub configuration_uuid: Option<String>,
+    /// `<CompatibilityMode>` of `Configuration.xml` (`Version8_3_24`, ...).
+    pub compatibility_mode: Option<String>,
 }
 
 /// `Catalogs` -> `Catalog`; nested collections use the same folder names.
@@ -101,6 +103,7 @@ pub fn kind_of_collection(folder: &str) -> Option<&'static str> {
         "Templates" => "Template",
         "Recalculations" => "Recalculation",
         "Interfaces" => "Interface",
+        "PaletteColors" => "PaletteColor",
         _ => return None,
     })
 }
@@ -113,6 +116,7 @@ struct Parsed {
     uuid: String,
     children: Vec<(String, String)>,
     generated: Vec<GeneratedType>,
+    compatibility_mode: Option<String>,
 }
 
 impl ConfigIndex {
@@ -134,6 +138,7 @@ impl ConfigIndex {
         for item in parsed {
             let full_name = if item.kind == "Configuration" {
                 index.configuration_uuid = Some(item.uuid.clone());
+                index.compatibility_mode = item.compatibility_mode.clone();
                 "Configuration".to_string()
             } else {
                 let parts = item
@@ -188,6 +193,14 @@ impl ConfigIndex {
     pub fn generated_type(&self, name: &str) -> Option<&GeneratedType> {
         self.generated_types.get(name)
     }
+
+    /// The configuration's compatibility mode as `(major, minor, release)`
+    /// (`Version8_3_24` -> `(8, 3, 24)`); `None` when absent or `DontUse`.
+    pub fn compatibility_version(&self) -> Option<(u32, u32, u32)> {
+        let mode = self.compatibility_mode.as_deref()?.strip_prefix("Version")?;
+        let mut parts = mode.split('_').map(|part| part.parse::<u32>().ok());
+        Some((parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(0)))
+    }
 }
 
 fn parse_one(root: &Path, path: &Path) -> Result<Option<Parsed>> {
@@ -217,6 +230,10 @@ fn parse_one(root: &Path, path: &Path) -> Result<Option<Parsed>> {
     if let Some(child_objects) = object.child("ChildObjects") {
         collect_children(child_objects, "", &mut children, &mut generated);
     }
+    let compatibility_mode = (object.name == "Configuration")
+        .then(|| object.path(&["Properties", "CompatibilityMode"]))
+        .flatten()
+        .map(|mode| mode.text.clone());
     Ok(Some(Parsed {
         relative,
         path: path.to_path_buf(),
@@ -225,6 +242,7 @@ fn parse_one(root: &Path, path: &Path) -> Result<Option<Parsed>> {
         uuid: uuid.to_ascii_lowercase(),
         children,
         generated,
+        compatibility_mode,
     }))
 }
 

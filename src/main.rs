@@ -288,6 +288,7 @@ fn run() -> Result<()> {
                 max_samples: args.max_samples,
                 diff_dir: args.diff_dir,
                 manifest: args.manifest,
+                rows_out: args.rows_out,
             };
             let report = ibcmd_rs::mssql::audit_empty_stage(
                 &args.root,
