@@ -717,6 +717,8 @@ fn classify_required_base(
     reason: &str,
     label: &str,
 ) -> Result<StorageKey> {
+    let reason = bounded_patch_reason(reason);
+    let reason = reason.as_str();
     let required = StorageKey::new(body_id)?;
     let dependency = compile_mssql_source(
         axes,
@@ -725,6 +727,23 @@ fn classify_required_base(
         SourcePayload::NeedsBase { required, reason },
     )?;
     required_base_key(&dependency, label)
+}
+
+/// A base-row reason within the storage patch bound: a blocker list can run
+/// past it (БСП `ВыгрузкаЗагрузкаДанныхXML/Forms/Форма`: 6 674 bytes), and the
+/// reason only explains why a base row is read, so the tail is cut rather than
+/// failing the load.
+fn bounded_patch_reason(reason: &str) -> String {
+    const LIMIT: usize = ibcmd_core::storage::MAX_STORAGE_PATCH_REASON_BYTES;
+    if reason.len() <= LIMIT {
+        return reason.to_string();
+    }
+    let note = format!(" ... ({} bytes in all)", reason.len());
+    let mut cut = LIMIT - note.len();
+    while !reason.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{note}", &reason[..cut])
 }
 
 fn classify_versions_dependency(
@@ -5726,11 +5745,13 @@ fn prepare_form_body_row(
         None
     };
     let form_item_assets_root = form_path.with_extension("").join("Items");
-    // The native writer compiles a Form.xml from the source alone. It is the
-    // first choice for a form that is new or changed; one it refuses falls
-    // back to the older paths below. `IBCMD_RS_NATIVE_FORM_WRITER=always`
-    // also recompiles the forms that did not change, which is what a full
-    // load-and-export round trip measures.
+    // The native writer compiles a Form.xml from the source alone and is the
+    // first choice for every form: every verified load-and-export cycle
+    // (virtual and real, БСП and ERP УХ, 8.3.27 and 8.5) ran it that way, then
+    // behind the opt-in `IBCMD_RS_NATIVE_FORM_WRITER=always`. A form it refuses
+    // falls back to the older paths below. `IBCMD_RS_NATIVE_FORM_WRITER=never`
+    // restores the older order, in which a form with item assets first tries
+    // to keep the target's own row unchanged.
     let native_items_root = form_path.with_file_name("Form").join("Items");
     let native = || {
         (!form_xml.is_empty())
@@ -5746,7 +5767,7 @@ fn prepare_form_body_row(
             .flatten()
     };
     let force_native =
-        std::env::var("IBCMD_RS_NATIVE_FORM_WRITER").is_ok_and(|value| value == "always");
+        std::env::var("IBCMD_RS_NATIVE_FORM_WRITER").map_or(true, |value| value != "never");
     if force_native && let Some(packed) = native() {
         return Ok(vec![PreparedMetadataBodyStage {
             body_id,

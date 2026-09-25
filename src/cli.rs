@@ -161,6 +161,10 @@ pub enum Commands {
     /// Stage all common module objects found under a source tree.
     MssqlStageSourceCommonModuleObjects(MssqlStageSourceCommonModuleObjectsArgs),
     /// Stage all supported root XML objects and common modules found under a source tree.
+    ///
+    /// Forms are compiled by the native form writer first; set
+    /// IBCMD_RS_NATIVE_FORM_WRITER=never for the older order, which keeps a
+    /// target's unchanged form row when the form has item assets.
     MssqlStageSourceObjects(MssqlStageSourceObjectsArgs),
     /// Stage one exchange plan object from XML.
     MssqlStageExchangePlanObject(MssqlStageExchangePlanObjectArgs),
