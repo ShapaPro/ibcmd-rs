@@ -9,8 +9,8 @@
 //! kind against the rows a platform stored.
 
 pub mod audit;
-pub mod export;
 pub mod brace;
+pub mod export;
 pub mod index;
 pub mod xml;
 

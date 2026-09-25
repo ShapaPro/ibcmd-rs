@@ -117,7 +117,9 @@ pub(crate) fn parse_list_path(text: &str, list: &str, tables: &[String]) -> Opti
 
 fn prefixes(rest: &str) -> Vec<String> {
     let parts = rest.split('.').collect::<Vec<_>>();
-    (1..=parts.len()).map(|count| parts[..count].join(".")).collect()
+    (1..=parts.len())
+        .map(|count| parts[..count].join("."))
+        .collect()
 }
 
 /// A marked entry's variant: `Some(twin)`; `None` for a plain one.
@@ -153,7 +155,13 @@ impl FieldMap {
 
     /// `claim`: the plain entry a marked one needs before it, added for that
     /// alone; a plain reference to the same name later makes it a real one.
-    fn add_entry(&mut self, name: &str, variant: Variant, secondary: Option<String>, claim: bool) -> usize {
+    fn add_entry(
+        &mut self,
+        name: &str,
+        variant: Variant,
+        secondary: Option<String>,
+        claim: bool,
+    ) -> usize {
         let key = (name.to_string(), variant.clone());
         if let Some(index) = self.by_key.get(&key) {
             if !claim {
@@ -246,18 +254,33 @@ impl FieldMap {
     pub(crate) fn pairs(&self, required: &[String]) -> Vec<(String, String)> {
         let mut pairs = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            pairs.push((format!("FieldsMapItemId{index}"), format!("{{\"N\",{}}}", entry.id)));
-            pairs.push((format!("FieldsMapItemName{index}"), format!("{{\"S\",{}}}", quoted(&entry.name))));
+            pairs.push((
+                format!("FieldsMapItemId{index}"),
+                format!("{{\"N\",{}}}", entry.id),
+            ));
+            pairs.push((
+                format!("FieldsMapItemName{index}"),
+                format!("{{\"S\",{}}}", quoted(&entry.name)),
+            ));
             if let Some(secondary) = entry.secondary.as_deref().filter(|value| !value.is_empty()) {
                 pairs.push((
                     format!("FieldsMapItemSecondaryName{index}"),
                     format!("{{\"S\",{}}}", quoted(secondary)),
                 ));
             }
-            pairs.push((format!("FiledsMapItemId{index}"), format!("{{\"N\",{}}}", entry.id)));
-            pairs.push((format!("FiledsMapItemName{index}"), format!("{{\"S\",{}}}", quoted(&entry.name))));
+            pairs.push((
+                format!("FiledsMapItemId{index}"),
+                format!("{{\"N\",{}}}", entry.id),
+            ));
+            pairs.push((
+                format!("FiledsMapItemName{index}"),
+                format!("{{\"S\",{}}}", quoted(&entry.name)),
+            ));
         }
-        pairs.push(("FieldsMapSecondaryNamesLoaded".to_string(), "{\"B\",1}".to_string()));
+        pairs.push((
+            "FieldsMapSecondaryNamesLoaded".to_string(),
+            "{\"B\",1}".to_string(),
+        ));
         let mut required = required.to_vec();
         required.sort_by_key(|id| id.parse::<i64>().unwrap_or(i64::MAX));
         for (index, id) in required.iter().enumerate() {
@@ -346,13 +369,17 @@ fn scan_tags(text: &str) -> Result<Vec<Tag>> {
             if rest.is_empty() || rest.starts_with('/') {
                 break;
             }
-            let eq = rest.find('=').ok_or_else(|| anyhow!("an attribute without a value"))?;
+            let eq = rest
+                .find('=')
+                .ok_or_else(|| anyhow!("an attribute without a value"))?;
             let key = rest[..eq].trim().to_string();
             let after = rest[eq + 1..].trim_start();
             let after = after
                 .strip_prefix('"')
                 .ok_or_else(|| anyhow!("an attribute value is not double-quoted"))?;
-            let value_end = after.find('"').ok_or_else(|| anyhow!("an unterminated attribute value"))?;
+            let value_end = after
+                .find('"')
+                .ok_or_else(|| anyhow!("an unterminated attribute value"))?;
             attributes.push((key, after[..value_end].to_string()));
             rest = &after[value_end + 1..];
         }
@@ -548,7 +575,9 @@ fn convert_block(
             scope_in.frames.pop();
             scope_out.frames.pop();
             depth -= 1;
-            let name = names.pop().ok_or_else(|| anyhow!("an unbalanced settings block"))?;
+            let name = names
+                .pop()
+                .ok_or_else(|| anyhow!("an unbalanced settings block"))?;
             out.push_str(&format!("</{name}>"));
             continue;
         }
@@ -578,28 +607,34 @@ fn convert_block(
             if tag.name == "CalculatedField" {
                 element_local = "ExpressionField".to_string();
                 attributes.retain(|(key, _)| key != "xsi:type");
-                attributes.insert(0, ("xsi:type".to_string(), "dcssch:CalculatedField".to_string()));
-            } else if tag.name == "Parameter" && !attributes.iter().any(|(key, _)| key == "xsi:type") {
+                attributes.insert(
+                    0,
+                    ("xsi:type".to_string(), "dcssch:CalculatedField".to_string()),
+                );
+            } else if tag.name == "Parameter"
+                && !attributes.iter().any(|(key, _)| key == "xsi:type")
+            {
                 attributes.insert(0, ("xsi:type".to_string(), "dcssch:Parameter".to_string()));
             }
         }
         scope_out.frames.push(Vec::new());
         let mut declarations = Vec::<(String, String)>::new();
         let mut generated = 0usize;
-        let mut declare = |scope_out: &mut Scope, declarations: &mut Vec<(String, String)>, namespace: &str| {
-            let prefix = match fixed_prefix(namespace) {
-                Some(prefix) => prefix.to_string(),
-                None => {
-                    generated += 1;
-                    format!("d{depth}p{generated}")
+        let mut declare =
+            |scope_out: &mut Scope, declarations: &mut Vec<(String, String)>, namespace: &str| {
+                let prefix = match fixed_prefix(namespace) {
+                    Some(prefix) => prefix.to_string(),
+                    None => {
+                        generated += 1;
+                        format!("d{depth}p{generated}")
+                    }
+                };
+                declarations.push((prefix.clone(), namespace.to_string()));
+                if let Some(frame) = scope_out.frames.last_mut() {
+                    frame.push((prefix.clone(), namespace.to_string()));
                 }
+                prefix
             };
-            declarations.push((prefix.clone(), namespace.to_string()));
-            if let Some(frame) = scope_out.frames.last_mut() {
-                frame.push((prefix.clone(), namespace.to_string()));
-            }
-            prefix
-        };
         let mut default_declaration = None;
         let current_default = scope_out.namespace_of("").unwrap_or("").to_string();
         let out_name = if element_namespace == current_default {
@@ -635,7 +670,11 @@ fn convert_block(
                 };
                 out_attributes.push((
                     key.clone(),
-                    if prefix.is_empty() { local } else { format!("{prefix}:{local}") },
+                    if prefix.is_empty() {
+                        local
+                    } else {
+                        format!("{prefix}:{local}")
+                    },
                 ));
             } else if key.contains(':') && !key.starts_with("xsi:") {
                 return Err(anyhow!("an attribute {key} is not measured"));
@@ -703,16 +742,18 @@ fn convert_block(
                     Some(prefix) => prefix,
                     None => declare(&mut scope_out, &mut declarations, &namespace),
                 };
-                let rendered = if prefix.is_empty() { local } else { format!("{prefix}:{local}") };
+                let rendered = if prefix.is_empty() {
+                    local
+                } else {
+                    format!("{prefix}:{local}")
+                };
                 replace_next_text = Some(raw.replace(value, &rendered));
             }
         }
         let type_body = (element_namespace == CORE
             && matches!(element_local.as_str(), "Type" | "TypeSet"))
             || typed(CORE, "Type");
-        if type_body
-            && let Some(raw) = next_text
-        {
+        if type_body && let Some(raw) = next_text {
             let value = raw.trim();
             if !value.is_empty() {
                 let (namespace, local) = scope_in.expand(value)?;
@@ -723,7 +764,11 @@ fn convert_block(
                         Some(prefix) => prefix,
                         None => declare(&mut scope_out, &mut declarations, &namespace),
                     };
-                    if prefix.is_empty() { local } else { format!("{prefix}:{local}") }
+                    if prefix.is_empty() {
+                        local
+                    } else {
+                        format!("{prefix}:{local}")
+                    }
                 };
                 replace_next_text = Some(raw.replace(value, &rendered));
             }
@@ -796,7 +841,10 @@ fn retype(document: &str, configuration: &ListConfiguration<'_>) -> Result<Strin
             members.push((is_set, value, separator));
             cursor = after + separator_len;
         }
-        let separators = members.iter().map(|(_, _, separator)| separator.clone()).collect::<Vec<_>>();
+        let separators = members
+            .iter()
+            .map(|(_, _, separator)| separator.clone())
+            .collect::<Vec<_>>();
         let mut builtin = Vec::new();
         let mut references = Vec::<(String, String)>::new();
         for (is_set, value, _) in &members {
@@ -810,7 +858,10 @@ fn retype(document: &str, configuration: &ListConfiguration<'_>) -> Result<Strin
                 } else {
                     (configuration.type_id)(name, false)?
                 };
-                references.push((id.clone(), format!("<TypeId xmlns=\"{CORE}\">{id}</TypeId>")));
+                references.push((
+                    id.clone(),
+                    format!("<TypeId xmlns=\"{CORE}\">{id}</TypeId>"),
+                ));
             } else if *is_set {
                 return Err(anyhow!("a builtin type set {value} is not measured"));
             } else {
@@ -991,12 +1042,16 @@ fn children_blocks(inner: Option<&str>, shift: usize) -> Result<Vec<(String, usi
 
 /// `ServerState`: the `<Settings>` children `Field`, `Parameter` and
 /// `CalculatedField` as a `<UniversalListServerOnlyState>` document, framed.
-fn server_state(children: &[(String, String)], configuration: &ListConfiguration<'_>) -> Result<String> {
+fn server_state(
+    children: &[(String, String)],
+    configuration: &ListConfiguration<'_>,
+) -> Result<String> {
     let blocks = children
         .iter()
         .filter(|(name, _)| matches!(name.as_str(), "Field" | "Parameter" | "CalculatedField"))
         .collect::<Vec<_>>();
-    let open = format!("<UniversalListServerOnlyState xmlns=\"\" xmlns:xs=\"{XS}\" xmlns:xsi=\"{XSI}\"");
+    let open =
+        format!("<UniversalListServerOnlyState xmlns=\"\" xmlns:xs=\"{XS}\" xmlns:xsi=\"{XSI}\"");
     let document = if blocks.is_empty() {
         format!("{DOCUMENT_HEAD}{open}/>")
     } else {
@@ -1103,7 +1158,12 @@ pub(crate) fn dynamic_list_bag(
 ) -> Result<String> {
     let inner = settings_inner(form, attribute)?;
     let children = direct_children(inner)?;
-    let first = |name: &str| children.iter().find(|(child, _)| child == name).map(|(_, raw)| raw.as_str());
+    let first = |name: &str| {
+        children
+            .iter()
+            .find(|(child, _)| child == name)
+            .map(|(_, raw)| raw.as_str())
+    };
     let scalar = |name: &str| first(name).map(text_of);
 
     let mut pairs = Vec::<(String, String)>::new();
@@ -1132,7 +1192,10 @@ pub(crate) fn dynamic_list_bag(
         }
         _ => (ZERO_UUID.to_string(), 0),
     };
-    pairs.push(("MainTable".into(), format!("{{\"#\",{MAIN_TABLE_REF},{main_table}}}")));
+    pairs.push((
+        "MainTable".into(),
+        format!("{{\"#\",{MAIN_TABLE_REF},{main_table}}}"),
+    ));
     pairs.push(("MainTableCategory".into(), format!("{{\"N\",{category}}}")));
     let key_type = match scalar("KeyType").as_deref() {
         None => 0,
@@ -1151,15 +1214,22 @@ pub(crate) fn dynamic_list_bag(
     } else {
         format!("{{{},{}}}", key_fields.len(), key_fields.join(","))
     };
-    pairs.push(("KeyFields".into(), format!("{{\"#\",{KEY_FIELDS_ARRAY},{key_fields}}}")));
+    pairs.push((
+        "KeyFields".into(),
+        format!("{{\"#\",{KEY_FIELDS_ARRAY},{key_fields}}}"),
+    ));
     let dynamic_data_read = scalar("DynamicDataRead")
         .ok_or_else(|| anyhow!("a dynamic list names no <DynamicDataRead>"))?;
-    pairs.push(("DynamicalDataSelection".into(), boolean(dynamic_data_read != "true")));
+    pairs.push((
+        "DynamicalDataSelection".into(),
+        boolean(dynamic_data_read != "true"),
+    ));
     pairs.push((
         "AutoFillAvailableFields".into(),
         boolean(scalar("AutoFillAvailableFields").as_deref() != Some("false")),
     ));
-    let manual_query = scalar("ManualQuery").ok_or_else(|| anyhow!("a dynamic list names no <ManualQuery>"))?;
+    let manual_query =
+        scalar("ManualQuery").ok_or_else(|| anyhow!("a dynamic list names no <ManualQuery>"))?;
     pairs.push(("ManualQuery".into(), boolean(manual_query == "true")));
     pairs.extend(map.pairs(required));
     pairs.push((
@@ -1173,10 +1243,27 @@ pub(crate) fn dynamic_list_bag(
         Some(inner) => direct_children(inner)?,
         None => Vec::new(),
     };
-    let part = |name: &str| parts.iter().find(|(part, _)| part == name).map(|(_, raw)| raw.as_str());
+    let part = |name: &str| {
+        parts
+            .iter()
+            .find(|(part, _)| part == name)
+            .map(|(_, raw)| raw.as_str())
+    };
     for (key, name, root, kind, default_id) in [
-        ("Filter", "dcsset:filter", "Filter", KIND_FILTER, DEFAULT_FILTER_ID),
-        ("Order", "dcsset:order", "Order", KIND_ORDER, DEFAULT_ORDER_ID),
+        (
+            "Filter",
+            "dcsset:filter",
+            "Filter",
+            KIND_FILTER,
+            DEFAULT_FILTER_ID,
+        ),
+        (
+            "Order",
+            "dcsset:order",
+            "Order",
+            KIND_ORDER,
+            DEFAULT_ORDER_ID,
+        ),
     ] {
         let raw = part(name);
         if let Some(raw) = raw
@@ -1185,7 +1272,10 @@ pub(crate) fn dynamic_list_bag(
             continue;
         }
         let blocks = children_blocks(raw.and_then(inner_of), 5)?;
-        pairs.push((key.into(), document_field(kind, &dcs_document(root, &blocks, configuration)?)));
+        pairs.push((
+            key.into(),
+            document_field(kind, &dcs_document(root, &blocks, configuration)?),
+        ));
     }
     // The group block.
     let items = parts
@@ -1207,10 +1297,19 @@ pub(crate) fn dynamic_list_bag(
         ));
         pairs.push((
             "GroupSelectedSettingViewMode".into(),
-            format!("{{\"N\",{}}}", if items_view_mode.as_deref() == Some("Normal") { 0 } else { 1 }),
+            format!(
+                "{{\"N\",{}}}",
+                if items_view_mode.as_deref() == Some("Normal") {
+                    0
+                } else {
+                    1
+                }
+            ),
         ));
         if items.len() > 1 {
-            return Err(anyhow!("a dynamic list with more than one structure item is not measured"));
+            return Err(anyhow!(
+                "a dynamic list with more than one structure item is not measured"
+            ));
         }
         let mut blocks = Vec::new();
         let mut level = 0usize;
@@ -1218,18 +1317,28 @@ pub(crate) fn dynamic_list_bag(
         while let Some(raw) = item {
             let first_line = raw.lines().next().unwrap_or("");
             if !first_line.contains("xsi:type=\"dcsset:StructureItemGroup\"") {
-                return Err(anyhow!("a dynamic list's structure item kind is not measured"));
+                return Err(anyhow!(
+                    "a dynamic list's structure item kind is not measured"
+                ));
             }
             let kids = direct_children(inner_of(&raw).unwrap_or(""))?;
-            let groups = kids.iter().filter(|(name, _)| name == "dcsset:groupItems").count();
-            let nested = kids.iter().filter(|(name, _)| name == "dcsset:item").count();
+            let groups = kids
+                .iter()
+                .filter(|(name, _)| name == "dcsset:groupItems")
+                .count();
+            let nested = kids
+                .iter()
+                .filter(|(name, _)| name == "dcsset:item")
+                .count();
             if kids
                 .iter()
                 .any(|(name, _)| !matches!(name.as_str(), "dcsset:groupItems" | "dcsset:item"))
                 || groups > 1
                 || nested > 1
             {
-                return Err(anyhow!("a dynamic list's structure item group is not measured"));
+                return Err(anyhow!(
+                    "a dynamic list's structure item group is not measured"
+                ));
             }
             let mut next = None;
             for (name, raw) in &kids {
@@ -1248,7 +1357,10 @@ pub(crate) fn dynamic_list_bag(
         }
         pairs.push((
             "Group".into(),
-            document_field(KIND_GROUP, &dcs_document("GroupItems", &blocks, configuration)?),
+            document_field(
+                KIND_GROUP,
+                &dcs_document("GroupItems", &blocks, configuration)?,
+            ),
         ));
         let presentation = match items_presentation {
             Some(raw) => {
@@ -1279,14 +1391,20 @@ pub(crate) fn dynamic_list_bag(
         let blocks = children_blocks(appearance.and_then(inner_of), 5)?;
         pairs.push((
             "Appearance".into(),
-            document_field(KIND_APPEARANCE, &dcs_document("ConditionalAppearance", &blocks, configuration)?),
+            document_field(
+                KIND_APPEARANCE,
+                &dcs_document("ConditionalAppearance", &blocks, configuration)?,
+            ),
         ));
     }
     pairs.push((
         "GetInvisibleFieldPresentations".into(),
         boolean(scalar("GetInvisibleFieldPresentations").as_deref() != Some("false")),
     ));
-    pairs.push(("ServerState".into(), server_state(&children, configuration)?));
+    pairs.push((
+        "ServerState".into(),
+        server_state(&children, configuration)?,
+    ));
     let parameters = children_blocks(part("dcsset:dataParameters").and_then(inner_of), 5)?;
     pairs.push((
         "DataParameters".into(),
@@ -1334,7 +1452,10 @@ mod tests {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.secondary.as_deref()))
             .collect::<Vec<_>>();
-        assert_eq!(secondary, vec![("Ref", Some("Ссылка")), ("Code", Some("Код"))]);
+        assert_eq!(
+            secondary,
+            vec![("Ref", Some("Ссылка")), ("Code", Some("Код"))]
+        );
     }
 
     fn twin_of<'a>(map: &'a FieldMap, name: &str) -> Option<&'a str> {
@@ -1369,8 +1490,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(secondary, vec!["{\"S\",\"Код\"}"]);
         // The references still resolve to their own entries.
-        assert_eq!(map.required_id(&list_path("Список.Ссылка")).as_deref(), Some("3"));
-        assert_eq!(map.required_id(&list_path("~Список.Ref")).as_deref(), Some("2"));
+        assert_eq!(
+            map.required_id(&list_path("Список.Ссылка")).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            map.required_id(&list_path("~Список.Ref")).as_deref(),
+            Some("2")
+        );
     }
 
     #[test]

@@ -209,15 +209,15 @@ impl<'a> XmlEdits<'a> {
             // placed before a sibling that a later rule removes lands where
             // that sibling was, ahead of the removed text.
             let seq = self.edits.len();
-            self.edits.push((start, end, String::new(), usize::MAX, seq));
+            self.edits
+                .push((start, end, String::new(), usize::MAX, seq));
         }
     }
 
     /// Adds `body` (CRLF-terminated lines, relative indentation) as a child of
     /// `parent`, at the place the 2.21 child order gives `tag`.
     pub(super) fn insert_child(&mut self, parent: usize, tag: &str, body: &str) -> Result<()> {
-        self.inserts
-            .push((parent, tag.to_owned(), body.to_owned()));
+        self.inserts.push((parent, tag.to_owned(), body.to_owned()));
         Ok(())
     }
 
@@ -700,14 +700,22 @@ const FACT_RULES: &[FactRule] = &[
         source: FactSource::Item("73", 6),
         element: "InitialRowActivation",
         replaces: &[],
-        values: &[("0", None), ("1", Some("Activate")), ("2", Some("NoActivate"))],
+        values: &[
+            ("0", None),
+            ("1", Some("Activate")),
+            ("2", Some("NoActivate")),
+        ],
     },
     FactRule {
         tags: &["Table"],
         source: FactSource::Item("73", 9),
         element: "RowActionsShowType",
         replaces: &[],
-        values: &[("0", None), ("1", Some("DontShow")), ("2", Some("ShowOnHover"))],
+        values: &[
+            ("0", None),
+            ("1", Some("DontShow")),
+            ("2", Some("ShowOnHover")),
+        ],
     },
     FactRule {
         tags: &["Table"],
@@ -759,7 +767,11 @@ const FACT_RULES: &[FactRule] = &[
         source: FactSource::Item("34", 5),
         element: "ButtonImportance",
         replaces: &[],
-        values: &[("0", Some("Main")), ("1", None), ("2", Some("Supplementary"))],
+        values: &[
+            ("0", Some("Main")),
+            ("1", None),
+            ("2", Some("Supplementary")),
+        ],
     },
     // Groups: members their property bags append. `Group`, `Representation`
     // and `ShowTitle` moved here; the 8.3.27 slots cannot spell the new
@@ -868,7 +880,11 @@ const FACT_RULES: &[FactRule] = &[
         source: FactSource::Bag("8", 0),
         element: "Importance",
         replaces: &[],
-        values: &[("0", Some("Main")), ("1", None), ("2", Some("Supplementary"))],
+        values: &[
+            ("0", Some("Main")),
+            ("1", None),
+            ("2", Some("Supplementary")),
+        ],
     },
     // Form commands: members the `11` record appends.
     FactRule {
@@ -998,7 +1014,10 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
         || members[1 + 2 * count].as_leaf() != Some("1")
         || members[2 + 2 * count].as_leaf() != Some("0")
     {
-        bail!("<UsualGroup> events: unexpected 8.5 record {}", node.to_text());
+        bail!(
+            "<UsualGroup> events: unexpected 8.5 record {}",
+            node.to_text()
+        );
     }
     if count == 0 {
         return Ok(());
@@ -1038,7 +1057,11 @@ fn apply_choice_value_pictures(
     object_refs: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let is_empty = |node: &Node| node.to_text().starts_with("{4,0,{0},");
-    if facts.choice_value_pictures.iter().all(|node| is_empty(node)) {
+    if facts
+        .choice_value_pictures
+        .iter()
+        .all(|node| is_empty(node))
+    {
         return Ok(());
     }
     let values = edits
@@ -1141,7 +1164,9 @@ fn apply_rules(
     }
     if let Some(item) = item {
         match tag.as_str() {
-            "Table" if item.revision == "73" => apply_complex_settings_view_mode(edits, element, item)?,
+            "Table" if item.revision == "73" => {
+                apply_complex_settings_view_mode(edits, element, item)?
+            }
             "UsualGroup" if item.bag_revision.as_deref() == Some("38") => {
                 if let Some(node) = item.bag_tail.get(4) {
                     apply_group_events(edits, element, node)?;
@@ -1158,10 +1183,16 @@ fn apply_rules(
             FactSource::ItemPair(revision, first, second) => {
                 let first = fact_node(FactSource::Item(revision, first), facts, item, command)?;
                 let second = fact_node(FactSource::Item(revision, second), facts, item, command)?;
-                match (first.and_then(Node::as_leaf), second.and_then(Node::as_leaf)) {
+                match (
+                    first.and_then(Node::as_leaf),
+                    second.and_then(Node::as_leaf),
+                ) {
                     (Some(first), Some(second)) => format!("{first}|{second}"),
                     (None, None) => continue,
-                    _ => bail!("<{tag}> {}: the 8.5 member pair is not scalar", rule.element),
+                    _ => bail!(
+                        "<{tag}> {}: the 8.5 member pair is not scalar",
+                        rule.element
+                    ),
                 }
             }
             source => {
@@ -1218,13 +1249,20 @@ pub(super) fn simple_text<'x>(edits: &XmlEdits<'x>, element: usize) -> Option<&'
 
 /// The value of the one direct child `tag` of `parent`, when it is a
 /// one-line element.
-pub(super) fn child_text<'x>(edits: &XmlEdits<'x>, parent: usize, tag: &str) -> Result<Option<(usize, &'x str)>> {
+pub(super) fn child_text<'x>(
+    edits: &XmlEdits<'x>,
+    parent: usize,
+    tag: &str,
+) -> Result<Option<(usize, &'x str)>> {
     let children = edits.direct_children(parent, tag);
     match children.as_slice() {
         [] => Ok(None),
         [child] => {
             let value = simple_text(edits, *child).ok_or_else(|| {
-                anyhow!("<{tag}> of <{}> is not a one-line element", edits.elements[parent].tag)
+                anyhow!(
+                    "<{tag}> of <{}> is not a one-line element",
+                    edits.elements[parent].tag
+                )
             })?;
             Ok(Some((*child, value)))
         }
@@ -1426,7 +1464,15 @@ pub(super) fn apply_v85_form_facts(
         .iter()
         .position(|element| element.parent.is_none() && element.tag == "Form")
         .ok_or_else(|| anyhow!("written form XML has no <Form> root"))?;
-    apply_rules(&mut edits, root, facts, None, None, object_refs, &mut assets)?;
+    apply_rules(
+        &mut edits,
+        root,
+        facts,
+        None,
+        None,
+        object_refs,
+        &mut assets,
+    )?;
     apply_choice_value_pictures(&mut edits, facts, object_refs)?;
     match facts.root_scale.as_deref() {
         None | Some("100") => {}
@@ -1466,12 +1512,28 @@ pub(super) fn apply_v85_form_facts(
     }
     for (element, id) in items {
         if let Some(item) = facts.items.get(&id) {
-            apply_rules(&mut edits, element, facts, Some(item), None, object_refs, &mut assets)?;
+            apply_rules(
+                &mut edits,
+                element,
+                facts,
+                Some(item),
+                None,
+                object_refs,
+                &mut assets,
+            )?;
         }
     }
     for (element, id) in commands {
         if let Some(tail) = facts.commands.get(&id) {
-            apply_rules(&mut edits, element, facts, None, Some(tail), object_refs, &mut assets)?;
+            apply_rules(
+                &mut edits,
+                element,
+                facts,
+                None,
+                Some(tail),
+                object_refs,
+                &mut assets,
+            )?;
         }
     }
     Ok((edits.finish()?, assets))

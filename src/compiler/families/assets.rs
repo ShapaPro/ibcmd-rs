@@ -776,10 +776,20 @@ impl SourceAssetRegistry {
     /// accounting registers, business processes, tasks and the two charts.
     pub fn help_suffix(self, owner_family: &str) -> Option<&'static str> {
         Some(match owner_family {
-            "AccumulationRegister" | "InformationRegister" | "CalculationRegister"
-            | "DocumentJournal" | "ExchangePlan" | "Subsystem" => ".0",
-            "Form" | "CommonForm" | "Catalog" | "Document" | "DataProcessor" | "Report"
-            | "ChartOfCalculationTypes" | "CommonCommand" => ".1",
+            "AccumulationRegister"
+            | "InformationRegister"
+            | "CalculationRegister"
+            | "DocumentJournal"
+            | "ExchangePlan"
+            | "Subsystem" => ".0",
+            "Form"
+            | "CommonForm"
+            | "Catalog"
+            | "Document"
+            | "DataProcessor"
+            | "Report"
+            | "ChartOfCalculationTypes"
+            | "CommonCommand" => ".1",
             "Configuration" => ".3",
             _ => ".5",
         })

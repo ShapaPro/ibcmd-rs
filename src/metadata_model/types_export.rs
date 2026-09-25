@@ -36,7 +36,9 @@ fn is_type_set(name: &str) -> bool {
         || local == "AnyIBRef"
         || local == "ConstantValueManager"
         || (!local.contains('.')
-            && (local.ends_with("Ref") || local.ends_with("Object") || local.ends_with("RecordSet"))
+            && (local.ends_with("Ref")
+                || local.ends_with("Object")
+                || local.ends_with("RecordSet"))
             && local != "ReportObject")
 }
 
@@ -327,7 +329,8 @@ pub(crate) fn value_element(qname: &str, node: &Brace, names: &NameIndex) -> Res
 /// section `X.Y.TabularSection.T`) by its code.
 pub(crate) fn standard_attribute_name(base: &str, code: i64) -> Result<String> {
     let kind = base.split('.').next().unwrap_or_default();
-    if base.contains(".TabularSection.") && code == crate::metadata_model::objects::line_number_marker(kind)
+    if base.contains(".TabularSection.")
+        && code == crate::metadata_model::objects::line_number_marker(kind)
     {
         return Ok("LineNumber".to_string());
     }

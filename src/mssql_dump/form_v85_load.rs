@@ -25,11 +25,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::module_blob::MetadataSourceContext;
 use super::form_v85::Node;
 use super::form_v85_writer::{
     FIELD_TAGS, GROUPING, TRI_STATE, XmlEdits, child_text, element_name, simple_text,
 };
+use crate::module_blob::MetadataSourceContext;
 
 const FORM_ITEM_CLASS_UUID: &str = "02023637-7868-4a5f-8576-835a76e0c9ba";
 const FORM_COMMAND_CLASS_UUID: &str = "409b9a53-7f7e-4178-86c1-33176c7c7a7a";
@@ -207,7 +207,11 @@ fn localized_member(edits: &XmlEdits<'_>, element: usize) -> Result<String> {
     let mut pairs = Vec::new();
     for &item in &edits.elements[element].children {
         if edits.elements[item].tag != "v8:item" {
-            bail!("<{}> holds <{}>", edits.elements[element].tag, edits.elements[item].tag);
+            bail!(
+                "<{}> holds <{}>",
+                edits.elements[element].tag,
+                edits.elements[item].tag
+            );
         }
         let mut lang = None;
         let mut content = None;
@@ -315,7 +319,10 @@ pub(crate) fn down_convert_v85_form_xml(
         let mut parent = element.parent;
         while let Some(ancestor) = parent {
             let tag = edits.elements[ancestor].tag.as_str();
-            if matches!(tag, "Attributes" | "Commands" | "Parameters" | "CommandInterface") {
+            if matches!(
+                tag,
+                "Attributes" | "Commands" | "Parameters" | "CommandInterface"
+            ) {
                 section = Some(tag);
                 break;
             }
@@ -335,8 +342,10 @@ pub(crate) fn down_convert_v85_form_xml(
             name: name.clone(),
             ..ItemFacts::default()
         };
-        load_item(&mut edits, element, &tag, &name, &mut item, source, items_root)
-            .with_context(|| format!("2.21 form item <{tag}> {name} (id {id})"))?;
+        load_item(
+            &mut edits, element, &tag, &name, &mut item, source, items_root,
+        )
+        .with_context(|| format!("2.21 form item <{tag}> {name} (id {id})"))?;
         facts.items.insert(id, item);
     }
     for (element, id) in commands {
@@ -373,7 +382,10 @@ pub(crate) fn down_convert_v85_form_xml(
         .find("version=\"2.21\"")
         .map(|offset| at + offset)
         .ok_or_else(|| anyhow!("the 2.21 <Form> root does not declare version 2.21"))?;
-    xml20.replace_range(version..version + "version=\"2.21\"".len(), "version=\"2.20\"");
+    xml20.replace_range(
+        version..version + "version=\"2.21\"".len(),
+        "version=\"2.20\"",
+    );
     Ok((xml20, facts))
 }
 
@@ -477,15 +489,20 @@ fn load_root(edits: &mut XmlEdits<'_>, root: usize, facts: &mut V85FormLoadFacts
     facts.root_tail.insert(
         5,
         code_of(
-            &[("0", None), ("1", Some("InMainWindow")), ("2", Some("InDialogWindow"))],
+            &[
+                ("0", None),
+                ("1", Some("InMainWindow")),
+                ("2", Some("InDialogWindow")),
+            ],
             view.as_deref(),
             "<Form> WindowViewMode",
         )?,
     );
     let bar = take(edits, root, "ShowCommandBar")?;
-    facts
-        .root_tail
-        .insert(6, code_of(TRI_STATE, bar.as_deref(), "<Form> ShowCommandBar")?);
+    facts.root_tail.insert(
+        6,
+        code_of(TRI_STATE, bar.as_deref(), "<Form> ShowCommandBar")?,
+    );
     let group = peek(edits, root, "Group")?;
     let group_code = code_of(GROUPING, group.as_deref(), "<Form> Group")?;
     facts.root_group_horizontal = matches!(group_code.as_str(), "4" | "5");
@@ -497,9 +514,10 @@ fn load_root(edits: &mut XmlEdits<'_>, root: usize, facts: &mut V85FormLoadFacts
         &["Horizontal", "HorizontalIfPossible", "AlwaysHorizontal"],
     )?;
     let title = peek(edits, root, "ShowTitle")?;
-    facts
-        .root_tail
-        .insert(10, code_of(TRI_STATE, title.as_deref(), "<Form> ShowTitle")?);
+    facts.root_tail.insert(
+        10,
+        code_of(TRI_STATE, title.as_deref(), "<Form> ShowTitle")?,
+    );
     keep_only(edits, root, "ShowTitle", &["false"])?;
     if let Some(element) = take_subtree(edits, root, "CreateButtonsGroupTitle")? {
         facts.root_tail.insert(0, localized_member(edits, element)?);
@@ -527,7 +545,11 @@ fn load_item(
             item.tail.insert(
                 5,
                 code_of(
-                    &[("0", Some("Main")), ("1", None), ("2", Some("Supplementary"))],
+                    &[
+                        ("0", Some("Main")),
+                        ("1", None),
+                        ("2", Some("Supplementary")),
+                    ],
                     importance.as_deref(),
                     "ButtonImportance",
                 )?,
@@ -563,8 +585,10 @@ fn load_item(
             // A page keeps an 8.3.27 `ScrollOnCompress` of `true` (141 BSP
             // pages); the member reads all three states.
             let scroll = peek(edits, element, "ScrollOnCompress")?;
-            item.bag_tail
-                .insert(1, code_of(TRI_STATE, scroll.as_deref(), "ScrollOnCompress")?);
+            item.bag_tail.insert(
+                1,
+                code_of(TRI_STATE, scroll.as_deref(), "ScrollOnCompress")?,
+            );
             keep_only(edits, element, "ScrollOnCompress", &["true"])?;
             let title = peek(edits, element, "ShowTitle")?;
             item.bag_tail
@@ -575,7 +599,11 @@ fn load_item(
             let card = take(edits, element, "ShowTitleInCard")?;
             item.bag_tail.insert(
                 2,
-                code_of(&[("0", Some("false")), ("2", None)], card.as_deref(), "ShowTitleInCard")?,
+                code_of(
+                    &[("0", Some("false")), ("2", None)],
+                    card.as_deref(),
+                    "ShowTitleInCard",
+                )?,
             );
             let title = peek(edits, element, "ShowTitle")?;
             item.bag_tail
@@ -586,7 +614,11 @@ fn load_item(
             let mode = take(edits, element, "AppearanceMode")?;
             item.bag_tail.insert(
                 0,
-                code_of(&[("0", None), ("1", Some("CommandBar"))], mode.as_deref(), "AppearanceMode")?,
+                code_of(
+                    &[("0", None), ("1", Some("CommandBar"))],
+                    mode.as_deref(),
+                    "AppearanceMode",
+                )?,
             );
         }
         "Popup" => {
@@ -594,7 +626,11 @@ fn load_item(
             item.bag_tail.insert(
                 0,
                 code_of(
-                    &[("0", Some("Main")), ("1", None), ("2", Some("Supplementary"))],
+                    &[
+                        ("0", Some("Main")),
+                        ("1", None),
+                        ("2", Some("Supplementary")),
+                    ],
                     importance.as_deref(),
                     "Importance",
                 )?,
@@ -622,8 +658,10 @@ fn load_field(
     items_root: Option<&Path>,
 ) -> Result<()> {
     let mark = take(edits, element, "MarkRequiredComplete")?;
-    item.tail
-        .insert(0, code_of(TRI_STATE, mark.as_deref(), "MarkRequiredComplete")?);
+    item.tail.insert(
+        0,
+        code_of(TRI_STATE, mark.as_deref(), "MarkRequiredComplete")?,
+    );
     // AutoEditMode reads together with EditMode: `true` over EnterOnInput is
     // 3; without it the member is EditMode's own code (Directly 0, unset 1,
     // EnterOnInput 2). The bars and the chart keep EditMode in record member
@@ -636,7 +674,11 @@ fn load_field(
         peek(edits, element, "EditMode")?
     };
     let edit_code = code_of(
-        &[("0", Some("Directly")), ("1", None), ("2", Some("EnterOnInput"))],
+        &[
+            ("0", Some("Directly")),
+            ("1", None),
+            ("2", Some("EnterOnInput")),
+        ],
         edit_mode.as_deref(),
         "EditMode",
     )?;
@@ -655,7 +697,11 @@ fn load_field(
     let width = take(edits, element, "WidthInCard")?;
     item.tail.insert(
         8,
-        code_of(&[("0", None), ("2", Some("Half"))], width.as_deref(), "WidthInCard")?,
+        code_of(
+            &[("0", None), ("2", Some("Half"))],
+            width.as_deref(),
+            "WidthInCard",
+        )?,
     );
     let auto_width = take(edits, element, "AutoWidthInTable")?;
     item.tail.insert(
@@ -706,14 +752,22 @@ fn load_field(
             let size = take(edits, element, "TextSize")?;
             item.bag_tail.insert(
                 3,
-                code_of(&[("0", Some("Enlarged")), ("1", None)], size.as_deref(), "TextSize")?,
+                code_of(
+                    &[("0", Some("Enlarged")), ("1", None)],
+                    size.as_deref(),
+                    "TextSize",
+                )?,
             );
         }
         "LabelField" => {
             let copy = take(edits, element, "UseCopy")?;
             item.bag_tail.insert(
                 0,
-                code_of(&[("1", Some("true")), ("2", None)], copy.as_deref(), "UseCopy")?,
+                code_of(
+                    &[("1", Some("true")), ("2", None)],
+                    copy.as_deref(),
+                    "UseCopy",
+                )?,
             );
         }
         "CheckBoxField" => {
@@ -738,7 +792,11 @@ fn load_field(
             let stretch = take(edits, element, "HorizontalStretch")?;
             item.bag_tail.insert(
                 2,
-                code_of(&[("1", Some("true")), ("2", None)], stretch.as_deref(), "HorizontalStretch")?,
+                code_of(
+                    &[("1", Some("true")), ("2", None)],
+                    stretch.as_deref(),
+                    "HorizontalStretch",
+                )?,
             );
         }
         "PictureField" => {
@@ -758,7 +816,12 @@ fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) ->
     for (index, bwa, old, old_when_not_true) in [
         (0, "HorizontalLinesBWA", "HorizontalLines", Some("false")),
         (1, "VerticalLinesBWA", "VerticalLines", Some("false")),
-        (10, "UseAlternationRowColorBWA", "UseAlternationRowColor", None),
+        (
+            10,
+            "UseAlternationRowColorBWA",
+            "UseAlternationRowColor",
+            None,
+        ),
     ] {
         let value = take(edits, element, bwa)?;
         item.tail
@@ -777,7 +840,11 @@ fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) ->
     item.tail.insert(
         6,
         code_of(
-            &[("0", None), ("1", Some("Activate")), ("2", Some("NoActivate"))],
+            &[
+                ("0", None),
+                ("1", Some("Activate")),
+                ("2", Some("NoActivate")),
+            ],
             activation.as_deref(),
             "InitialRowActivation",
         )?,
@@ -786,7 +853,11 @@ fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) ->
     item.tail.insert(
         9,
         code_of(
-            &[("0", None), ("1", Some("DontShow")), ("2", Some("ShowOnHover"))],
+            &[
+                ("0", None),
+                ("1", Some("DontShow")),
+                ("2", Some("ShowOnHover")),
+            ],
             actions.as_deref(),
             "RowActionsShowType",
         )?,
@@ -826,7 +897,11 @@ fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) ->
     let card = take(edits, element, "AutoMaxCardHeight")?;
     item.tail.insert(
         18,
-        code_of(&[("0", Some("false")), ("1", None)], card.as_deref(), "AutoMaxCardHeight")?,
+        code_of(
+            &[("0", Some("false")), ("1", None)],
+            card.as_deref(),
+            "AutoMaxCardHeight",
+        )?,
     );
     let links = take(edits, element, "CellHyperlinksRepresentation")?;
     item.tail.insert(
@@ -849,12 +924,20 @@ fn load_usual_group(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFac
     let card = take(edits, element, "ShowAsCard")?;
     item.bag_tail.insert(
         0,
-        code_of(&[("0", None), ("1", Some("true"))], card.as_deref(), "ShowAsCard")?,
+        code_of(
+            &[("0", None), ("1", Some("true"))],
+            card.as_deref(),
+            "ShowAsCard",
+        )?,
     );
     let link = take(edits, element, "Hyperlink")?;
     item.bag_tail.insert(
         2,
-        code_of(&[("0", None), ("1", Some("true"))], link.as_deref(), "Hyperlink")?,
+        code_of(
+            &[("0", None), ("1", Some("true"))],
+            link.as_deref(),
+            "Hyperlink",
+        )?,
     );
     if let Some(events) = take_subtree(edits, element, "Events")? {
         let mut handlers = Vec::new();
@@ -862,7 +945,11 @@ fn load_usual_group(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFac
             let open = &edits.xml[edits.elements[event].open_start..edits.elements[event].line_end];
             let name = open
                 .find(" name=\"")
-                .and_then(|at| open[at + 7..].find('"').map(|end| &open[at + 7..at + 7 + end]))
+                .and_then(|at| {
+                    open[at + 7..]
+                        .find('"')
+                        .map(|end| &open[at + 7..at + 7 + end])
+                })
                 .ok_or_else(|| anyhow!("a usual group event has no name"))?;
             if name != "Click" {
                 bail!("usual group event {name} has no 8.5 identifier");
@@ -921,10 +1008,17 @@ fn load_usual_group(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFac
     let scroll = take(edits, element, "ScrollOnCompress")?;
     item.bag_tail.insert(
         8,
-        if scroll.as_deref() == Some("true") { "1" } else { "0" }.to_owned(),
+        if scroll.as_deref() == Some("true") {
+            "1"
+        } else {
+            "0"
+        }
+        .to_owned(),
     );
-    item.bag_tail
-        .insert(9, code_of(TRI_STATE, scroll.as_deref(), "ScrollOnCompress")?);
+    item.bag_tail.insert(
+        9,
+        code_of(TRI_STATE, scroll.as_deref(), "ScrollOnCompress")?,
+    );
     let title = peek(edits, element, "ShowTitle")?;
     item.bag_tail
         .insert(12, code_of(TRI_STATE, title.as_deref(), "ShowTitle")?);
@@ -960,9 +1054,7 @@ fn load_choice_value_pictures(
         .collect::<Vec<_>>();
     for value in values {
         let picture = match take_subtree(edits, value, "Picture")? {
-            Some(picture) => {
-                picture_member(edits, picture, "ChoiceList", "", source, items_root)?
-            }
+            Some(picture) => picture_member(edits, picture, "ChoiceList", "", source, items_root)?,
             None => EMPTY_PICTURE.to_owned(),
         };
         facts.choice_value_pictures.push(picture);
@@ -1266,7 +1358,10 @@ pub(crate) fn up_convert_v85_chart_records(text: &str) -> Result<String> {
         };
         // The record's fixed part alone is 97 members (`moxel.rs`).
         if members.len() < 97 {
-            bail!("a chart record `{{74,...}}` carries {} members, fewer than 97", members.len());
+            bail!(
+                "a chart record `{{74,...}}` carries {} members, fewer than 97",
+                members.len()
+            );
         }
         members[0] = Node::Leaf("75".to_owned());
         for _ in 0..8 {
@@ -1342,12 +1437,16 @@ fn generated_search_panel(table: &str, table_id: &str, kind: u8) -> String {
     let (suffix, payload, own) = match kind {
         0 => (
             "СтрокаПоиска",
-            format!("{{1,0,2,{UNSET_COLOR},{UNSET_COLOR},{UNSET_COLOR},{{7,3,0,1,100}},{{0,1,0}},1,0,0}}"),
+            format!(
+                "{{1,0,2,{UNSET_COLOR},{UNSET_COLOR},{UNSET_COLOR},{{7,3,0,1,100}},{{0,1,0}},1,0,0}}"
+            ),
             "СтрокаПоиска",
         ),
         _ => (
             "УправлениеПоиском",
-            format!("{{1,0,{UNSET_COLOR},{UNSET_COLOR},{UNSET_COLOR},{{7,3,0,1,100}},{{0,1,0}},1,0,0,2}}"),
+            format!(
+                "{{1,0,{UNSET_COLOR},{UNSET_COLOR},{UNSET_COLOR},{{7,3,0,1,100}},{{0,1,0}},1,0,0,2}}"
+            ),
             "УправлениеПоиском",
         ),
     };
@@ -1368,7 +1467,12 @@ fn generated_search_panel(table: &str, table_id: &str, kind: u8) -> String {
 /// The inverse of `form_v85::bag_revision`: (8.3.27 owner revision, item
 /// kind, 8.3.27 bag revision, 8.3.27 bag length) -> (8.5 bag revision, the
 /// defaults of the members 8.5 appends).
-fn up_bag(owner: &str, kind: &str, revision: &str, len: usize) -> Option<(&'static str, Vec<&'static str>)> {
+fn up_bag(
+    owner: &str,
+    kind: &str,
+    revision: &str,
+    len: usize,
+) -> Option<(&'static str, Vec<&'static str>)> {
     Some(match (owner, kind, revision, len) {
         ("22", "0", "1", 3) => ("2", vec!["0"]),
         ("22", "1", "7", 9) => ("8", vec!["1"]),
@@ -1377,7 +1481,21 @@ fn up_bag(owner: &str, kind: &str, revision: &str, len: usize) -> Option<(&'stat
         ("22", "4", "18", 20) => ("22", vec!["4", "2", "0", "2"]),
         ("22", "5", "29", 29) => (
             "38",
-            vec!["0", "0", "0", EMPTY_PICTURE, "{0,1,0}", "0", "4", "4", "0", "2", "0", "0", "2"],
+            vec![
+                "0",
+                "0",
+                "0",
+                EMPTY_PICTURE,
+                "{0,1,0}",
+                "0",
+                "4",
+                "4",
+                "0",
+                "2",
+                "0",
+                "0",
+                "2",
+            ],
         ),
         ("22", "6", "2", 4) => ("2", vec![]),
         ("22", "8", "1", 2) => ("1", vec![]),
@@ -1498,12 +1616,17 @@ fn crlf_line_breaks(text: &str) -> String {
 /// A base64 leaf as 8.5 stores it; see [`up_convert_leaves`]. A payload that
 /// does not decode is only laid out; one that is not base64 text is kept.
 fn v85_base64_leaf(payload: &str) -> String {
-    let compact: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let compact: String = payload
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
     if !compact.is_ascii() {
         return format!("#base64:{payload}");
     }
     let declared = crate::module_blob::decode_base64_mime(&compact).and_then(|bytes| {
-        let document = bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(&bytes);
+        let document = bytes
+            .strip_prefix(b"\xEF\xBB\xBF".as_slice())
+            .unwrap_or(&bytes);
         if !document.starts_with(b"<?xml") {
             return None;
         }
@@ -1549,7 +1672,10 @@ fn up_convert_root(root: &mut Node, facts: &V85FormLoadFacts) -> Result<()> {
         }
     }
     // The trailer's own `{50,...}` tuple sits one member before the end.
-    match members.get_mut(len.checked_sub(2).ok_or_else(|| anyhow!("form root is too short"))?) {
+    match members.get_mut(
+        len.checked_sub(2)
+            .ok_or_else(|| anyhow!("form root is too short"))?,
+    ) {
         Some(Node::List(tuple)) if tuple.first().and_then(leaf) == Some("50") => {
             tuple[0] = Node::Leaf("59".to_owned());
         }
@@ -1606,7 +1732,9 @@ impl UpConversion<'_> {
             members[0] = Node::Leaf("11".to_owned());
             let tail = self.facts.commands.get(&id);
             for index in 0..2 {
-                let value = tail.and_then(|tail| tail.get(&index)).map_or("0", String::as_str);
+                let value = tail
+                    .and_then(|tail| tail.get(&index))
+                    .map_or("0", String::as_str);
                 members.push(node_of(value)?);
             }
             return Ok(());
@@ -1645,7 +1773,8 @@ impl UpConversion<'_> {
                 (
                     "48",
                     [
-                        "2", "0", "1", "1", &panel, "0", "0", "2", "0", "0", "1", "2", "0", "0", "0",
+                        "2", "0", "1", "1", &panel, "0", "0", "2", "0", "0", "1", "2", "0", "0",
+                        "0",
                     ]
                     .iter()
                     .map(|value| (*value).to_owned())
@@ -1670,9 +1799,9 @@ impl UpConversion<'_> {
                 (
                     "73",
                     [
-                        "2", "2", "0", "0", "\"\"", "\"\"", "0", "1", &selected, "0", "2", "0", "2",
-                        "1", &rows, "2", "0", "2", "1", "0", "0", "0", "0", "0", "1", &search, "1",
-                        &control,
+                        "2", "2", "0", "0", "\"\"", "\"\"", "0", "1", &selected, "0", "2", "0",
+                        "2", "1", &rows, "2", "0", "2", "1", "0", "0", "0", "0", "0", "1", &search,
+                        "1", &control,
                     ]
                     .iter()
                     .map(|value| (*value).to_owned())
@@ -1682,7 +1811,9 @@ impl UpConversion<'_> {
             "22" => ("22", Vec::new()),
             "12" => ("12", Vec::new()),
             "5" => ("6", vec!["\"\"".to_owned()]),
-            other => bail!("form item {id} declares 8.3.27 revision {other}, which 8.5 does not name"),
+            other => {
+                bail!("form item {id} declares 8.3.27 revision {other}, which 8.5 does not name")
+            }
         };
         let prefix = usize::from(matches!(members.get(5), Some(Node::List(_))));
         if revision == "55" && facts.is_some_and(|facts| facts.complex_settings_view_mode) {
@@ -1739,14 +1870,20 @@ impl UpConversion<'_> {
                 bag.push(node_of(value)?);
             }
             if let Some(facts) = facts
-                && let Some(index) = facts.bag_tail.keys().find(|index| **index >= bag_defaults.len())
+                && let Some(index) = facts
+                    .bag_tail
+                    .keys()
+                    .find(|index| **index >= bag_defaults.len())
             {
                 bail!("form item {id} names bag member {index}, which its 8.5 bag does not append");
             }
         } else if let Some(facts) = facts
             && (!facts.bag_tail.is_empty() || !facts.bag.is_empty())
         {
-            bail!("form item {id} ({}) names bag members and has no bag", facts.tag);
+            bail!(
+                "form item {id} ({}) names bag members and has no bag",
+                facts.tag
+            );
         }
         members[0] = Node::Leaf(v85.to_owned());
         for (index, default) in tail_defaults.iter().enumerate() {
@@ -1756,9 +1893,15 @@ impl UpConversion<'_> {
             members.push(node_of(value)?);
         }
         if let Some(facts) = facts
-            && let Some(index) = facts.tail.keys().find(|index| **index >= tail_defaults.len())
+            && let Some(index) = facts
+                .tail
+                .keys()
+                .find(|index| **index >= tail_defaults.len())
         {
-            bail!("form item {id} ({}) names record member {index}, which 8.5 does not append", facts.tag);
+            bail!(
+                "form item {id} ({}) names record member {index}, which 8.5 does not append",
+                facts.tag
+            );
         }
         Ok(())
     }
@@ -1784,7 +1927,9 @@ fn add_report_state(members: &mut Vec<Node>, state: &ReportState) -> Result<()> 
         .get(BAG)
         .and_then(leaf)
         .and_then(|count| count.parse().ok())
-        .ok_or_else(|| anyhow!("the report form root carries no property bag count at member {BAG}"))?;
+        .ok_or_else(|| {
+            anyhow!("the report form root carries no property bag count at member {BAG}")
+        })?;
     let mut pairs = BTreeMap::new();
     for index in 0..count {
         let key = members
@@ -1801,7 +1946,12 @@ fn add_report_state(members: &mut Vec<Node>, state: &ReportState) -> Result<()> 
     if !pairs.contains_key(&7) {
         bail!("the report form root bag holds no report form type (key 7)");
     }
-    let urn = |property: u8| format!("{{\"S\",\"urn:form:md:{property}:{}\"}}", state.configuration);
+    let urn = |property: u8| {
+        format!(
+            "{{\"S\",\"urn:form:md:{property}:{}\"}}",
+            state.configuration
+        )
+    };
     let defaults = [
         (5, EMPTY_REFERENCE.to_owned()),
         (6, EMPTY_REFERENCE.to_owned()),
@@ -1818,7 +1968,10 @@ fn add_report_state(members: &mut Vec<Node>, state: &ReportState) -> Result<()> 
         (18, VARIANT.to_owned()),
         (19, "{\"S\",\"\"}".to_owned()),
         (20, EMPTY_REFERENCE.to_owned()),
-        (22, "{\"S\",\"00000000-0000-0000-0000-000000000000\"}".to_owned()),
+        (
+            22,
+            "{\"S\",\"00000000-0000-0000-0000-000000000000\"}".to_owned(),
+        ),
         (23, "{\"N\",0}".to_owned()),
     ];
     for (key, value) in defaults {
@@ -1864,7 +2017,10 @@ fn set_complex_settings_view_mode(members: &mut Vec<Node>, prefix: usize) -> Res
     if pairs.iter().any(|(key, _)| *key == 21) {
         bail!("the table property bag already holds key 21");
     }
-    pairs.push((21, parse_raw("{\"#\",2eb62aaa-e6c1-48b6-a047-435354d5ae82,0}")?));
+    pairs.push((
+        21,
+        parse_raw("{\"#\",2eb62aaa-e6c1-48b6-a047-435354d5ae82,0}")?,
+    ));
     pairs.sort_by_key(|(key, _)| *key);
     let mut replacement = vec![Node::Leaf(pairs.len().to_string())];
     for (key, value) in pairs {
@@ -1897,7 +2053,9 @@ fn command_identity(members: &[Node]) -> Option<String> {
     }
     match &members[1] {
         Node::List(identity) => match identity.as_slice() {
-            [Node::Leaf(id), Node::Leaf(class)] if class == FORM_COMMAND_CLASS_UUID && is_int(id) => {
+            [Node::Leaf(id), Node::Leaf(class)]
+                if class == FORM_COMMAND_CLASS_UUID && is_int(id) =>
+            {
                 Some(id.clone())
             }
             _ => None,
@@ -1937,7 +2095,12 @@ pub(crate) fn compile_v85_form_body_in_v83_layout(
 ) -> Result<String> {
     let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
     let (xml20, _) = down_convert_v85_form_xml(xml, source, items_root)?;
-    crate::module_blob::compile_native_form_body_v83(xml20.as_bytes(), module_text, source, items_root)
+    crate::module_blob::compile_native_form_body_v83(
+        xml20.as_bytes(),
+        module_text,
+        source,
+        items_root,
+    )
 }
 
 #[cfg(test)]
@@ -1958,7 +2121,9 @@ mod tests {
                             super::super::form_v85::bag_revision(owner, &kind, &revision, len)
                         {
                             let (v85, defaults) = up_bag(owner, &kind, v83, len - appended)
-                                .unwrap_or_else(|| panic!("no inverse for {owner}/{kind}/{revision}/{len}"));
+                                .unwrap_or_else(|| {
+                                    panic!("no inverse for {owner}/{kind}/{revision}/{len}")
+                                });
                             assert_eq!((v85, defaults.len()), (revision.as_str(), appended));
                             checked += 1;
                         }
@@ -1985,7 +2150,9 @@ mod tests {
         let Node::List(members) = &node else { panic!() };
         assert_eq!(leaf(&members[0]), Some("\"a\r\nb\""));
         assert_eq!(leaf(&members[1]), Some("\"c\r\nd\""));
-        let Node::List(document) = &members[2] else { panic!() };
+        let Node::List(document) = &members[2] else {
+            panic!()
+        };
         let text = leaf(&document[0]).unwrap();
         let encoded = crate::module_blob::encode_base64(with_pal.as_bytes());
         let lines: Vec<&str> = text["#base64:".len()..].split("\r\r\n").collect();
@@ -1993,7 +2160,10 @@ mod tests {
         assert!(lines[..lines.len() - 1].iter().all(|line| line.len() == 64));
         assert!(!lines.last().unwrap().is_empty() || encoded.len() % 64 == 0);
         // A payload of exactly 64 characters keeps the break after it.
-        assert_eq!(v85_base64_leaf(&"A".repeat(64)), format!("#base64:{}\r\r\n", "A".repeat(64)));
+        assert_eq!(
+            v85_base64_leaf(&"A".repeat(64)),
+            format!("#base64:{}\r\r\n", "A".repeat(64))
+        );
     }
 
     #[test]
@@ -2016,9 +2186,15 @@ mod tests {
         let flat = out.replace("\r\n", "");
         // Keys 7 and 23 from the XML, sixteen added: 5, 6, 8-20, 22.
         assert!(flat.contains(",18,5,{\"#\",11cfd3e0-86f8-4480-aaa5-dc6a6ccac689,{0,\"\"}},6,"));
-        assert!(flat.contains(",8,{\"S\",\"urn:form:md:14:11111111-2222-3333-4444-555555555555\"},9,"));
+        assert!(
+            flat.contains(",8,{\"S\",\"urn:form:md:14:11111111-2222-3333-4444-555555555555\"},9,")
+        );
         assert!(flat.contains(",12,{\"S\",\"Отчет.Пример\"},13,{\"S\",\"Основной\"},14,{\"B\",0},15,{\"U\"},16,{\"B\",0},17,"));
-        assert!(flat.contains(",22,{\"S\",\"00000000-0000-0000-0000-000000000000\"},23,{\"N\",3},tail}"));
+        assert!(
+            flat.contains(
+                ",22,{\"S\",\"00000000-0000-0000-0000-000000000000\"},23,{\"N\",3},tail}"
+            )
+        );
         assert_eq!(leaf(&members[18]), Some("18"));
     }
 
@@ -2035,7 +2211,9 @@ mod tests {
 
     #[test]
     fn respells_colours_and_fonts() {
-        let mut node = parse_raw("{{3,4,{0}},{3,3,{0,11111111-2222-3333-4444-555555555555}},{7,3,0,1,100}}").unwrap();
+        let mut node =
+            parse_raw("{{3,4,{0}},{3,3,{0,11111111-2222-3333-4444-555555555555}},{7,3,0,1,100}}")
+                .unwrap();
         up_convert_primitives(&mut node);
         let mut out = String::new();
         emit_1c(&node, &mut out);

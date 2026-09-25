@@ -52,7 +52,12 @@ fn record<'a>(payload: &'a Brace, version: &str, kind: &str) -> Result<&'a [Brac
 }
 
 /// `<xr:GeneratedType name=.. category=..><xr:TypeId/><xr:ValueId/>`.
-fn generated_type(name: String, category: &str, type_id: &Brace, value_id: &Brace) -> Result<Element> {
+fn generated_type(
+    name: String,
+    category: &str,
+    type_id: &Brace,
+    value_id: &Brace,
+) -> Result<Element> {
     Ok(el("xr:GeneratedType")
         .attr("name", name)
         .attr("category", category)
@@ -160,9 +165,7 @@ fn constant(payload: &Brace, context: &ExportContext) -> Result<Element> {
             "DataLockControlMode" => leaf(name, code_text(&fields[6], DATA_LOCK_CONTROL_MODE)?),
             "DataHistory" => leaf(name, code_text(&fields[12], DATA_HISTORY)?),
             "UpdateDataHistoryImmediatelyAfterWrite" => leaf(name, bool_text(&fields[15])?),
-            "ExecuteAfterWriteDataHistoryVersionProcessing" => {
-                leaf(name, bool_text(&fields[16])?)
-            }
+            "ExecuteAfterWriteDataHistoryVersionProcessing" => leaf(name, bool_text(&fields[16])?),
             other => bail!("a constant has no <{other}>"),
         })
     })?;
@@ -252,7 +255,10 @@ fn wrapped_reference(node: &Brace, context: &ExportContext) -> Result<String> {
 fn common_attribute(payload: &Brace, context: &ExportContext) -> Result<Element> {
     let fields = record(payload, "5", "CommonAttribute")?;
     if fields.len() != 15 {
-        bail!("a common attribute record has 15 values, not {}", fields.len());
+        bail!(
+            "a common attribute record has 15 values, not {}",
+            fields.len()
+        );
     }
     let body = item(fields, 1)?;
     let head = crate::metadata_model::export::values::attribute_header(body)?;
@@ -280,7 +286,10 @@ fn common_attribute(payload: &Brace, context: &ExportContext) -> Result<Element>
     }
     let tail = vec![
         content,
-        leaf("AutoUse", code_text(&fields[6], &[("Use", 0), ("DontUse", 1)])?),
+        leaf(
+            "AutoUse",
+            code_text(&fields[6], &[("Use", 0), ("DontUse", 1)])?,
+        ),
         leaf(
             "DataSeparation",
             code_text(&fields[5], &[("Separate", 0), ("DontUse", 1)])?,
@@ -292,11 +301,20 @@ fn common_attribute(payload: &Brace, context: &ExportContext) -> Result<Element>
                 &[("Independently", 0), ("IndependentlyAndSimultaneously", 1)],
             )?,
         ),
-        leaf("DataSeparationValue", wrapped_reference(&fields[7], context)?),
+        leaf(
+            "DataSeparationValue",
+            wrapped_reference(&fields[7], context)?,
+        ),
         leaf("DataSeparationUse", wrapped_reference(&fields[8], context)?),
-        leaf("ConditionalSeparation", wrapped_reference(&fields[9], context)?),
+        leaf(
+            "ConditionalSeparation",
+            wrapped_reference(&fields[9], context)?,
+        ),
         leaf("UsersSeparation", code_text(&fields[10], SEPARATION)?),
-        leaf("AuthenticationSeparation", code_text(&fields[11], SEPARATION)?),
+        leaf(
+            "AuthenticationSeparation",
+            code_text(&fields[11], SEPARATION)?,
+        ),
         leaf(
             "ConfigurationExtensionsSeparation",
             code_text(&fields[13], SEPARATION)?,
@@ -305,10 +323,17 @@ fn common_attribute(payload: &Brace, context: &ExportContext) -> Result<Element>
             "Indexing",
             code_text(
                 &fields[3],
-                &[("DontIndex", 0), ("Index", 1), ("IndexWithAdditionalOrder", 2)],
+                &[
+                    ("DontIndex", 0),
+                    ("Index", 1),
+                    ("IndexWithAdditionalOrder", 2),
+                ],
             )?,
         ),
-        leaf("FullTextSearch", code_text(&fields[4], &[("DontUse", 0), ("Use", 1)])?),
+        leaf(
+            "FullTextSearch",
+            code_text(&fields[4], &[("DontUse", 0), ("Use", 1)])?,
+        ),
         leaf("DataHistory", code_text(&fields[14], DATA_HISTORY)?),
     ];
     Ok(object(
@@ -359,7 +384,8 @@ fn functional_options_parameter(payload: &Brace, context: &ExportContext) -> Res
     };
     let mut uses = el("Use");
     for entry in stored.iter().skip(2).take(count) {
-        uses.children.push(value_element("xr:Item", entry, &context.names)?);
+        uses.children
+            .push(value_element("xr:Item", entry, &context.names)?);
     }
     Ok(object(
         "FunctionalOptionsParameter",
@@ -517,7 +543,9 @@ fn filter_criterion(root: &[Brace], context: &ExportContext) -> Result<Element> 
     let count = number(item(stored, 1)?)? as usize;
     let mut content = el("Content");
     for entry in stored.iter().skip(2).take(count) {
-        content.children.push(value_element("xr:Item", entry, &context.names)?);
+        content
+            .children
+            .push(value_element("xr:Item", entry, &context.names)?);
     }
     let properties = el("Properties")
         .child(name)
@@ -529,7 +557,10 @@ fn filter_criterion(root: &[Brace], context: &ExportContext) -> Result<Element> 
         .child(leaf("DefaultForm", named(item(fields, 8)?, context)?))
         .child(leaf("AuxiliaryForm", named(item(fields, 9)?, context)?))
         .child(localized_element("ListPresentation", item(fields, 10)?)?)
-        .child(localized_element("ExtendedListPresentation", item(fields, 11)?)?)
+        .child(localized_element(
+            "ExtendedListPresentation",
+            item(fields, 11)?,
+        )?)
         .child(localized_element("Explanation", item(fields, 12)?)?);
     let mut children = el("ChildObjects").children(owned(
         "Form",
@@ -543,7 +574,9 @@ fn filter_criterion(root: &[Brace], context: &ExportContext) -> Result<Element> 
         let body = item(list(inner)?, 3)?;
         children
             .children
-            .push(crate::metadata_model::objects::export::command(body, context)?);
+            .push(crate::metadata_model::objects::export::command(
+                body, context,
+            )?);
     }
     Ok(object(
         "FilterCriterion",
@@ -555,7 +588,12 @@ fn filter_criterion(root: &[Brace], context: &ExportContext) -> Result<Element> 
 // ---------------------------------------------------------------------------
 // Names.
 
-fn generated(name: String, category: &str, type_id: &Brace, value_id: &Brace) -> Result<GeneratedTypeName> {
+fn generated(
+    name: String,
+    category: &str,
+    type_id: &Brace,
+    value_id: &Brace,
+) -> Result<GeneratedTypeName> {
     Ok(GeneratedTypeName {
         name,
         category: category.to_string(),
@@ -569,7 +607,10 @@ pub(crate) fn names(kind: &str, row: &Brace) -> Result<ObjectNames> {
     let root = list(row)?;
     let fields = list(item(root, 1)?)?;
     let (head, types, children) = match kind {
-        "Language" | "FunctionalOption" | "FunctionalOptionsParameter" | "EventSubscription"
+        "Language"
+        | "FunctionalOption"
+        | "FunctionalOptionsParameter"
+        | "EventSubscription"
         | "ScheduledJob" => (header(item(fields, 1)?)?, Vec::new(), Vec::new()),
         "SessionParameter" => (
             header(item(list(item(fields, 1)?)?, 1)?)?,
@@ -648,7 +689,10 @@ pub(crate) fn names(kind: &str, row: &Brace) -> Result<ObjectNames> {
                 let command = list(item(body, 2)?)?;
                 let command_head = header(item(command, 9)?)?;
                 children.push((
-                    format!("FilterCriterion.{}.Command.{}", head.name, command_head.name),
+                    format!(
+                        "FilterCriterion.{}.Command.{}",
+                        head.name, command_head.name
+                    ),
                     command_head.uuid,
                 ));
             }
@@ -669,12 +713,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::metadata_model::ObjectXml;
     use crate::metadata_model::export::{NameIndex, write_document};
     use crate::metadata_model::index::ObjectEntry;
     use crate::metadata_model::objects::parts::Compat;
     use crate::metadata_model::simple::compile;
     use crate::metadata_model::types::tests::{context, element};
-    use crate::metadata_model::ObjectXml;
 
     const MODULE: &str = "dc2b7a9e-132b-4a30-b7a8-ec72bf3d2e63";
 
@@ -695,7 +739,9 @@ mod tests {
         let object = ObjectXml {
             element: &original,
             kind,
-            uuid: Element::attr(&original, "uuid").unwrap_or_default().to_string(),
+            uuid: Element::attr(&original, "uuid")
+                .unwrap_or_default()
+                .to_string(),
             name: original
                 .path(&["Properties", "Name"])
                 .map(|name| name.text.clone())

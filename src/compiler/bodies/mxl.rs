@@ -8,8 +8,7 @@ use ibcmd_core::profile::EffectiveProfile;
 
 use super::{BodyProfileError, SelectedBodyProfile};
 use crate::compiler::families::native::{
-    NativeError, exact_token, inflate, parse, parse_without_bom, required_list,
-    required_token,
+    NativeError, exact_token, inflate, parse, parse_without_bom, required_list, required_token,
 };
 use crate::module_blob::{
     MetadataSourceContext, SpreadsheetNumberFormatHint,
@@ -198,9 +197,7 @@ fn decode_plain(
         let tail = fields
             .get(fields.len().saturating_sub(6)..)
             .filter(|tail| tail.len() == 6)
-            .ok_or_else(|| {
-                MxlCodecError::InvalidShape("MOXCEL root has no trailer".to_string())
-            })?;
+            .ok_or_else(|| MxlCodecError::InvalidShape("MOXCEL root has no trailer".to_string()))?;
         for (field, expected) in tail.iter().zip(["0", "0", "1", "0", "0", "0"]) {
             exact_token(field, expected, "MOXCEL trailer")?;
         }

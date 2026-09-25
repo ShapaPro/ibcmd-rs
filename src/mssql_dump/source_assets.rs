@@ -1052,7 +1052,10 @@ pub(super) fn source_asset_paths_with_indexes(
     let list_texts = parent_configuration_list_ids(&paths)
         .into_iter()
         .filter_map(|list_id| {
-            let bytes = rows_by_file_name.get(list_id.as_str())?.binary_bytes().ok()?;
+            let bytes = rows_by_file_name
+                .get(list_id.as_str())?
+                .binary_bytes()
+                .ok()?;
             Some((list_id, inflated_row_text(&bytes)?))
         })
         .collect::<BTreeMap<_, _>>();
@@ -1395,8 +1398,12 @@ pub(super) fn insert_parent_configuration_assets(
             continue;
         }
         let (Some(uuid), Some(name)) = (
-            fields.get(3).and_then(|field| parse_uuid_field(field.trim())),
-            fields.get(8).and_then(|field| parse_1c_quoted_string(field.trim())),
+            fields
+                .get(3)
+                .and_then(|field| parse_uuid_field(field.trim())),
+            fields
+                .get(8)
+                .and_then(|field| parse_1c_quoted_string(field.trim())),
         ) else {
             continue;
         };
@@ -2368,11 +2375,11 @@ fn write_source_asset_inner(
                 context.source_version,
             )
             .with_context(|| {
-                    format!(
-                        "failed to extract style body from source asset {}",
-                        asset.primary_path.display()
-                    )
-                })?;
+                format!(
+                    "failed to extract style body from source asset {}",
+                    asset.primary_path.display()
+                )
+            })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
@@ -2454,8 +2461,8 @@ fn write_source_asset_inner(
                     // Diagnostic: `IBCMD_RS_V85_FORM_PASS=off` writes what the 8.3.27
                     // codec reads from the (down-converted) body, without the 2.21
                     // pass -- the XML a 2.21 load hands the 8.3.27 form writer.
-                    let v85_pass_off = std::env::var("IBCMD_RS_V85_FORM_PASS")
-                        .is_ok_and(|value| value == "off");
+                    let v85_pass_off =
+                        std::env::var("IBCMD_RS_V85_FORM_PASS").is_ok_and(|value| value == "off");
                     let (xml, v85_item_assets) = match &v85_facts {
                         _ if v85_pass_off => (xml, Vec::new()),
                         Some(facts) => super::form_v85_writer::apply_v85_form_facts(

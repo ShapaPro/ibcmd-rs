@@ -18,8 +18,8 @@ use super::mxl::{
 };
 use super::{BodyProfileError, SelectedBodyProfile};
 use crate::compiler::families::native::{
-    NativeError, deflate_bytes, exact_list, exact_token, inflate, parse_optional_bom, required_list,
-    required_text, required_token,
+    NativeError, deflate_bytes, exact_list, exact_token, inflate, parse_optional_bom,
+    required_list, required_text, required_token,
 };
 use crate::module_blob::{
     MetadataSourceContext, SpreadsheetNumberFormatHint, decode_base64_mime,

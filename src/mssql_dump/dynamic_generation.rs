@@ -157,11 +157,7 @@ pub(super) fn clear_storage_generation_overlays() {
 }
 
 pub(super) fn storage_generation_overlay_for(table: &str) -> Option<StorageGenerationOverlay> {
-    STORAGE_GENERATION_OVERLAYS
-        .read()
-        .ok()?
-        .get(table)
-        .cloned()
+    STORAGE_GENERATION_OVERLAYS.read().ok()?.get(table).cloned()
 }
 
 /// The table expression every query reads from: the table itself when no
@@ -210,9 +206,7 @@ mod tests {
     #[test]
     fn reads_the_history_a_marker_records() {
         assert_eq!(
-            dynamic_generation_history(
-                "{1,1,06cb0442-0c47-4fad-986a-f08f28287c1b}".as_bytes()
-            ),
+            dynamic_generation_history("{1,1,06cb0442-0c47-4fad-986a-f08f28287c1b}".as_bytes()),
             Some(vec!["06cb0442-0c47-4fad-986a-f08f28287c1b".to_owned()])
         );
         assert_eq!(
@@ -235,7 +229,10 @@ mod tests {
             dynamic_generation_history("{0,1,06cb0442-0c47-4fad-986a-f08f28287c1b}".as_bytes()),
             None
         );
-        assert_eq!(dynamic_generation_history("{1,1,not-a-uuid}".as_bytes()), None);
+        assert_eq!(
+            dynamic_generation_history("{1,1,not-a-uuid}".as_bytes()),
+            None
+        );
     }
 
     #[test]
@@ -299,7 +296,10 @@ mod tests {
     fn an_active_generation_reads_through_a_derived_table() {
         let overlay = storage_generation_overlay(
             &["06cb0442-0c47-4fad-986a-f08f28287c1b".to_owned()],
-            ["versions".into(), "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b"],
+            [
+                "versions".into(),
+                "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",
+            ],
         );
         let expression = storage_table_expression("[db].dbo.[Config]", Some(&overlay));
 

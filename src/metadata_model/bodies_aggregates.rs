@@ -18,9 +18,7 @@ use anyhow::{Context, Result, anyhow};
 
 use super::DescriptorContext;
 use super::bodies_predefined::PREDEFINED_REF_TYPE;
-use super::bodies_value_table::{
-    Column, Row, bool_value, number_value, pattern, value_table,
-};
+use super::bodies_value_table::{Column, Row, bool_value, number_value, pattern, value_table};
 use super::brace::{Brace, serialize};
 use super::xml::{Element, parse_element_tree};
 use crate::brace_list;
@@ -143,12 +141,19 @@ pub fn aggregates_row(
             .filter(|dimension| dimension.text.trim() == "true")
             .filter_map(|dimension| {
                 let spelled = dimension.attr("ref")?;
-                Some(spelled.strip_prefix(prefix.as_str()).unwrap_or(spelled).to_string())
+                Some(
+                    spelled
+                        .strip_prefix(prefix.as_str())
+                        .unwrap_or(spelled)
+                        .to_string(),
+                )
             })
             .collect::<Vec<_>>();
         for (uuid, name) in &dimensions {
             values.push(bool_value(
-                included.iter().any(|spelled| spelled == name || spelled == uuid),
+                included
+                    .iter()
+                    .any(|spelled| spelled == name || spelled == uuid),
             ));
         }
         rows.push(Row::new(values));

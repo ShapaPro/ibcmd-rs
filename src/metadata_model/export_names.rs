@@ -36,13 +36,20 @@ pub fn has_names(kind: &str) -> bool {
 }
 
 /// Whether `decode_object` decodes rows of `kind`.
-pub fn has_decoder(kind: &str, context: &ExportContext) -> bool {
+pub fn has_decoder(kind: &str) -> bool {
     static KNOWN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
     if let Some(answer) = known.lock().ok().and_then(|map| map.get(kind).copied()) {
         return answer;
     }
-    let answer = match decode_object(kind, &Brace::List(Vec::new()), context) {
+    // The probe decodes an empty row: a kind without a decoder answers
+    // "not yet" before it reads the context.
+    let context = ExportContext {
+        names: NameIndex::default(),
+        version: "2.20".to_string(),
+        compat: super::super::objects::parts::Compat(8, 3, 27),
+    };
+    let answer = match decode_object(kind, &Brace::List(Vec::new()), &context) {
         Ok(_) => true,
         Err(error) => !is_not_yet(&error),
     };
@@ -85,7 +92,10 @@ impl NameIndex {
 
     /// Adds a predefined item of `owner` (`Catalog.X`).
     pub fn insert_predefined(&mut self, owner: &str, uuid: &str, name: &str) {
-        let items = self.predefined.entry(uuid.to_ascii_lowercase()).or_default();
+        let items = self
+            .predefined
+            .entry(uuid.to_ascii_lowercase())
+            .or_default();
         if !items.iter().any(|(item_owner, _)| item_owner == owner) {
             items.push((owner.to_string(), name.to_string()));
         }
@@ -131,14 +141,26 @@ impl NameIndex {
 /// row, `{<class id>,<count>,<uuid>...}` (the load direction's root layout).
 const ROOT_CLASSES: &[(&str, &str)] = &[
     ("2deed9b8-0056-4ffe-a473-c20a6c32a0bc", "AccountingRegister"),
-    ("b64d9a40-1642-11d6-a3c7-0050bae0a776", "AccumulationRegister"),
+    (
+        "b64d9a40-1642-11d6-a3c7-0050bae0a776",
+        "AccumulationRegister",
+    ),
     ("6e6dc072-b7ac-41e7-8f88-278d25b6da2a", "Bot"),
     ("fcd3404e-1523-48ce-9bc0-ecdb822684a1", "BusinessProcess"),
-    ("f2de87a8-64e5-45eb-a22d-b3aedab050e7", "CalculationRegister"),
+    (
+        "f2de87a8-64e5-45eb-a22d-b3aedab050e7",
+        "CalculationRegister",
+    ),
     ("cf4abea6-37b2-11d4-940f-008048da11f9", "Catalog"),
     ("238e7e88-3c5f-48b2-8a3b-81ebbecb20ed", "ChartOfAccounts"),
-    ("30b100d6-b29f-47ac-aec7-cb8ca8a54767", "ChartOfCalculationTypes"),
-    ("82a1b659-b220-4d94-a9bd-14d757b95a48", "ChartOfCharacteristicTypes"),
+    (
+        "30b100d6-b29f-47ac-aec7-cb8ca8a54767",
+        "ChartOfCalculationTypes",
+    ),
+    (
+        "82a1b659-b220-4d94-a9bd-14d757b95a48",
+        "ChartOfCharacteristicTypes",
+    ),
     ("1c57eabe-7349-44b3-b1de-ebfeab67b47d", "CommandGroup"),
     ("15794563-ccec-41f6-a83c-ec5f7b9a5bc1", "CommonAttribute"),
     ("2f1a5187-fb0e-4b05-9489-dc5dd6412348", "CommonCommand"),
@@ -158,9 +180,15 @@ const ROOT_CLASSES: &[(&str, &str)] = &[
     ("5274d9fc-9c3a-4a71-8f5e-a0db8ab23de5", "ExternalDataSource"),
     ("3e7bfcc0-067d-11d6-a3c7-0050bae0a776", "FilterCriterion"),
     ("af547940-3268-434f-a3e7-e47d6d2638c3", "FunctionalOption"),
-    ("30d554db-541e-4f62-8970-a1c6dcfeb2bc", "FunctionalOptionsParameter"),
+    (
+        "30d554db-541e-4f62-8970-a1c6dcfeb2bc",
+        "FunctionalOptionsParameter",
+    ),
     ("0fffc09c-8f4c-47cc-b41c-8d5c5a221d79", "HTTPService"),
-    ("13134201-f60b-11d5-a3c7-0050bae0a776", "InformationRegister"),
+    (
+        "13134201-f60b-11d5-a3c7-0050bae0a776",
+        "InformationRegister",
+    ),
     ("bf3420b0-f6f9-41a0-b83a-fe9d4ab0b65d", "IntegrationService"),
     ("39bddf6a-0c3c-452b-921c-d99cfa1c2f1b", "Interface"),
     ("9cd510ce-abfc-11d4-9434-004095e12fc7", "Language"),
@@ -339,7 +367,10 @@ pub fn predefined_items(kind: &str, body: &Brace) -> Result<Vec<(String, String)
     for column in 0..columns {
         let position = atom(item(row_data, 2 + 2 * column)?)?;
         let id = atom(item(row_data, 3 + 2 * column)?)?;
-        positions.insert(id.to_string(), position.parse::<usize>().unwrap_or(usize::MAX));
+        positions.insert(
+            id.to_string(),
+            position.parse::<usize>().unwrap_or(usize::MAX),
+        );
     }
     let position = |id: i64| {
         positions

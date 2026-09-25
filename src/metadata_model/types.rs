@@ -29,9 +29,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{DescriptorContext, native_text};
 use super::brace::{Brace, NIL_UUID};
 use super::xml::{Element, parse_element_tree};
+use super::{DescriptorContext, native_text};
 use crate::brace_list;
 
 #[path = "types_export.rs"]
@@ -73,21 +73,39 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("v8:FixedArray", FIXED_ARRAY_TYPE),
     ("v8:FixedMap", "220455ea-6c85-4513-996f-bbe79ed07774"),
     ("v8:StandardPeriod", "2fdc88ec-7c9b-43cd-8ba5-873f043bdd88"),
-    ("v8:StandardBeginningDate", "0387f3a2-7df5-4804-948b-4580a51e4a15"),
+    (
+        "v8:StandardBeginningDate",
+        "0387f3a2-7df5-4804-948b-4580a51e4a15",
+    ),
     ("v8:ValueListType", "4772b3b4-f4a3-49c0-a1a5-8cb5961511a3"),
     ("v8:TypeDescription", "f5c65050-3bbb-11d5-b988-0050bae0a95d"),
     ("v8:FillChecking", "98ea8e5a-b586-442b-b944-6e3447734aa7"),
-    ("v8ui:FormattedString", "140b5ff4-37b1-4df5-b5ec-a0bfd2b94f8f"),
+    (
+        "v8ui:FormattedString",
+        "140b5ff4-37b1-4df5-b5ec-a0bfd2b94f8f",
+    ),
     ("v8ui:Color", "9cd510c7-abfc-11d4-9434-004095e12fc7"),
     ("v8ui:Font", "9cd510c8-abfc-11d4-9434-004095e12fc7"),
     ("v8ui:Picture", "e6f51714-91cb-4dce-94fe-90ae3e3e1ad1"),
     ("v8ui:VerticalAlign", "52616226-8ccf-4d1d-a3da-827eeb4f9cf9"),
-    ("v8ui:HorizontalAlign", "43f9c095-40e8-441a-8fad-20a45798c71b"),
-    ("mxl:SpreadsheetDocument", "e603103e-a318-4edc-a014-b1c6cf94d49f"),
-    ("fd:FormattedDocument", "151f8778-e2d0-496a-9f02-d9ffd93b57ec"),
+    (
+        "v8ui:HorizontalAlign",
+        "43f9c095-40e8-441a-8fad-20a45798c71b",
+    ),
+    (
+        "mxl:SpreadsheetDocument",
+        "e603103e-a318-4edc-a014-b1c6cf94d49f",
+    ),
+    (
+        "fd:FormattedDocument",
+        "151f8778-e2d0-496a-9f02-d9ffd93b57ec",
+    ),
     ("pdfdoc:PDFDocument", "48510817-200c-48c2-9973-06cf90840514"),
     ("pl:Planner", "43dc7f37-5b1d-42a7-8f28-f545080d0255"),
-    ("dcsset:SettingsComposer", "cab0d12b-3c88-4993-8edc-8c3827cadc7d"),
+    (
+        "dcsset:SettingsComposer",
+        "cab0d12b-3c88-4993-8edc-8c3827cadc7d",
+    ),
     ("dcsset:Filter", "f6841c6b-6c71-4c82-ae9e-d08b49db326c"),
     (
         "dcsset:DataCompositionComparisonType",
@@ -110,7 +128,10 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "c6a52555-d20f-452c-bfc2-1b53e9a56063",
     ),
     ("dcscor:Field", "913e8016-6e90-47a0-b2a0-4513f4edad61"),
-    ("ent:AccountingRecordType", "741ae838-6e42-4ac0-b6a4-17e5604b0669"),
+    (
+        "ent:AccountingRecordType",
+        "741ae838-6e42-4ac0-b6a4-17e5604b0669",
+    ),
     ("ent:ComparisonType", "b1b064f3-ae38-49bf-8c6d-390c65fd94af"),
     ("cfg:ConstantsSet", "dcfc3784-a14f-4786-ac7b-c82db5ba275f"),
     ("cfg:ReportBuilder", "0dda99d9-ae9f-43d2-b7ac-44f3fb0d4059"),
@@ -122,17 +143,26 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("cfg:CatalogRef", "e61ef7b8-f3e1-4f4b-8ac7-676e90524997"),
     ("cfg:DocumentRef", "38bfd075-3e63-4aaa-a93e-94521380d579"),
     ("cfg:EnumRef", "474c3bf6-08b5-4ddc-a2ad-989cedf11583"),
-    ("cfg:ExchangePlanRef", "0a52f9de-73ea-4507-81e8-66217bead73a"),
+    (
+        "cfg:ExchangePlanRef",
+        "0a52f9de-73ea-4507-81e8-66217bead73a",
+    ),
     (
         "cfg:ChartOfCharacteristicTypesRef",
         "99892482-ed55-4fb5-a7f7-20888820a758",
     ),
-    ("cfg:ChartOfAccountsRef", "ac606d60-0209-4159-8e4c-794bc091ce38"),
+    (
+        "cfg:ChartOfAccountsRef",
+        "ac606d60-0209-4159-8e4c-794bc091ce38",
+    ),
     (
         "cfg:ChartOfCalculationTypesRef",
         "593cd424-0877-470d-91f9-b90a982059b4",
     ),
-    ("cfg:BusinessProcessRef", "214fa4d8-6ba4-4748-a5e1-6332b5887780"),
+    (
+        "cfg:BusinessProcessRef",
+        "214fa4d8-6ba4-4748-a5e1-6332b5887780",
+    ),
     (
         "cfg:BusinessProcessRoutePointRef",
         "11e5f865-1501-40c6-b4d4-022095a296a5",
@@ -140,19 +170,31 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("cfg:TaskRef", "6291e9b3-8df5-44e1-b6b2-d9fe008016c0"),
     ("cfg:CatalogObject", "cf4abea6-37b2-11d4-940f-008048da11f9"),
     ("cfg:DocumentObject", "061d872a-5787-460e-95ac-ed74ea3a3e84"),
-    ("cfg:ExchangePlanObject", "857c4a91-e5f4-4fac-86ec-787626f1c108"),
+    (
+        "cfg:ExchangePlanObject",
+        "857c4a91-e5f4-4fac-86ec-787626f1c108",
+    ),
     (
         "cfg:ChartOfCharacteristicTypesObject",
         "82a1b659-b220-4d94-a9bd-14d757b95a48",
     ),
-    ("cfg:ChartOfAccountsObject", "238e7e88-3c5f-48b2-8a3b-81ebbecb20ed"),
+    (
+        "cfg:ChartOfAccountsObject",
+        "238e7e88-3c5f-48b2-8a3b-81ebbecb20ed",
+    ),
     (
         "cfg:ChartOfCalculationTypesObject",
         "30b100d6-b29f-47ac-aec7-cb8ca8a54767",
     ),
-    ("cfg:BusinessProcessObject", "fcd3404e-1523-48ce-9bc0-ecdb822684a1"),
+    (
+        "cfg:BusinessProcessObject",
+        "fcd3404e-1523-48ce-9bc0-ecdb822684a1",
+    ),
     ("cfg:TaskObject", "3e63355c-1378-4953-be9b-1deb5fb6bec5"),
-    ("cfg:ConstantValueManager", "0195e80c-b157-11d4-9435-004095e12fc7"),
+    (
+        "cfg:ConstantValueManager",
+        "0195e80c-b157-11d4-9435-004095e12fc7",
+    ),
     (
         "cfg:InformationRegisterRecordSet",
         "13134201-f60b-11d5-a3c7-0050bae0a776",
@@ -169,16 +211,31 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "cfg:CalculationRegisterRecordSet",
         "f2de87a8-64e5-45eb-a22d-b3aedab050e7",
     ),
-    ("cfg:SequenceRecordSet", "274bf899-db0e-4df6-8ab5-67bf6371ec0b"),
-    ("cfg:RecalculationRecordSet", "bc587f20-35d9-11d6-a3c7-0050bae0a776"),
+    (
+        "cfg:SequenceRecordSet",
+        "274bf899-db0e-4df6-8ab5-67bf6371ec0b",
+    ),
+    (
+        "cfg:RecalculationRecordSet",
+        "bc587f20-35d9-11d6-a3c7-0050bae0a776",
+    ),
     ("cfg:CatalogManager", "82faabf3-7f9b-4b2e-b499-98876415f270"),
-    ("cfg:DocumentManager", "26dd1dee-252a-4942-b4b5-62ea44ed8030"),
-    ("cfg:DocumentJournalManager", "92e7f73f-bd66-4d9e-bc43-bae2acfadfd5"),
+    (
+        "cfg:DocumentManager",
+        "26dd1dee-252a-4942-b4b5-62ea44ed8030",
+    ),
+    (
+        "cfg:DocumentJournalManager",
+        "92e7f73f-bd66-4d9e-bc43-bae2acfadfd5",
+    ),
     (
         "cfg:ChartOfCharacteristicTypesManager",
         "7612de75-8b10-466a-b235-68572c605d92",
     ),
-    ("cfg:ChartOfAccountsManager", "2066866d-9d38-47fe-a272-3cd416eb9c85"),
+    (
+        "cfg:ChartOfAccountsManager",
+        "2066866d-9d38-47fe-a272-3cd416eb9c85",
+    ),
     (
         "cfg:ChartOfCalculationTypesManager",
         "3eab4ff4-f2d1-4c96-831c-04711b093999",
@@ -199,7 +256,10 @@ const BUILTIN_TYPES: &[(&str, &str)] = &[
         "cfg:CalculationRegisterManager",
         "2d0abc8e-dede-4184-afd7-7ae8da588d47",
     ),
-    ("cfg:BusinessProcessManager", "38f1038d-8b0b-438b-bfbe-830a60a1153a"),
+    (
+        "cfg:BusinessProcessManager",
+        "38f1038d-8b0b-438b-bfbe-830a60a1153a",
+    ),
     ("cfg:TaskManager", "5e268c17-8035-458f-8041-daf9b15d05c9"),
 ];
 
@@ -210,17 +270,29 @@ const BUILTIN_LOCAL_TYPES: &[(&str, &str)] = &[
     ("d0p1:Chart", "3543ef08-3316-4f7e-9447-0cd0a1cbf1d5"),
     ("d0p1:GanttChart", "3a6e63bf-16aa-42eb-b48c-2fff9670ad2f"),
     ("d0p1:TextDocument", "ebf766b1-f32c-11d3-9851-008048da1252"),
-    ("d0p1:GeographicalSchema", "95de81b0-81c3-4936-9dbb-6400e5c90378"),
-    ("d0p1:FlowchartContextType", "4af83795-fc2a-48cd-9bea-ce665789a62c"),
+    (
+        "d0p1:GeographicalSchema",
+        "95de81b0-81c3-4936-9dbb-6400e5c90378",
+    ),
+    (
+        "d0p1:FlowchartContextType",
+        "4af83795-fc2a-48cd-9bea-ce665789a62c",
+    ),
     (
         "d0p1:DataAnalysisTimeIntervalUnitType",
         "77a01c71-e9b2-4617-af07-c95a4b74548a",
     ),
-    ("d0p1:ConditionalAppearance", "7dd764b6-b22f-4712-8edc-c0d634340e60"),
+    (
+        "d0p1:ConditionalAppearance",
+        "7dd764b6-b22f-4712-8edc-c0d634340e60",
+    ),
 ];
 
 fn builtin_type_id(name: &str) -> Option<&'static str> {
-    if let Some((_, id)) = BUILTIN_TYPES.iter().find(|(candidate, _)| *candidate == name) {
+    if let Some((_, id)) = BUILTIN_TYPES
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+    {
         return Some(id);
     }
     let (prefix, local) = name.split_once(':')?;
@@ -478,7 +550,10 @@ const REF_FAMILIES: &[(&str, &str)] = &[
     ("Document", "DocumentRef"),
     ("Enum", "EnumRef"),
     ("ExchangePlan", "ExchangePlanRef"),
-    ("ChartOfCharacteristicTypes", "ChartOfCharacteristicTypesRef"),
+    (
+        "ChartOfCharacteristicTypes",
+        "ChartOfCharacteristicTypesRef",
+    ),
     ("ChartOfAccounts", "ChartOfAccountsRef"),
     ("ChartOfCalculationTypes", "ChartOfCalculationTypesRef"),
     ("BusinessProcess", "BusinessProcessRef"),
@@ -575,7 +650,11 @@ pub fn predefined_item_id(
         .objects
         .get(&format!("{kind}.{name}"))
         .ok_or_else(|| anyhow!("unknown object {kind}.{name}"))?;
-    let path = entry.path.with_extension("").join("Ext").join("Predefined.xml");
+    let path = entry
+        .path
+        .with_extension("")
+        .join("Ext")
+        .join("Predefined.xml");
     let cached = predefined_cache()
         .lock()
         .map_err(|_| anyhow!("predefined cache poisoned"))?
@@ -895,7 +974,12 @@ pub mod corpus {
                 if stored.contains(&text) {
                     Outcome::Found
                 } else {
-                    Outcome::Missing(kind.to_string(), relative.to_string(), summary(element), text)
+                    Outcome::Missing(
+                        kind.to_string(),
+                        relative.to_string(),
+                        summary(element),
+                        text,
+                    )
                 }
             }
         }
@@ -1038,7 +1122,10 @@ pub(crate) mod tests {
             ("Enum.Виды.EnumValue.Первый", ENUM_VALUE),
             ("Catalog.Счета.Attribute.Банк", ATTRIBUTE),
             ("Catalog.Счета.TabularSection.Строки", SECTION),
-            ("Catalog.Счета.TabularSection.Строки.Attribute.Свойство", SECTION_ATTRIBUTE),
+            (
+                "Catalog.Счета.TabularSection.Строки.Attribute.Свойство",
+                SECTION_ATTRIBUTE,
+            ),
         ] {
             index.children.insert(name.to_string(), uuid.to_string());
         }
@@ -1060,7 +1147,10 @@ pub(crate) mod tests {
 
     #[test]
     fn dates_uuids_and_builtins() {
-        assert_eq!(date_digits("0001-01-01T00:00:00").unwrap(), "00010101000000");
+        assert_eq!(
+            date_digits("0001-01-01T00:00:00").unwrap(),
+            "00010101000000"
+        );
         assert!(is_uuid("5c14e26f-099b-4d37-84a6-b433d87400da"));
         assert!(!is_uuid("Catalog.X"));
         assert_eq!(
@@ -1107,13 +1197,28 @@ pub(crate) mod tests {
         let context = context();
         let value = |xml: &str| text(typed_value(Some(&element(xml)), &context));
         assert_eq!(value(r##"<FillValue xsi:nil="true"/>"##), r##"{"U"}"##);
-        assert_eq!(value(r##"<FillValue xsi:type="xs:string"/>"##), r##"{"S",""}"##);
         assert_eq!(
-            serialize(&typed_value(Some(&element("<V xsi:type=\"xs:string\">a\nb</V>")), &context).unwrap()),
+            value(r##"<FillValue xsi:type="xs:string"/>"##),
+            r##"{"S",""}"##
+        );
+        assert_eq!(
+            serialize(
+                &typed_value(
+                    Some(&element("<V xsi:type=\"xs:string\">a\nb</V>")),
+                    &context
+                )
+                .unwrap()
+            ),
             "{\"S\",\"a\r\nb\"}"
         );
-        assert_eq!(value(r##"<V xsi:type="xs:decimal">0.5</V>"##), r##"{"N",0.5}"##);
-        assert_eq!(value(r##"<V xsi:type="xs:boolean">true</V>"##), r##"{"B",1}"##);
+        assert_eq!(
+            value(r##"<V xsi:type="xs:decimal">0.5</V>"##),
+            r##"{"N",0.5}"##
+        );
+        assert_eq!(
+            value(r##"<V xsi:type="xs:boolean">true</V>"##),
+            r##"{"B",1}"##
+        );
         assert_eq!(
             value(r##"<V xsi:type="xs:dateTime">0001-01-01T23:59:59</V>"##),
             r##"{"D",00010101235959}"##
@@ -1147,7 +1252,10 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>()
                 .join("|")
         };
-        assert_eq!(path("Catalog.Счета.Attribute.Банк"), format!("{{0,{ATTRIBUTE}}}"));
+        assert_eq!(
+            path("Catalog.Счета.Attribute.Банк"),
+            format!("{{0,{ATTRIBUTE}}}")
+        );
         assert_eq!(
             path("Catalog.Счета.TabularSection.Строки.Attribute.Свойство"),
             format!("{{0,{SECTION}}}|{{0,{SECTION_ATTRIBUTE}}}")

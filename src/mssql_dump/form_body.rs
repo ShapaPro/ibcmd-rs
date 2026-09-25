@@ -7306,7 +7306,12 @@ fn form_query_source_tables_by_alias(tokens: &[String]) -> BTreeMap<String, Stri
         if dot != "." || !is_1c_query_ident(name) || !is_1c_query_ident(kind) {
             continue;
         }
-        if index.checked_sub(4).and_then(|at| tokens.get(at)).map(String::as_str) == Some(".") {
+        if index
+            .checked_sub(4)
+            .and_then(|at| tokens.get(at))
+            .map(String::as_str)
+            == Some(".")
+        {
             continue;
         }
         let kind_upper = kind.to_uppercase();
@@ -7353,7 +7358,12 @@ fn form_dynamic_list_query_dereferences_undeclared_member(
         if window[1] != "." || window[3] != "." {
             continue;
         }
-        if index.checked_sub(1).and_then(|at| tokens.get(at)).map(String::as_str) == Some(".") {
+        if index
+            .checked_sub(1)
+            .and_then(|at| tokens.get(at))
+            .map(String::as_str)
+            == Some(".")
+        {
             continue;
         }
         if !is_1c_query_ident(&window[0])
@@ -22450,11 +22460,7 @@ pub(super) fn parse_form_child_item_event_fields(
         let head = parse_form_child_item_event_record(&nested, names_events);
         append_unique_form_body_events(
             &mut events,
-            interleave_form_child_item_event_bindings(
-                &nested,
-                names_events,
-                head,
-            ),
+            interleave_form_child_item_event_bindings(&nested, names_events, head),
         );
     }
     for window in fields.windows(2) {
@@ -23284,7 +23290,10 @@ pub(super) fn parse_form_child_item_data_path(
             table_path: primary.to_owned(),
             column_id: parse_form_chain_numeric_id(column_id)?.to_string(),
         };
-        let column = owner_scoped_bindings.additional_columns.get(&key)?.as_ref()?;
+        let column = owner_scoped_bindings
+            .additional_columns
+            .get(&key)?
+            .as_ref()?;
         Some(format!("{primary}.{column}"))
     });
     let paths = FormChildItemDataPaths {
@@ -23693,7 +23702,9 @@ fn resolve_form_dynamic_list_chain_data_path(
         column_id: numeric[1].to_string(),
     };
     let marker = (owner_scoped_bindings.invalid_nested_columns.contains(&key)
-        || owner_scoped_bindings.unresolvable_columns.contains(&head_key))
+        || owner_scoped_bindings
+            .unresolvable_columns
+            .contains(&head_key))
     .then_some("~")
     .unwrap_or_default();
     FormOwnerScopedDataPath::Resolved(format!("{marker}{}.{}", attribute.name, field_name))
