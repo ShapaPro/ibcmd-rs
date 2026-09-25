@@ -850,6 +850,7 @@ fn build_import_stage_args(
         bulk: false,
         per_row: false,
         bcp_executable: None,
+        base_free: false,
     })
 }
 
