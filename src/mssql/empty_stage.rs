@@ -425,6 +425,10 @@ pub struct EmptyStageAuditOptions {
     /// stored bytes, sha256 of the inflated text), to check a
     /// `--base-free --script-only` bcp file against.
     pub manifest: Option<PathBuf>,
+    /// Write every produced row here as `<FileName>__part0.bin`, the stored
+    /// bytes (raw deflate) -- the layout of a rows cache, for an offline
+    /// export of the empty-infobase row set.
+    pub rows_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -828,6 +832,17 @@ pub fn audit_empty_stage(
 ) -> Result<EmptyStageAuditReport> {
     let stored = StoredRows::scan(rows)?;
     let context = EmptyStageContext::new(root, version)?;
+    if let Some(dir) = &options.rows_out {
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    let write_row = |row: &EmptyStageRow| -> Result<()> {
+        if let Some(dir) = &options.rows_out {
+            let path = dir.join(format!("{}__part0.bin", row.file_name));
+            fs::write(&path, &row.blob)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    };
     let paths = descriptor_xmls(root);
 
     // Owner kind of every uuid the tree names.
@@ -872,6 +887,7 @@ pub fn audit_empty_stage(
                     let mut names = Vec::new();
                     let mut manifest = Vec::new();
                     for row in &object.rows {
+                        write_row(row)?;
                         names.push(row.file_name.clone());
                         let plain = match &row.plain {
                             Some(plain) => plain.clone(),
@@ -966,6 +982,7 @@ pub fn audit_empty_stage(
     let service = service_rows(&context, &names)?;
     let mut versions_report = EmptyStageVersionsReport::default();
     for row in &service {
+        write_row(row)?;
         let plain = row.plain.clone().unwrap_or_default();
         if options.manifest.is_some() {
             manifest.push((

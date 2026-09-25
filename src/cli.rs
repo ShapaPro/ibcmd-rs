@@ -1036,6 +1036,10 @@ pub struct AuditEmptyStageArgs {
     /// Write a TSV of every produced row (name, family, bytes, sha256).
     #[arg(long)]
     pub manifest: Option<PathBuf>,
+    /// Write every produced row as `<FileName>__part0.bin` (raw deflate, the
+    /// layout of a rows cache) into this directory.
+    #[arg(long)]
+    pub rows_out: Option<PathBuf>,
     /// Optional JSON report.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
