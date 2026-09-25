@@ -226,6 +226,49 @@ pub fn choice_parameters(
     Ok(Brace::List(items))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::super::brace::{NIL_UUID, serialize};
+    use super::super::types::tests::{VALUTA_TYPE, context, element};
+    use super::super::types::DESIGN_TIME_REF_TYPE;
+    use super::*;
+
+    const UUID: &str = "63eb6a1b-5f48-461a-9a6f-821db663c9d3";
+
+    fn body(properties: &str) -> String {
+        let properties = element(properties);
+        serialize(&attribute_body(UUID, &properties, &context()).unwrap()).replace("\r\n", "")
+    }
+
+    #[test]
+    fn a_constant_body_defaults_every_slot() {
+        // BSP `Constants/_ДемоИмяКонфигурацииВОбменеСБиблиотекойСтандартныхПодсистем`.
+        let actual = body(
+            r##"<Properties><Name>Имя</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Синоним</v8:content></v8:item></Synonym><Comment/><Type><v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>15</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers></Type><PasswordMode>false</PasswordMode><Format/><EditFormat/><ToolTip/><MarkNegatives>false</MarkNegatives><Mask/><MultiLine>false</MultiLine><ExtendedEdit>false</ExtendedEdit><MinValue xsi:nil="true"/><MaxValue xsi:nil="true"/><FillChecking>DontCheck</FillChecking><ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems><ChoiceParameterLinks/><ChoiceParameters/><QuickChoice>Auto</QuickChoice><ChoiceForm/><LinkByType/><ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput></Properties>"##,
+        );
+        assert_eq!(
+            actual,
+            format!(
+                r##"{{27,{{2,{{3,{{1,0,{UUID}}},"Имя",{{1,"ru","Синоним"}},"",0,0,{NIL_UUID},0}},{{"Pattern",{{"S",15,1}}}}}},0,{{0}},{{0}},0,"",0,{{"U"}},{{"U"}},0,{NIL_UUID},2,0,{{5006,0}},{{3,0,0}},{{0,0}},0,{{0}},{{"S",""}},0,0,0}}"##
+            )
+        );
+    }
+
+    #[test]
+    fn a_reference_attribute_body_with_links_and_parameters() {
+        let actual = body(
+            r##"<Properties><Name>Валюта</Name><Synonym/><Comment/><Type><v8:Type>cfg:CatalogRef.Валюты</v8:Type></Type><PasswordMode>false</PasswordMode><Format/><EditFormat/><ToolTip><v8:item><v8:lang>ru</v8:lang><v8:content>Подсказка</v8:content></v8:item></ToolTip><MarkNegatives>false</MarkNegatives><Mask/><MultiLine>false</MultiLine><ExtendedEdit>true</ExtendedEdit><MinValue xsi:nil="true"/><MaxValue xsi:type="xs:string">100</MaxValue><FillFromFillingValue>true</FillFromFillingValue><FillValue xsi:type="xr:DesignTimeRef">Catalog.Валюты.EmptyRef</FillValue><FillChecking>ShowError</FillChecking><ChoiceFoldersAndItems>FoldersAndItems</ChoiceFoldersAndItems><ChoiceParameterLinks><xr:Link><xr:Name>Отбор.Владелец</xr:Name><xr:DataPath xsi:type="xs:string">Catalog.Счета.StandardAttribute.Owner</xr:DataPath><xr:ValueChange>DontChange</xr:ValueChange></xr:Link></ChoiceParameterLinks><ChoiceParameters><app:item name="Отбор.ПометкаУдаления"><app:value xsi:type="xs:boolean">false</app:value></app:item></ChoiceParameters><QuickChoice>DontUse</QuickChoice><CreateOnInput>Use</CreateOnInput><ChoiceForm/><LinkByType><xr:DataPath>Catalog.Счета.Attribute.Банк</xr:DataPath><xr:LinkItem>3</xr:LinkItem></LinkByType><ChoiceHistoryOnInput>DontUse</ChoiceHistoryOnInput></Properties>"##,
+        );
+        let bank = super::super::types::tests::ATTRIBUTE;
+        assert_eq!(
+            actual,
+            format!(
+                r##"{{27,{{2,{{3,{{1,0,{UUID}}},"Валюта",{{0}},"",0,0,{NIL_UUID},0}},{{"Pattern",{{"#",{VALUTA_TYPE}}}}}}},0,{{0}},{{1,"ru","Подсказка"}},0,"",0,{{"U"}},{{"S","100"}},2,{NIL_UUID},0,1,{{5006,1,"Отбор.Владелец",1,{{-5}},1}},{{3,1,{{0,{bank}}},3}},{{0,1,"Отбор.ПометкаУдаления",{{"B",0}}}},1,{{0}},{{"#",{DESIGN_TIME_REF_TYPE},{{0,{VALUTA_TYPE},{NIL_UUID}}}}},1,2,1}}"##
+            )
+        );
+    }
+}
+
 /// Offline measurement of [`attribute_body`] against every attribute-like
 /// child the owners' stored rows carry (catalog/document/register
 /// attributes, tabular-section attributes, dimensions, resources, ...), not
