@@ -17,7 +17,7 @@ use super::{line_number_marker, standard_markers};
 use crate::brace_list;
 use crate::metadata_model::brace::{Brace, NIL_UUID};
 use crate::metadata_model::xml::{Element, MetadataXml};
-use crate::metadata_model::{DescriptorContext, ObjectXml, localized, md_base};
+use crate::metadata_model::{DescriptorContext, ObjectXml, localized, md_base, native_text};
 
 pub(crate) fn num(value: i64) -> Brace {
     Brace::num(value)
@@ -753,21 +753,12 @@ impl<'a> Obj<'a> {
 pub(crate) const FILL_CHECKING: &[(&str, i64)] = &[("DontCheck", 0), ("ShowError", 1)];
 
 /// The rows keep line breaks inside strings as CRLF; XML hands them over as
-/// LF. Every string of the tree gets the stored spelling back.
+/// LF. `localized` and `md_base` already convert; every other string of the
+/// tree (comments of standard attributes, masks, filter values...) gets the
+/// stored spelling here.
 pub(crate) fn restore_crlf(node: &mut Brace) {
     match node {
-        Brace::Str(text) if text.contains('\n') => {
-            let mut out = String::with_capacity(text.len() + 8);
-            let mut previous = ' ';
-            for ch in text.chars() {
-                if ch == '\n' && previous != '\r' {
-                    out.push('\r');
-                }
-                out.push(ch);
-                previous = ch;
-            }
-            *text = out;
-        }
+        Brace::Str(text) if text.contains('\n') => *text = native_text(text),
         Brace::List(items) => items.iter_mut().for_each(restore_crlf),
         _ => {}
     }
@@ -1181,90 +1172,94 @@ fn enum_value_color(text: &str) -> Result<Brace> {
     Ok(brace_list![num(4), num(4), brace_list![num(index)], num(5)])
 }
 
-/// The seam to the simple-objects track: type descriptions, typed values and
-/// the attribute body. Until its encoders land every non-trivial value is a
-/// `<A:...>` placeholder that the offline comparison masks.
+/// The seam to the simple-objects track (`types.rs`, `attribute.rs`): type
+/// descriptions, typed values, the attribute body and the choice/link
+/// properties the standard attributes share with attributes.
 pub(crate) mod shared {
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
 
-    use super::{Obj, num};
-    use crate::brace_list;
-    use crate::metadata_model::DescriptorContext;
+    use super::Obj;
     use crate::metadata_model::brace::Brace;
     use crate::metadata_model::xml::Element;
-
-    fn pending(what: &str) -> Brace {
-        Brace::Atom(format!("<A:{what}>"))
-    }
+    use crate::metadata_model::{DescriptorContext, attribute, types};
 
     /// `{27,...}` of an attribute-like element.
-    pub(crate) fn attribute_body(_element: &Element, _context: &DescriptorContext) -> Result<Brace> {
-        Ok(pending("attribute"))
+    pub(crate) fn attribute_body(element: &Element, context: &DescriptorContext) -> Result<Brace> {
+        let uuid = element
+            .attr("uuid")
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| anyhow!("<{}> has no uuid", element.name))?;
+        let properties = element
+            .child("Properties")
+            .ok_or_else(|| anyhow!("<{}> has no <Properties>", element.name))?;
+        attribute::attribute_body(&uuid, properties, context)
     }
 
     /// `{"Pattern",...}` of a `<Type>`-like element.
     pub(crate) fn type_pattern(
         element: Option<&Element>,
-        _context: &DescriptorContext,
+        context: &DescriptorContext,
     ) -> Result<Brace> {
-        match element {
-            None => Ok(brace_list![Brace::str("Pattern")]),
-            Some(element) if element.children.is_empty() => {
-                Ok(brace_list![Brace::str("Pattern")])
-            }
-            Some(_) => Ok(pending("type")),
-        }
+        types::type_pattern(element, context)
     }
 
     /// A typed value (`FillValue`, `MinValue`, `TypesFilterValue`...).
+    ///
+    /// Two value types only the charts' standard attributes hold are spelled
+    /// here: a `v8:TypeDescription` (a characteristic chart's `ValueType`) is
+    /// `{"#",<type description>,<pattern>}` and an `ent:AccountType` (a chart
+    /// of accounts' `Type`) `{"#",<account type>,<code>}`.
     pub(crate) fn typed_value(
         element: Option<&Element>,
-        _context: &DescriptorContext,
+        context: &DescriptorContext,
     ) -> Result<Brace> {
-        let Some(element) = element else {
-            return Ok(brace_list![Brace::str("U")]);
-        };
-        if element.is_nil() {
-            return Ok(brace_list![Brace::str("U")]);
+        if let Some(element) = element.filter(|element| !element.is_nil()) {
+            match element.attr("type") {
+                Some("v8:TypeDescription") => {
+                    return Ok(crate::brace_list![
+                        Brace::str("#"),
+                        Brace::uuid("f5c65050-3bbb-11d5-b988-0050bae0a95d"),
+                        types::type_pattern(Some(element), context)?,
+                    ]);
+                }
+                Some("ent:AccountType") => {
+                    let code = match element.text.trim() {
+                        "Active" => 0,
+                        "Passive" => 1,
+                        "ActivePassive" => 2,
+                        other => return Err(anyhow!("unsupported account type {other}")),
+                    };
+                    return Ok(crate::brace_list![
+                        Brace::str("#"),
+                        Brace::uuid("872f7198-7083-4e3e-b57e-a2a9802c769e"),
+                        Brace::num(code),
+                    ]);
+                }
+                _ => {}
+            }
         }
-        match element.attr("type") {
-            Some("xs:string") => Ok(brace_list![Brace::str("S"), Brace::str(element.text.clone())]),
-            Some("xs:boolean") => Ok(brace_list![
-                Brace::str("B"),
-                Brace::flag(element.text.trim() == "true")
-            ]),
-            _ => Ok(pending("value")),
-        }
+        types::typed_value(element, context)
     }
 
-    /// `{5006,0}` of an empty `<ChoiceParameterLinks>`.
-    pub(crate) fn choice_parameter_links(element: Option<&Element>, _obj: &Obj<'_>) -> Result<Brace> {
-        match element {
-            Some(element) if !element.children.is_empty() => Ok(pending("links")),
-            _ => Ok(brace_list![num(5006), num(0)]),
-        }
+    /// `{5006,N,...}` of `<ChoiceParameterLinks>`.
+    pub(crate) fn choice_parameter_links(element: Option<&Element>, obj: &Obj<'_>) -> Result<Brace> {
+        attribute::choice_parameter_links(element, obj.cx)
     }
 
-    /// `{0,0}` of an empty `<ChoiceParameters>`.
+    /// `{0,N,...}` of `<ChoiceParameters>`.
     pub(crate) fn choice_parameters(
         element: Option<&Element>,
-        _context: &DescriptorContext,
+        context: &DescriptorContext,
     ) -> Result<Brace> {
-        match element {
-            Some(element) if !element.children.is_empty() => Ok(pending("parameters")),
-            _ => Ok(brace_list![num(0), num(0)]),
-        }
+        attribute::choice_parameters(element, context)
     }
 
-    /// `{3,0,0}` of an empty `<LinkByType>`.
+    /// `{3,...}` of `<LinkByType>`.
     pub(crate) fn link_by_type(
         element: Option<&Element>,
-        _context: &DescriptorContext,
+        context: &DescriptorContext,
     ) -> Result<Brace> {
-        match element {
-            Some(element) if !element.children.is_empty() => Ok(pending("link")),
-            _ => Ok(brace_list![num(3), num(0), num(0)]),
-        }
+        attribute::link_by_type(element, context)
     }
 }
 
