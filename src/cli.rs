@@ -66,6 +66,10 @@ pub enum Commands {
     /// row, and read the compiled row back into Template.xml.
     #[command(hide = true)]
     AuditMxlWriter(AuditMxlWriterArgs),
+    /// Measure the base-free descriptor compiler: compile every metadata XML
+    /// without a base row and compare it with the row the platform stored.
+    #[command(hide = true)]
+    AuditMetadataCompiler(AuditMetadataCompilerArgs),
     /// Build a load plan by comparing manifests.
     Plan(PlanArgs),
     /// Compare two 1C XML source trees by path and content hash.
@@ -980,6 +984,30 @@ pub struct AuditMxlWriterArgs {
     /// Folder with the inflated stored rows of the same database.
     pub bodies: PathBuf,
     /// Optional JSON output file. Prints to stdout when omitted.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditMetadataCompilerArgs {
+    /// Root folder with the native 1C XML sources.
+    pub root: PathBuf,
+    /// Folder with the stored Config rows of the same database
+    /// (`<FileName>__part0.bin`, raw deflate, or `<FileName>__part0.txt`).
+    pub rows: PathBuf,
+    /// XML dialect of the tree: 2.20 (8.3.27) or 2.21 (8.5).
+    #[arg(long, default_value = "2.20")]
+    pub source_version: String,
+    /// Only this kind, e.g. `Catalog` (repeatable).
+    #[arg(long = "kind")]
+    pub kinds: Vec<String>,
+    /// Write the stored and the compiled text of differing samples here.
+    #[arg(long)]
+    pub diff_dir: Option<PathBuf>,
+    /// Differing samples kept per kind.
+    #[arg(long, default_value_t = 5)]
+    pub max_samples: usize,
+    /// Optional JSON report.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 }

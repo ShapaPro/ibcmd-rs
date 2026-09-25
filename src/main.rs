@@ -283,6 +283,24 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
+        Commands::AuditMetadataCompiler(args) => {
+            use ibcmd_rs::metadata_model::audit;
+            let options = audit::DescriptorAuditOptions {
+                kinds: args.kinds,
+                max_samples: args.max_samples,
+                diff_dir: args.diff_dir,
+            };
+            let report = audit::audit_descriptor_compiler(
+                &args.root,
+                &args.rows,
+                &args.source_version,
+                &options,
+            )?;
+            println!("{}", audit::summary_table(&report));
+            if let Some(output) = args.output {
+                std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
         Commands::AuditMxlWriter(args) => {
             let report = ibcmd_rs::source_audit::audit_mxl_writer(&args.root, &args.bodies)?;
             if let Some(output) = args.output {

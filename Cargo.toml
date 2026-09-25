@@ -41,3 +41,11 @@ walkdir = "2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+# Fast rebuilds while iterating on a compiler against the lab corpora:
+# `cargo build --profile iter` -> target/iter/ibcmd-rs.exe.
+[profile.iter]
+inherits = "release"
+opt-level = 1
+incremental = true
+codegen-units = 256

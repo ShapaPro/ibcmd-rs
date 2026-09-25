@@ -14,6 +14,7 @@ pub(crate) mod form_schema;
 pub mod infobase;
 pub mod legacy_version;
 pub(crate) mod metadata_owner_graph;
+pub mod metadata_model;
 pub mod module_blob;
 pub mod mssql;
 pub mod mssql_apply;
