@@ -293,7 +293,7 @@ fn functional_option(object: &ObjectXml<'_>, context: &DescriptorContext) -> Res
     ]))
 }
 
-/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}`
+/// `{1,{0,<md base>,{0,<count>,<metadata ref>...}},0}` (`{0}` when empty)
 fn functional_options_parameter(
     object: &ObjectXml<'_>,
     context: &DescriptorContext,
@@ -306,6 +306,11 @@ fn functional_options_parameter(
         }
     }
     uses[1] = Brace::num((uses.len() - 2) as i64);
+    if uses.len() == 2 {
+        // No corpus parameter is empty; the older strict codec
+        // (`compiler::families::simple`) reads an empty list as bare `{0}`.
+        uses.truncate(1);
+    }
     Ok(row(brace_list![
         Brace::num(0),
         md_base(&object.uuid, properties),
