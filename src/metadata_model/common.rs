@@ -19,7 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::brace::{Brace, parse_row};
 use super::xml::{Element, MetadataXml};
-use super::{DescriptorContext, ObjectXml, not_yet, parse_bool};
+use super::{DescriptorContext, ObjectXml, native_text, not_yet, parse_bool};
 use crate::brace_list;
 use crate::compiler::bodies::form_native::{
     format_native_color, format_native_control_border, format_native_font,
@@ -61,12 +61,11 @@ fn compile_tree(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<B
 // ---------------------------------------------------------------------------
 
 /// A stored string breaks its lines with CR LF where the XML text holds a
-/// bare LF (multi-line synonyms, tooltips, explanations).
+/// bare LF (multi-line synonyms, tooltips, explanations): `native_text` over
+/// every string of a compiled tree.
 pub fn crlf_strings(node: &mut Brace) {
     match node {
-        Brace::Str(value) if value.contains('\n') => {
-            *value = value.replace("\r\n", "\n").replace('\n', "\r\n");
-        }
+        Brace::Str(value) if value.contains('\n') => *value = native_text(value),
         Brace::List(items) => items.iter_mut().for_each(crlf_strings),
         _ => {}
     }
@@ -986,16 +985,10 @@ fn command_group_uuid(reference: &str, context: &DescriptorContext) -> Result<St
     bail!("unsupported command group {reference:?}")
 }
 
-/// A `<Type>`-like element (`<CommandParameterType>`) as `{"Pattern",...}`.
-///
-/// Type descriptions belong to the simple-objects track (`types.rs`); until
-/// it lands only the empty pattern is written.
-fn type_pattern(element: Option<&Element>, _context: &DescriptorContext) -> Result<Brace> {
-    let empty = element.is_none_or(|element| element.children.is_empty());
-    if empty {
-        return Ok(brace_list![Brace::str("Pattern")]);
-    }
-    bail!("type descriptions wait for types::type_pattern")
+/// A `<Type>`-like element (`<CommandParameterType>`) as `{"Pattern",...}`:
+/// the simple-objects track's type description encoder.
+fn type_pattern(element: Option<&Element>, context: &DescriptorContext) -> Result<Brace> {
+    super::types::type_pattern(element, context)
 }
 
 // ---------------------------------------------------------------------------
