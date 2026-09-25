@@ -457,13 +457,9 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         }
     }
     content[1] = Brace::num((content.len() - 2) as i64);
-    let commands = object
-        .child_objects()
-        .map(|children| children.children_named("Command").count())
-        .unwrap_or(0);
-    if commands > 0 {
-        bail!("filter criterion commands are not compiled yet");
-    }
+    // Owned commands are the reference objects' `{{0,{0,0,0,<command>}},0}`.
+    let commands = super::objects::parts::Obj::new(object, context)?
+        .commands(super::objects::parts::CommandWrapper::Owner)?;
     Ok(brace_list![
         Brace::num(1),
         brace_list![
@@ -493,7 +489,7 @@ fn filter_criterion(object: &ObjectXml<'_>, context: &DescriptorContext) -> Resu
         ],
         Brace::num(2),
         collection(FORMS, owned_object_uuids(object, "Form", context)?),
-        collection(COMMANDS, Vec::new()),
+        collection(COMMANDS, commands),
     ])
 }
 
