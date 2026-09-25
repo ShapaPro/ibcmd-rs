@@ -79,7 +79,9 @@ pub fn generated(object: &ObjectXml<'_>, categories: &[&str]) -> Result<Vec<Brac
                 )
             })?;
         for id in ["TypeId", "ValueId"] {
-            out.push(Brace::uuid(generated.child_text(id).unwrap_or_default().trim()));
+            out.push(Brace::uuid(
+                generated.child_text(id).unwrap_or_default().trim(),
+            ));
         }
     }
     Ok(out)
@@ -182,8 +184,9 @@ impl StandardAttributes {
         if let Some(list) = object.properties()?.child("StandardAttributes") {
             for element in list.children_named("StandardAttribute") {
                 let name = element.attr("name").unwrap_or_default();
-                let code = marker(name)
-                    .ok_or_else(|| anyhow!("unknown standard attribute {name} of {}", object.kind))?;
+                let code = marker(name).ok_or_else(|| {
+                    anyhow!("unknown standard attribute {name} of {}", object.kind)
+                })?;
                 let attribute = StandardAttribute::from_xml(element, context, generation, marker)
                     .with_context(|| format!("standard attribute {name}"))?;
                 entries.push((code, attribute));
@@ -295,10 +298,7 @@ impl StandardAttribute {
             )?,
             multi_line: flag("MultiLine")?,
             fill_from_filling_value: flag("FillFromFillingValue")?,
-            create_on_input: choice(
-                "CreateOnInput",
-                &[("Auto", 0), ("DontUse", 1), ("Use", 2)],
-            )?,
+            create_on_input: choice("CreateOnInput", &[("Auto", 0), ("DontUse", 1), ("Use", 2)])?,
             type_reduction_mode: match element.child_text("TypeReductionMode") {
                 Some(value) => enum_value(
                     "TypeReductionMode",
@@ -356,7 +356,10 @@ impl StandardAttribute {
                     Brace::num(self.fill_checking),
                 ),
             ),
-            ("2bbba66b-fabf-4863-8ba3-54b3c64c896e", boolean(self.multi_line)),
+            (
+                "2bbba66b-fabf-4863-8ba3-54b3c64c896e",
+                boolean(self.multi_line),
+            ),
             (
                 "2c8143d5-4248-4c43-8bfb-307c0be2e415",
                 boolean(self.fill_from_filling_value),
@@ -381,12 +384,18 @@ impl StandardAttribute {
                 "4690ff70-e3fa-4914-9127-6a9acc5fc949",
                 hash(LOCALIZED_STRING, self.tool_tip),
             ),
-            ("4de03908-56f4-4396-a61e-17253afca9ac", boolean(self.extended_edit)),
+            (
+                "4de03908-56f4-4396-a61e-17253afca9ac",
+                boolean(self.extended_edit),
+            ),
             (
                 "580c29e2-8af4-4258-882a-7cf8073e61c8",
                 hash(LOCALIZED_STRING, self.format),
             ),
-            ("6c4f7074-e7d4-48eb-b31b-132873666262", md_ref(self.choice_form)),
+            (
+                "6c4f7074-e7d4-48eb-b31b-132873666262",
+                md_ref(self.choice_form),
+            ),
             (
                 "6e3a1131-37a3-4da5-8895-572d9d0c9db6",
                 nested("ace3fd07-11b2-477e-ab7f-36f0ea37c8dd", self.quick_choice),
@@ -402,12 +411,18 @@ impl StandardAttribute {
                 "88149a78-9448-4767-867b-0e650d165d2e",
                 hash(LOCALIZED_STRING, self.edit_format),
             ),
-            ("90ae4b5d-e0fd-49ef-a008-d67c1e75038c", boolean(self.password_mode)),
+            (
+                "90ae4b5d-e0fd-49ef-a008-d67c1e75038c",
+                boolean(self.password_mode),
+            ),
             (
                 "9288a8ed-b259-46d0-a8e3-70d87956ff2d",
                 nested("d46ea122-3201-4e5e-bed4-e669c6e463c8", self.data_history),
             ),
-            ("b02800e9-a8d1-42ab-9a12-f673e92be968", boolean(self.mark_negatives)),
+            (
+                "b02800e9-a8d1-42ab-9a12-f673e92be968",
+                boolean(self.mark_negatives),
+            ),
             ("c65a541f-0b91-4f33-bc88-fbaaa57f9992", self.min_value),
             (
                 "cf4abea3-37b2-11d4-940f-008048da11f9",
@@ -462,18 +477,25 @@ pub fn command(element: &Element, context: &DescriptorContext) -> Result<Brace> 
     let properties = element
         .child("Properties")
         .ok_or_else(|| anyhow!("<Command> has no <Properties>"))?;
-    let uuid = element.attr("uuid").unwrap_or_default().to_ascii_lowercase();
+    let uuid = element
+        .attr("uuid")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let text = |name: &str| -> &str { properties.child_text(name).unwrap_or_default().trim() };
     let name = text("Name");
-    let group = command_group(text("Group"), context)
-        .with_context(|| format!("command {name}"))?;
+    let group = command_group(text("Group"), context).with_context(|| format!("command {name}"))?;
     let body = brace_list![
         Brace::num(9),
         picture(properties.child("Picture"), context).with_context(|| format!("command {name}"))?,
         code(
             "Representation",
             text("Representation"),
-            &[("Text", 0), ("Picture", 1), ("PictureAndText", 2), ("Auto", 3)],
+            &[
+                ("Text", 0),
+                ("Picture", 1),
+                ("PictureAndText", 2),
+                ("Auto", 3)
+            ],
         )?,
         localized(properties.child("ToolTip")),
         Brace::num(1),
@@ -499,7 +521,11 @@ pub fn command(element: &Element, context: &DescriptorContext) -> Result<Brace> 
         Brace::num(0),
         brace_list![
             Brace::num(1),
-            brace_list![Brace::num(2), Brace::uuid(&uuid), Brace::atom(COMMAND_CLASS)],
+            brace_list![
+                Brace::num(2),
+                Brace::uuid(&uuid),
+                Brace::atom(COMMAND_CLASS)
+            ],
             body,
         ],
     ]))
@@ -651,5 +677,9 @@ pub fn shortcut(text: &str) -> Result<Brace> {
             };
         }
     }
-    Ok(brace_list![Brace::num(0), Brace::num(code), Brace::num(mask)])
+    Ok(brace_list![
+        Brace::num(0),
+        Brace::num(code),
+        Brace::num(mask)
+    ])
 }

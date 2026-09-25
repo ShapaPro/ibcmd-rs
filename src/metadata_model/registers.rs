@@ -221,7 +221,10 @@ impl<'a> Field<'a> {
         Ok(Self {
             element,
             properties,
-            uuid: element.attr("uuid").unwrap_or_default().to_ascii_lowercase(),
+            uuid: element
+                .attr("uuid")
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
         })
     }
     fn text(&self, name: &str) -> &'a str {
@@ -1267,7 +1270,11 @@ mod tests {
             r#"<MetaDataObject {NAMESPACES} version="2.20"><DocumentNumerator uuid="5c85fe94-66e5-42be-852a-9c90f6242257"><Properties><Name>СчетаФактурыВыданные</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Счета-фактуры выданные</v8:content></v8:item><v8:item><v8:lang>en</v8:lang><v8:content>Issued tax invoices</v8:content></v8:item></Synonym><Comment/><NumberType>String</NumberType><NumberLength>12</NumberLength><NumberAllowedLength>Fixed</NumberAllowedLength><NumberPeriodicity>Year</NumberPeriodicity><CheckUnique>false</CheckUnique></Properties></DocumentNumerator></MetaDataObject>"#
         );
         let doc = MetadataXml::parse(xml.as_bytes()).unwrap();
-        let tree = compile(&object(&doc, "DocumentNumerator"), &context("Version8_3_27")).unwrap();
+        let tree = compile(
+            &object(&doc, "DocumentNumerator"),
+            &context("Version8_3_27"),
+        )
+        .unwrap();
         assert_eq!(
             serialize(&tree),
             "{1,\r\n{3,\r\n{3,\r\n{1,0,5c85fe94-66e5-42be-852a-9c90f6242257},\"СчетаФактурыВыданные\",\r\n{2,\"ru\",\"Счета-фактуры выданные\",\"en\",\"Issued tax invoices\"},\"\",0,0,00000000-0000-0000-0000-000000000000,0},1,12,1,0,0},0}"
@@ -1282,9 +1289,10 @@ mod tests {
         let doc = MetadataXml::parse(xml.as_bytes()).unwrap();
         let object = object(&doc, "InformationRegister");
         for (mode, header, keys) in [("Version8_3_24", "13", "24"), ("Version8_3_27", "14", "25")] {
-            let tree = StandardAttributes::from_xml(&object, &context(mode), information_register_marker)
-                .unwrap()
-                .to_brace();
+            let tree =
+                StandardAttributes::from_xml(&object, &context(mode), information_register_marker)
+                    .unwrap()
+                    .to_brace();
             // {1,{1,1,{-2},510405d3-...,<bag>}}
             assert_eq!(tree.at(&[1, 2]), Some(&brace_list![Brace::num(-2)]));
             let bag = tree.at(&[1, 4]).unwrap();
