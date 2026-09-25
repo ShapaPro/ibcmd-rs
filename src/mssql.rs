@@ -5136,6 +5136,7 @@ fn prepare_configuration_asset_body_rows(
     source: Option<&MetadataSourceContext>,
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
+    let configuration_uuid = properties.uuid.clone();
     let owner = configuration_asset_owner_uuid(xml_path).map(|uuid| SimpleMetadataXmlProperties {
         uuid,
         ..properties.clone()
@@ -5236,7 +5237,112 @@ fn prepare_configuration_asset_body_rows(
         source,
         axes,
     )?);
+    rows.extend(prepare_parent_configuration_rows(
+        &configuration_uuid,
+        xml_path,
+    )?);
     Ok(rows)
+}
+
+/// `Ext/ParentConfigurations/<name>.cf`: a configuration on vendor support
+/// keeps each parent configuration whole, deflated twice, in the row named
+/// by the configuration's own uuid and the parent's uuid, which
+/// `Ext/ParentConfigurations.bin` pairs with the name:
+/// `{6,0,<count>,<parent uuid>,0,<uuid>,"<version>","<vendor>","<name>",...}`.
+/// The reverse of the exporter's `ParentConfigurationFile`; БСП 8.5.1.1150
+/// 3.2.1.356 keeps one parent of 103 199 340 bytes (its stored row is zlib
+/// level 9, memLevel 9 inside and again outside). A list naming more than
+/// one parent is refused, as the exporter leaves it: where the next entry
+/// starts is not on record.
+fn prepare_parent_configuration_rows(
+    configuration_uuid: &str,
+    xml_path: &Path,
+) -> Result<Vec<PreparedMetadataBodyStage>> {
+    let dir = infer_configuration_ext_body_path(xml_path, "ParentConfigurations");
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = fs::read_dir(&dir)
+        .with_context(|| format!("failed to list {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cf"))
+        })
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    files.sort();
+    let list_path = infer_configuration_ext_body_path(xml_path, "ParentConfigurations.bin");
+    let list = fs::read(&list_path)
+        .with_context(|| format!("failed to read {}", list_path.display()))?;
+    let parents = parse_parent_configuration_list(&list)
+        .with_context(|| format!("failed to read {}", list_path.display()))?;
+    let mut rows = Vec::with_capacity(files.len());
+    for path in files {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| anyhow!("parent configuration file has no UTF-8 name: {}", path.display()))?;
+        let (uuid, _) = parents
+            .iter()
+            .find(|(_, listed)| listed == name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "parent configuration {} is not listed in {}",
+                    path.display(),
+                    list_path.display()
+                )
+            })?;
+        let cf = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let inner = crate::module_blob::deflate_raw(&cf)?;
+        let blob = crate::module_blob::deflate_raw(&inner)?;
+        rows.push(PreparedMetadataBodyStage {
+            body_id: format!("{configuration_uuid}.{uuid}"),
+            path,
+            blob_sha256: hex_sha256(&blob),
+            blob,
+        });
+    }
+    Ok(rows)
+}
+
+/// `(parent uuid, name)` of every parent `Ext/ParentConfigurations.bin`
+/// lists (0 or 1 of them).
+fn parse_parent_configuration_list(bytes: &[u8]) -> Result<Vec<(String, String)>> {
+    let list = crate::metadata_model::brace::parse_row(bytes)?;
+    let items = list
+        .as_list()
+        .ok_or_else(|| anyhow!("the parent configuration list is not a list"))?;
+    let field = |index: usize| items.get(index);
+    if field(0).and_then(|item| item.as_atom()) != Some("6") {
+        bail!("the parent configuration list does not open with 6");
+    }
+    let count = field(2)
+        .and_then(|item| item.as_atom())
+        .and_then(|count| count.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("the parent configuration list has no count"))?;
+    match count {
+        0 => Ok(Vec::new()),
+        1 => {
+            let uuid = field(3)
+                .and_then(|item| item.as_atom())
+                .filter(|uuid| uuid::Uuid::parse_str(uuid).is_ok())
+                .ok_or_else(|| anyhow!("the parent configuration has no uuid"))?;
+            let name = field(8)
+                .and_then(|item| item.as_str())
+                .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+                .ok_or_else(|| anyhow!("the parent configuration has no name"))?;
+            Ok(vec![(uuid.to_ascii_lowercase(), name.to_string())])
+        }
+        more => bail!(
+            "{more} parent configurations are listed; where the entry after the first starts is not on record"
+        ),
+    }
 }
 
 /// A command interface compiled from the source alone, names resolved
