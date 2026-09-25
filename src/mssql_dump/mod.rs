@@ -4227,19 +4227,41 @@ fn dump_table_rows_streamed(
     };
     timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
     // `--model-export`: what each row is, from the rows alone and before the
-    // legacy indexes, so the ones only the descriptor converters read are
-    // left out once every descriptor goes through the model. The index
-    // needs the whole row set; a run that fetched part of it stays legacy.
+    // legacy indexes, so the ones only the legacy descriptor converters of
+    // modelled kinds read are left out. The index needs the whole row set;
+    // a run that fetched part of it stays legacy.
     let plan_started = Instant::now();
     let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
         model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
     });
-    let descriptors_modelled = model_plan
-        .as_ref()
-        .is_some_and(|plan| plan.models_every_descriptor(&index_metadata_texts));
+    let modelled = |kinds: &[&str]| {
+        model_plan
+            .as_ref()
+            .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
+    };
+    // Who reads what: a recalculation's own XML the recalculation index, a
+    // calculation register's the root recalculation index, a functional
+    // option's the functional option index; the predefined items of the
+    // descriptors' own values are read by these kinds' converters.
+    let skip_recalculation_refs = modelled(&["Recalculation"]);
+    let skip_root_recalculation_refs = modelled(&["CalculationRegister"]);
+    let skip_functional_option_refs = modelled(&["FunctionalOption"]);
+    let skip_value_predefined_items = modelled(&[
+        "Catalog",
+        "DataProcessor",
+        "Document",
+        "Report",
+        "ChartOfCharacteristicTypes",
+        "ChartOfAccounts",
+        "ChartOfCalculationTypes",
+        "BusinessProcess",
+        "Task",
+        "InformationRegister",
+    ]);
     if let Some(plan) = &model_plan {
         eprintln!(
-            "model export: every descriptor through the model: {descriptors_modelled}; still legacy by kind: {:?}",
+            "model export: every descriptor through the model: {}; still legacy by kind: {:?};              left out: recalculation refs {skip_recalculation_refs}, root recalculation refs              {skip_root_recalculation_refs}, functional option refs {skip_functional_option_refs},              value predefined items {skip_value_predefined_items}",
+            plan.models_every_descriptor(&index_metadata_texts),
             plan.legacy_descriptor_kinds(&index_metadata_texts)
         );
     }
@@ -4249,12 +4271,12 @@ fn dump_table_rows_streamed(
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
-    let recalculation_refs = if extract_metadata_xml && !descriptors_modelled {
+    let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
-    let root_recalculation_refs = if extract_metadata_xml && !descriptors_modelled {
+    let root_recalculation_refs = if extract_metadata_xml && !skip_root_recalculation_refs {
         build_calculation_root_recalculation_reference_index(&index_metadata_texts)
     } else {
         BTreeMap::new()
@@ -4430,7 +4452,10 @@ fn dump_table_rows_streamed(
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let functional_option_refs =
-        if extract_metadata_xml && source_reference_needs.functional_option_refs && !descriptors_modelled {
+        if extract_metadata_xml
+            && source_reference_needs.functional_option_refs
+            && !skip_functional_option_refs
+        {
             build_functional_option_reference_index_from_texts(
                 &index_metadata_texts,
                 &object_refs,
@@ -4596,7 +4621,7 @@ fn dump_table_rows_streamed(
         streamed_metadata_value_owner_file_names(&index_metadata_texts, &selected_file_names);
     // The predefined items the descriptors' own values name; flowcharts add
     // theirs below.
-    let mut owner_ids = if descriptors_modelled {
+    let mut owner_ids = if skip_value_predefined_items {
         BTreeSet::new()
     } else {
         selected_metadata_predefined_owner_ids(

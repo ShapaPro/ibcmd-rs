@@ -191,6 +191,17 @@ impl ModelPlan {
             .all(|row| self.kind_of(&row.file_name).is_some_and(has_decoder))
     }
 
+    /// Whether every row of these kinds goes through the model: each kind has
+    /// a decoder and the plan knows the kind of every descriptor row (a row
+    /// it cannot place could be one of them).
+    pub(super) fn models_kinds(&self, kinds: &[&str], texts: &[MetadataTextRow]) -> bool {
+        kinds.iter().all(|kind| has_decoder(kind))
+            && texts
+                .iter()
+                .filter(|row| !row.file_name.contains('.') && row.header.is_some())
+                .all(|row| self.kind_of(&row.file_name).is_some())
+    }
+
     /// The descriptor rows the legacy converters still write, by kind (`?`
     /// for a row neither the root's nor an owner's lists name).
     pub(super) fn legacy_descriptor_kinds(
