@@ -2,20 +2,45 @@
 //! complete native text of its Config row without reading the target
 //! database, so a configuration can be loaded into an empty infobase.
 //!
-//! One module per family of kinds; `compile_descriptor` dispatches by the
-//! XML's kind. `audit` measures every kind against the rows a platform stored.
+//! Layout: `brace` (the row as a plain tree, one layout rule for every
+//! descriptor), `xml` (a small DOM), `index` (names -> uuids for the whole
+//! tree), shared encoders here, and one module per family of kinds.
+//! `compile_descriptor` dispatches by the XML's kind; `audit` measures every
+//! kind against the rows a platform stored.
 
 pub mod audit;
+pub mod brace;
+pub mod index;
+pub mod xml;
 
-use std::path::Path;
+// Shared encoders owned by the simple-objects track: type descriptions,
+// typed values and the attribute body every "attribute-like" object shares.
+pub mod attribute;
+pub mod types;
 
-use anyhow::{Result, anyhow};
+// Kind families, one track each.
+pub mod common;
+pub mod objects;
+pub mod registers;
+pub mod root;
+pub mod simple;
 
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+
+use self::brace::{Brace, serialize_row};
+use self::index::ConfigIndex;
+use self::xml::{Element, MetadataXml};
+use crate::brace_list;
 use crate::module_blob::MetadataSourceContext;
 
 /// What a kind compiler may read besides its own XML.
 pub struct DescriptorContext {
-    /// The whole source tree, for names other objects resolve to.
+    pub root: PathBuf,
+    /// Names -> uuids for the whole tree.
+    pub index: ConfigIndex,
+    /// The older, lazily filled source context the load writers use.
     pub source: MetadataSourceContext,
     /// XML dialect of the tree: `2.20` (8.3.27) or `2.21` (8.5).
     pub version: String,
@@ -24,20 +49,160 @@ pub struct DescriptorContext {
 impl DescriptorContext {
     pub fn new(root: &Path, version: &str) -> Result<Self> {
         Ok(Self {
+            root: root.to_path_buf(),
+            index: ConfigIndex::build(root).context("failed to index the source tree")?,
             source: MetadataSourceContext::new(root.to_path_buf()),
             version: version.to_string(),
         })
     }
+
+    /// 8.5 (`2.21`) rather than 8.3.27 (`2.20`).
+    pub fn is_v85(&self) -> bool {
+        self.version != "2.20"
+    }
 }
 
-/// Compiles one metadata XML into the inflated text of its Config row (BOM included).
+/// One metadata object's XML, parsed.
+pub struct ObjectXml<'a> {
+    /// The object element (`<Catalog uuid=...>`).
+    pub element: &'a Element,
+    /// `Catalog`, `Form`, ...
+    pub kind: &'a str,
+    pub uuid: String,
+    pub name: String,
+    /// The XML file, for bodies next to it.
+    pub path: &'a Path,
+}
+
+impl<'a> ObjectXml<'a> {
+    pub fn properties(&self) -> Result<&'a Element> {
+        self.element
+            .child("Properties")
+            .ok_or_else(|| anyhow!("{} {} has no <Properties>", self.kind, self.name))
+    }
+    /// A property element, erroring when absent.
+    pub fn prop(&self, name: &str) -> Result<&'a Element> {
+        self.properties()?
+            .child(name)
+            .ok_or_else(|| anyhow!("{} {} has no <{name}>", self.kind, self.name))
+    }
+    pub fn prop_text(&self, name: &str) -> Result<&'a str> {
+        Ok(self.prop(name)?.text.as_str())
+    }
+    pub fn prop_bool(&self, name: &str) -> Result<bool> {
+        parse_bool(self.prop_text(name)?)
+    }
+    pub fn child_objects(&self) -> Option<&'a Element> {
+        self.element.child("ChildObjects")
+    }
+}
+
+pub fn parse_bool(text: &str) -> Result<bool> {
+    match text {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => bail!("expected true/false, got {other:?}"),
+    }
+}
+
+/// `{N,"lang","text",...}`, `{0}` when empty: synonyms, tooltips, formats,
+/// presentations.
+pub fn localized(element: Option<&Element>) -> Brace {
+    let pairs = element.map(Element::localized).unwrap_or_default();
+    let mut items = vec![Brace::num(pairs.len() as i64)];
+    for (lang, content) in pairs {
+        items.push(Brace::str(lang));
+        items.push(Brace::str(content));
+    }
+    Brace::List(items)
+}
+
+/// The block every metadata object and child object starts with:
+/// `{3,{1,0,<uuid>},"Name",<synonym>,"Comment",0,0,<nil uuid>,0}`.
+pub fn md_base(uuid: &str, properties: &Element) -> Brace {
+    brace_list![
+        Brace::num(3),
+        brace_list![Brace::num(1), Brace::num(0), Brace::uuid(uuid)],
+        Brace::str(properties.child_text("Name").unwrap_or_default()),
+        localized(properties.child("Synonym")),
+        Brace::str(properties.child_text("Comment").unwrap_or_default()),
+        Brace::num(0),
+        Brace::num(0),
+        Brace::nil_uuid(),
+        Brace::num(0),
+    ]
+}
+
+/// Compiles one metadata XML into the inflated text of its Config row
+/// (BOM included).
 pub fn compile_descriptor(
     kind: &str,
-    _xml_path: &Path,
-    _xml: &[u8],
-    _context: &DescriptorContext,
+    xml_path: &Path,
+    xml: &[u8],
+    context: &DescriptorContext,
 ) -> Result<Vec<u8>> {
-    match kind {
-        _ => Err(anyhow!("no base-free compiler for {kind} yet")),
+    let doc = MetadataXml::parse(xml)?;
+    let element = doc.object()?;
+    let object = ObjectXml {
+        element,
+        kind,
+        uuid: element
+            .attr("uuid")
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        name: element
+            .path(&["Properties", "Name"])
+            .map(|name| name.text.clone())
+            .unwrap_or_default(),
+        path: xml_path,
+    };
+    let tree = compile_object(&object, context)?;
+    Ok(serialize_row(&tree))
+}
+
+/// Dispatches one object to its family.
+pub fn compile_object(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
+    match object.kind {
+        "Constant"
+        | "DefinedType"
+        | "SessionParameter"
+        | "CommonAttribute"
+        | "FunctionalOption"
+        | "FunctionalOptionsParameter"
+        | "EventSubscription"
+        | "ScheduledJob"
+        | "SettingsStorage"
+        | "FilterCriterion"
+        | "Language" => simple::compile(object, context),
+        "Catalog"
+        | "Document"
+        | "ExchangePlan"
+        | "ChartOfCharacteristicTypes"
+        | "ChartOfAccounts"
+        | "ChartOfCalculationTypes"
+        | "BusinessProcess"
+        | "Task"
+        | "Report"
+        | "DataProcessor"
+        | "Enum" => objects::compile(object, context),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => registers::compile(object, context),
+        "CommonModule" | "CommonPicture" | "CommonTemplate" | "CommonCommand" | "CommandGroup"
+        | "Role" | "XDTOPackage" | "StyleItem" | "Style" | "WebService" | "HTTPService"
+        | "WSReference" | "IntegrationService" | "Bot" | "ExternalDataSource" | "Subsystem"
+        | "Form" | "Template" | "CommonForm" | "Interface" => common::compile(object, context),
+        "Configuration" => root::compile(object, context),
+        other => bail!("unknown metadata kind {other}"),
     }
+}
+
+/// The error a family returns for a kind it does not compile yet.
+pub fn not_yet(object: &ObjectXml<'_>) -> anyhow::Error {
+    anyhow!("no base-free compiler for {} yet", object.kind)
 }
