@@ -36,13 +36,20 @@ pub fn has_names(kind: &str) -> bool {
 }
 
 /// Whether `decode_object` decodes rows of `kind`.
-pub fn has_decoder(kind: &str, context: &ExportContext) -> bool {
+pub fn has_decoder(kind: &str) -> bool {
     static KNOWN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
     if let Some(answer) = known.lock().ok().and_then(|map| map.get(kind).copied()) {
         return answer;
     }
-    let answer = match decode_object(kind, &Brace::List(Vec::new()), context) {
+    // The probe decodes an empty row: a kind without a decoder answers
+    // "not yet" before it reads the context.
+    let context = ExportContext {
+        names: NameIndex::default(),
+        version: "2.20".to_string(),
+        compat: super::super::objects::parts::Compat(8, 3, 27),
+    };
+    let answer = match decode_object(kind, &Brace::List(Vec::new()), &context) {
         Ok(_) => true,
         Err(error) => !is_not_yet(&error),
     };
@@ -83,10 +90,15 @@ impl NameIndex {
         true
     }
 
-    /// Adds a predefined item name.
-    pub fn insert_predefined(&mut self, uuid: &str, name: &str) {
-        self.predefined
-            .insert(uuid.to_ascii_lowercase(), name.to_string());
+    /// Adds a predefined item of `owner` (`Catalog.X`).
+    pub fn insert_predefined(&mut self, owner: &str, uuid: &str, name: &str) {
+        let items = self
+            .predefined
+            .entry(uuid.to_ascii_lowercase())
+            .or_default();
+        if !items.iter().any(|(item_owner, _)| item_owner == owner) {
+            items.push((owner.to_string(), name.to_string()));
+        }
     }
 
     pub fn has_name(&self, uuid: &str) -> bool {
@@ -99,7 +111,11 @@ impl NameIndex {
 
     /// (names, generated types, predefined items).
     pub fn sizes(&self) -> (usize, usize, usize) {
-        (self.names.len(), self.types.len(), self.predefined.len())
+        (
+            self.names.len(),
+            self.types.len(),
+            self.predefined.values().map(Vec::len).sum(),
+        )
     }
 
     /// Merges what several parallel builders collected; `self` wins.
@@ -110,8 +126,10 @@ impl NameIndex {
         for (type_id, name) in other.types {
             self.types.entry(type_id).or_insert(name);
         }
-        for (uuid, name) in other.predefined {
-            self.predefined.entry(uuid).or_insert(name);
+        for (uuid, items) in other.predefined {
+            for (owner, name) in items {
+                self.insert_predefined(&owner, &uuid, &name);
+            }
         }
     }
 }
@@ -123,14 +141,26 @@ impl NameIndex {
 /// row, `{<class id>,<count>,<uuid>...}` (the load direction's root layout).
 const ROOT_CLASSES: &[(&str, &str)] = &[
     ("2deed9b8-0056-4ffe-a473-c20a6c32a0bc", "AccountingRegister"),
-    ("b64d9a40-1642-11d6-a3c7-0050bae0a776", "AccumulationRegister"),
+    (
+        "b64d9a40-1642-11d6-a3c7-0050bae0a776",
+        "AccumulationRegister",
+    ),
     ("6e6dc072-b7ac-41e7-8f88-278d25b6da2a", "Bot"),
     ("fcd3404e-1523-48ce-9bc0-ecdb822684a1", "BusinessProcess"),
-    ("f2de87a8-64e5-45eb-a22d-b3aedab050e7", "CalculationRegister"),
+    (
+        "f2de87a8-64e5-45eb-a22d-b3aedab050e7",
+        "CalculationRegister",
+    ),
     ("cf4abea6-37b2-11d4-940f-008048da11f9", "Catalog"),
     ("238e7e88-3c5f-48b2-8a3b-81ebbecb20ed", "ChartOfAccounts"),
-    ("30b100d6-b29f-47ac-aec7-cb8ca8a54767", "ChartOfCalculationTypes"),
-    ("82a1b659-b220-4d94-a9bd-14d757b95a48", "ChartOfCharacteristicTypes"),
+    (
+        "30b100d6-b29f-47ac-aec7-cb8ca8a54767",
+        "ChartOfCalculationTypes",
+    ),
+    (
+        "82a1b659-b220-4d94-a9bd-14d757b95a48",
+        "ChartOfCharacteristicTypes",
+    ),
     ("1c57eabe-7349-44b3-b1de-ebfeab67b47d", "CommandGroup"),
     ("15794563-ccec-41f6-a83c-ec5f7b9a5bc1", "CommonAttribute"),
     ("2f1a5187-fb0e-4b05-9489-dc5dd6412348", "CommonCommand"),
@@ -150,9 +180,15 @@ const ROOT_CLASSES: &[(&str, &str)] = &[
     ("5274d9fc-9c3a-4a71-8f5e-a0db8ab23de5", "ExternalDataSource"),
     ("3e7bfcc0-067d-11d6-a3c7-0050bae0a776", "FilterCriterion"),
     ("af547940-3268-434f-a3e7-e47d6d2638c3", "FunctionalOption"),
-    ("30d554db-541e-4f62-8970-a1c6dcfeb2bc", "FunctionalOptionsParameter"),
+    (
+        "30d554db-541e-4f62-8970-a1c6dcfeb2bc",
+        "FunctionalOptionsParameter",
+    ),
     ("0fffc09c-8f4c-47cc-b41c-8d5c5a221d79", "HTTPService"),
-    ("13134201-f60b-11d5-a3c7-0050bae0a776", "InformationRegister"),
+    (
+        "13134201-f60b-11d5-a3c7-0050bae0a776",
+        "InformationRegister",
+    ),
     ("bf3420b0-f6f9-41a0-b83a-fe9d4ab0b65d", "IntegrationService"),
     ("39bddf6a-0c3c-452b-921c-d99cfa1c2f1b", "Interface"),
     ("9cd510ce-abfc-11d4-9434-004095e12fc7", "Language"),
@@ -210,6 +246,79 @@ fn collect_root_kinds(
 }
 
 // ---------------------------------------------------------------------------
+// Owned objects: rows of their own that their owner's row lists by uuid.
+
+/// The class id an owner's row lists each kind of owned object under,
+/// `{<class id>,<count>,<uuid>...}` (measured over the four corpora: every
+/// form, template, recalculation and nested subsystem of their trees).
+const OWNED_CLASSES: &[(&str, &str)] = &[
+    ("3daea016-69b7-4ed4-9453-127911372fe6", "Template"),
+    ("37f2fa9a-b276-11d4-9435-004095e12fc7", "Subsystem"),
+    ("274bf899-db0e-4df6-8ab5-67bf6371ec0b", "Recalculation"),
+    // Forms, one class per owner kind.
+    ("d3b5d6eb-4ea2-4610-a3e2-624d4e815934", "Form"),
+    ("b64d9a44-1642-11d6-a3c7-0050bae0a776", "Form"),
+    ("3f7a8120-b71a-4265-98bf-4d9bc09b7719", "Form"),
+    ("a2cb086c-db98-43e4-a1a9-0760ab048f8d", "Form"),
+    ("fdf816d2-1ead-11d5-b975-0050bae0a95d", "Form"),
+    ("5372e285-03db-4f8c-8565-fe56f1aea40e", "Form"),
+    ("a7f8f92a-7a4b-484b-937e-42d242e64144", "Form"),
+    ("eb2b78a8-40a6-4b7e-b1b3-6ca9966cbc94", "Form"),
+    ("d5b0e5ed-256d-401c-9c36-f630cafd8a62", "Form"),
+    ("fb880e93-47d7-4127-9357-a20e69c17545", "Form"),
+    ("ec81ad10-ca07-11d5-b9a5-0050bae0a95d", "Form"),
+    ("87c509ab-3d38-4d67-b379-aca796298578", "Form"),
+    ("13134204-f60b-11d5-a3c7-0050bae0a776", "Form"),
+    ("a3b368c0-29e2-11d6-a3c7-0050bae0a776", "Form"),
+    ("b8533c0c-2342-4db3-91a2-c2b08cbf6b23", "Form"),
+    ("3f58cbfb-4172-4e54-be49-561a579bb38b", "Form"),
+    ("33f2e54b-37ce-4a7a-a569-b648d7aa4634", "Form"),
+    ("00867c40-06b1-11d6-a3c7-0050bae0a776", "Form"),
+];
+
+/// Whether a stored row's text lists any owned object (a cheap test before
+/// parsing it).
+pub fn may_own_objects(text: &str) -> bool {
+    OWNED_CLASSES.iter().any(|(class, _)| text.contains(class))
+}
+
+/// The objects a row owns that have rows of their own, as (kind, uuid).
+pub fn owned_objects(row: &Brace) -> Vec<(&'static str, String)> {
+    let classes = OWNED_CLASSES.iter().copied().collect::<HashMap<_, _>>();
+    let mut out = Vec::new();
+    collect_owned(row, &classes, &mut out);
+    out
+}
+
+fn collect_owned(
+    node: &Brace,
+    classes: &HashMap<&str, &'static str>,
+    out: &mut Vec<(&'static str, String)>,
+) {
+    let Some(members) = node.as_list() else {
+        return;
+    };
+    if let (Some(class), Some(count)) = (
+        members.first().and_then(Brace::as_atom),
+        members.get(1).and_then(Brace::as_atom),
+    ) && let Some(kind) = classes.get(class)
+        && let Ok(count) = count.parse::<usize>()
+        && members.len() == count + 2
+        && members[2..].iter().all(|member| member.as_atom().is_some())
+    {
+        for member in &members[2..] {
+            if let Some(uuid) = member.as_atom() {
+                out.push((*kind, uuid.to_ascii_lowercase()));
+            }
+        }
+        return;
+    }
+    for member in members {
+        collect_owned(member, classes, out);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Predefined items.
 
 /// `{"#",<this>,{1,<uuid>}}`: a reference to a predefined item.
@@ -238,12 +347,15 @@ pub fn predefined_suffix(kind: &str) -> Option<&'static str> {
 /// in a row: `{2,N,<position>,<column id>...,{1,<count>,<row>...},X,Y}`,
 /// a row `{2,<index>,<value count>,<value>...,0}` or, with children,
 /// `{...,1,{1,<count>,<row>...}}`.
+///
+/// A tree's top row is its root (`Элементы`, `Характеристики`, `Счета`), never
+/// an item, even when an edited tree stores a reference in it.
 pub fn predefined_items(kind: &str, body: &Brace) -> Result<Vec<(String, String)>> {
-    let (container, reference_column, name_column) = match kind {
-        "Catalog" => (tagged(body, 0)?, 0, 3),
-        "ChartOfCharacteristicTypes" => (tagged(body, 1)?, 1, 3),
-        "ChartOfAccounts" => (tagged(body, 2)?, 0, 1),
-        "ChartOfCalculationTypes" => (body, 1, 2),
+    let (container, reference_column, name_column, tree) = match kind {
+        "Catalog" => (tagged(body, 0)?, 0, 3, true),
+        "ChartOfCharacteristicTypes" => (tagged(body, 1)?, 1, 3, true),
+        "ChartOfAccounts" => (tagged(body, 2)?, 0, 1, true),
+        "ChartOfCalculationTypes" => (body, 1, 2, false),
         other => bail!("{other} stores no predefined items"),
     };
     let members = list(container)?;
@@ -255,7 +367,10 @@ pub fn predefined_items(kind: &str, body: &Brace) -> Result<Vec<(String, String)
     for column in 0..columns {
         let position = atom(item(row_data, 2 + 2 * column)?)?;
         let id = atom(item(row_data, 3 + 2 * column)?)?;
-        positions.insert(id.to_string(), position.parse::<usize>().unwrap_or(usize::MAX));
+        positions.insert(
+            id.to_string(),
+            position.parse::<usize>().unwrap_or(usize::MAX),
+        );
     }
     let position = |id: i64| {
         positions
@@ -265,13 +380,24 @@ pub fn predefined_items(kind: &str, body: &Brace) -> Result<Vec<(String, String)
     };
     let reference_at = position(reference_column)?;
     let name_at = position(name_column)?;
+    let rows = item(row_data, 2 + 2 * columns)?;
     let mut out = Vec::new();
-    collect_rows(
-        item(row_data, 2 + 2 * columns)?,
-        reference_at,
-        name_at,
-        &mut out,
-    )?;
+    if tree {
+        for root in list(rows)?.iter().skip(2) {
+            let fields = list(root)?;
+            let count = atom(item(fields, 2)?)?
+                .parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("bad value count"))?;
+            if let Some(flag) = fields.get(3 + count)
+                && flag.as_atom() == Some("1")
+                && let Some(children) = fields.get(4 + count)
+            {
+                collect_rows(children, reference_at, name_at, &mut out)?;
+            }
+        }
+    } else {
+        collect_rows(rows, reference_at, name_at, &mut out)?;
+    }
     Ok(out)
 }
 
@@ -375,8 +501,24 @@ pub fn compare(expected: &NameIndex, actual: &NameIndex, max_samples: usize) -> 
     IndexComparison {
         names: compare_maps(&expected.names, &actual.names, max_samples),
         types: compare_maps(&expected.types, &actual.types, max_samples),
-        predefined: compare_maps(&expected.predefined, &actual.predefined, max_samples),
+        predefined: compare_maps(
+            &flat_predefined(&expected.predefined),
+            &flat_predefined(&actual.predefined),
+            max_samples,
+        ),
     }
+}
+
+/// `owner/uuid` -> `owner.item`: the predefined items keyed per owner.
+fn flat_predefined(items: &HashMap<String, Vec<(String, String)>>) -> HashMap<String, String> {
+    items
+        .iter()
+        .flat_map(|(uuid, items)| {
+            items
+                .iter()
+                .map(move |(owner, name)| (format!("{owner}/{uuid}"), format!("{owner}.{name}")))
+        })
+        .collect()
 }
 
 fn kind_of(name: &str) -> String {

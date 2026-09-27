@@ -1384,6 +1384,10 @@ pub struct MssqlDumpConfigArgs {
     /// server or database is contacted.
     #[arg(long)]
     pub rows_dir: Option<PathBuf>,
+    /// Write the descriptors of the kinds the metadata model decodes through
+    /// the model (also `IBCMD_RS_MODEL_EXPORT=1`).
+    #[arg(long, hide = true)]
+    pub model_export: bool,
     /// Output directory for dumped rows and manifest.json.
     #[arg(short, long)]
     pub output_dir: PathBuf,

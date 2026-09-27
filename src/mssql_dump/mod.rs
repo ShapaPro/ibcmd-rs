@@ -2186,6 +2186,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             args.extract_metadata_xml,
             source_version,
             args.collect_all_source_asset_diagnostics,
+            model_export::requested(args.model_export),
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -2787,6 +2788,8 @@ struct DumpedRow {
 }
 
 struct DumpRowContext<'a> {
+    /// `--model-export`: descriptors of the modelled kinds go through it.
+    model_export: Option<&'a model_export::ModelExport>,
     output_dir: &'a Path,
     table: &'a str,
     source_version: InfobaseConfigSourceVersion,
@@ -3463,6 +3466,7 @@ fn dump_table_rows_with_options_mode(
     }
 
     let context = DumpRowContext {
+        model_export: None,
         type_set_leaves: &type_set_leaves,
         output_dir,
         table,
@@ -3708,6 +3712,7 @@ fn dump_table_rows_streamed(
     extract_metadata_xml: bool,
     source_version: InfobaseConfigSourceVersion,
     collect_all_source_asset_diagnostics: bool,
+    model_export: bool,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
@@ -4221,17 +4226,57 @@ fn dump_table_rows_streamed(
         Vec::new()
     };
     timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
+    // `--model-export`: what each row is, from the rows alone and before the
+    // legacy indexes, so the ones only the legacy descriptor converters of
+    // modelled kinds read are left out. The index needs the whole row set;
+    // a run that fetched part of it stays legacy.
+    let plan_started = Instant::now();
+    let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
+        model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
+    });
+    let modelled = |kinds: &[&str]| {
+        model_plan
+            .as_ref()
+            .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
+    };
+    // Who reads what: a recalculation's own XML the recalculation index, a
+    // calculation register's the root recalculation index, a functional
+    // option's the functional option index; the predefined items of the
+    // descriptors' own values are read by these kinds' converters.
+    let skip_recalculation_refs = modelled(&["Recalculation"]);
+    let skip_root_recalculation_refs = modelled(&["CalculationRegister"]);
+    let skip_functional_option_refs = modelled(&["FunctionalOption"]);
+    let skip_value_predefined_items = modelled(&[
+        "Catalog",
+        "DataProcessor",
+        "Document",
+        "Report",
+        "ChartOfCharacteristicTypes",
+        "ChartOfAccounts",
+        "ChartOfCalculationTypes",
+        "BusinessProcess",
+        "Task",
+        "InformationRegister",
+    ]);
+    if let Some(plan) = &model_plan {
+        eprintln!(
+            "model export: every descriptor through the model: {}; still legacy by kind: {:?};              left out: recalculation refs {skip_recalculation_refs}, root recalculation refs              {skip_root_recalculation_refs}, functional option refs {skip_functional_option_refs},              value predefined items {skip_value_predefined_items}",
+            plan.models_every_descriptor(&index_metadata_texts),
+            plan.legacy_descriptor_kinds(&index_metadata_texts)
+        );
+    }
+    timings.prepare_model_index_ms += elapsed_ms(plan_started);
     let reference_indexes_started = Instant::now();
     let metadata_texts_by_file_name = index_metadata_texts
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
-    let recalculation_refs = if extract_metadata_xml {
+    let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
-    let root_recalculation_refs = if extract_metadata_xml {
+    let root_recalculation_refs = if extract_metadata_xml && !skip_root_recalculation_refs {
         build_calculation_root_recalculation_reference_index(&index_metadata_texts)
     } else {
         BTreeMap::new()
@@ -4407,7 +4452,10 @@ fn dump_table_rows_streamed(
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let functional_option_refs =
-        if extract_metadata_xml && source_reference_needs.functional_option_refs {
+        if extract_metadata_xml
+            && source_reference_needs.functional_option_refs
+            && !skip_functional_option_refs
+        {
             build_functional_option_reference_index_from_texts(
                 &index_metadata_texts,
                 &object_refs,
@@ -4571,13 +4619,19 @@ fn dump_table_rows_streamed(
     };
     let metadata_value_owner_file_names =
         streamed_metadata_value_owner_file_names(&index_metadata_texts, &selected_file_names);
-    let mut owner_ids = selected_metadata_predefined_owner_ids(
-        &index_metadata_texts,
-        &metadata_value_owner_file_names,
-        &type_index,
-        &object_refs,
-        &body_owners,
-    );
+    // The predefined items the descriptors' own values name; flowcharts add
+    // theirs below.
+    let mut owner_ids = if skip_value_predefined_items {
+        BTreeSet::new()
+    } else {
+        selected_metadata_predefined_owner_ids(
+            &index_metadata_texts,
+            &metadata_value_owner_file_names,
+            &type_index,
+            &object_refs,
+            &body_owners,
+        )
+    };
     let flowchart_file_names = business_process_flowchart_file_names(&index_metadata_texts);
     if !flowchart_file_names.is_empty() {
         let flowchart_fetch_started = Instant::now();
@@ -4717,9 +4771,48 @@ fn dump_table_rows_streamed(
         }
     }
     timings.prepare_reference_indexes_ms += elapsed_ms(reference_indexes_started);
+    // `--model-export`: the descriptors of the modelled kinds are decoded
+    // from their rows; names come from an index of the whole row set, so a
+    // run that fetched only part of it keeps the legacy converters.
+    let model = if let Some(plan) = model_plan {
+        let started = Instant::now();
+        let predefined_names = plan.predefined_body_file_names();
+        let predefined_rows = if predefined_names.is_empty() {
+            Vec::new()
+        } else {
+            fetch_config_rows_bcp(
+                sqlcmd,
+                bcp,
+                server,
+                user,
+                password,
+                database,
+                table,
+                &predefined_names,
+            )?
+        };
+        let model = model_export::ModelExport::build(
+            plan,
+            &metadata_rows,
+            &index_metadata_texts,
+            &predefined_rows,
+            &model_export::LegacyNames {
+                object_refs: &object_refs,
+                type_index: &type_index,
+                form_refs: &form_refs,
+                template_refs: &template_refs,
+            },
+        )?;
+        timings.prepare_model_index_ms += elapsed_ms(started);
+        model.log_summary(elapsed_ms(started));
+        Some(model)
+    } else {
+        None
+    };
     timings.prepare_indexes_ms = elapsed_ms(prepare_started);
 
     let context = DumpRowContext {
+        model_export: model.as_ref(),
         type_set_leaves: &type_set_leaves,
         output_dir,
         table,
@@ -4969,6 +5062,10 @@ fn form_body_override(file_name: &str) -> Option<String> {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn build_dump_file_name_batches(
@@ -5623,25 +5720,11 @@ fn dump_table_row_bytes(
 
     let mut metadata_xml_rows = 0;
     let mut metadata_xml_diagnostic = None;
+    let mut model_row = false;
     let metadata_xml_relative = if context.extract_metadata_xml {
         let started = Instant::now();
-        let extracted = if context
-            .refused_output_paths
-            .metadata_xml
-            .contains_key(file_name)
-        {
-            // Two rows resolved to the identical canonical descriptor path
-            // (`colliding_reference_output_paths` -- a form, template, or
-            // subsystem whose own XML lands on a path another row also
-            // claims). The platform writes neither, so this exporter must
-            // not pick a nondeterministic winner between runs either: fail
-            // closed instead of computing and writing either row's XML.
-            Err(MetadataSourceExtractionDiagnostic::legacy_option_none(
-                MetadataSourceFailureClass::Unsupported,
-                "unknown",
-                "output_path_collision",
-            ))
-        } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name) {
+        let mut shadow_us = 0;
+        let legacy_from_text = |row: &MetadataTextRow| {
             extract_metadata_source_xml_from_text_row_audited_with_object_ref_resolutions(
                 row,
                 context.type_index,
@@ -5659,6 +5742,57 @@ fn dump_table_row_bytes(
                 context.source_version,
                 context.type_set_leaves,
             )
+        };
+        let extracted = if context
+            .refused_output_paths
+            .metadata_xml
+            .contains_key(file_name)
+        {
+            // Two rows resolved to the identical canonical descriptor path
+            // (`colliding_reference_output_paths` -- a form, template, or
+            // subsystem whose own XML lands on a path another row also
+            // claims). The platform writes neither, so this exporter must
+            // not pick a nondeterministic winner between runs either: fail
+            // closed instead of computing and writing either row's XML.
+            Err(MetadataSourceExtractionDiagnostic::legacy_option_none(
+                MetadataSourceFailureClass::Unsupported,
+                "unknown",
+                "output_path_collision",
+            ))
+        } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name)
+            && let Some(modelled) = context
+                .model_export
+                .and_then(|model| model.export_row(row, bytes))
+                .and_then(|result| match result {
+                    Ok(extracted) => Some(extracted),
+                    Err(error) => {
+                        model_export::report_fallback(file_name, &error);
+                        timings.model_fallback_rows += 1;
+                        None
+                    }
+                })
+        {
+            timings.model_metadata_xml_rows += 1;
+            timings.model_metadata_xml_convert_us += micros(started);
+            model_row = true;
+            if model_export::shadow() {
+                let shadow_started = Instant::now();
+                let legacy = legacy_from_text(row);
+                shadow_us = micros(shadow_started);
+                timings.model_shadow_rows += 1;
+                timings.model_shadow_legacy_convert_us += shadow_us;
+                if !model_export::same_as_written(
+                    legacy.as_ref().ok(),
+                    &modelled,
+                    context.source_version,
+                ) {
+                    timings.model_shadow_differing_rows += 1;
+                    model_export::report_shadow_difference(file_name, &modelled.relative_path);
+                }
+            }
+            Ok(modelled)
+        } else if let Some(row) = context.metadata_texts_by_file_name.get(file_name) {
+            legacy_from_text(row)
         } else {
             extract_metadata_source_xml_with_recalculation_refs_with_object_ref_resolutions(
                 &bytes,
@@ -5686,6 +5820,7 @@ fn dump_table_row_bytes(
                 )
             })
         };
+        timings.metadata_xml_convert_us += micros(started).saturating_sub(shadow_us);
         match extracted {
             Ok(extracted) => {
                 let path = context.output_dir.join(&extracted.relative_path);
@@ -5696,6 +5831,9 @@ fn dump_table_row_bytes(
                 write_source_xml_file(&path, extracted.xml, context.source_version)?;
                 metadata_xml_rows = 1;
                 timings.metadata_xml_cpu_ms += elapsed_ms(started);
+                if model_row {
+                    timings.model_metadata_xml_cpu_ms += elapsed_ms(started);
+                }
                 Some(extracted.relative_path.to_string_lossy().replace('\\', "/"))
             }
             Err(diagnostic) => {
