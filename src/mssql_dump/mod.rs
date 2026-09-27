@@ -4456,13 +4456,16 @@ fn dump_table_rows_streamed(
     let index_part_started = Instant::now();
     let index_part_cpu = process_cpu_ms();
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let field_refs = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_reference_index_from_texts(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
     timings.prepare_field_names_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_names", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let field_type_refs = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_metadata_field_type_reference_index_from_texts(&index_metadata_texts, &type_index)
@@ -4471,7 +4474,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_field_types_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_types", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     // One index, two readers -- see the sibling construction site.
     let type_set_leaves = if extract_metadata_xml {
         build_metadata_type_set_leaf_index_from_texts(&index_metadata_texts, &type_index)
@@ -4479,7 +4484,9 @@ fn dump_table_rows_streamed(
         MetadataTypeSetLeafIndex::new()
     };
     timings.prepare_type_set_leaves_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.type_set_leaves", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let information_register_field_refs =
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_field_reference_index_from_texts(
@@ -4491,7 +4498,9 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         };
     timings.prepare_register_fields_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.register_fields", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let information_register_master_dimensions = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_master_dimension_index_from_texts(
@@ -4506,7 +4515,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_master_dimensions_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.master_dimensions", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let metadata_field_declarations = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_declaration_index_from_texts(
             &index_metadata_texts,
@@ -4518,6 +4529,7 @@ fn dump_table_rows_streamed(
         MetadataFieldDeclarationIndex::default()
     };
     timings.prepare_field_declarations_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_declarations", field_part_cpu);
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     cpu_add(&mut timings, "prepare.field_refs", index_part_cpu);
     let index_part_started = Instant::now();
