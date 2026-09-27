@@ -2,6 +2,106 @@ use super::mxl_ir::{
     MxlDiagnostic, MxlFormatReferenceMap, MxlPaletteProvenance, MxlSpreadsheetWritePlan,
 };
 use super::*;
+use std::fmt::Write as _;
+
+/// [`escape_xml_element_text`] written straight into the output: the same
+/// bytes (`\r\n` read as `\n`, then `&`, `<` and `>` escaped) without
+/// building the escaped copy first.
+struct XmlElementText<'a>(&'a str);
+
+impl std::fmt::Display for XmlElementText<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for_each_element_text_piece(self.0, |piece| formatter.write_str(piece))
+    }
+}
+
+/// Hands `value` to `write` in the pieces that spell it as element text.
+fn for_each_element_text_piece<E>(
+    value: &str,
+    mut write: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    let bytes = value.as_bytes();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let (replacement, width) = match bytes[index] {
+            b'&' => ("&amp;", 1),
+            b'<' => ("&lt;", 1),
+            b'>' => ("&gt;", 1),
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => ("\n", 2),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        write(&value[start..index])?;
+        write(replacement)?;
+        index += width;
+        start = index;
+    }
+    write(&value[start..])
+}
+
+/// Appends `value` in decimal: what `{}` writes for it.
+fn push_decimal(xml: &mut String, value: usize) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = value;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    xml.push_str(std::str::from_utf8(&digits[at..]).expect("decimal digits are ASCII"));
+}
+
+/// Appends `value` as [`XmlElementText`] writes it.
+fn push_xml_element_text(xml: &mut String, value: &str) {
+    let _ = for_each_element_text_piece(value, |piece| {
+        xml.push_str(piece);
+        Ok::<(), std::convert::Infallible>(())
+    });
+}
+
+/// Appends `<tag>value</tag>` and a line break after `indent`, the value
+/// escaped as element text.
+fn push_xml_text_element(xml: &mut String, indent: &str, tag: &str, value: &str) {
+    xml.push_str(indent);
+    xml.push('<');
+    xml.push_str(tag);
+    xml.push('>');
+    push_xml_element_text(xml, value);
+    xml.push_str("</");
+    xml.push_str(tag);
+    xml.push_str(">\r\n");
+}
+
+/// [`escape_xml_text`] written straight into the output.
+struct XmlText<'a>(&'a str);
+
+impl std::fmt::Display for XmlText<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = self.0;
+        let mut start = 0usize;
+        for (index, byte) in value.bytes().enumerate() {
+            let replacement = match byte {
+                b'&' => "&amp;",
+                b'<' => "&lt;",
+                b'>' => "&gt;",
+                b'"' => "&quot;",
+                _ => continue,
+            };
+            formatter.write_str(&value[start..index])?;
+            formatter.write_str(replacement)?;
+            start = index + 1;
+        }
+        formatter.write_str(&value[start..])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The body's brace splitter.
 //
@@ -11739,9 +11839,7 @@ fn render_moxel_spreadsheet_xml(
         xml.push_str("\t<templateMode>true</templateMode>\r\n");
     }
     if let Some(step_direction) = spreadsheet.step_direction {
-        xml.push_str(&format!(
-            "\t<stepDirection>{step_direction}</stepDirection>\r\n"
-        ));
+        _ = write!(xml, "\t<stepDirection>{step_direction}</stepDirection>\r\n");
     }
     // The leading default-format record names format content, not a slot: the
     // published index is the pool position that carries the record's own bytes.
@@ -11807,12 +11905,13 @@ fn render_moxel_spreadsheet_xml(
             }),
     };
     if let Some(default_format_index) = published_default_format_index {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t<defaultFormatIndex>{default_format_index}</defaultFormatIndex>\r\n"
-        ));
+        );
     }
     if spreadsheet.height > 0 {
-        xml.push_str(&format!("\t<height>{}</height>\r\n", spreadsheet.height));
+        _ = write!(xml, "\t<height>{}</height>\r\n", spreadsheet.height);
     }
     if !spreadsheet.vertical_groups.is_empty() {
         let vg_levels = spreadsheet
@@ -11822,10 +11921,10 @@ fn render_moxel_spreadsheet_xml(
             .max()
             .unwrap_or(0);
         if vg_levels > 0 {
-            xml.push_str(&format!("\t<vgLevels>{vg_levels}</vgLevels>\r\n"));
+            _ = write!(xml, "\t<vgLevels>{vg_levels}</vgLevels>\r\n");
         }
     }
-    xml.push_str(&format!("\t<vgRows>{}</vgRows>\r\n", spreadsheet.height));
+    _ = write!(xml, "\t<vgRows>{}</vgRows>\r\n", spreadsheet.height);
     for group in &spreadsheet.vertical_groups {
         push_moxel_group_xml(&mut xml, "vg", group);
     }
@@ -11871,7 +11970,7 @@ fn render_moxel_spreadsheet_xml(
     }
     for (role, (tag, _)) in MOXEL_GROUP_HEADER_COLOR_ROLES.iter().enumerate() {
         if let Some(color) = &spreadsheet.group_header_colors[role] {
-            xml.push_str(&format!("\t<{tag}>{}</{tag}>\r\n", escape_xml_text(color)));
+            _ = write!(xml, "\t<{tag}>{}</{tag}>\r\n", XmlText(color));
         }
     }
     for line in &spreadsheet.lines {
@@ -12197,7 +12296,7 @@ pub(super) fn push_moxel_columns_xml(
 ) {
     xml.push_str("\t<columns>\r\n");
     if let Some(id) = &column_set.id {
-        xml.push_str(&format!("\t\t<id>{}</id>\r\n", escape_xml_text(id)));
+        _ = write!(xml, "\t\t<id>{}</id>\r\n", XmlText(id));
     }
     // The stored reference decides whether the element exists at all: over all
     // 1810 column sets of the native corpus the 1734 that store 0 publish
@@ -12215,25 +12314,27 @@ pub(super) fn push_moxel_columns_xml(
                 })
             })
     {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<formatIndex>{default_format_index}</formatIndex>\r\n"
-        ));
+        );
     }
-    xml.push_str(&format!("\t\t<size>{}</size>\r\n", column_set.size));
+    _ = write!(xml, "\t\t<size>{}</size>\r\n", column_set.size);
     for column in &column_set.columns {
         let column_index = column.index;
         let format_index = output_format_index_map
             .get(&column.format_index)
             .copied()
             .unwrap_or(column.format_index);
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<columnsItem>\r\n\
 \t\t\t<index>{column_index}</index>\r\n\
 \t\t\t<column>\r\n\
 \t\t\t\t<formatIndex>{format_index}</formatIndex>\r\n\
 \t\t\t</column>\r\n\
 \t\t</columnsItem>\r\n"
-        ));
+        );
     }
     xml.push_str("\t</columns>\r\n");
 }
@@ -13067,21 +13168,19 @@ fn push_moxel_language_settings_xml(xml: &mut String, settings: Option<&MoxelLan
     }
     for info in infos {
         xml.push_str("\t\t<languageInfo>\r\n");
-        xml.push_str(&format!("\t\t\t<id>{}</id>\r\n", escape_xml_text(&info.id)));
-        xml.push_str(&format!(
-            "\t\t\t<code>{}</code>\r\n",
-            escape_xml_text(&info.code)
-        ));
+        _ = write!(xml, "\t\t\t<id>{}</id>\r\n", XmlText(&info.id));
+        _ = write!(xml, "\t\t\t<code>{}</code>\r\n", XmlText(&info.code));
         // A configured language with no translated name (typically `en`
         // when only its `ru` name is filled in) self-closes: the platform
         // writes `<description/>`, never `<description></description>`.
         if info.description.is_empty() {
             xml.push_str("\t\t\t<description/>\r\n");
         } else {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t<description>{}</description>\r\n",
-                escape_xml_text(&info.description)
-            ));
+                XmlText(&info.description)
+            );
         }
         xml.push_str("\t\t</languageInfo>\r\n");
     }
@@ -13090,13 +13189,10 @@ fn push_moxel_language_settings_xml(xml: &mut String, settings: Option<&MoxelLan
 
 fn push_moxel_language_text(xml: &mut String, tag: &str, value: &str) {
     if value.is_empty() {
-        xml.push_str(&format!("\t\t<{tag}/>\r\n"));
+        _ = write!(xml, "\t\t<{tag}/>\r\n");
         return;
     }
-    xml.push_str(&format!(
-        "\t\t<{tag}>{}</{tag}>\r\n",
-        escape_xml_text(value)
-    ));
+    _ = write!(xml, "\t\t<{tag}>{}</{tag}>\r\n", XmlText(value));
 }
 
 fn push_moxel_header_footer_slots_xml(
@@ -13111,8 +13207,8 @@ fn push_moxel_header_footer_slots_xml(
         let Some(format_index) = output_format_index(record.source_format_ref) else {
             continue;
         };
-        xml.push_str(&format!("\t<{tag}>\r\n"));
-        xml.push_str(&format!("\t\t<f>{format_index}</f>\r\n"));
+        _ = write!(xml, "\t<{tag}>\r\n");
+        _ = write!(xml, "\t\t<f>{format_index}</f>\r\n");
         match record.text_kind {
             MoxelHeaderFooterText::Absent => {}
             MoxelHeaderFooterText::Plain => {
@@ -13122,29 +13218,31 @@ fn push_moxel_header_footer_slots_xml(
                 push_moxel_header_footer_text_xml(xml, "tfl", &record.text);
             }
         }
-        xml.push_str(&format!("\t</{tag}>\r\n"));
+        _ = write!(xml, "\t</{tag}>\r\n");
     }
 }
 
 fn push_moxel_header_footer_text_xml(xml: &mut String, tag: &str, values: &[MoxelLocalizedValue]) {
     if values.is_empty() {
-        xml.push_str(&format!("\t\t<{tag}/>\r\n"));
+        _ = write!(xml, "\t\t<{tag}/>\r\n");
         return;
     }
-    xml.push_str(&format!("\t\t<{tag}>\r\n"));
+    _ = write!(xml, "\t\t<{tag}>\r\n");
     for value in values {
         xml.push_str("\t\t\t<v8:item>\r\n");
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-            escape_xml_element_text(&value.lang)
-        ));
-        xml.push_str(&format!(
+            XmlElementText(&value.lang)
+        );
+        _ = write!(
+            xml,
             "\t\t\t\t<v8:content>{}</v8:content>\r\n",
-            escape_xml_element_text(&value.content)
-        ));
+            XmlElementText(&value.content)
+        );
         xml.push_str("\t\t\t</v8:item>\r\n");
     }
-    xml.push_str(&format!("\t\t</{tag}>\r\n"));
+    _ = write!(xml, "\t\t</{tag}>\r\n");
 }
 
 pub(super) fn push_moxel_print_settings_xml(xml: &mut String, settings: &MoxelPrintSettings) {
@@ -13278,27 +13376,30 @@ fn push_moxel_format_body_xml(
     push_moxel_format_text(xml, "textPlacement", format.text_placement);
     push_moxel_format_text(xml, "fillType", format.fill_type);
     if let Some(protection) = format.protection {
-        xml.push_str(&format!("\t\t<protection>{protection}</protection>\r\n"));
+        _ = write!(xml, "\t\t<protection>{protection}</protection>\r\n");
     }
     if let Some(hidden) = format.hidden {
-        xml.push_str(&format!("\t\t<hidden>{hidden}</hidden>\r\n"));
+        _ = write!(xml, "\t\t<hidden>{hidden}</hidden>\r\n");
     }
     push_moxel_format_usize(xml, "textOrientation", format.text_orientation);
     push_moxel_format_text(xml, "detailsUse", format.details_use);
     if let Some(by_selected_columns) = format.by_selected_columns {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<bySelectedColumns>{by_selected_columns}</bySelectedColumns>\r\n"
-        ));
+        );
     }
     if let Some(mark_negatives) = format.mark_negatives {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<markNegatives>{mark_negatives}</markNegatives>\r\n"
-        ));
+        );
     }
     if let Some(contains_value) = format.contains_value {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<containsValue>{contains_value}</containsValue>\r\n"
-        ));
+        );
     }
     if let Some(value_type) = format
         .value_type_index
@@ -13316,22 +13417,22 @@ fn push_moxel_format_body_xml(
         .control_type_index
         .and_then(|index| spreadsheet.control_types.get(index))
     {
-        xml.push_str(&format!(
-            "\t\t<controlType>{control_type}</controlType>\r\n"
-        ));
+        _ = write!(xml, "\t\t<controlType>{control_type}</controlType>\r\n");
     }
     if let Some(hyper_link) = format.hyper_link {
-        xml.push_str(&format!("\t\t<hyperLink>{hyper_link}</hyperLink>\r\n"));
+        _ = write!(xml, "\t\t<hyperLink>{hyper_link}</hyperLink>\r\n");
     }
     if let Some(auto_mark_incomplete) = format.auto_mark_incomplete {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<autoMarkIncomplete>{auto_mark_incomplete}</autoMarkIncomplete>\r\n"
-        ));
+        );
     }
     if let Some(mark_incomplete) = format.mark_incomplete {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<markIncomplete>{mark_incomplete}</markIncomplete>\r\n"
-        ));
+        );
     }
     push_moxel_format_usize(xml, "indent", format.indent);
     push_moxel_format_usize(xml, "autoIndent", format.auto_indent);
@@ -13393,13 +13494,16 @@ pub(super) fn push_moxel_value_type_xml(xml: &mut String, value_type: &MoxelValu
             MoxelValueTypeItem::Date { .. } => {
                 xml.push_str("\t\t\t<v8:Type>xs:dateTime</v8:Type>\r\n")
             }
-            MoxelValueTypeItem::ConfigRef(reference) => xml.push_str(&format!(
-                "\t\t\t<v8:Type xmlns:d4p1=\"http://v8.1c.ru/8.1/data/enterprise/current-config\">\
+            MoxelValueTypeItem::ConfigRef(reference) => {
+                _ = write!(
+                    xml,
+                    "\t\t\t<v8:Type xmlns:d4p1=\"http://v8.1c.ru/8.1/data/enterprise/current-config\">\
                  d4p1:{}</v8:Type>\r\n",
-                escape_xml_element_text(reference)
-            )),
+                    XmlElementText(reference)
+                )
+            }
             MoxelValueTypeItem::TypeId(uuid) => {
-                xml.push_str(&format!("\t\t\t<v8:TypeId>{uuid}</v8:TypeId>\r\n"))
+                _ = write!(xml, "\t\t\t<v8:TypeId>{uuid}</v8:TypeId>\r\n")
             }
         }
     }
@@ -13410,13 +13514,14 @@ pub(super) fn push_moxel_value_type_xml(xml: &mut String, value_type: &MoxelValu
             allowed_sign,
         } = item
         {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t<v8:NumberQualifiers>\r\n\
                  \t\t\t\t<v8:Digits>{digits}</v8:Digits>\r\n\
                  \t\t\t\t<v8:FractionDigits>{fraction_digits}</v8:FractionDigits>\r\n\
                  \t\t\t\t<v8:AllowedSign>{allowed_sign}</v8:AllowedSign>\r\n\
                  \t\t\t</v8:NumberQualifiers>\r\n"
-            ));
+            );
         }
     }
     for item in &value_type.items {
@@ -13425,21 +13530,23 @@ pub(super) fn push_moxel_value_type_xml(xml: &mut String, value_type: &MoxelValu
             allowed_length,
         } = item
         {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t<v8:StringQualifiers>\r\n\
                  \t\t\t\t<v8:Length>{length}</v8:Length>\r\n\
                  \t\t\t\t<v8:AllowedLength>{allowed_length}</v8:AllowedLength>\r\n\
                  \t\t\t</v8:StringQualifiers>\r\n"
-            ));
+            );
         }
     }
     for item in &value_type.items {
         if let MoxelValueTypeItem::Date { fractions } = item {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t<v8:DateQualifiers>\r\n\
                  \t\t\t\t<v8:DateFractions>{fractions}</v8:DateFractions>\r\n\
                  \t\t\t</v8:DateQualifiers>\r\n"
-            ));
+            );
         }
     }
     xml.push_str("\t\t</valueType>\r\n");
@@ -13455,23 +13562,25 @@ pub(super) fn push_moxel_localized_values_xml(
         return;
     }
     if values.is_empty() {
-        xml.push_str(&format!("\t\t<{tag}/>\r\n"));
+        _ = write!(xml, "\t\t<{tag}/>\r\n");
         return;
     }
-    xml.push_str(&format!("\t\t<{tag}>\r\n"));
+    _ = write!(xml, "\t\t<{tag}>\r\n");
     for value in values {
         xml.push_str("\t\t\t<v8:item>\r\n");
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-            escape_xml_element_text(&value.lang)
-        ));
-        xml.push_str(&format!(
+            XmlElementText(&value.lang)
+        );
+        _ = write!(
+            xml,
             "\t\t\t\t<v8:content>{}</v8:content>\r\n",
-            escape_xml_element_text(&value.content)
-        ));
+            XmlElementText(&value.content)
+        );
         xml.push_str("\t\t\t</v8:item>\r\n");
     }
-    xml.push_str(&format!("\t\t</{tag}>\r\n"));
+    _ = write!(xml, "\t\t</{tag}>\r\n");
 }
 
 pub(super) fn moxel_format_for_index(
@@ -13572,42 +13681,41 @@ pub(super) fn moxel_format_for_index(
 
 pub(super) fn push_moxel_format_usize(xml: &mut String, tag: &str, value: Option<usize>) {
     if let Some(value) = value {
-        xml.push_str(&format!("\t\t<{tag}>{value}</{tag}>\r\n"));
+        _ = write!(xml, "\t\t<{tag}>{value}</{tag}>\r\n");
     }
 }
 
 pub(super) fn push_moxel_format_i32(xml: &mut String, tag: &str, value: Option<i32>) {
     if let Some(value) = value {
-        xml.push_str(&format!("\t\t<{tag}>{value}</{tag}>\r\n"));
+        _ = write!(xml, "\t\t<{tag}>{value}</{tag}>\r\n");
     }
 }
 
 pub(super) fn push_moxel_format_bool(xml: &mut String, tag: &str, value: Option<bool>) {
     if let Some(value) = value {
-        xml.push_str(&format!("\t\t<{tag}>{}</{tag}>\r\n", xml_bool(value)));
+        _ = write!(xml, "\t\t<{tag}>{}</{tag}>\r\n", xml_bool(value));
     }
 }
 
 pub(super) fn push_moxel_format_text(xml: &mut String, tag: &str, value: Option<&str>) {
     if let Some(value) = value {
-        xml.push_str(&format!(
-            "\t\t<{tag}>{}</{tag}>\r\n",
-            escape_xml_element_text(value)
-        ));
+        _ = write!(xml, "\t\t<{tag}>{}</{tag}>\r\n", XmlElementText(value));
     }
 }
 
 pub(super) fn push_moxel_format_color(xml: &mut String, tag: &str, value: Option<&str>) {
     if let Some(name) = value.and_then(|value| value.strip_prefix("windows:")) {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<{tag} xmlns:d3p1=\"http://v8.1c.ru/8.1/data/ui/colors/windows\">d3p1:{}</{tag}>\r\n",
-            escape_xml_element_text(name)
-        ));
+            XmlElementText(name)
+        );
     } else if let Some(value) = value.filter(|value| value.starts_with("d3p1:")) {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<{tag} xmlns:d3p1=\"http://v8.1c.ru/8.1/data/ui/colors/web\">{}</{tag}>\r\n",
-            escape_xml_element_text(value)
-        ));
+            XmlElementText(value)
+        );
     } else {
         push_moxel_format_text(xml, tag, value);
     }
@@ -13615,7 +13723,7 @@ pub(super) fn push_moxel_format_color(xml: &mut String, tag: &str, value: Option
 
 pub(super) fn push_moxel_picture_xml(xml: &mut String, picture: &MoxelPicture) {
     xml.push_str("\t<picture>\r\n");
-    xml.push_str(&format!("\t\t<index>{}</index>\r\n", picture.index));
+    _ = write!(xml, "\t\t<index>{}</index>\r\n", picture.index);
     // The record's seventh member decides the attribute: 0 writes `t="false"`,
     // anything else writes no `t` at all. Evidence (native 1С:УТ 11.5.27.75):
     // of the 363 picture elements in the tree that carry a body or a reference,
@@ -13634,15 +13742,17 @@ pub(super) fn push_moxel_picture_xml(xml: &mut String, picture: &MoxelPicture) {
         None => transparency,
     };
     if let Some(payload) = &picture.payload {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<picture{transparency}>{}</picture>\r\n",
-            escape_xml_text(payload)
-        ));
+            XmlText(payload)
+        );
     } else if let Some(ref_name) = &picture.ref_name {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<picture{transparency} ref=\"{}\"/>\r\n",
-            escape_xml_text(ref_name)
-        ));
+            XmlText(ref_name)
+        );
     } else {
         xml.push_str("\t\t<picture/>\r\n");
     }
@@ -13661,18 +13771,13 @@ pub(super) fn push_moxel_drawing_xml(
         MoxelDrawingKind::Chart(_) => "Chart",
         MoxelDrawingKind::GanttChart(_) => "GanttChart",
     };
-    xml.push_str(&format!(
-        "\t\t<drawingType>{drawing_type}</drawingType>\r\n"
-    ));
-    xml.push_str(&format!("\t\t<id>{}</id>\r\n", drawing.id));
+    _ = write!(xml, "\t\t<drawingType>{drawing_type}</drawingType>\r\n");
+    _ = write!(xml, "\t\t<id>{}</id>\r\n", drawing.id);
     let format_index = output_format_index_map
         .get(&drawing.format_index)
         .copied()
         .unwrap_or(drawing.format_index);
-    xml.push_str(&format!(
-        "\t\t<formatIndex>{}</formatIndex>\r\n",
-        format_index
-    ));
+    _ = write!(xml, "\t\t<formatIndex>{}</formatIndex>\r\n", format_index);
     // Member publication order is `text`/`parameter`, `value`,
     // `detailParameter`, which is the reverse of their slot order in the record;
     // the 9 records that carry all three pin it.
@@ -13684,89 +13789,90 @@ pub(super) fn push_moxel_drawing_xml(
         xml.push_str("\t\t<text>\r\n");
         for item in &drawing.members.text {
             xml.push_str("\t\t\t<v8:item>\r\n");
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-                escape_xml_element_text(&item.lang)
-            ));
-            xml.push_str(&format!(
+                XmlElementText(&item.lang)
+            );
+            _ = write!(
+                xml,
                 "\t\t\t\t<v8:content>{}</v8:content>\r\n",
-                escape_xml_element_text(&item.content)
-            ));
+                XmlElementText(&item.content)
+            );
             xml.push_str("\t\t\t</v8:item>\r\n");
         }
         xml.push_str("\t\t</text>\r\n");
     }
     if let Some(parameter) = &drawing.members.parameter {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<parameter>{}</parameter>\r\n",
-            escape_xml_element_text(parameter)
-        ));
+            XmlElementText(parameter)
+        );
     }
     if let Some(value) = &drawing.members.value {
         if value.is_empty() {
             xml.push_str("\t\t<value xsi:type=\"xs:string\"/>\r\n");
         } else {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t<value xsi:type=\"xs:string\">{}</value>\r\n",
-                escape_xml_element_text(value)
-            ));
+                XmlElementText(value)
+            );
         }
     }
     if let Some(detail_parameter) = &drawing.members.detail_parameter {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<detailParameter>{}</detailParameter>\r\n",
-            escape_xml_element_text(detail_parameter)
-        ));
+            XmlElementText(detail_parameter)
+        );
     }
-    xml.push_str(&format!(
-        "\t\t<beginRow>{}</beginRow>\r\n",
-        drawing.begin_row
-    ));
-    xml.push_str(&format!(
+    _ = write!(xml, "\t\t<beginRow>{}</beginRow>\r\n", drawing.begin_row);
+    _ = write!(
+        xml,
         "\t\t<beginRowOffset>{}</beginRowOffset>\r\n",
         drawing.begin_row_offset
-    ));
-    xml.push_str(&format!("\t\t<endRow>{}</endRow>\r\n", drawing.end_row));
-    xml.push_str(&format!(
+    );
+    _ = write!(xml, "\t\t<endRow>{}</endRow>\r\n", drawing.end_row);
+    _ = write!(
+        xml,
         "\t\t<endRowOffset>{}</endRowOffset>\r\n",
         drawing.end_row_offset
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t<beginColumn>{}</beginColumn>\r\n",
         drawing.begin_column
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t<beginColumnOffset>{}</beginColumnOffset>\r\n",
         drawing.begin_column_offset
-    ));
-    xml.push_str(&format!(
-        "\t\t<endColumn>{}</endColumn>\r\n",
-        drawing.end_column
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(xml, "\t\t<endColumn>{}</endColumn>\r\n", drawing.end_column);
+    _ = write!(
+        xml,
         "\t\t<endColumnOffset>{}</endColumnOffset>\r\n",
         drawing.end_column_offset
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t<autoSize>{}</autoSize>\r\n",
         xml_bool(drawing.auto_size)
-    ));
+    );
     let picture_size = match &drawing.kind {
         MoxelDrawingKind::Picture { picture_size, .. } => *picture_size,
         MoxelDrawingKind::Shape(_)
         | MoxelDrawingKind::Chart(_)
         | MoxelDrawingKind::GanttChart(_) => "Stretch",
     };
-    xml.push_str(&format!(
-        "\t\t<pictureSize>{picture_size}</pictureSize>\r\n"
-    ));
-    xml.push_str(&format!("\t\t<zOrder>{}</zOrder>\r\n", drawing.z_order));
+    _ = write!(xml, "\t\t<pictureSize>{picture_size}</pictureSize>\r\n");
+    _ = write!(xml, "\t\t<zOrder>{}</zOrder>\r\n", drawing.z_order);
     match &drawing.kind {
         MoxelDrawingKind::Shape(_) => {}
         MoxelDrawingKind::Picture { picture_index, .. } => {
-            xml.push_str(&format!(
-                "\t\t<pictureIndex>{picture_index}</pictureIndex>\r\n"
-            ));
+            _ = write!(xml, "\t\t<pictureIndex>{picture_index}</pictureIndex>\r\n");
         }
         MoxelDrawingKind::Chart(chart) => push_moxel_chart_xml(xml, chart),
         MoxelDrawingKind::GanttChart(gantt) => push_moxel_gantt_chart_xml(xml, gantt),
@@ -14359,7 +14465,7 @@ fn push_moxel_chart_series_xml(
     series: &MoxelChartSeries,
     automatic_names_apply: bool,
 ) {
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}>\r\n");
     push_moxel_chart_text_indented(xml, "id", series.id, 4);
     push_moxel_chart_literal_indented(xml, "color", &series.color, 4);
     push_moxel_chart_line_xml(xml, "line", &series.line, 4, "Solid");
@@ -14369,7 +14475,7 @@ fn push_moxel_chart_series_xml(
     push_moxel_chart_bool_indented(xml, "isExpand", series.is_expand, 4);
     push_moxel_chart_bool_indented(xml, "isIndicator", series.is_indicator, 4);
     push_moxel_chart_bool_indented(xml, "colorPriority", series.color_priority, 4);
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_point_xml(xml: &mut String, point: &MoxelChartPoint) {
@@ -14394,22 +14500,25 @@ fn push_moxel_chart_line_xml(
     style: &str,
 ) {
     let tabs = "\t".repeat(indent);
-    xml.push_str(&format!(
+    _ = write!(
+        xml,
         "{tabs}<d3p1:{tag} width=\"{}\" gap=\"false\">\r\n",
         line.width
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "{tabs}\t<v8ui:style xsi:type=\"v8ui:ChartLineType\">{style}</v8ui:style>\r\n"
-    ));
-    xml.push_str(&format!("{tabs}</d3p1:{tag}>\r\n"));
+    );
+    _ = write!(xml, "{tabs}</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_border_xml(xml: &mut String, tag: &str, width: usize, style: &str) {
-    xml.push_str(&format!("\t\t\t<d3p1:{tag} width=\"{width}\">\r\n"));
-    xml.push_str(&format!(
+    _ = write!(xml, "\t\t\t<d3p1:{tag} width=\"{width}\">\r\n");
+    _ = write!(
+        xml,
         "\t\t\t\t<v8ui:style xsi:type=\"v8ui:ControlBorderType\">{style}</v8ui:style>\r\n"
-    ));
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    );
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 /// `ttlFont`/`legFont`/`chFont`: unlike the general `<font>` element
@@ -14426,15 +14535,15 @@ fn push_moxel_chart_font_xml_indented(
     font: &MoxelFont,
     indent: usize,
 ) {
-    xml.push_str(&format!("{}<d3p1:{tag}", "\t".repeat(indent)));
+    _ = write!(xml, "{}<d3p1:{tag}", "\t".repeat(indent));
     if let Some(ref_name) = &font.ref_name {
-        xml.push_str(&format!(" ref=\"{}\"", escape_xml_text(ref_name)));
+        _ = write!(xml, " ref=\"{}\"", XmlText(ref_name));
     }
     if let Some(face_name) = &font.face_name {
-        xml.push_str(&format!(" faceName=\"{}\"", escape_xml_text(face_name)));
+        _ = write!(xml, " faceName=\"{}\"", XmlText(face_name));
     }
     if let Some(height) = &font.height {
-        xml.push_str(&format!(" height=\"{}\"", escape_xml_text(height)));
+        _ = write!(xml, " height=\"{}\"", XmlText(height));
     }
     for (member, name) in [
         (font.bold, "bold"),
@@ -14443,12 +14552,12 @@ fn push_moxel_chart_font_xml_indented(
         (font.strikeout, "strikeout"),
     ] {
         if let Some(value) = member {
-            xml.push_str(&format!(" {name}=\"{value}\""));
+            _ = write!(xml, " {name}=\"{value}\"");
         }
     }
-    xml.push_str(&format!(" kind=\"{}\"", font.kind));
+    _ = write!(xml, " kind=\"{}\"", font.kind);
     if let Some(scale) = font.scale {
-        xml.push_str(&format!(" scale=\"{scale}\""));
+        _ = write!(xml, " scale=\"{scale}\"");
     }
     xml.push_str("/>\r\n");
 }
@@ -14461,23 +14570,25 @@ fn push_moxel_chart_localized_xml(
 ) {
     let tabs = "\t".repeat(indent);
     if values.is_empty() {
-        xml.push_str(&format!("{tabs}<d3p1:{tag}/>\r\n"));
+        _ = write!(xml, "{tabs}<d3p1:{tag}/>\r\n");
         return;
     }
-    xml.push_str(&format!("{tabs}<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "{tabs}<d3p1:{tag}>\r\n");
     for value in values {
-        xml.push_str(&format!("{tabs}\t<v8:item>\r\n"));
-        xml.push_str(&format!(
+        _ = write!(xml, "{tabs}\t<v8:item>\r\n");
+        _ = write!(
+            xml,
             "{tabs}\t\t<v8:lang>{}</v8:lang>\r\n",
-            escape_xml_element_text(&value.lang)
-        ));
-        xml.push_str(&format!(
+            XmlElementText(&value.lang)
+        );
+        _ = write!(
+            xml,
             "{tabs}\t\t<v8:content>{}</v8:content>\r\n",
-            escape_xml_element_text(&value.content)
-        ));
-        xml.push_str(&format!("{tabs}\t</v8:item>\r\n"));
+            XmlElementText(&value.content)
+        );
+        _ = write!(xml, "{tabs}\t</v8:item>\r\n");
     }
-    xml.push_str(&format!("{tabs}</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "{tabs}</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_gauge_bands_xml(xml: &mut String, bands: &[MoxelChartGaugeBand]) {
@@ -14513,23 +14624,25 @@ fn push_moxel_chart_namespaced_localized_xml(
 ) {
     let tabs = "\t".repeat(indent);
     if values.is_empty() {
-        xml.push_str(&format!("{tabs}<{prefix}:{tag}/>\r\n"));
+        _ = write!(xml, "{tabs}<{prefix}:{tag}/>\r\n");
         return;
     }
-    xml.push_str(&format!("{tabs}<{prefix}:{tag}>\r\n"));
+    _ = write!(xml, "{tabs}<{prefix}:{tag}>\r\n");
     for value in values {
-        xml.push_str(&format!("{tabs}\t<v8:item>\r\n"));
-        xml.push_str(&format!(
+        _ = write!(xml, "{tabs}\t<v8:item>\r\n");
+        _ = write!(
+            xml,
             "{tabs}\t\t<v8:lang>{}</v8:lang>\r\n",
-            escape_xml_element_text(&value.lang)
-        ));
-        xml.push_str(&format!(
+            XmlElementText(&value.lang)
+        );
+        _ = write!(
+            xml,
             "{tabs}\t\t<v8:content>{}</v8:content>\r\n",
-            escape_xml_element_text(&value.content)
-        ));
-        xml.push_str(&format!("{tabs}\t</v8:item>\r\n"));
+            XmlElementText(&value.content)
+        );
+        _ = write!(xml, "{tabs}\t</v8:item>\r\n");
     }
-    xml.push_str(&format!("{tabs}</{prefix}:{tag}>\r\n"));
+    _ = write!(xml, "{tabs}</{prefix}:{tag}>\r\n");
 }
 
 fn push_moxel_chart_data_items_xml(xml: &mut String, items: &[MoxelChartDataItem]) {
@@ -14545,25 +14658,28 @@ fn push_moxel_chart_data_items_xml(xml: &mut String, items: &[MoxelChartDataItem
     for item in items {
         xml.push_str("\t\t\t\t<d3p1:item>\r\n");
         if item.value_is_empty {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t\t\t<d3p1:valData xsi:type=\"{}\"/>\r\n",
                 item.value_type
-            ));
+            );
         } else {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t\t\t<d3p1:valData xsi:type=\"{}\">{}</d3p1:valData>\r\n",
                 item.value_type,
-                escape_xml_element_text(&item.value)
-            ));
+                XmlElementText(&item.value)
+            );
         }
         xml.push_str("\t\t\t\t\t<d3p1:valInfo xsi:nil=\"true\"/>\r\n");
         if item.tooltip.is_empty() {
             xml.push_str("\t\t\t\t\t<d3p1:toolTip/>\r\n");
         } else {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t\t\t<d3p1:toolTip>{}</d3p1:toolTip>\r\n",
-                escape_xml_element_text(&item.tooltip)
-            ));
+                XmlElementText(&item.tooltip)
+            );
         }
         xml.push_str("\t\t\t\t</d3p1:item>\r\n");
     }
@@ -14596,7 +14712,7 @@ fn push_moxel_chart_scale_xml(xml: &mut String, tag: &str, scale: &MoxelChartSca
     if scale.is_empty() {
         return;
     }
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}>\r\n");
     push_moxel_chart_scale_title_area_xml(xml);
     if !scale.label_format.is_empty() {
         push_moxel_chart_localized_xml(xml, "labelFormat", &scale.label_format, 4);
@@ -14616,7 +14732,7 @@ fn push_moxel_chart_scale_xml(xml: &mut String, tag: &str, scale: &MoxelChartSca
     if let Some(orientation) = scale.label_orientation {
         push_moxel_chart_literal_indented(xml, "labelOrientation", orientation, 4);
     }
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 /// A palette block, written only when its record names a palette.
@@ -14624,21 +14740,21 @@ fn push_moxel_chart_palette_xml(xml: &mut String, tag: &str, palette: &MoxelChar
     let Some(name) = palette.name else {
         return;
     };
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}>\r\n");
     push_moxel_chart_literal_indented(xml, "colorPalette", name, 4);
     if let Some(color) = &palette.gradient_start_color {
         push_moxel_chart_literal_indented(xml, "gradientPaletteStartColor", color, 4);
     }
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_rectangle_xml(xml: &mut String, tag: &str, rect: &MoxelChartRectangle) {
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}>\r\n");
     push_moxel_chart_literal_indented(xml, "left", &rect.left, 4);
     push_moxel_chart_literal_indented(xml, "right", &rect.right, 4);
     push_moxel_chart_literal_indented(xml, "top", &rect.top, 4);
     push_moxel_chart_literal_indented(xml, "bottom", &rect.bottom, 4);
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_axis_xml(xml: &mut String, tag: &str, axis: &MoxelChartAxis) {
@@ -14651,24 +14767,27 @@ fn push_moxel_chart_axis_xml(xml: &mut String, tag: &str, axis: &MoxelChartAxis)
         push_moxel_chart_empty(xml, tag);
         return;
     }
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}>\r\n");
     if let Some(value) = &axis.base_value {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t<d3p1:baseValue>{}</d3p1:baseValue>\r\n",
-            escape_xml_element_text(value)
-        ));
+            XmlElementText(value)
+        );
     }
     if let Some(value) = &axis.min_value {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t<d3p1:minValue xsi:type=\"xs:decimal\">{}</d3p1:minValue>\r\n",
-            escape_xml_element_text(value)
-        ));
+            XmlElementText(value)
+        );
     }
     if let Some(value) = &axis.max_value {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t<d3p1:maxValue xsi:type=\"xs:decimal\">{}</d3p1:maxValue>\r\n",
-            escape_xml_element_text(value)
-        ));
+            XmlElementText(value)
+        );
     }
     if axis.min_detection {
         xml.push_str(
@@ -14682,7 +14801,7 @@ fn push_moxel_chart_axis_xml(xml: &mut String, tag: &str, axis: &MoxelChartAxis)
              </d3p1:maxValueDetectionMethod>\r\n",
         );
     }
-    xml.push_str(&format!("\t\t\t</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "\t\t\t</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_text(xml: &mut String, tag: &str, value: impl std::fmt::Display) {
@@ -14696,7 +14815,7 @@ fn push_moxel_chart_text_indented(
     indent: usize,
 ) {
     let tabs = "\t".repeat(indent);
-    xml.push_str(&format!("{tabs}<d3p1:{tag}>{value}</d3p1:{tag}>\r\n"));
+    _ = write!(xml, "{tabs}<d3p1:{tag}>{value}</d3p1:{tag}>\r\n");
 }
 
 fn push_moxel_chart_bool(xml: &mut String, tag: &str, value: bool) {
@@ -14723,14 +14842,15 @@ fn push_moxel_chart_plain_literal(
     indent: usize,
 ) {
     let tabs = "\t".repeat(indent);
-    xml.push_str(&format!(
+    _ = write!(
+        xml,
         "{tabs}<{prefix}:{tag}>{}</{prefix}:{tag}>\r\n",
-        escape_xml_element_text(value)
-    ));
+        XmlElementText(value)
+    );
 }
 
 fn push_moxel_chart_empty(xml: &mut String, tag: &str) {
-    xml.push_str(&format!("\t\t\t<d3p1:{tag}/>\r\n"));
+    _ = write!(xml, "\t\t\t<d3p1:{tag}/>\r\n");
 }
 
 pub(super) fn push_moxel_merge_xml(xml: &mut String, merge: &MoxelMerge) {
@@ -14749,23 +14869,25 @@ pub(super) fn push_moxel_merge_xml(xml: &mut String, merge: &MoxelMerge) {
 /// order is unobserved and this writer follows the storage record rather
 /// than inventing one.
 pub(super) fn push_moxel_group_xml(xml: &mut String, tag: &str, group: &MoxelVerticalGroup) {
-    xml.push_str(&format!("\t<{tag}>\r\n"));
-    xml.push_str(&format!("\t\t<b>{}</b>\r\n", group.begin_row));
+    _ = write!(xml, "\t<{tag}>\r\n");
+    _ = write!(xml, "\t\t<b>{}</b>\r\n", group.begin_row);
     if group.end_row != group.begin_row {
-        xml.push_str(&format!("\t\t<e>{}</e>\r\n", group.end_row));
+        _ = write!(xml, "\t\t<e>{}</e>\r\n", group.end_row);
     }
     if !group.text.is_empty() {
         xml.push_str("\t\t<t>\r\n");
         for item in &group.text {
             xml.push_str("\t\t\t<v8:item>\r\n");
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-                escape_xml_element_text(&item.lang)
-            ));
-            xml.push_str(&format!(
+                XmlElementText(&item.lang)
+            );
+            _ = write!(
+                xml,
                 "\t\t\t\t<v8:content>{}</v8:content>\r\n",
-                escape_xml_element_text(&item.content)
-            ));
+                XmlElementText(&item.content)
+            );
             xml.push_str("\t\t\t</v8:item>\r\n");
         }
         xml.push_str("\t\t</t>\r\n");
@@ -14776,7 +14898,7 @@ pub(super) fn push_moxel_group_xml(xml: &mut String, tag: &str, group: &MoxelVer
     if group.group_begin {
         xml.push_str("\t\t<g>Begin</g>\r\n");
     }
-    xml.push_str(&format!("\t</{tag}>\r\n"));
+    _ = write!(xml, "\t</{tag}>\r\n");
 }
 
 pub(super) fn push_moxel_vertical_unmerge_xml(xml: &mut String, merge: &MoxelMerge) {
@@ -14792,28 +14914,26 @@ pub(super) fn push_moxel_horizontal_unmerge_xml(xml: &mut String, merge: &MoxelM
 }
 
 pub(super) fn push_moxel_merge_body_xml(xml: &mut String, merge: &MoxelMerge) {
-    xml.push_str(&format!("\t\t<r>{}</r>\r\n", merge.row));
-    xml.push_str(&format!("\t\t<c>{}</c>\r\n", merge.column));
+    _ = write!(xml, "\t\t<r>{}</r>\r\n", merge.row);
+    _ = write!(xml, "\t\t<c>{}</c>\r\n", merge.column);
     if merge.height > 0 {
-        xml.push_str(&format!("\t\t<h>{}</h>\r\n", merge.height));
+        _ = write!(xml, "\t\t<h>{}</h>\r\n", merge.height);
     }
     if merge.width > 0 {
-        xml.push_str(&format!("\t\t<w>{}</w>\r\n", merge.width));
+        _ = write!(xml, "\t\t<w>{}</w>\r\n", merge.width);
     }
     if let Some(columns_id) = &merge.columns_id {
-        xml.push_str(&format!("\t\t<columnsID>{columns_id}</columnsID>\r\n"));
+        _ = write!(xml, "\t\t<columnsID>{columns_id}</columnsID>\r\n");
     }
 }
 
 pub(super) fn push_moxel_line_xml(xml: &mut String, line: &MoxelLine) {
-    xml.push_str(&format!(
-        "\t<line width=\"{}\" gap=\"false\">\r\n",
-        line.width
-    ));
-    xml.push_str(&format!(
+    _ = write!(xml, "\t<line width=\"{}\" gap=\"false\">\r\n", line.width);
+    _ = write!(
+        xml,
         "\t\t<v8ui:style xsi:type=\"{}\">{}</v8ui:style>\r\n",
         line.line_type, line.style
-    ));
+    );
     xml.push_str("\t</line>\r\n");
 }
 
@@ -14823,13 +14943,13 @@ pub(super) fn push_moxel_font_xml(xml: &mut String, font: &MoxelFont) {
         if ref_name.starts_with("sys:") {
             xml.push_str(" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\"");
         }
-        xml.push_str(&format!(" ref=\"{}\"", escape_xml_text(ref_name)));
+        _ = write!(xml, " ref=\"{}\"", XmlText(ref_name));
     }
     if let Some(face_name) = &font.face_name {
-        xml.push_str(&format!(" faceName=\"{}\"", escape_xml_text(face_name)));
+        _ = write!(xml, " faceName=\"{}\"", XmlText(face_name));
     }
     if let Some(height) = &font.height {
-        xml.push_str(&format!(" height=\"{}\"", escape_xml_text(height)));
+        _ = write!(xml, " height=\"{}\"", XmlText(height));
     }
     // A member the descriptor's mask does not carry is a member the platform
     // does not write, so each attribute is emitted exactly when it is present.
@@ -14840,12 +14960,12 @@ pub(super) fn push_moxel_font_xml(xml: &mut String, font: &MoxelFont) {
         (font.strikeout, "strikeout"),
     ] {
         if let Some(value) = member {
-            xml.push_str(&format!(" {name}=\"{value}\""));
+            _ = write!(xml, " {name}=\"{value}\"");
         }
     }
-    xml.push_str(&format!(" kind=\"{}\"", font.kind));
+    _ = write!(xml, " kind=\"{}\"", font.kind);
     if let Some(scale) = font.scale {
-        xml.push_str(&format!(" scale=\"{scale}\""));
+        _ = write!(xml, " scale=\"{scale}\"");
     }
     xml.push_str("/>\r\n");
 }
@@ -14855,11 +14975,8 @@ pub(super) fn push_moxel_named_item_xml(xml: &mut String, named_item: &MoxelName
         MoxelNamedItem::Cells(area) => push_moxel_area_xml(xml, area),
         MoxelNamedItem::Drawing { name, drawing_id } => {
             xml.push_str("\t<namedItem xsi:type=\"NamedItemDrawing\">\r\n");
-            xml.push_str(&format!(
-                "\t\t<name>{}</name>\r\n",
-                escape_xml_element_text(name)
-            ));
-            xml.push_str(&format!("\t\t<drawingID>{drawing_id}</drawingID>\r\n"));
+            _ = write!(xml, "\t\t<name>{}</name>\r\n", XmlElementText(name));
+            _ = write!(xml, "\t\t<drawingID>{drawing_id}</drawingID>\r\n");
             xml.push_str("\t</namedItem>\r\n");
         }
     }
@@ -14867,55 +14984,47 @@ pub(super) fn push_moxel_named_item_xml(xml: &mut String, named_item: &MoxelName
 
 pub(super) fn push_moxel_area_xml(xml: &mut String, area: &MoxelArea) {
     xml.push_str("\t<namedItem xsi:type=\"NamedItemCells\">\r\n");
-    xml.push_str(&format!(
-        "\t\t<name>{}</name>\r\n",
-        escape_xml_element_text(&area.name)
-    ));
+    _ = write!(xml, "\t\t<name>{}</name>\r\n", XmlElementText(&area.name));
     xml.push_str("\t\t<area>\r\n");
-    xml.push_str(&format!("\t\t\t<type>{}</type>\r\n", area.area_type));
-    xml.push_str(&format!(
-        "\t\t\t<beginRow>{}</beginRow>\r\n",
-        area.begin_row
-    ));
-    xml.push_str(&format!("\t\t\t<endRow>{}</endRow>\r\n", area.end_row));
-    xml.push_str(&format!(
+    _ = write!(xml, "\t\t\t<type>{}</type>\r\n", area.area_type);
+    _ = write!(xml, "\t\t\t<beginRow>{}</beginRow>\r\n", area.begin_row);
+    _ = write!(xml, "\t\t\t<endRow>{}</endRow>\r\n", area.end_row);
+    _ = write!(
+        xml,
         "\t\t\t<beginColumn>{}</beginColumn>\r\n",
         area.begin_column
-    ));
-    xml.push_str(&format!(
-        "\t\t\t<endColumn>{}</endColumn>\r\n",
-        area.end_column
-    ));
+    );
+    _ = write!(xml, "\t\t\t<endColumn>{}</endColumn>\r\n", area.end_column);
     if let Some(columns_id) = &area.columns_id {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t<columnsID>{}</columnsID>\r\n",
-            escape_xml_text(columns_id)
-        ));
+            XmlText(columns_id)
+        );
     }
     xml.push_str("\t\t</area>\r\n");
     xml.push_str("\t</namedItem>\r\n");
 }
 
 pub(super) fn push_moxel_document_area_xml(xml: &mut String, tag: &str, area: &MoxelArea) {
-    xml.push_str(&format!("\t<{tag}>\r\n"));
-    xml.push_str(&format!("\t\t<type>{}</type>\r\n", area.area_type));
-    xml.push_str(&format!("\t\t<beginRow>{}</beginRow>\r\n", area.begin_row));
-    xml.push_str(&format!("\t\t<endRow>{}</endRow>\r\n", area.end_row));
-    xml.push_str(&format!(
+    _ = write!(xml, "\t<{tag}>\r\n");
+    _ = write!(xml, "\t\t<type>{}</type>\r\n", area.area_type);
+    _ = write!(xml, "\t\t<beginRow>{}</beginRow>\r\n", area.begin_row);
+    _ = write!(xml, "\t\t<endRow>{}</endRow>\r\n", area.end_row);
+    _ = write!(
+        xml,
         "\t\t<beginColumn>{}</beginColumn>\r\n",
         area.begin_column
-    ));
-    xml.push_str(&format!(
-        "\t\t<endColumn>{}</endColumn>\r\n",
-        area.end_column
-    ));
+    );
+    _ = write!(xml, "\t\t<endColumn>{}</endColumn>\r\n", area.end_column);
     if let Some(columns_id) = &area.columns_id {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t<columnsID>{}</columnsID>\r\n",
-            escape_xml_text(columns_id)
-        ));
+            XmlText(columns_id)
+        );
     }
-    xml.push_str(&format!("\t</{tag}>\r\n"));
+    _ = write!(xml, "\t</{tag}>\r\n");
 }
 
 pub(super) fn push_moxel_row_xml(
@@ -14924,12 +15033,16 @@ pub(super) fn push_moxel_row_xml(
     output_format_index_map: &BTreeMap<usize, usize>,
     emit_first_format_index: bool,
 ) {
-    xml.push_str(&format!(
-        "\t<rowsItem>\r\n\t\t<index>{}</index>\r\n",
-        row.index
-    ));
+    // Every element below is appended piece by piece: a template of ERP УХ
+    // publishes hundreds of thousands of cells, and formatting each element
+    // through `write!` cost more than the rest of the writer together.
+    xml.push_str("\t<rowsItem>\r\n\t\t<index>");
+    push_decimal(xml, row.index);
+    xml.push_str("</index>\r\n");
     if let Some(index_to) = row.index_to {
-        xml.push_str(&format!("\t\t<indexTo>{index_to}</indexTo>\r\n"));
+        xml.push_str("\t\t<indexTo>");
+        push_decimal(xml, index_to);
+        xml.push_str("</indexTo>\r\n");
     }
     xml.push_str("\t\t<row>\r\n");
     let format_index = output_format_index_map
@@ -14937,10 +15050,11 @@ pub(super) fn push_moxel_row_xml(
         .copied()
         .unwrap_or(row.format_index);
     if let Some(columns_id) = &row.columns_id {
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t<columnsID>{}</columnsID>\r\n",
-            escape_xml_text(columns_id)
-        ));
+            XmlText(columns_id)
+        );
     }
     let explicit_source_format_collapsed_to_one = format_index == 1
         && row
@@ -14954,9 +15068,9 @@ pub(super) fn push_moxel_row_xml(
         || (emit_first_format_index && format_index == 1)
         || explicit_source_format_collapsed_to_one
     {
-        xml.push_str(&format!(
-            "\t\t\t<formatIndex>{format_index}</formatIndex>\r\n"
-        ));
+        xml.push_str("\t\t\t<formatIndex>");
+        push_decimal(xml, format_index);
+        xml.push_str("</formatIndex>\r\n");
     }
     if row.cells.is_empty() {
         xml.push_str("\t\t\t<empty>true</empty>\r\n");
@@ -14967,7 +15081,9 @@ pub(super) fn push_moxel_row_xml(
     for cell in &row.cells {
         xml.push_str("\t\t\t<c>\r\n");
         if cell.column_index != expected_column {
-            xml.push_str(&format!("\t\t\t\t<i>{}</i>\r\n", cell.column_index));
+            xml.push_str("\t\t\t\t<i>");
+            push_decimal(xml, cell.column_index);
+            xml.push_str("</i>\r\n");
         }
         xml.push_str("\t\t\t\t<c>\r\n");
         let cell_format_index = if cell.format_index == 0 {
@@ -14978,10 +15094,14 @@ pub(super) fn push_moxel_row_xml(
                 .copied()
                 .unwrap_or(cell.format_index)
         };
-        xml.push_str(&format!("\t\t\t\t\t<f>{cell_format_index}</f>\r\n"));
+        xml.push_str("\t\t\t\t\t<f>");
+        push_decimal(xml, cell_format_index);
+        xml.push_str("</f>\r\n");
         let text_element = if cell.formatted_text { "tfl" } else { "tl" };
         if !cell.text.is_empty() {
-            xml.push_str(&format!("\t\t\t\t\t<{text_element}>\r\n"));
+            xml.push_str("\t\t\t\t\t<");
+            xml.push_str(text_element);
+            xml.push_str(">\r\n");
             for item in &cell.text {
                 xml.push_str("\t\t\t\t\t\t<v8:item>\r\n");
                 // The empty language is spelled by the self-closed element.
@@ -14994,26 +15114,21 @@ pub(super) fn push_moxel_row_xml(
                 if item.lang.is_empty() {
                     xml.push_str("\t\t\t\t\t\t\t<v8:lang/>\r\n");
                 } else {
-                    xml.push_str(&format!(
-                        "\t\t\t\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-                        escape_xml_element_text(&item.lang)
-                    ));
+                    push_xml_text_element(xml, "\t\t\t\t\t\t\t", "v8:lang", &item.lang);
                 }
-                xml.push_str(&format!(
-                    "\t\t\t\t\t\t\t<v8:content>{}</v8:content>\r\n",
-                    escape_xml_element_text(&item.content)
-                ));
+                push_xml_text_element(xml, "\t\t\t\t\t\t\t", "v8:content", &item.content);
                 xml.push_str("\t\t\t\t\t\t</v8:item>\r\n");
             }
-            xml.push_str(&format!("\t\t\t\t\t</{text_element}>\r\n"));
+            xml.push_str("\t\t\t\t\t</");
+            xml.push_str(text_element);
+            xml.push_str(">\r\n");
         } else if cell.empty_text {
-            xml.push_str(&format!("\t\t\t\t\t<{text_element}/>\r\n"));
+            xml.push_str("\t\t\t\t\t<");
+            xml.push_str(text_element);
+            xml.push_str("/>\r\n");
         }
         if let Some(parameter) = &cell.parameter {
-            xml.push_str(&format!(
-                "\t\t\t\t\t<parameter>{}</parameter>\r\n",
-                escape_xml_element_text(parameter)
-            ));
+            push_xml_text_element(xml, "\t\t\t\t\t", "parameter", parameter);
         }
         // Member publication order below is evidence-derived, not the storage
         // record's own slot order (control, value, detail_value, detailParameter,
@@ -15053,10 +15168,7 @@ pub(super) fn push_moxel_row_xml(
             }
         }
         if let Some(detail_parameter) = &cell.detail_parameter {
-            xml.push_str(&format!(
-                "\t\t\t\t\t<detailParameter>{}</detailParameter>\r\n",
-                escape_xml_element_text(detail_parameter)
-            ));
+            push_xml_text_element(xml, "\t\t\t\t\t", "detailParameter", detail_parameter);
         }
         if let Some(value) = &cell.value {
             if value_is_reference {
@@ -15067,10 +15179,7 @@ pub(super) fn push_moxel_row_xml(
             push_moxel_cell_value_xml(xml, "d", detail_value);
         }
         if let Some(picture_parameter) = &cell.picture_parameter {
-            xml.push_str(&format!(
-                "\t\t\t\t\t<pictureParameter>{}</pictureParameter>\r\n",
-                escape_xml_element_text(picture_parameter)
-            ));
+            push_xml_text_element(xml, "\t\t\t\t\t", "pictureParameter", picture_parameter);
         }
         if let Some(note) = &cell.note {
             push_moxel_note_xml(xml, note, output_format_index_map);
@@ -15110,30 +15219,34 @@ fn push_moxel_typed_value_xml(
     let indent = "\t".repeat(depth);
     match value {
         MoxelCellValue::Nil => {
-            xml.push_str(&format!("{indent}<{element} xsi:nil=\"true\"/>\r\n"));
+            _ = write!(xml, "{indent}<{element} xsi:nil=\"true\"/>\r\n");
         }
         MoxelCellValue::Boolean(value) => {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "{indent}<{element} xsi:type=\"xs:boolean\">{}</{element}>\r\n",
                 if *value { "true" } else { "false" }
-            ));
+            );
         }
         MoxelCellValue::Text(text) if text.is_empty() => {
-            xml.push_str(&format!("{indent}<{element} xsi:type=\"xs:string\"/>\r\n"));
+            _ = write!(xml, "{indent}<{element} xsi:type=\"xs:string\"/>\r\n");
         }
         MoxelCellValue::Text(text) => {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "{indent}<{element} xsi:type=\"xs:string\">{}</{element}>\r\n",
-                escape_xml_element_text(text)
-            ));
+                XmlElementText(text)
+            );
         }
         MoxelCellValue::Number(number) => {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "{indent}<{element} xsi:type=\"xs:decimal\">{number}</{element}>\r\n"
-            ));
+            );
         }
         MoxelCellValue::DateTime(stamp) => {
-            xml.push_str(&format!(
+            _ = write!(
+                xml,
                 "{indent}<{element} xsi:type=\"xs:dateTime\">{}-{}-{}T{}:{}:{}</{element}>\r\n",
                 &stamp[0..4],
                 &stamp[4..6],
@@ -15141,41 +15254,41 @@ fn push_moxel_typed_value_xml(
                 &stamp[8..10],
                 &stamp[10..12],
                 &stamp[12..14]
-            ));
+            );
         }
         MoxelCellValue::Reference(index) => {
-            xml.push_str(&format!("{indent}<r>{index}</r>\r\n"));
+            _ = write!(xml, "{indent}<r>{index}</r>\r\n");
         }
         MoxelCellValue::Structure(properties) => {
-            xml.push_str(&format!(
-                "{indent}<{element} xsi:type=\"v8:Structure\">\r\n"
-            ));
+            _ = write!(xml, "{indent}<{element} xsi:type=\"v8:Structure\">\r\n");
             let property_indent = "\t".repeat(depth + 1);
             for (key, property_value) in properties {
-                xml.push_str(&format!(
+                _ = write!(
+                    xml,
                     "{property_indent}<v8:Property name=\"{}\">\r\n",
-                    escape_xml_text(key)
-                ));
+                    XmlText(key)
+                );
                 push_moxel_typed_value_xml(xml, "v8:Value", property_value, depth + 2);
-                xml.push_str(&format!("{property_indent}</v8:Property>\r\n"));
+                _ = write!(xml, "{property_indent}</v8:Property>\r\n");
             }
-            xml.push_str(&format!("{indent}</{element}>\r\n"));
+            _ = write!(xml, "{indent}</{element}>\r\n");
         }
         MoxelCellValue::Array(values) => {
-            xml.push_str(&format!("{indent}<{element} xsi:type=\"v8:Array\">\r\n"));
+            _ = write!(xml, "{indent}<{element} xsi:type=\"v8:Array\">\r\n");
             for value in values {
                 push_moxel_typed_value_xml(xml, "v8:Value", value, depth + 1);
             }
-            xml.push_str(&format!("{indent}</{element}>\r\n"));
+            _ = write!(xml, "{indent}</{element}>\r\n");
         }
     }
 }
 
 /// Publishes an embedded control blob verbatim.
 fn push_moxel_cell_control_xml(xml: &mut String, control: &str) {
-    xml.push_str(&format!(
+    _ = write!(
+        xml,
         "\t\t\t\t\t<control xsi:type=\"xs:base64Binary\">{control}</control>\r\n"
-    ));
+    );
 }
 
 fn push_moxel_note_xml(
@@ -15190,59 +15303,67 @@ fn push_moxel_note_xml(
     xml.push_str("\t\t\t\t\t<note>\r\n");
     xml.push_str("\t\t\t\t\t\t<drawingType>Comment</drawingType>\r\n");
     xml.push_str("\t\t\t\t\t\t<id>0</id>\r\n");
-    xml.push_str(&format!(
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<formatIndex>{format_index}</formatIndex>\r\n"
-    ));
+    );
     xml.push_str("\t\t\t\t\t\t<text>\r\n");
     for item in &note.text {
         xml.push_str("\t\t\t\t\t\t\t<v8:item>\r\n");
-        xml.push_str(&format!(
+        _ = write!(
+            xml,
             "\t\t\t\t\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
-            escape_xml_element_text(&item.lang)
-        ));
-        xml.push_str(&format!(
+            XmlElementText(&item.lang)
+        );
+        _ = write!(
+            xml,
             "\t\t\t\t\t\t\t\t<v8:content>{}</v8:content>\r\n",
-            escape_xml_element_text(&item.content)
-        ));
+            XmlElementText(&item.content)
+        );
         xml.push_str("\t\t\t\t\t\t\t</v8:item>\r\n");
     }
     xml.push_str("\t\t\t\t\t\t</text>\r\n");
-    xml.push_str(&format!(
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<beginRow>{}</beginRow>\r\n",
         note.begin_row
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<beginRowOffset>{}</beginRowOffset>\r\n",
         note.begin_row_offset
-    ));
-    xml.push_str(&format!(
-        "\t\t\t\t\t\t<endRow>{}</endRow>\r\n",
-        note.end_row
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(xml, "\t\t\t\t\t\t<endRow>{}</endRow>\r\n", note.end_row);
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<endRowOffset>{}</endRowOffset>\r\n",
         note.end_row_offset
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<beginColumn>{}</beginColumn>\r\n",
         note.begin_column
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<beginColumnOffset>{}</beginColumnOffset>\r\n",
         note.begin_column_offset
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<endColumn>{}</endColumn>\r\n",
         note.end_column
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<endColumnOffset>{}</endColumnOffset>\r\n",
         note.end_column_offset
-    ));
-    xml.push_str(&format!(
+    );
+    _ = write!(
+        xml,
         "\t\t\t\t\t\t<autoSize>{}</autoSize>\r\n",
         xml_bool(note.auto_size)
-    ));
+    );
     xml.push_str("\t\t\t\t\t\t<pictureSize>Stretch</pictureSize>\r\n");
     xml.push_str("\t\t\t\t\t</note>\r\n");
 }
