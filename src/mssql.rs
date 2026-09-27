@@ -15909,4 +15909,13 @@ mod tests {
         assert_eq!(diff.changed[0].before.sha256, "bbb");
         assert_eq!(diff.changed[0].after.sha256, "ccc");
     }
+
+    #[test]
+    fn a_base_reason_is_cut_to_the_storage_bound() {
+        let long = "блокер формы; ".repeat(600);
+        let cut = super::bounded_patch_reason(&long);
+        assert!(cut.len() <= ibcmd_core::storage::MAX_STORAGE_PATCH_REASON_BYTES);
+        assert!(cut.ends_with(&format!("({} bytes in all)", long.len())));
+        assert_eq!(super::bounded_patch_reason("short"), "short");
+    }
 }
