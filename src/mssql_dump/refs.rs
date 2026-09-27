@@ -583,6 +583,9 @@ fn field_declarations_of_row(
     // Read from the same header walk the field-type index is built from, and
     // keyed the way the query side asks -- by table and field name rather
     // than by the child's uuid.
+    // Each child's type is read from the values enclosing its header, so the
+    // record's nesting is read once for all of its children.
+    let _brace_jumps = register_brace_jumps([row.text.as_str()]);
     for (header, marker_start) in
         nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
     {
@@ -2377,6 +2380,9 @@ pub(super) fn build_metadata_field_type_reference_index_from_texts(
     type_index: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let per_row = |row: &MetadataTextRow| {
+        // Each child's type is read from the values enclosing its header, so
+        // the record's nesting is read once for all of its children.
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
         let mut pairs = Vec::new();
         for (header, marker_start) in
             nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
@@ -2470,6 +2476,8 @@ fn information_register_master_dimension_entry(
         else {
             return None;
         };
+        // Each dimension is read from the values enclosing its header.
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
         let dimension_prefix = format!("InformationRegister.{}.Dimension.", register.name);
         let expected_dimensions = declared_dimensions
             .get(register.name.as_str())
@@ -2600,6 +2608,8 @@ fn information_register_field_reference_entries(
     else {
         return None;
     };
+    // Each field is read from the values enclosing its header.
+    let _brace_jumps = register_brace_jumps([row.text.as_str()]);
     let mut entries = Vec::new();
     for (field, marker_start) in
         nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
