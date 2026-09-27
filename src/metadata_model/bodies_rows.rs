@@ -1,9 +1,9 @@
 //! The body rows track D writes for a base-free stage: predefined data
 //! (Catalog `.1c`, ChartOfCharacteristicTypes `.7`, ChartOfAccounts `.9`,
-//! ChartOfCalculationTypes `.2`), business process flowcharts (`.7`) and
-//! accumulation register aggregates (`.3`). Each is compiled from the
-//! object's XML and its `Ext` file alone; an object without that file has
-//! no row.
+//! ChartOfCalculationTypes `.2`), business process flowcharts (`.7`),
+//! accumulation register aggregates (`.3`) and GraphicalSchema templates
+//! (`.0`, with their inline pictures). Each is compiled from the object's
+//! XML and its `Ext` files alone; an object without them has no row.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,10 @@ use anyhow::{Result, anyhow};
 
 use super::DescriptorContext;
 use super::bodies_aggregates::{aggregates_path, aggregates_row};
-use super::bodies_flowchart::{flowchart_path, flowchart_row};
+use super::bodies_flowchart::{
+    flowchart_path, flowchart_row, graphical_schema_row, is_graphical_schema_template,
+    template_body_path,
+};
 use super::bodies_predefined::{predefined_path, predefined_row, predefined_suffix};
 use super::brace::serialize_row;
 use super::common::crlf_strings;
@@ -26,13 +29,19 @@ pub struct BodyRow {
     pub text: Vec<u8>,
 }
 
-/// Whether these writers replace the loader's own kind-body writer for a
-/// kind (whose writer only patches a base row).
-pub fn owns_kind_body(kind: &str) -> bool {
-    matches!(
-        kind,
-        "Catalog" | "ChartOfCharacteristicTypes" | "BusinessProcess"
-    )
+/// Whether these writers replace the loader's own kind-body writer for an
+/// object (whose writer only patches a base row): predefined data,
+/// flowcharts and graphical-schema templates.
+pub fn owns_kind_body(kind: &str, xml: &[u8]) -> bool {
+    match kind {
+        "Catalog" | "ChartOfCharacteristicTypes" | "BusinessProcess" => true,
+        "Template" | "CommonTemplate" => MetadataXml::parse(xml)
+            .ok()
+            .as_ref()
+            .and_then(|doc| doc.object().ok())
+            .is_some_and(is_graphical_schema_template),
+        _ => false,
+    }
 }
 
 /// The suffix of the row these writers give a kind, if any.
@@ -40,6 +49,7 @@ pub fn body_row_suffix(kind: &str) -> Option<&'static str> {
     match kind {
         "BusinessProcess" => Some("7"),
         "AccumulationRegister" => Some("3"),
+        "Template" | "CommonTemplate" => Some("0"),
         other => predefined_suffix(other),
     }
 }
@@ -62,6 +72,15 @@ pub fn compile_body_rows(
         .to_ascii_lowercase();
     let (tree, source) = match kind {
         "BusinessProcess" => (flowchart_row(xml_path, context)?, flowchart_path(xml_path)),
+        "Template" | "CommonTemplate" => {
+            if !is_graphical_schema_template(object) {
+                return Ok(Vec::new());
+            }
+            (
+                graphical_schema_row(xml_path, context)?,
+                template_body_path(xml_path),
+            )
+        }
         "AccumulationRegister" => (
             aggregates_row(object, xml_path, context)?,
             aggregates_path(xml_path),
