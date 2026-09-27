@@ -411,7 +411,7 @@ pub(crate) fn service_rows(
     let mut rows = Vec::with_capacity(3);
     for (file_name, plain) in [
         ("root", root_row(&context.facts)),
-        ("version", version_row(&context.facts, &fresh())),
+        ("version", version_row(&context.facts)?),
         ("versions", versions_row(names, fresh)),
     ] {
         rows.push(EmptyStageRow {
@@ -837,32 +837,6 @@ fn excerpt(text: &[u8], offset: usize) -> String {
     String::from_utf8_lossy(&text[start.min(end)..end]).replace("\r\n", "⏎")
 }
 
-/// uuids that are masked when a service row is compared: they are fresh by
-/// design.
-fn mask_uuids(text: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(text);
-    reason_of_all(&text).into_bytes()
-}
-
-fn reason_of_all(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    while index < text.len() {
-        if index + 36 <= text.len()
-            && text.is_char_boundary(index + 36)
-            && is_uuid(&text[index..index + 36])
-        {
-            out.push_str("<uuid>");
-            index += 36;
-            continue;
-        }
-        let ch = text[index..].chars().next().unwrap_or(' ');
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
-}
-
 /// The names a `versions` row lists (the leading `""` aside).
 fn versions_names(plain: &[u8]) -> BTreeSet<String> {
     let text = String::from_utf8_lossy(plain);
@@ -1049,8 +1023,9 @@ pub fn audit_empty_stage(
         manifest.extend(object_manifest);
     }
 
-    // Service rows: root and version compared with generation uuids masked,
-    // versions by its names.
+    // Service rows: root and version compared byte for byte (masking their
+    // uuids once hid a generated uuid in 8.5's version row, which apply
+    // refused), versions by its names.
     let service = service_rows(&context, &names)?;
     let mut versions_report = EmptyStageVersionsReport::default();
     for row in &service {
@@ -1105,18 +1080,17 @@ pub fn audit_empty_stage(
                 }
             }
             Some(expected) => {
-                let left = mask_uuids(expected);
-                let right = mask_uuids(&plain);
+                let (left, right) = (expected.as_slice(), plain.as_slice());
                 if left == right {
                     (Outcome::Identical, String::new())
                 } else {
-                    let offset = first_difference(&left, &right);
+                    let offset = first_difference(left, right);
                     (
                         Outcome::Different,
                         format!(
                             "stored {} | produced {}",
-                            excerpt(&left, offset),
-                            excerpt(&right, offset)
+                            excerpt(left, offset),
+                            excerpt(right, offset)
                         ),
                     )
                 }
