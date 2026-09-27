@@ -18198,11 +18198,20 @@ fn extracts_real_sfc_page_scroll_on_compress() {
     );
 }
 
+/// Child-item events stay with their items; none is hoisted to the form.
+///
+/// Two expectations follow the platform rather than the fixture's first
+/// reading. The table declares no `<DataPath>`, and the platform names a
+/// table's events only through the data the table shows: over the eight stand
+/// corpora 12 731 tables with a `<DataPath>` never carry a raw identifier, and
+/// the five without one write all ten of their events as raw identifiers
+/// (`parse_form_child_item_event_identifier`). And `213d1900-...`, the field's
+/// placeholder for an identifier nothing names, is the form's own
+/// `AfterWriteAtServer`, which the event tables name now; the placeholder is
+/// an identifier no table names.
 #[test]
 fn extracts_form_body_xml_keeps_child_events_nested() {
     let form_uuid = "02023637-7868-4a5f-8576-835a76e0c9ba";
-    // An event identifier no event table names; see
-    // `extracts_form_child_items_from_layout_pairs`.
     let unnamed_event = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let layout = format!(
         r#"{{59,1,cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"Список",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged",{unnamed_event},"NameUuidEvent"}},{{1,97365900-eadf-4dfd-a9aa-fbb9ecabd079,"RowsGetData",1,0,97365900-eadf-4dfd-a9aa-fbb9ecabd079,0,1}}}}}}"#
@@ -18212,20 +18221,22 @@ fn extracts_form_body_xml_keeps_child_events_nested() {
     let form_xml = extract_form_body_xml(&form_body, &BTreeMap::new()).unwrap();
 
     assert!(!form_xml.contains("\r\n\t<Events>\r\n"));
+    let table = &form_xml[form_xml.find(r#"<Table name="Список" id="25">"#).unwrap()..];
     assert_eq!(
-        form_xml
-            .matches(r#"<Event name="OnGetDataAtServer">RowsGetData</Event>"#)
+        table
+            .matches(r#"<Event name="97365900-eadf-4dfd-a9aa-fbb9ecabd079">RowsGetData</Event>"#)
             .count(),
         1
     );
+    let field = &table[table.find(r#"<InputField name="Наименование" id="40">"#).unwrap()..];
     assert_eq!(
-        form_xml
+        field
             .matches(r#"<Event name="OnChange">NameChanged</Event>"#)
             .count(),
         1
     );
     assert_eq!(
-        form_xml
+        field
             .matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
             .count(),
         1
