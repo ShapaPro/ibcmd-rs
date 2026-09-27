@@ -4234,10 +4234,13 @@ fn dump_table_rows_streamed(
     let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
         model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
     });
+    // The shadow check runs the legacy converters too, so it keeps what
+    // they read.
     let modelled = |kinds: &[&str]| {
-        model_plan
-            .as_ref()
-            .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
+        !model_export::shadow()
+            && model_plan
+                .as_ref()
+                .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
     };
     // Who reads what: a recalculation's own XML the recalculation index, a
     // calculation register's the root recalculation index, a functional
@@ -4404,11 +4407,14 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     let index_part_started = Instant::now();
+    let field_part_started = Instant::now();
     let field_refs = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_reference_index_from_texts(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
+    timings.prepare_field_names_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let field_type_refs = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_metadata_field_type_reference_index_from_texts(&index_metadata_texts, &type_index)
@@ -4416,12 +4422,16 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         },
     );
+    timings.prepare_field_types_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     // One index, two readers -- see the sibling construction site.
     let type_set_leaves = if extract_metadata_xml {
         build_metadata_type_set_leaf_index_from_texts(&index_metadata_texts, &type_index)
     } else {
         MetadataTypeSetLeafIndex::new()
     };
+    timings.prepare_type_set_leaves_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let information_register_field_refs =
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_field_reference_index_from_texts(
@@ -4432,6 +4442,8 @@ fn dump_table_rows_streamed(
         } else {
             BTreeMap::new()
         };
+    timings.prepare_register_fields_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let information_register_master_dimensions = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_master_dimension_index_from_texts(
@@ -4445,6 +4457,8 @@ fn dump_table_rows_streamed(
             InformationRegisterMasterDimensionIndex::new()
         },
     );
+    timings.prepare_master_dimensions_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let metadata_field_declarations = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_declaration_index_from_texts(
             &index_metadata_texts,
@@ -4455,6 +4469,7 @@ fn dump_table_rows_streamed(
     } else {
         MetadataFieldDeclarationIndex::default()
     };
+    timings.prepare_field_declarations_ms += elapsed_ms(field_part_started);
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let functional_option_refs =

@@ -28,6 +28,15 @@ pub struct MssqlDumpTimingReport {
     pub prepare_subsystem_refs_ms: u64,
     pub prepare_object_refs_ms: u64,
     pub prepare_field_refs_ms: u64,
+    /// The parts of `prepare_field_refs_ms`: child names, child types, type
+    /// set leaves, information register fields, master dimensions, the
+    /// dynamic-list field declarations.
+    pub prepare_field_names_ms: u64,
+    pub prepare_field_types_ms: u64,
+    pub prepare_type_set_leaves_ms: u64,
+    pub prepare_register_fields_ms: u64,
+    pub prepare_master_dimensions_ms: u64,
+    pub prepare_field_declarations_ms: u64,
     pub prepare_functional_option_refs_ms: u64,
     pub prepare_source_assets_ms: u64,
     pub prepare_help_refs_ms: u64,
@@ -384,6 +393,12 @@ impl MssqlDumpTimingReport {
         self.prepare_subsystem_refs_ms += other.prepare_subsystem_refs_ms;
         self.prepare_object_refs_ms += other.prepare_object_refs_ms;
         self.prepare_field_refs_ms += other.prepare_field_refs_ms;
+        self.prepare_field_names_ms += other.prepare_field_names_ms;
+        self.prepare_field_types_ms += other.prepare_field_types_ms;
+        self.prepare_type_set_leaves_ms += other.prepare_type_set_leaves_ms;
+        self.prepare_register_fields_ms += other.prepare_register_fields_ms;
+        self.prepare_master_dimensions_ms += other.prepare_master_dimensions_ms;
+        self.prepare_field_declarations_ms += other.prepare_field_declarations_ms;
         self.prepare_functional_option_refs_ms += other.prepare_functional_option_refs_ms;
         self.prepare_source_assets_ms += other.prepare_source_assets_ms;
         self.prepare_help_refs_ms += other.prepare_help_refs_ms;
