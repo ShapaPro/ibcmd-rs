@@ -4244,34 +4244,23 @@ fn dump_table_rows_streamed(
     };
     // Who reads what: a recalculation's own XML the recalculation index, a
     // calculation register's the root recalculation index, a functional
-    // option's the functional option index; the predefined items of the
-    // descriptors' own values are read by these kinds' converters.
+    // option's the functional option index, and nothing else reads them.
+    // (The predefined items of the descriptors' own values stay: besides the
+    // descriptor converters, flowcharts and graphical schemes read them
+    // through the metadata object references.)
     let skip_recalculation_refs = modelled(&["Recalculation"]);
     let skip_root_recalculation_refs = modelled(&["CalculationRegister"]);
     let skip_functional_option_refs = modelled(&["FunctionalOption"]);
-    let skip_value_predefined_items = modelled(&[
-        "Catalog",
-        "DataProcessor",
-        "Document",
-        "Report",
-        "ChartOfCharacteristicTypes",
-        "ChartOfAccounts",
-        "ChartOfCalculationTypes",
-        "BusinessProcess",
-        "Task",
-        "InformationRegister",
-    ]);
     if let Some(plan) = &model_plan {
         eprintln!(
             "model export: every descriptor through the model: {}; still legacy by kind: {:?}; \
              left out: recalculation refs {}, root recalculation refs {}, functional option \
-             refs {}, value predefined items {}",
+             refs {}",
             plan.models_every_descriptor(&index_metadata_texts),
             plan.legacy_descriptor_kinds(&index_metadata_texts),
             skip_recalculation_refs,
             skip_root_recalculation_refs,
             skip_functional_option_refs,
-            skip_value_predefined_items,
         );
     }
     timings.prepare_model_index_ms += elapsed_ms(plan_started);
@@ -4280,6 +4269,7 @@ fn dump_table_rows_streamed(
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
+    let index_part_started = Instant::now();
     let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
@@ -4290,12 +4280,15 @@ fn dump_table_rows_streamed(
     } else {
         BTreeMap::new()
     };
+    timings.prepare_recalculation_refs_ms += elapsed_ms(index_part_started);
 
+    let index_part_started = Instant::now();
     let module_text_paths = if extract_module_text {
         module_body_paths_from_texts(&write_index_rows, &index_metadata_texts)
     } else {
         BTreeMap::new()
     };
+    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let source_reference_needs = selected_configuration_index_needs
         .or(selected_metadata_index_needs)
@@ -4638,21 +4631,16 @@ fn dump_table_rows_streamed(
     } else {
         BTreeMap::new()
     };
+    let value_items_started = Instant::now();
     let metadata_value_owner_file_names =
         streamed_metadata_value_owner_file_names(&index_metadata_texts, &selected_file_names);
-    // The predefined items the descriptors' own values name; flowcharts add
-    // theirs below.
-    let mut owner_ids = if skip_value_predefined_items {
-        BTreeSet::new()
-    } else {
-        selected_metadata_predefined_owner_ids(
-            &index_metadata_texts,
-            &metadata_value_owner_file_names,
-            &type_index,
-            &object_refs,
-            &body_owners,
-        )
-    };
+    let mut owner_ids = selected_metadata_predefined_owner_ids(
+        &index_metadata_texts,
+        &metadata_value_owner_file_names,
+        &type_index,
+        &object_refs,
+        &body_owners,
+    );
     let flowchart_file_names = business_process_flowchart_file_names(&index_metadata_texts);
     if !flowchart_file_names.is_empty() {
         let flowchart_fetch_started = Instant::now();
@@ -4708,6 +4696,7 @@ fn dump_table_rows_streamed(
         &type_index,
         &object_refs,
     )?;
+    timings.prepare_value_predefined_items_ms += elapsed_ms(value_items_started);
     let configuration_root_child_order =
         build_configuration_root_child_order_from_texts(&index_metadata_texts);
     // A form names a predefined item of *any* object, not only of the objects
