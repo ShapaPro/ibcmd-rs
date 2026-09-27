@@ -767,6 +767,13 @@ fn constant_declared_use_always(text: &str, uuid: &str) -> Option<MetadataConsta
     })
 }
 
+/// Whether a constant's stored row flags it always used (slot 11), `None`
+/// when the row does not read: what a load onto a database needs to write a
+/// constants set's `<UseAlways>` record as the delta the platform keeps.
+pub(crate) fn constant_row_always_used(text: &str, uuid: &str) -> Option<bool> {
+    constant_declared_use_always(text, uuid).map(|declaration| declaration.always_used)
+}
+
 /// The single platform type id a constant's `{"Pattern",{"#",<uuid>}}` names,
 /// when it names exactly one.
 fn constant_declared_pattern_type_uuid(detail: Option<&str>) -> Option<String> {

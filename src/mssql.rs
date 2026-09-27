@@ -1225,6 +1225,13 @@ pub fn audit_source_parity(
     let bootstrap_readiness =
         source_bootstrap_readiness_report(&args.source_root, &metadata_xmls, &common_module_xmls)?;
 
+    install_always_used_constants_source(
+        &args.sqlcmd,
+        &args.server,
+        SqlAuth::integrated(),
+        &args.database,
+        Some(&args.source_root),
+    );
     let source = MetadataSourceContext::new(args.source_root.clone());
     let metadata_results = parallel::install(|| {
         metadata_xmls
@@ -3237,6 +3244,13 @@ pub fn stage_metadata_objects(
         password: sql_password.as_deref(),
     };
 
+    install_always_used_constants_source(
+        &args.sqlcmd,
+        &args.server,
+        sql_auth,
+        &args.database,
+        args.source_root.as_deref(),
+    );
     let source = args.source_root.clone().map(MetadataSourceContext::new);
     let prepared = parallel::install(|| {
         args.xmls
@@ -3418,6 +3432,13 @@ pub fn stage_source_objects(
     if args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some() {
         OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    install_always_used_constants_source(
+        &args.sqlcmd,
+        &args.server,
+        sql_auth,
+        &args.database,
+        Some(&args.source_root),
+    );
     // A bulk stage reads the base rows it patches with one bcp query instead
     // of one sqlcmd call per object (ERP УХ: over an hour without it).
     if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
@@ -7159,9 +7180,134 @@ fn diff_activation_rows(
     }
 }
 
+/// A constants set's form record is a delta against the target's always-used
+/// flags, which only the target's rows hold: every path that compiles forms
+/// against a database installs this reader, asked once, and only when a
+/// constants set is compiled. `IBCMD_RS_ALWAYS_USED_CONSTANTS` still
+/// overrides it; an empty infobase (`--base-free`, `audit-empty-stage`)
+/// never installs it and clears the flags instead.
+fn install_always_used_constants_source(
+    sqlcmd: &Path,
+    server: &str,
+    sql_auth: SqlAuth<'_>,
+    database: &str,
+    source_root: Option<&Path>,
+) {
+    let sqlcmd = sqlcmd.to_path_buf();
+    let server = server.to_string();
+    let user = sql_auth.user.map(str::to_string);
+    let password = sql_auth.password.map(str::to_string);
+    let database = database.to_string();
+    let source_root = source_root.map(Path::to_path_buf);
+    crate::module_blob::set_always_used_constants_source(move || {
+        let sql_auth = SqlAuth {
+            user: user.as_deref(),
+            password: password.as_deref(),
+        };
+        target_always_used_constants(
+            &sqlcmd,
+            &server,
+            sql_auth,
+            &database,
+            source_root.as_deref(),
+        )
+    });
+}
+
+/// The constants the target flags always-used (slot 11 of each constant's
+/// row), sorted: every constant the target's Configuration row lists, and
+/// every constant of the tree. A row that is missing or does not read counts
+/// as not flagged.
+fn target_always_used_constants(
+    sqlcmd: &Path,
+    server: &str,
+    sql_auth: SqlAuth<'_>,
+    database: &str,
+    source_root: Option<&Path>,
+) -> Vec<String> {
+    let fetch = |name: &str| {
+        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, name)
+            .ok()
+            .and_then(|blob| crate::module_blob::inflate_raw(&blob).ok())
+    };
+    let mut constants = BTreeSet::new();
+    let listed = fetch("root")
+        .and_then(|root| crate::metadata_model::brace::parse_row(&root).ok())
+        .and_then(|root| root.at(&[1]).and_then(|uuid| uuid.as_atom()).map(str::to_string))
+        .and_then(|configuration| fetch(&configuration))
+        .and_then(|row| crate::metadata_model::brace::parse_row(&row).ok())
+        .and_then(|row| crate::metadata_model::export::configuration_objects(&row).ok());
+    constants.extend(
+        listed
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(kind, _)| kind == "Constant")
+            .map(|(_, uuid)| uuid),
+    );
+    if let Some(Ok(entries)) = source_root.map(|root| fs::read_dir(root.join("Constants"))) {
+        for path in entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()) {
+            if path.extension().is_some_and(|extension| extension == "xml")
+                && let Ok(xml) = fs::read(&path)
+                && let Ok(properties) = parse_simple_metadata_xml_properties(&xml)
+            {
+                constants.insert(properties.uuid);
+            }
+        }
+    }
+    // Held in memory (a bulk stage) or in files, a row costs nothing; a
+    // per-row stage asks for them a hundred at a time.
+    let in_hand = std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some()
+        || PREFETCHED_BASE_ROWS
+            .get()
+            .is_some_and(|(prefetched, _)| prefetched == database);
+    let rows: Vec<(String, Vec<u8>)> = if in_hand {
+        constants
+            .iter()
+            .filter_map(|uuid| fetch(uuid).map(|plain| (uuid.clone(), plain)))
+            .collect()
+    } else {
+        let names = constants.iter().cloned().collect::<Vec<_>>();
+        fetch_config_blobs_for_files_with_auth(sqlcmd, server, sql_auth, database, &names)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| {
+                let blob = decode_hex(&row.binary_hex).ok()?;
+                let plain = crate::module_blob::inflate_raw(&blob).ok()?;
+                Some((row.file_name.to_ascii_lowercase(), plain))
+            })
+            .collect()
+    };
+    let mut flagged = rows
+        .into_iter()
+        .filter(|(uuid, plain)| {
+            crate::mssql_dump::constant_row_always_used(&String::from_utf8_lossy(plain), uuid)
+                == Some(true)
+        })
+        .map(|(uuid, _)| uuid)
+        .collect::<Vec<_>>();
+    flagged.sort();
+    flagged
+}
+
 fn fetch_config_blobs_for_files(
     sqlcmd: &Path,
     server: &str,
+    database: &str,
+    file_names: &[String],
+) -> Result<Vec<BinaryBlobRow>> {
+    fetch_config_blobs_for_files_with_auth(
+        sqlcmd,
+        server,
+        SqlAuth::integrated(),
+        database,
+        file_names,
+    )
+}
+
+fn fetch_config_blobs_for_files_with_auth(
+    sqlcmd: &Path,
+    server: &str,
+    sql_auth: SqlAuth<'_>,
     database: &str,
     file_names: &[String],
 ) -> Result<Vec<BinaryBlobRow>> {
@@ -7191,7 +7337,7 @@ fn fetch_config_blobs_for_files(
              ), '[]');",
             db = quote_ident(database),
         );
-        let stdout = run_sql_capture(sqlcmd, server, &sql)?;
+        let stdout = run_sql_capture_with_auth(sqlcmd, server, sql_auth, &sql)?;
         let json = extract_json_array(
             &stdout,
             &format!("fetch_config_blobs_for_files({database})"),
