@@ -8,7 +8,7 @@ use ibcmd_core::profile::EffectiveProfile;
 
 use super::{BodyProfileError, SelectedBodyProfile};
 use crate::compiler::families::native::{
-    NativeError, exact_token, inflate, parse, parse_without_bom, required_list,
+    NativeError, exact_token, inflate, outline, outline_without_bom, required_list,
     required_token,
 };
 use crate::module_blob::{
@@ -151,17 +151,26 @@ fn decode_plain(
         })?
     };
 
+    // Only the root's first four and last six fields are read below, so the
+    // body is checked the way the full parse checks it without building the
+    // tree of the rest.
     let native = if strict {
-        parse(&plain[MOXCEL_HEADER.len()..])?
+        outline(&plain[MOXCEL_HEADER.len()..], 4, 6)?
     } else {
-        parse_without_bom(&plain[body_start..])?
+        outline_without_bom(&plain[body_start..], 4, 6)?
     };
-    let fields = required_list(&native, "MOXCEL root")?;
-    if fields.len() < 8 {
+    let Some(field_count) = native.len else {
+        return Err(NativeError::Shape {
+            field: "MOXCEL root",
+        }
+        .into());
+    };
+    if field_count < 8 {
         return Err(MxlCodecError::InvalidShape(
             "MOXCEL marker-8 root is too short".to_string(),
         ));
     }
+    let fields = &native.head;
     exact_token(&fields[0], "8", "MOXCEL root marker")?;
     exact_token(&fields[1], "1", "MOXCEL root version")?;
     let declared_columns = required_token(&fields[2], "MOXCEL column count")?
@@ -195,8 +204,7 @@ fn decode_plain(
         exact_token(&fields[2], "12", "MOXCEL root revision")?;
         // The platform closes every body with the same six scalars: all 14 046
         // ERP УХ and 61 БСП stored spreadsheet rows end `…,0,0,1,0,0,0}`.
-        let tail = fields
-            .get(fields.len().saturating_sub(6)..)
+        let tail = Some(native.tail.as_slice())
             .filter(|tail| tail.len() == 6)
             .ok_or_else(|| {
                 MxlCodecError::InvalidShape("MOXCEL root has no trailer".to_string())
@@ -212,7 +220,7 @@ fn decode_plain(
         plain,
         body_start,
         declared_columns,
-        native_fields: fields.len(),
+        native_fields: field_count,
     })
 }
 
