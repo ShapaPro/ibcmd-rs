@@ -1105,6 +1105,10 @@ pub struct MetadataSourceContext {
     help_references: Arc<Mutex<BTreeMap<String, Result<help_pages::HelpReference, String>>>>,
     /// `Configuration.xml`'s own uuid, read once (`None` when it cannot be).
     configuration_uuid: Arc<std::sync::OnceLock<Option<String>>>,
+    /// `moxel_object_refs`, read once: every chart of a spreadsheet template
+    /// asks for it, and each answer read every common picture and style item
+    /// of the tree (ERP УХ: 3 350 files per chart; one template took 64-89 s).
+    moxel_object_refs: Arc<std::sync::OnceLock<Result<BTreeMap<String, String>, String>>>,
     /// Source files already read into memory, by the path they were read at:
     /// a base-free stage reads every metadata XML of its tree once, up front,
     /// and the resolvers below read those files from here. On the lab
@@ -1136,6 +1140,7 @@ impl MetadataSourceContext {
             style_items: Arc::new(std::sync::OnceLock::new()),
             help_references: Arc::new(Mutex::new(BTreeMap::new())),
             configuration_uuid: Arc::new(std::sync::OnceLock::new()),
+            moxel_object_refs: Arc::new(std::sync::OnceLock::new()),
             preloaded: PreloadedSourceFiles::default(),
         }
     }
@@ -1238,10 +1243,16 @@ impl MetadataSourceContext {
     }
 
     pub fn moxel_object_refs(&self) -> Result<BTreeMap<String, String>> {
-        let mut refs = BTreeMap::new();
-        self.collect_simple_metadata_refs("CommonPictures", "CommonPicture", &mut refs)?;
-        self.collect_simple_metadata_refs("StyleItems", "StyleItem", &mut refs)?;
-        Ok(refs)
+        let refs = self.moxel_object_refs.get_or_init(|| {
+            let mut refs = BTreeMap::new();
+            self.collect_simple_metadata_refs("CommonPictures", "CommonPicture", &mut refs)
+                .and_then(|()| {
+                    self.collect_simple_metadata_refs("StyleItems", "StyleItem", &mut refs)
+                })
+                .map(|()| refs)
+                .map_err(|error| format!("{error:#}"))
+        });
+        refs.clone().map_err(|error| anyhow!(error))
     }
 
     fn collect_simple_metadata_refs(
