@@ -35546,6 +35546,7 @@ fn split_1c_braced_fields(text: &str, start: usize) -> Option<Vec<&str>> {
 /// Top-level 1C fields with byte offsets into the original source text.
 /// Offsets delimit the trimmed field value, so provenance points at the exact
 /// raw token rather than a reconstructed/value-matched occurrence.
+#[cfg(test)]
 fn split_1c_braced_fields_with_spans(
     text: &str,
     start: usize,

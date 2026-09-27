@@ -2,6 +2,548 @@ use super::mxl_ir::{
     MxlDiagnostic, MxlFormatReferenceMap, MxlPaletteProvenance, MxlSpreadsheetWritePlan,
 };
 use super::*;
+// ---------------------------------------------------------------------------
+// The body's brace splitter.
+//
+// The decoder splits millions of short records and reads some long ones --
+// the format table -- in several passes. This splitter shadows the shared
+// `split_1c_braced_fields` for this module: it walks the bytes once, returns
+// the fields inline, and, while a conversion holds a [`SplitCacheScope`] on
+// its body, remembers the split of every long slice of that body, so a long
+// value is scanned once per conversion. A slice of any other text (a string
+// built along the way) is never cached: only the body is known to outlive the
+// scope unchanged.
+
+/// Slices shorter than this are split again rather than remembered: their
+/// scan is cheaper than the cache's bookkeeping, and short values -- a cell,
+/// its text -- are read once anyway.
+const SPLIT_CACHE_MIN_LEN: usize = 4096;
+
+#[derive(Default)]
+struct SplitKeyHasher(u64);
+
+impl std::hash::Hasher for SplitKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+}
+
+type SplitOffsets = std::rc::Rc<[(u32, u32)]>;
+
+struct SplitCache {
+    base: usize,
+    end: usize,
+    /// (slice address, slice length, start) -> the split's field offsets
+    /// relative to the slice, `None` when the slice does not split.
+    splits: HashMap<
+        (usize, usize, usize),
+        Option<SplitOffsets>,
+        std::hash::BuildHasherDefault<SplitKeyHasher>,
+    >,
+}
+
+thread_local! {
+    static SPLIT_CACHE: std::cell::RefCell<Option<SplitCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Remembers the splits of `body`'s slices until dropped.
+struct SplitCacheScope {
+    previous: Option<SplitCache>,
+}
+
+impl SplitCacheScope {
+    fn new(body: &str) -> Self {
+        let base = body.as_ptr() as usize;
+        let cache = SplitCache {
+            base,
+            end: base + body.len(),
+            splits: HashMap::default(),
+        };
+        let previous = SPLIT_CACHE.with(|slot| slot.borrow_mut().replace(cache));
+        Self { previous }
+    }
+}
+
+impl Drop for SplitCacheScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SPLIT_CACHE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// How many fields a [`BracedFields`] keeps without a heap allocation: every
+/// cell record, localized item, colour and group record fits.
+const INLINE_BRACED_FIELDS: usize = 16;
+
+/// The fields of one braced value, read as a slice. The decoder splits
+/// millions of short records and throws each split away at once, so the usual
+/// record keeps its fields inline and only a longer one moves to the heap.
+#[derive(Clone, Debug)]
+pub(super) struct BracedFields<'a> {
+    inline: [&'a str; INLINE_BRACED_FIELDS],
+    len: usize,
+    spilled: Vec<&'a str>,
+}
+
+impl<'a> BracedFields<'a> {
+    fn new() -> Self {
+        Self {
+            inline: [""; INLINE_BRACED_FIELDS],
+            len: 0,
+            spilled: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, field: &'a str) {
+        if self.spilled.is_empty() {
+            if self.len < INLINE_BRACED_FIELDS {
+                self.inline[self.len] = field;
+                self.len += 1;
+                return;
+            }
+            self.spilled.reserve(INLINE_BRACED_FIELDS * 2);
+            self.spilled.extend_from_slice(&self.inline);
+        }
+        self.spilled.push(field);
+    }
+}
+
+impl<'a> std::ops::Deref for BracedFields<'a> {
+    type Target = [&'a str];
+
+    fn deref(&self) -> &[&'a str] {
+        if self.spilled.is_empty() {
+            &self.inline[..self.len]
+        } else {
+            &self.spilled
+        }
+    }
+}
+
+impl<'a> IntoIterator for BracedFields<'a> {
+    type Item = &'a str;
+    type IntoIter = std::iter::Chain<
+        std::iter::Take<std::array::IntoIter<&'a str, INLINE_BRACED_FIELDS>>,
+        std::vec::IntoIter<&'a str>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let inline = if self.spilled.is_empty() { self.len } else { 0 };
+        self.inline.into_iter().take(inline).chain(self.spilled)
+    }
+}
+
+impl<'a, 'b> IntoIterator for &'b BracedFields<'a> {
+    type Item = &'b &'a str;
+    type IntoIter = std::slice::Iter<'b, &'a str>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The shared `parse_1c_string`: content without a doubled quote is copied
+/// as it stands.
+fn parse_1c_string(text: &str) -> Option<String> {
+    let text = text.trim();
+    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+    Some(if inner.contains('"') {
+        inner.replace("\"\"", "\"")
+    } else {
+        inner.to_owned()
+    })
+}
+
+/// The first byte of field `n` of the braced value `text`, past ASCII
+/// whitespace; `None` when the value holds no such field.
+fn braced_field_first_byte(text: &str, n: usize) -> Option<u8> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    // Field 0 opens right behind the brace, every other one behind the comma
+    // that ends the field in front of it.
+    let mut start = Some(1usize);
+    if n > 0 {
+        start = None;
+        let mut ended = 0usize;
+        walk_braced_fields(text, 0, |_, end, last| {
+            ended += 1;
+            if ended == n && !last {
+                start = Some(end + 1);
+                return std::ops::ControlFlow::Break(());
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+    text.as_bytes()[start?..]
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
+/// The top-level fields of the braced value at `start`, trimmed: the same
+/// answer as the shared splitter.
+fn split_1c_braced_fields(text: &str, start: usize) -> Option<BracedFields<'_>> {
+    if text.len() < SPLIT_CACHE_MIN_LEN {
+        return split_braced_inline(text, start);
+    }
+    let address = text.as_ptr() as usize;
+    let key = (address, text.len(), start);
+    let cached = SPLIT_CACHE.with(|slot| {
+        let slot = slot.borrow();
+        let cache = slot.as_ref()?;
+        if address < cache.base || address + text.len() > cache.end {
+            return None;
+        }
+        Some(cache.splits.get(&key).cloned())
+    });
+    match cached {
+        // Not a slice of the body in scope.
+        None => split_braced_inline(text, start),
+        Some(Some(Some(offsets))) => {
+            let mut fields = BracedFields::new();
+            for &(from, to) in offsets.iter() {
+                fields.push(&text[from as usize..to as usize]);
+            }
+            Some(fields)
+        }
+        Some(Some(None)) => None,
+        Some(None) => {
+            let fields = split_braced_inline(text, start);
+            let offsets = fields.as_ref().map(|fields| {
+                fields
+                    .iter()
+                    .map(|field| {
+                        let from = field.as_ptr() as usize - address;
+                        (from as u32, (from + field.len()) as u32)
+                    })
+                    .collect::<SplitOffsets>()
+            });
+            SPLIT_CACHE.with(|slot| {
+                if let Some(cache) = slot.borrow_mut().as_mut() {
+                    cache.splits.insert(key, offsets);
+                }
+            });
+            fields
+        }
+    }
+}
+
+/// How a walk over a braced value ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BracedWalk {
+    /// The value closed.
+    Closed,
+    /// The visitor stopped the walk.
+    Stopped,
+    /// The value does not open where the walk started, or never closes.
+    Unclosed,
+}
+
+/// Walks the braced value that opens with `{` at `start` in one pass over the
+/// bytes -- the delimiters are all ASCII. Fields part at depth-one commas
+/// outside strings (`""` escapes a quote), and nothing inside a string but its
+/// closing quote is looked at. `field` receives each top-level field's byte
+/// range, untrimmed, as the field ends, and whether it is the last one; a
+/// `Break` stops the walk.
+fn walk_braced_fields(
+    text: &str,
+    start: usize,
+    mut field: impl FnMut(usize, usize, bool) -> std::ops::ControlFlow<()>,
+) -> BracedWalk {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&b'{') {
+        return BracedWalk::Unclosed;
+    }
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut field_start = start + 1;
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if in_string {
+            let Some(offset) = text[index..].find('"') else {
+                return BracedWalk::Unclosed;
+            };
+            index += offset;
+            if bytes.get(index + 1) == Some(&b'"') {
+                index += 2;
+                continue;
+            }
+            in_string = false;
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return if field(field_start, index, true).is_break() {
+                        BracedWalk::Stopped
+                    } else {
+                        BracedWalk::Closed
+                    };
+                }
+            }
+            b',' if depth == 1 => {
+                if field(field_start, index, false).is_break() {
+                    return BracedWalk::Stopped;
+                }
+                field_start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    BracedWalk::Unclosed
+}
+
+/// [`split_braced_bytes`] into a [`BracedFields`].
+fn split_braced_inline(text: &str, start: usize) -> Option<BracedFields<'_>> {
+    let mut fields = BracedFields::new();
+    let walk = walk_braced_fields(text, start, |from, to, _| {
+        fields.push(text[from..to].trim());
+        std::ops::ControlFlow::Continue(())
+    });
+    (walk == BracedWalk::Closed).then_some(fields)
+}
+
+/// The trimmed top-level fields of the braced value at `start`, the shared
+/// splitter's answer; `None` when the value does not open there or never
+/// closes.
+fn split_braced_bytes(text: &str, start: usize) -> Option<Vec<&str>> {
+    let mut fields = Vec::new();
+    let walk = walk_braced_fields(text, start, |from, to, _| {
+        fields.push(text[from..to].trim());
+        std::ops::ControlFlow::Continue(())
+    });
+    (walk == BracedWalk::Closed).then_some(fields)
+}
+
+/// The root fields with the byte offsets of their values in `body`, as
+/// `split_1c_braced_fields_with_spans` spells them.
+fn moxel_root_field_spans<'a>(body: &str, fields: &[&'a str]) -> Vec<(&'a str, usize, usize)> {
+    let base = body.as_ptr() as usize;
+    fields
+        .iter()
+        .map(|field| {
+            let from = field.as_ptr() as usize - base;
+            (*field, from, from + field.len())
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The root fields' shapes.
+//
+// Most passes of the decoder walk every root field and try to read it as the
+// record they look for, and the root of a large template holds millions of
+// fields -- nearly all of them cell records that only the row reader wants.
+// Each root field's shape is read once per conversion: how many fields its
+// braced value splits into and the integer it leads with. A pass looks at the
+// shape first and reads only the fields whose shape its record can have.
+// Every skip restates a check the record's own reader makes before anything
+// else, so each pass finds exactly what it found before.
+
+/// `split_1c_braced_fields(field, 0)` yields nothing.
+const NOT_BRACED: u32 = u32::MAX;
+/// The leading value is not a canonical integer.
+const OTHER_HEAD: i32 = i32::MIN;
+
+/// A root field as the passes see it.
+#[derive(Clone, Copy, Debug)]
+struct RootFieldShape {
+    /// How many fields the field's split yields, or [`NOT_BRACED`].
+    len: u32,
+    /// The split's leading field -- the field itself when it does not split --
+    /// as a canonical integer: `0`, or at most nine digits with no leading
+    /// zero after an optional `-`. [`OTHER_HEAD`] for anything else, which a
+    /// reader that parses the value has to read to know.
+    head: i32,
+}
+
+/// The canonical integer `text` spells, or [`OTHER_HEAD`]. A canonical
+/// spelling is the only one of its value, so comparing values compares the
+/// text, and `parse` reads exactly this value from it.
+fn canonical_i32(text: &str) -> i32 {
+    let bytes = text.as_bytes();
+    let (negative, digits) = match bytes.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, bytes),
+    };
+    if digits.is_empty()
+        || digits.len() > 9
+        || !digits.iter().all(u8::is_ascii_digit)
+        || (digits[0] == b'0' && (digits.len() > 1 || negative))
+    {
+        return OTHER_HEAD;
+    }
+    let value = digits
+        .iter()
+        .fold(0i32, |value, digit| value * 10 + i32::from(digit - b'0'));
+    if negative { -value } else { value }
+}
+
+impl RootFieldShape {
+    /// The shape of `split_1c_braced_fields(field, 0)`, read the same way.
+    fn of(field: &str) -> Self {
+        if !field.starts_with('{') {
+            return Self {
+                len: NOT_BRACED,
+                head: canonical_i32(field),
+            };
+        }
+        let mut len = 0u32;
+        let mut head = OTHER_HEAD;
+        let walk = walk_braced_fields(field, 0, |from, to, _| {
+            if len == 0 {
+                head = canonical_i32(field[from..to].trim());
+            }
+            len += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+        if walk == BracedWalk::Closed {
+            Self { len, head }
+        } else {
+            Self {
+                len: NOT_BRACED,
+                head: OTHER_HEAD,
+            }
+        }
+    }
+
+    fn braced(self) -> bool {
+        self.len != NOT_BRACED
+    }
+
+    /// A braced value whose leading field is exactly `value`.
+    fn leads_with(self, value: i32) -> bool {
+        self.braced() && self.head == value
+    }
+
+    /// What `parse::<usize>()` makes of the value the head was read from:
+    /// `Err` when it fails, `Ok(None)` when only reading the text can tell.
+    fn head_usize(self) -> Result<Option<usize>, ()> {
+        match self.head {
+            OTHER_HEAD => Ok(None),
+            head if head < 0 => Err(()),
+            head => Ok(Some(head as usize)),
+        }
+    }
+
+    /// What `field.trim().parse::<usize>()` makes of the root field itself: a
+    /// braced field opens with `{` and never parses.
+    fn scalar_usize(self) -> Result<Option<usize>, ()> {
+        if self.braced() {
+            return Err(());
+        }
+        self.head_usize()
+    }
+
+    /// Whether this can be a braced value that leads with a count in
+    /// `min..=max` and holds exactly `count * per + extra` fields.
+    fn may_be_counted(self, min: usize, max: usize, per: usize, extra: usize) -> bool {
+        if !self.braced() {
+            return false;
+        }
+        match self.head_usize() {
+            Err(()) => false,
+            Ok(None) => true,
+            Ok(Some(count)) => {
+                count >= min
+                    && count <= max
+                    && count
+                        .checked_mul(per)
+                        .and_then(|fields| fields.checked_add(extra))
+                        == Some(self.len as usize)
+            }
+        }
+    }
+
+    /// Whether this can be a format record: `parse_moxel_format` splits it
+    /// and reads its leading field as a `u64` member mask.
+    fn may_be_format(self) -> bool {
+        self.braced() && self.head_usize().is_ok()
+    }
+}
+
+/// The shapes of the root fields a conversion is decoding.
+struct RootShapes {
+    /// Address and length of the root field slice the shapes describe.
+    fields: usize,
+    len: usize,
+    shapes: Vec<RootFieldShape>,
+    /// The palette span, once located.
+    palette: std::cell::OnceCell<Option<(usize, usize)>>,
+}
+
+thread_local! {
+    static ROOT_SHAPES: std::cell::RefCell<Option<std::rc::Rc<RootShapes>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keeps the shapes of `fields` available to the passes until dropped.
+struct RootShapesScope {
+    previous: Option<std::rc::Rc<RootShapes>>,
+}
+
+impl RootShapesScope {
+    fn new(fields: &[&str]) -> Self {
+        let shapes = std::rc::Rc::new(RootShapes {
+            fields: fields.as_ptr() as usize,
+            len: fields.len(),
+            shapes: fields
+                .iter()
+                .map(|field| RootFieldShape::of(field))
+                .collect(),
+            palette: std::cell::OnceCell::new(),
+        });
+        let previous = ROOT_SHAPES.with(|slot| slot.borrow_mut().replace(shapes));
+        Self { previous }
+    }
+}
+
+impl Drop for RootShapesScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ROOT_SHAPES.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The shapes of `fields`, when `fields` are the root fields being decoded.
+fn root_shapes(fields: &[&str]) -> Option<std::rc::Rc<RootShapes>> {
+    ROOT_SHAPES.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|shapes| {
+                shapes.fields == fields.as_ptr() as usize && shapes.len == fields.len()
+            })
+            .cloned()
+    })
+}
+
+/// Whether the field at `index` can pass `test`: always, where no shapes are
+/// known.
+fn root_shape_allows(
+    shapes: Option<&RootShapes>,
+    index: usize,
+    test: impl Fn(RootFieldShape) -> bool,
+) -> bool {
+    shapes.is_none_or(|shapes| shapes.shapes.get(index).is_some_and(|shape| test(*shape)))
+}
 
 /// A decoded spreadsheet plus the exact palette/reference plan that the XML
 /// projection is allowed to consume.  Keeping this private makes the current
@@ -1352,6 +1894,7 @@ pub(crate) fn try_extract_moxel_spreadsheet_xml_with_generated_types(
     })?;
     // An 8.5 spreadsheet spells its colour and font tuples one revision later.
     let text = super::form_v85::rewrite_v85_primitives_in_place(body.native_body_text());
+    let _scope = SplitCacheScope::new(&text);
     let decoded = decode_moxel_spreadsheet_ir(&text, object_refs, generated_types, None)?;
     write_moxel_spreadsheet_xml(&decoded)
 }
@@ -1362,6 +1905,7 @@ pub(crate) fn extract_moxel_spreadsheet_xml_with_line_trace(
     trace_sink: Option<&dyn MoxelLineTraceSink>,
 ) -> Option<String> {
     let body = crate::compiler::bodies::mxl::decode_compatible_mxl(bytes).ok()?;
+    let _scope = SplitCacheScope::new(body.native_body_text());
     let decoded = decode_moxel_spreadsheet_ir(
         body.native_body_text(),
         object_refs,
@@ -1380,6 +1924,7 @@ pub(crate) fn extract_inflated_moxel_spreadsheet_xml_with_line_trace(
     trace_sink: Option<&dyn MoxelLineTraceSink>,
 ) -> Option<String> {
     let body = crate::compiler::bodies::mxl::decode_inflated_compatible_mxl(bytes).ok()?;
+    let _scope = SplitCacheScope::new(body.native_body_text());
     let decoded = decode_moxel_spreadsheet_ir(
         body.native_body_text(),
         object_refs,
@@ -1399,11 +1944,14 @@ fn decode_moxel_spreadsheet_ir(
     generated_types: &BTreeMap<String, String>,
     trace_sink: Option<&dyn MoxelLineTraceSink>,
 ) -> Result<DecodedMoxelSpreadsheet, MxlDiagnostic> {
+    // The palette is read off the same root fields the spreadsheet is.
+    let mut palette = None;
     let spreadsheet = parse_moxel_spreadsheet_text_with_line_trace(
         text,
         object_refs,
         generated_types,
         trace_sink,
+        Some(&mut palette),
     )
     .ok_or_else(|| {
         MxlDiagnostic::decoder(
@@ -1411,14 +1959,12 @@ fn decode_moxel_spreadsheet_ir(
             "native MOXCEL body could not be decoded into supported spreadsheet IR",
         )
     })?;
-    let body = text.trim_start_matches('\u{feff}');
-    let fields = split_1c_braced_fields(body, 0).ok_or_else(|| {
+    let palette = palette.ok_or_else(|| {
         MxlDiagnostic::decoder(
             "mxl.decoder.canonical-ir",
             "native MOXCEL body has no complete root field list",
         )
     })?;
-    let palette = parse_moxel_raw_palette_provenance(&fields, object_refs);
     let write_plan = moxel_spreadsheet_write_plan(&spreadsheet, palette)?;
     Ok(DecodedMoxelSpreadsheet {
         spreadsheet,
@@ -1465,7 +2011,13 @@ pub(super) fn parse_moxel_spreadsheet_text(
     text: &str,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<MoxelSpreadsheet> {
-    parse_moxel_spreadsheet_text_with_line_trace(text, object_refs, &NO_MOXEL_GENERATED_TYPES, None)
+    parse_moxel_spreadsheet_text_with_line_trace(
+        text,
+        object_refs,
+        &NO_MOXEL_GENERATED_TYPES,
+        None,
+        None,
+    )
 }
 
 fn parse_moxel_spreadsheet_text_with_line_trace(
@@ -1473,13 +2025,11 @@ fn parse_moxel_spreadsheet_text_with_line_trace(
     object_refs: &BTreeMap<String, String>,
     generated_types: &BTreeMap<String, String>,
     trace_sink: Option<&dyn MoxelLineTraceSink>,
+    palette: Option<&mut Option<MxlPaletteProvenance>>,
 ) -> Option<MoxelSpreadsheet> {
     let body = text.trim_start_matches('\u{feff}');
-    let spanned_fields = split_1c_braced_fields_with_spans(body, 0)?;
-    let fields = spanned_fields
-        .iter()
-        .map(|(value, _, _)| *value)
-        .collect::<Vec<_>>();
+    let fields = split_braced_bytes(body, 0)?;
+    let _root_shapes = RootShapesScope::new(&fields);
     if fields.first()?.trim() != "8" {
         return None;
     }
@@ -1985,6 +2535,7 @@ fn parse_moxel_spreadsheet_text_with_line_trace(
             lines
         }
         None => {
+            let spanned_fields = moxel_root_field_spans(body, &fields);
             let mut lines = parse_moxel_lines_with_raw_spans(
                 &fields,
                 &spanned_fields,
@@ -2196,6 +2747,9 @@ fn parse_moxel_spreadsheet_text_with_line_trace(
     }
     normalize_moxel_lines_to_published_citation_order(&mut spreadsheet);
     restore_moxel_text_of_cells_whose_format_states_no_parameter(&mut spreadsheet);
+    if let Some(palette) = palette {
+        *palette = Some(parse_moxel_raw_palette_provenance(&fields, object_refs));
+    }
     Some(spreadsheet)
 }
 
@@ -2439,7 +2993,22 @@ fn parse_moxel_column_sets_with_source_format_order(
     Vec<usize>,
     bool,
 ) {
+    let shapes = root_shapes(fields);
     for index in 0..fields.len() {
+        // `{count, default, uuid, n, (index, format) * n}`, `n <= 2048`.
+        if !root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.braced()
+                && shape.len >= 4
+                && (shape.len - 4) % 2 == 0
+                && (shape.len - 4) / 2 <= 2048
+                && shape.head_usize().is_ok()
+        }) {
+            continue;
+        }
+        // The third member is the set's uuid, never a list or a string.
+        if matches!(braced_field_first_byte(fields[index], 2), Some(b'{' | b'"')) {
+            continue;
+        }
         let Some(default_set) = parse_moxel_column_set(fields[index]) else {
             continue;
         };
@@ -2580,7 +3149,7 @@ fn parse_moxel_group_run(
     if run_end > fields.len() {
         return None;
     }
-    let mut groups = Vec::with_capacity(count);
+    let mut groups = Vec::new();
     let mut cursor = count_index + 1;
     for _ in 0..count {
         groups.push(parse_moxel_vertical_group(fields.get(cursor)?)?);
@@ -2590,6 +3159,36 @@ fn parse_moxel_group_run(
         cursor += 2;
     }
     Some((groups, cursor))
+}
+
+/// What `parse_moxel_group_run` can make of the run counted at `index`, told
+/// by the shapes alone.
+enum MoxelGroupRunShape {
+    /// No run.
+    None,
+    /// The empty run.
+    Empty,
+    /// Only reading it can tell.
+    Maybe,
+}
+
+fn moxel_group_run_shape(shapes: &[RootFieldShape], index: usize) -> MoxelGroupRunShape {
+    let Some(shape) = shapes.get(index) else {
+        return MoxelGroupRunShape::None;
+    };
+    match shape.scalar_usize() {
+        Err(()) => MoxelGroupRunShape::None,
+        Ok(None) => MoxelGroupRunShape::Maybe,
+        Ok(Some(0)) => MoxelGroupRunShape::Empty,
+        // The first record is a six-field group.
+        Ok(Some(_)) => {
+            if shapes.get(index + 1).is_some_and(|record| record.len == 6) {
+                MoxelGroupRunShape::Maybe
+            } else {
+                MoxelGroupRunShape::None
+            }
+        }
+    }
 }
 
 /// The document's row and column grouping block.
@@ -2635,7 +3234,24 @@ fn scan_moxel_row_column_groups(
     fields: &[&str],
     require_vertical: bool,
 ) -> Option<(Vec<MoxelVerticalGroup>, Vec<MoxelVerticalGroup>)> {
+    let shapes = root_shapes(fields);
     for index in 0..fields.len() {
+        if let Some(shapes) = shapes.as_deref() {
+            match moxel_group_run_shape(&shapes.shapes, index) {
+                MoxelGroupRunShape::None => continue,
+                MoxelGroupRunShape::Empty if require_vertical => continue,
+                // An empty row run needs a column run behind it.
+                MoxelGroupRunShape::Empty => {
+                    if matches!(
+                        moxel_group_run_shape(&shapes.shapes, index + 1),
+                        MoxelGroupRunShape::None | MoxelGroupRunShape::Empty
+                    ) {
+                        continue;
+                    }
+                }
+                MoxelGroupRunShape::Maybe => {}
+            }
+        }
         let Some((vertical, cursor)) = parse_moxel_group_run(fields, index) else {
             continue;
         };
@@ -3126,25 +3742,25 @@ pub(super) fn moxel_spreadsheet_height(
 /// those two members present.  `is_moxel_compactable_empty_row` keeps the old
 /// spelling because the structurally-empty-sheet guard is calibrated on it.
 pub(super) fn compact_moxel_empty_row_ranges(rows: &mut Vec<MoxelRow>) {
-    let mut compacted = Vec::with_capacity(rows.len());
-    let mut index = 0usize;
-    while index < rows.len() {
-        let mut row = rows[index].clone();
-        if row.cells.is_empty() {
-            let mut cursor = index + 1;
-            while cursor < rows.len()
-                && rows[cursor].index == rows[cursor - 1].index + 1
-                && moxel_rows_publish_equal_empty_payload(&row, &rows[cursor])
-            {
-                row.index_to = Some(rows[cursor].index);
-                cursor += 1;
-            }
-            compacted.push(row);
-            index = cursor;
-        } else {
-            compacted.push(row);
-            index += 1;
+    let source = std::mem::take(rows);
+    let mut compacted: Vec<MoxelRow> = Vec::with_capacity(source.len());
+    // A cell-less row opens a run, and each next row extends it while its
+    // index follows the previous row's and its payload equals the run's.
+    let mut run_open = false;
+    let mut previous_index = 0usize;
+    for row in source {
+        if run_open
+            && let Some(head) = compacted.last_mut()
+            && row.index == previous_index + 1
+            && moxel_rows_publish_equal_empty_payload(head, &row)
+        {
+            head.index_to = Some(row.index);
+            previous_index = row.index;
+            continue;
         }
+        run_open = row.cells.is_empty();
+        previous_index = row.index;
+        compacted.push(row);
     }
     *rows = compacted;
 }
@@ -3597,7 +4213,17 @@ pub(super) enum MoxelCellValue {
 
 pub(super) fn parse_moxel_cell_value(text: &str) -> Option<MoxelCellValue> {
     let fields = split_1c_braced_fields(text, 0)?;
-    match (parse_1c_string(fields.first()?)?.as_str(), fields.len()) {
+    // A tag is one letter, and nothing but the quoted letter unescapes to it.
+    let tag = match fields.first()?.trim() {
+        "\"U\"" => "U",
+        "\"B\"" => "B",
+        "\"S\"" => "S",
+        "\"N\"" => "N",
+        "\"D\"" => "D",
+        "\"#\"" => "#",
+        _ => return None,
+    };
+    match (tag, fields.len()) {
         ("U", 1) => Some(MoxelCellValue::Nil),
         ("B", 2) => match fields.get(1)?.trim() {
             "0" => Some(MoxelCellValue::Boolean(false)),
@@ -4036,15 +4662,30 @@ pub(super) fn parse_moxel_areas(fields: &[&str]) -> Vec<MoxelArea> {
 }
 
 pub(super) fn parse_moxel_named_items(fields: &[&str]) -> Vec<MoxelNamedItem> {
+    let shapes = root_shapes(fields);
     fields
         .iter()
-        .filter_map(|field| parse_moxel_named_item_list(field))
+        .enumerate()
+        // `{count, (name, item) * count}`, `count >= 1`.
+        .filter(|(index, _)| {
+            root_shape_allows(shapes.as_deref(), *index, |shape| {
+                shape.may_be_counted(1, usize::MAX, 2, 1)
+            })
+        })
+        .filter_map(|(_, field)| parse_moxel_named_item_list(field))
         .next()
         .unwrap_or_default()
 }
 
 pub(super) fn parse_moxel_print_area(fields: &[&str]) -> Option<MoxelArea> {
-    fields.iter().find_map(|field| {
+    let shapes = root_shapes(fields);
+    fields.iter().enumerate().find_map(|(index, field)| {
+        // Six bounds that lead with the area kind 1, 2 or 3.
+        if !root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.len == 6 && (1..=3).contains(&shape.head)
+        }) {
+            return None;
+        }
         let bounds = split_1c_braced_fields(field, 0)?;
         if bounds.len() != 6 {
             return None;
@@ -4160,9 +4801,15 @@ pub(super) fn parse_moxel_fonts(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> Vec<MoxelFont> {
+    let shapes = root_shapes(fields);
     fields
         .iter()
-        .filter_map(|field| parse_moxel_font(field, object_refs))
+        .enumerate()
+        // A font descriptor leads with `7`.
+        .filter(|(index, _)| {
+            root_shape_allows(shapes.as_deref(), *index, |shape| shape.leads_with(7))
+        })
+        .filter_map(|(_, field)| parse_moxel_font(field, object_refs))
         .collect()
 }
 
@@ -5279,14 +5926,36 @@ pub(super) fn parse_moxel_pictures(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> Vec<MoxelPicture> {
+    let shapes = root_shapes(fields);
     for index in 0..fields.len() {
-        let Some(count) = fields
-            .get(index)
-            .and_then(|field| field.trim().parse::<usize>().ok())
-        else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[index].scalar_usize())
+        {
+            Some(Err(())) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = fields
+                    .get(index)
+                    .and_then(|field| field.trim().parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                count
+            }
         };
         if count == 0 || count > 512 || index + count >= fields.len() {
+            continue;
+        }
+        // Every picture record leads with `4` and reaches its transparency
+        // member.
+        if let Some(shapes) = shapes.as_deref()
+            && !shapes.shapes[index + 1..=index + count]
+                .iter()
+                .all(|shape| {
+                    shape.leads_with(4) && shape.len as usize > MOXEL_PICTURE_TRANSPARENCY_FIELD
+                })
+        {
             continue;
         }
         let mut pictures = Vec::with_capacity(count);
@@ -5414,8 +6083,15 @@ pub(super) fn parse_moxel_drawings(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> Vec<MoxelDrawing> {
+    let shapes = root_shapes(fields);
     let mut drawings = Vec::new();
-    for field in fields {
+    for (index, field) in fields.iter().enumerate() {
+        // A drawing record holds twelve or fourteen fields.
+        if !root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.len == 12 || shape.len == 14
+        }) {
+            continue;
+        }
         let Some(mut drawing) = parse_moxel_drawing(field, object_refs) else {
             continue;
         };
@@ -6669,7 +7345,7 @@ fn parse_moxel_chart_color(text: &str) -> Option<String> {
     }
     let payload = split_1c_braced_fields(fields.get(2)?, 0)?;
     match fields.get(1)?.trim() {
-        "4" if fields.len() == 3 && payload.as_slice() == ["0"] => Some("auto".to_string()),
+        "4" if fields.len() == 3 && payload[..] == ["0"] => Some("auto".to_string()),
         // `-23` is new: native UT 11.5.27.75's
         // `Reports/СравнительныйАнализПоказателейРаботыМенеджеров/Templates/СравнительныйАнализМенеджеров`
         // stores its mandatory `realExSeriesData`'s colour as `{3,3,{-23}}`
@@ -7565,24 +8241,35 @@ pub(super) fn parse_moxel_default_format_width(
     fields: &[&str],
     column_count: usize,
 ) -> Option<usize> {
+    let shapes = root_shapes(fields);
+    // A column width is `{128, width}`, the extended one `{161, 0, 0, width}`.
+    let may_be_width = |index: usize| {
+        root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.len == 2 && shape.leads_with(128)
+        })
+    };
     if let Some((table_index, slots)) =
         parse_moxel_equal_width_only_format_table(fields, column_count)
         && slots.iter().any(|slot| slot.is_none())
-        && let Some(width) = fields[..table_index]
-            .iter()
+        && let Some(width) = (0..table_index)
             .rev()
-            .find_map(|field| parse_moxel_column_width(field))
+            .filter(|index| may_be_width(*index))
+            .find_map(|index| parse_moxel_column_width(fields[index]))
     {
         return Some(width);
     }
-    let widths = fields
-        .iter()
-        .filter_map(|field| parse_moxel_column_width(field))
+    let widths = (0..fields.len())
+        .filter(|index| may_be_width(*index))
+        .filter_map(|index| parse_moxel_column_width(fields[index]))
         .collect::<Vec<_>>();
     if widths.len() <= column_count {
-        return fields
-            .iter()
-            .find_map(|field| parse_moxel_extended_default_format_width(field))
+        return (0..fields.len())
+            .filter(|index| {
+                root_shape_allows(shapes.as_deref(), *index, |shape| {
+                    shape.len == 4 && shape.leads_with(161)
+                })
+            })
+            .find_map(|index| parse_moxel_extended_default_format_width(fields[index]))
             .or_else(|| {
                 fields
                     .iter()
@@ -7697,9 +8384,20 @@ pub(super) fn parse_moxel_value_types(
     fields: &[&str],
     generated_types: &BTreeMap<String, String>,
 ) -> Vec<MoxelValueType> {
+    let shapes = root_shapes(fields);
     for (start, count_field) in fields.iter().enumerate() {
-        let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[start].scalar_usize())
+        {
+            Some(Err(()) | Ok(Some(0))) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
+                    continue;
+                };
+                count
+            }
         };
         if count > MAX_MOXEL_VALUE_TYPES {
             continue;
@@ -7707,6 +8405,14 @@ pub(super) fn parse_moxel_value_types(
         let Some(entries) = fields.get(start + 1..start + 1 + count) else {
             continue;
         };
+        // An entry that opens with `{"Pattern"` leads with no integer.
+        if let Some(shapes) = shapes.as_deref()
+            && !shapes.shapes[start + 1..start + 1 + count]
+                .iter()
+                .all(|shape| shape.head == OTHER_HEAD)
+        {
+            continue;
+        }
         if !entries
             .iter()
             .all(|entry| entry.trim_start().starts_with("{\"Pattern\""))
@@ -7899,9 +8605,20 @@ pub(super) fn parse_moxel_mask_refs(fields: &[&str]) -> Vec<Vec<MoxelLocalizedVa
 /// UUID at the index named by format member 25 equals the published
 /// `<controlType>` in all 51 - 285 references, zero mismatches.
 pub(super) fn parse_moxel_control_types(fields: &[&str]) -> Vec<String> {
+    let shapes = root_shapes(fields);
     for (start, count_field) in fields.iter().enumerate() {
-        let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[start].scalar_usize())
+        {
+            Some(Err(()) | Ok(Some(0))) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
+                    continue;
+                };
+                count
+            }
         };
         if count > MAX_MOXEL_VALUE_TYPES {
             continue;
@@ -7909,6 +8626,14 @@ pub(super) fn parse_moxel_control_types(fields: &[&str]) -> Vec<String> {
         let Some(entries) = fields.get(start + 1..start + 1 + count) else {
             continue;
         };
+        // A uuid is a scalar that is no integer.
+        if let Some(shapes) = shapes.as_deref()
+            && !shapes.shapes[start + 1..start + 1 + count]
+                .iter()
+                .all(|shape| !shape.braced() && shape.head == OTHER_HEAD)
+        {
+            continue;
+        }
         let Some(uuids) = entries
             .iter()
             .map(|entry| parse_uuid_field(entry.trim()))
@@ -7925,9 +8650,17 @@ pub(super) fn parse_moxel_default_format(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> MoxelFormat {
+    let shapes = root_shapes(fields);
     fields
         .iter()
-        .filter_map(|field| parse_moxel_default_format_field(field, object_refs))
+        .enumerate()
+        // `{1, 0, <border colour>}`.
+        .filter(|(index, _)| {
+            root_shape_allows(shapes.as_deref(), *index, |shape| {
+                shape.len == 3 && shape.leads_with(1)
+            })
+        })
+        .filter_map(|(_, field)| parse_moxel_default_format_field(field, object_refs))
         .next()
         .unwrap_or_default()
 }
@@ -7977,9 +8710,19 @@ pub(super) fn parse_moxel_default_format_field(
 }
 
 pub(super) fn parse_moxel_print_settings(fields: &[&str]) -> Option<MoxelPrintSettings> {
+    let shapes = root_shapes(fields);
     fields
         .iter()
-        .filter_map(|field| parse_moxel_print_settings_field(field))
+        .enumerate()
+        // `{0, count, (key, value) * count}`, possibly wrapped once in a
+        // list whose only member is itself a list.
+        .filter(|(index, _)| {
+            root_shape_allows(shapes.as_deref(), *index, |shape| {
+                (shape.len == 1 && shape.head == OTHER_HEAD)
+                    || (shape.braced() && shape.len >= 4 && shape.head == 0)
+            })
+        })
+        .filter_map(|(_, field)| parse_moxel_print_settings_field(field))
         .next()
 }
 
@@ -8431,6 +9174,7 @@ pub(super) fn parse_moxel_format_table(
     let palette_span =
         locate_moxel_style_ref_palette(fields, &BTreeMap::new()).map(|(start, end, _)| start..end);
     let palette_after = palette_span.as_ref().map(|span| span.end);
+    let shapes = root_shapes(fields);
     // New packed bodies place the actual table immediately after the palette;
     // try that structurally confirmed position before legacy global fallback.
     for index in palette_after.into_iter().chain(0..fields.len()) {
@@ -8443,7 +9187,10 @@ pub(super) fn parse_moxel_format_table(
         {
             continue;
         }
-        if let Some(formats) = parse_moxel_nested_format_table(
+        // `{count, format * count}`, `column_count < count <= 2048`.
+        if root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.may_be_counted(column_count.saturating_add(1), 2048, 1, 1)
+        }) && let Some(formats) = parse_moxel_nested_format_table(
             fields[index],
             column_count,
             style_refs,
@@ -8452,13 +9199,30 @@ pub(super) fn parse_moxel_format_table(
         ) {
             return Some(formats);
         }
-        let Some(count) = fields
-            .get(index)
-            .and_then(|field| field.trim().parse::<usize>().ok())
-        else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[index].scalar_usize())
+        {
+            Some(Err(())) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = fields
+                    .get(index)
+                    .and_then(|field| field.trim().parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                count
+            }
         };
         if count <= column_count || count > 2048 || index + count >= fields.len() {
+            continue;
+        }
+        if let Some(shapes) = shapes.as_deref()
+            && !shapes.shapes[index + 1..=index + count]
+                .iter()
+                .all(|shape| shape.may_be_format())
+        {
             continue;
         }
         let mut formats = Vec::with_capacity(count);
@@ -8498,12 +9262,23 @@ pub(super) fn parse_moxel_equal_width_only_format_table(
     if column_count == 0 {
         return None;
     }
+    let shapes = root_shapes(fields);
     for index in 0..fields.len() {
-        let Some(count) = fields
-            .get(index)
-            .and_then(|field| field.trim().parse::<usize>().ok())
-        else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[index].scalar_usize())
+        {
+            Some(Err(())) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = fields
+                    .get(index)
+                    .and_then(|field| field.trim().parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                count
+            }
         };
         if count != column_count || index + count >= fields.len() {
             continue;
@@ -8511,7 +9286,14 @@ pub(super) fn parse_moxel_equal_width_only_format_table(
         let mut saw_width = false;
         let mut slots = Vec::with_capacity(count);
         let mut valid = true;
-        for field in &fields[index + 1..=index + count] {
+        for (offset, field) in fields[index + 1..=index + count].iter().enumerate() {
+            // `{0}` or `{128, width}`.
+            if !root_shape_allows(shapes.as_deref(), index + 1 + offset, |shape| {
+                (shape.len == 1 && shape.leads_with(0)) || (shape.len == 2 && shape.leads_with(128))
+            }) {
+                valid = false;
+                break;
+            }
             let trimmed = field.trim();
             if trimmed == "{0}" {
                 slots.push(None);
@@ -8878,7 +9660,33 @@ pub(super) fn parse_moxel_number_format_refs(
 ) -> Vec<Vec<MoxelLocalizedValue>> {
     let mut required_count = 0usize;
     let mut start = 0usize;
+    let shapes = root_shapes(fields);
     for index in 0..fields.len() {
+        if let Some(shapes) = shapes.as_deref() {
+            let shape = shapes.shapes[index];
+            // A braced field is only ever the nested table
+            // `{count, format * count}`; a scalar is only ever its count.
+            if shape.braced() {
+                if !shape.may_be_counted(column_count.saturating_add(1), 2048, 1, 1) {
+                    continue;
+                }
+            } else {
+                match shape.scalar_usize() {
+                    Err(()) => continue,
+                    Ok(Some(count))
+                        if count <= column_count
+                            || count > 2048
+                            || index + count >= fields.len()
+                            || !shapes.shapes[index + 1..=index + count]
+                                .iter()
+                                .all(|shape| shape.may_be_format()) =>
+                    {
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let Some(nested) = split_1c_braced_fields(fields[index], 0) {
             let Some(count) = nested
                 .first()
@@ -8931,13 +9739,27 @@ pub(super) fn parse_moxel_number_format_refs(
         return Vec::new();
     }
     for index in start..fields.len() {
-        let Some(count) = fields
-            .get(index)
-            .and_then(|field| field.trim().parse::<usize>().ok())
-        else {
-            continue;
+        let count = match shapes
+            .as_deref()
+            .map(|shapes| shapes.shapes[index].scalar_usize())
+        {
+            Some(Err(())) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = fields
+                    .get(index)
+                    .and_then(|field| field.trim().parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                count
+            }
         };
         if count < required_count || count > 1024 || index + count >= fields.len() {
+            continue;
+        }
+        // The first entry is a localized list, `{1, count, ...}`.
+        if !root_shape_allows(shapes.as_deref(), index + 1, |shape| shape.leads_with(1)) {
             continue;
         }
         let formats = fields[index + 1..=index + count]
@@ -9577,7 +10399,14 @@ pub(super) fn parse_moxel_style_refs(
 
     // Overrides are deliberately limited to explicit root containers and are
     // applied only after the bounded base table was located.
-    for field in fields.iter().skip(palette_end) {
+    let shapes = root_shapes(fields);
+    for (index, field) in fields.iter().enumerate().skip(palette_end) {
+        // `{count, (slot, ref) * count}`, `1 <= count <= 2048`.
+        if !root_shape_allows(shapes.as_deref(), index, |shape| {
+            shape.may_be_counted(1, MAX_MOXCEL_STYLE_REFS, 2, 1)
+        }) {
+            continue;
+        }
         if let Some(overrides) = parse_moxel_indexed_style_ref_overrides(field, object_refs) {
             for (slot_index, style_ref) in overrides {
                 if slot_index >= MAX_MOXCEL_STYLE_REFS {
@@ -9627,15 +10456,52 @@ fn locate_moxel_style_ref_palette(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> Option<(usize, usize, Vec<Option<String>>)> {
+    let Some(shapes) = root_shapes(fields) else {
+        return locate_moxel_style_ref_palette_in(fields, None, object_refs);
+    };
+    // Which run is the palette does not depend on the object references -- a
+    // slot that names a style item reads with or without them -- so the run
+    // is located once per conversion and only its slots are read per call.
+    let (start, end) = (*shapes.palette.get_or_init(|| {
+        locate_moxel_style_ref_palette_in(fields, Some(&*shapes), &BTreeMap::new())
+            .map(|(start, end, _)| (start, end))
+    }))?;
+    let refs = fields
+        .get(start + 1..end)?
+        .iter()
+        .map(|entry| parse_moxel_style_ref_slot(entry, object_refs))
+        .collect::<Option<Vec<_>>>()?;
+    Some((start, end, refs))
+}
+
+fn locate_moxel_style_ref_palette_in(
+    fields: &[&str],
+    shapes: Option<&RootShapes>,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<(usize, usize, Vec<Option<String>>)> {
     // A MOXCEL palette is a single, count-prefixed run in the root.  Do not
     // scan arbitrary nested/positional descriptors: those are common in row,
     // drawing and format data and used to corrupt the palette silently.
     let mut candidates = Vec::new();
     for (start, count_field) in fields.iter().enumerate() {
-        let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
-            continue;
+        // A canonical positive count is a scalar of digits with no leading
+        // zero, and the run's first slot is `{3, kind, payload}`.
+        let count = match shapes.map(|shapes| shapes.shapes[start].scalar_usize()) {
+            Some(Err(()) | Ok(Some(0))) => continue,
+            Some(Ok(Some(count))) => count,
+            Some(Ok(None)) | None => {
+                let Some(count) = parse_moxel_canonical_positive_count(count_field) else {
+                    continue;
+                };
+                count
+            }
         };
         if count > MAX_MOXCEL_STYLE_REFS {
+            continue;
+        }
+        if !root_shape_allows(shapes, start + 1, |shape| {
+            shape.len == 3 && shape.leads_with(3)
+        }) {
             continue;
         }
         let Some(end) = start
@@ -10443,9 +11309,17 @@ pub(super) fn parse_moxel_merge_regions(
     let mut merges = Vec::new();
     let mut horizontal_unmerges = Vec::new();
     let mut vertical_unmerges = Vec::new();
+    let shapes = root_shapes(fields);
     for (field_merges, field_horizontal_unmerges, field_vertical_unmerges) in fields
         .iter()
-        .filter_map(|field| parse_moxel_merge_region_list(field))
+        .enumerate()
+        // `{count, region * count}`, `1 <= count <= 4096`.
+        .filter(|(index, _)| {
+            root_shape_allows(shapes.as_deref(), *index, |shape| {
+                shape.may_be_counted(1, 4096, 1, 1)
+            })
+        })
+        .filter_map(|(_, field)| parse_moxel_merge_region_list(field))
     {
         merges.extend(field_merges);
         horizontal_unmerges.extend(field_horizontal_unmerges);
