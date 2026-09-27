@@ -162,6 +162,9 @@ pub(super) struct FormParseContext<'a> {
     /// standard-attribute table and every common attribute of the
     /// configuration, which is the pre-existing behaviour.
     metadata_field_declarations: Option<&'a MetadataFieldDeclarationIndex>,
+    /// Reverse lookups over `object_refs` (which references exist, which
+    /// children a table declares), when the caller built them.
+    object_ref_index: Option<&'a FormObjectRefIndex<'a>>,
     dcs_source_profile: ProfileId,
     dcs_target_profile: ProfileId,
     trace_sink: Option<&'a dyn FormItemTraceSink>,
@@ -217,6 +220,7 @@ impl<'a> FormParseContext<'a> {
             metadata_command_refs: None,
             metadata_command_facts: None,
             metadata_field_declarations: None,
+            object_ref_index: None,
             dcs_source_profile: ProfileId::parse("provider:mssql-legacy")
                 .expect("static MSSQL provider profile is valid"),
             dcs_target_profile: ProfileId::parse("xml-2.20").expect("static XML profile is valid"),
@@ -253,6 +257,14 @@ impl<'a> FormParseContext<'a> {
         metadata_field_declarations: &'a MetadataFieldDeclarationIndex,
     ) -> Self {
         self.metadata_field_declarations = Some(metadata_field_declarations);
+        self
+    }
+
+    pub(super) fn with_object_ref_index(
+        mut self,
+        object_ref_index: &'a FormObjectRefIndex<'a>,
+    ) -> Self {
+        self.object_ref_index = Some(object_ref_index);
         self
     }
 
@@ -367,6 +379,7 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         context.dcs_type_index,
         context.object_refs,
         context.metadata_field_declarations,
+        context.object_ref_index,
     );
     let attribute_save_field_bindings = extract_form_body_attribute_save_field_bindings(
         &body.trailing,
@@ -4071,6 +4084,7 @@ fn extract_form_body_attributes_with_dcs_type_index(
     dcs_type_index: &DcsTypeIndex,
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> Vec<FormAttribute> {
     let Some(fields) = trailing
         .first()
@@ -4096,6 +4110,7 @@ fn extract_form_body_attributes_with_dcs_type_index(
                 dcs_type_index,
                 object_refs,
                 declarations,
+                object_ref_index,
             )
         })
         .collect()
@@ -4169,8 +4184,8 @@ pub(super) fn extract_form_body_attributes_section(
 
 pub(super) fn extract_form_body_attribute_save_field_bindings(
     trailing: &[String],
-    type_index: &BTreeMap<String, String>,
-    object_refs: &BTreeMap<String, String>,
+    _type_index: &BTreeMap<String, String>,
+    _object_refs: &BTreeMap<String, String>,
 ) -> BTreeMap<String, Vec<FormAttributeSaveFieldBinding>> {
     let Some(fields) = trailing
         .first()
@@ -4185,14 +4200,17 @@ pub(super) fn extract_form_body_attribute_save_field_bindings(
         .get(1)
         .and_then(|field| field.trim().parse::<usize>().ok())
         .unwrap_or(usize::MAX);
+    // Only the attribute's name and whether it is one: the head decides both
+    // (the whole parse fails exactly when the head does), so the record is
+    // not parsed a second time here.
     let mut save_field_bindings = BTreeMap::new();
     for field in fields.iter().skip(2).take(attribute_count) {
-        let Some(attribute) = parse_form_attribute(field, type_index, object_refs) else {
+        let Some((attribute_fields, _, name)) = form_attribute_record_head(field) else {
             continue;
         };
-        let bindings = parse_form_attribute_save_field_bindings(Some(field));
+        let bindings = form_attribute_save_field_bindings_of(&attribute_fields);
         if !bindings.is_empty() {
-            save_field_bindings.insert(attribute.name, bindings);
+            save_field_bindings.insert(name, bindings);
         }
     }
     save_field_bindings
@@ -4230,6 +4248,7 @@ pub(super) fn apply_form_body_attribute_additional_columns(
     );
 }
 
+#[cfg(test)]
 pub(super) fn parse_form_attribute(
     field: &str,
     type_index: &BTreeMap<String, String>,
@@ -4240,6 +4259,7 @@ pub(super) fn parse_form_attribute(
         type_index,
         &DcsTypeIndex::new(),
         object_refs,
+        None,
         None,
     )
 }
@@ -4257,16 +4277,14 @@ pub(super) fn parse_form_attribute_with_declarations(
         &DcsTypeIndex::new(),
         object_refs,
         Some(declarations),
+        None,
     )
 }
 
-fn parse_form_attribute_with_dcs_type_index(
-    field: &str,
-    type_index: &BTreeMap<String, String>,
-    dcs_type_index: &DcsTypeIndex,
-    object_refs: &BTreeMap<String, String>,
-    declarations: Option<&MetadataFieldDeclarationIndex>,
-) -> Option<FormAttribute> {
+/// An attribute record's fields, id and name: `None` exactly when the record
+/// is not an attribute the form declares, the only way a whole parse of it
+/// fails.
+fn form_attribute_record_head(field: &str) -> Option<(Vec<&str>, &str, String)> {
     let fields = split_1c_braced_fields(field.trim(), 0)?;
     if fields.first().map(|value| value.trim()) != Some("9") {
         return None;
@@ -4280,6 +4298,18 @@ fn parse_form_attribute_with_dcs_type_index(
     if name.is_empty() {
         return None;
     }
+    Some((fields, id, name))
+}
+
+fn parse_form_attribute_with_dcs_type_index(
+    field: &str,
+    type_index: &BTreeMap<String, String>,
+    dcs_type_index: &DcsTypeIndex,
+    object_refs: &BTreeMap<String, String>,
+    declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
+) -> Option<FormAttribute> {
+    let (fields, id, name) = form_attribute_record_head(field)?;
     let title = fields
         .get(4)
         .map(|field| parse_form_localized_strings(field))
@@ -4381,9 +4411,23 @@ fn parse_form_attribute_with_dcs_type_index(
         exact_single_type_uuid.as_deref(),
         declarations,
     );
-    if let Some(dynamic_list_use_always) = fields.get(14).map(|field| {
-        parse_form_attribute_use_always(&name, field, settings.as_ref(), object_refs, declarations)
-    }) {
+    // The list-settings bag is read once for every reader below: its field
+    // map, localized twins, shadowed ids and resolvable-field universe are the
+    // same facts each of them used to derive again from the same text.
+    let list_facts = fields.get(14).and_then(|field| {
+        FormDynamicListFieldFacts::read(
+            field,
+            settings.as_ref(),
+            object_refs,
+            declarations,
+            object_ref_index,
+        )
+    });
+    if fields.get(14).is_some() {
+        let dynamic_list_use_always = list_facts
+            .as_ref()
+            .map(|facts| facts.use_always(&name, settings.as_ref()))
+            .unwrap_or_default();
         let mut seen = use_always.iter().cloned().collect::<BTreeSet<_>>();
         for field_name in dynamic_list_use_always {
             if seen.insert(field_name.clone()) {
@@ -4398,47 +4442,9 @@ fn parse_form_attribute_with_dcs_type_index(
     // The same resolvable-field universe `<UseAlways>` is measured against,
     // recorded per field-map id so a data path onto one of those fields can
     // carry the platform's own `~` marker.
-    let unresolvable_field_item_ids = fields
-        .get(14)
-        .and_then(|field| {
-            let settings_fields = split_1c_braced_fields(field.trim(), 0)?;
-            let universe = form_dynamic_list_use_always_universe(
-                settings.as_ref(),
-                &settings_fields,
-                object_refs,
-                declarations,
-            )?;
-            let mut field_name_by_item_id =
-                parse_form_dynamic_list_field_name_by_item_id(&settings_fields);
-            if let Some(settings) = settings.as_ref() {
-                for field in &settings.fields {
-                    if let Some(item_id) = &field.item_id {
-                        field_name_by_item_id
-                            .entry(item_id.clone())
-                            .or_insert_with(|| field.field.clone());
-                    }
-                }
-            }
-            let secondary_by_item_id =
-                parse_form_dynamic_list_field_secondary_name_by_item_id(&settings_fields);
-            let shadowed_item_ids =
-                parse_form_dynamic_list_shadowed_field_item_ids(&settings_fields);
-            Some(
-                field_name_by_item_id
-                    .into_iter()
-                    .filter(|(item_id, field_name)| {
-                        !form_dynamic_list_field_item_is_resolvable(
-                            item_id,
-                            field_name,
-                            secondary_by_item_id.get(item_id).map(String::as_str),
-                            &shadowed_item_ids,
-                            &universe,
-                        )
-                    })
-                    .map(|(item_id, _)| item_id)
-                    .collect::<BTreeSet<String>>(),
-            )
-        })
+    let unresolvable_field_item_ids = list_facts
+        .as_ref()
+        .map(FormDynamicListFieldFacts::unresolvable_item_ids)
         .unwrap_or_default();
     // A top-level available-field universe cannot validate a dereference: it
     // deliberately contains `Lines`, not every `Lines.Column`, and marking all
@@ -4450,76 +4456,24 @@ fn parse_form_attribute_with_dcs_type_index(
         .as_ref()
         .and_then(|settings| {
             let main_table = settings.main_table.as_deref()?;
-            let settings_fields = split_1c_braced_fields(fields.get(14)?.trim(), 0)?;
-            let mut field_name_by_item_id =
-                parse_form_dynamic_list_field_name_by_item_id(&settings_fields);
-            for field in &settings.fields {
-                if let Some(item_id) = &field.item_id {
-                    field_name_by_item_id
-                        .entry(item_id.clone())
-                        .or_insert_with(|| field.field.clone());
-                }
-            }
-            Some(
-                field_name_by_item_id
-                    .into_iter()
-                    .filter(|(_, field_name)| {
-                        form_dynamic_list_nested_field_is_declared(
-                            main_table,
-                            field_name,
-                            object_refs,
-                            declarations,
-                        ) == Some(false)
-                    })
-                    .map(|(item_id, _)| item_id)
-                    .collect::<BTreeSet<_>>(),
-            )
+            Some(list_facts.as_ref()?.invalid_nested_item_ids(
+                main_table,
+                object_refs,
+                declarations,
+                object_ref_index,
+            ))
         })
         .unwrap_or_default();
     // The twin is remembered per field-map id, independently of whether the
     // field resolves: which of the two names gets written is the marker's
-    // business, not the map's.
-    let mut field_item_twins = fields
-        .get(14)
-        .and_then(|field| {
-            let settings_fields = split_1c_braced_fields(field.trim(), 0)?;
-            let field_name_by_item_id =
-                parse_form_dynamic_list_field_name_by_item_id(&settings_fields);
-            Some(
-                parse_form_dynamic_list_field_secondary_name_by_item_id(&settings_fields)
-                    .into_iter()
-                    .filter(|(item_id, secondary)| {
-                        field_name_by_item_id.get(item_id) != Some(secondary)
-                    })
-                    .collect::<BTreeMap<String, String>>(),
-            )
-        })
+    // business, not the map's. Field names are matched case-insensitively,
+    // but the source spelling is the spelling of the list's field universe,
+    // not the field map's spelling; that winning spelling is kept beside the
+    // localized twin so the data-path resolver can publish it.
+    let field_item_twins = list_facts
+        .as_ref()
+        .map(FormDynamicListFieldFacts::field_item_twins)
         .unwrap_or_default();
-    // Field names are matched case-insensitively, but the source spelling is
-    // the spelling of the list's field universe, not the field map's spelling.
-    // Keep that winning spelling beside the localized twin so the data-path
-    // resolver can publish it. The measured corpus contains case differences
-    // in both directions, so neither spelling is treated as intrinsically
-    // canonical.
-    if let Some(settings_field) = fields.get(14)
-        && let Some(settings_fields) = split_1c_braced_fields(settings_field.trim(), 0)
-        && let Some(universe) = form_dynamic_list_use_always_universe(
-            settings.as_ref(),
-            &settings_fields,
-            object_refs,
-            declarations,
-        )
-    {
-        for (item_id, field_name) in parse_form_dynamic_list_field_name_by_item_id(&settings_fields)
-        {
-            if let Some(canonical) = universe.iter().find(|candidate| {
-                form_data_path_name_eq_ignore_case(candidate, &field_name)
-                    && *candidate != &field_name
-            }) {
-                field_item_twins.insert(item_id, canonical.clone());
-            }
-        }
-    }
     Some(FormAttribute {
         id: id.to_string(),
         name,
@@ -4889,12 +4843,8 @@ fn parse_form_attribute_save_entries(field: &str) -> Option<Vec<FormAttributeSav
         .collect()
 }
 
-pub(super) fn parse_form_attribute_save_field_bindings(
-    field: Option<&str>,
-) -> Vec<FormAttributeSaveFieldBinding> {
-    let Some(fields) = field.and_then(|value| split_1c_braced_fields(value.trim(), 0)) else {
-        return Vec::new();
-    };
+/// The save-field bindings of an attribute record's fields (slot 9).
+fn form_attribute_save_field_bindings_of(fields: &[&str]) -> Vec<FormAttributeSaveFieldBinding> {
     let Some(entries) = fields
         .get(9)
         .and_then(|value| parse_form_attribute_save_entries(value))
@@ -6131,6 +6081,7 @@ pub(super) fn parse_form_dynamic_list_field_map_items(
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn parse_form_attribute_use_always(
     attribute_name: &str,
     settings_field: &str,
@@ -6138,52 +6089,189 @@ pub(super) fn parse_form_attribute_use_always(
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
 ) -> Vec<String> {
-    let Some(settings_fields) = split_1c_braced_fields(settings_field.trim(), 0) else {
-        return Vec::new();
-    };
-    let required_item_ids = parse_form_dynamic_list_required_item_ids(&settings_fields);
-    if required_item_ids.is_empty() {
-        return Vec::new();
-    }
-    let mut field_name_by_item_id = parse_form_dynamic_list_field_name_by_item_id(&settings_fields);
-    if let Some(settings) = settings {
-        for field in &settings.fields {
-            if let Some(item_id) = &field.item_id {
-                field_name_by_item_id
-                    .entry(item_id.clone())
-                    .or_insert_with(|| field.field.clone());
+    FormDynamicListFieldFacts::read(settings_field, settings, object_refs, declarations, None)
+        .map(|facts| facts.use_always(attribute_name, settings))
+        .unwrap_or_default()
+}
+
+/// What a dynamic list's settings bag says about the list's fields, read once
+/// per attribute: every reader of the attribute asks the same questions of
+/// the same text.
+struct FormDynamicListFieldFacts<'s> {
+    settings_fields: Vec<&'s str>,
+    /// The field map: item id -> the name it remembers.
+    field_names: BTreeMap<String, String>,
+    /// The same map with the list's own fields added where it is silent.
+    field_names_with_settings: BTreeMap<String, String>,
+    secondary_names: BTreeMap<String, String>,
+    shadowed_item_ids: BTreeSet<String>,
+    universe: Option<BTreeSet<String>>,
+    /// Lower-case spellings of the universe, each with its spellings in
+    /// universe order: names are matched case-insensitively.
+    universe_by_lowercase: HashMap<String, Vec<String>>,
+}
+
+impl<'s> FormDynamicListFieldFacts<'s> {
+    /// `None` when the bag is not a braced list.
+    fn read(
+        settings_field: &'s str,
+        settings: Option<&FormDynamicListSettings>,
+        object_refs: &BTreeMap<String, String>,
+        declarations: Option<&MetadataFieldDeclarationIndex>,
+        object_ref_index: Option<&FormObjectRefIndex<'_>>,
+    ) -> Option<Self> {
+        let settings_fields = split_1c_braced_fields(settings_field.trim(), 0)?;
+        let field_names = parse_form_dynamic_list_field_name_by_item_id(&settings_fields);
+        let mut field_names_with_settings = field_names.clone();
+        if let Some(settings) = settings {
+            for field in &settings.fields {
+                if let Some(item_id) = &field.item_id {
+                    field_names_with_settings
+                        .entry(item_id.clone())
+                        .or_insert_with(|| field.field.clone());
+                }
             }
         }
-    }
-    let secondary_by_item_id =
-        parse_form_dynamic_list_field_secondary_name_by_item_id(&settings_fields);
-    let shadowed_item_ids = parse_form_dynamic_list_shadowed_field_item_ids(&settings_fields);
-    let main_table = settings.and_then(|settings| settings.main_table.as_deref());
-    let universe = form_dynamic_list_use_always_universe(
-        settings,
-        &settings_fields,
-        object_refs,
-        declarations,
-    );
-    let mut parsed = Vec::new();
-    let mut seen = BTreeSet::<String>::new();
-    for item_id in required_item_ids {
-        let Some(field_name) = form_dynamic_list_use_always_field_name(
-            attribute_name,
-            &item_id,
-            &field_name_by_item_id,
-            &secondary_by_item_id,
-            &shadowed_item_ids,
-            main_table,
-            universe.as_ref(),
-        ) else {
-            continue;
-        };
-        if seen.insert(field_name.clone()) {
-            parsed.push(field_name);
+        let secondary_names =
+            parse_form_dynamic_list_field_secondary_name_by_item_id(&settings_fields);
+        let shadowed_item_ids = parse_form_dynamic_list_shadowed_field_item_ids(&settings_fields);
+        let universe = form_dynamic_list_use_always_universe(
+            settings,
+            &settings_fields,
+            object_refs,
+            declarations,
+            object_ref_index,
+        );
+        let mut universe_by_lowercase = HashMap::<String, Vec<String>>::new();
+        for name in universe.iter().flatten() {
+            universe_by_lowercase
+                .entry(name.to_lowercase())
+                .or_default()
+                .push(name.clone());
         }
+        Some(Self {
+            settings_fields,
+            field_names,
+            field_names_with_settings,
+            secondary_names,
+            shadowed_item_ids,
+            universe,
+            universe_by_lowercase,
+        })
     }
-    parsed
+
+    /// Whether a remembered name (or its twin) is a field of the list, and no
+    /// earlier entry of the map claimed that name already: the set form of
+    /// `form_dynamic_list_field_name_is_resolvable`.
+    fn resolves(&self, item_id: &str, field_name: &str, secondary: Option<&str>) -> bool {
+        !self.shadowed_item_ids.contains(item_id)
+            && (self
+                .universe_by_lowercase
+                .contains_key(&field_name.to_lowercase())
+                || secondary.is_some_and(|secondary| {
+                    self.universe_by_lowercase
+                        .contains_key(&secondary.to_lowercase())
+                }))
+    }
+
+    /// The list's `<UseAlways>` entries, in required order, without repeats.
+    fn use_always(
+        &self,
+        attribute_name: &str,
+        settings: Option<&FormDynamicListSettings>,
+    ) -> Vec<String> {
+        let required_item_ids = parse_form_dynamic_list_required_item_ids(&self.settings_fields);
+        if required_item_ids.is_empty() {
+            return Vec::new();
+        }
+        let main_table = settings.and_then(|settings| settings.main_table.as_deref());
+        let mut parsed = Vec::new();
+        let mut seen = BTreeSet::<String>::new();
+        for item_id in required_item_ids {
+            let Some(field_name) = form_dynamic_list_use_always_field_name(
+                attribute_name,
+                &item_id,
+                &self.field_names_with_settings,
+                &self.secondary_names,
+                main_table,
+                self.universe.is_some(),
+                |item_id, field_name, secondary| self.resolves(item_id, field_name, secondary),
+            ) else {
+                continue;
+            };
+            if seen.insert(field_name.clone()) {
+                parsed.push(field_name);
+            }
+        }
+        parsed
+    }
+
+    /// Field-map ids whose name the list cannot resolve; none without a
+    /// universe.
+    fn unresolvable_item_ids(&self) -> BTreeSet<String> {
+        if self.universe.is_none() {
+            return BTreeSet::new();
+        }
+        self.field_names_with_settings
+            .iter()
+            .filter(|(item_id, field_name)| {
+                !self.resolves(
+                    item_id,
+                    field_name,
+                    self.secondary_names.get(*item_id).map(String::as_str),
+                )
+            })
+            .map(|(item_id, _)| item_id.clone())
+            .collect()
+    }
+
+    /// Field-map ids whose two-member path the metadata proves undeclared.
+    fn invalid_nested_item_ids(
+        &self,
+        main_table: &str,
+        object_refs: &BTreeMap<String, String>,
+        declarations: Option<&MetadataFieldDeclarationIndex>,
+        object_ref_index: Option<&FormObjectRefIndex<'_>>,
+    ) -> BTreeSet<String> {
+        self.field_names_with_settings
+            .iter()
+            .filter(|(_, field_name)| {
+                form_dynamic_list_nested_field_is_declared_indexed(
+                    main_table,
+                    field_name,
+                    object_refs,
+                    declarations,
+                    object_ref_index,
+                ) == Some(false)
+            })
+            .map(|(item_id, _)| item_id.clone())
+            .collect()
+    }
+
+    /// The localized twin of each field-map id, overridden by the universe's
+    /// own spelling where that differs only in case.
+    fn field_item_twins(&self) -> BTreeMap<String, String> {
+        let mut twins = self
+            .secondary_names
+            .iter()
+            .filter(|(item_id, secondary)| self.field_names.get(*item_id) != Some(*secondary))
+            .map(|(item_id, secondary)| (item_id.clone(), secondary.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if self.universe.is_some() {
+            for (item_id, field_name) in &self.field_names {
+                if let Some(canonical) = self
+                    .universe_by_lowercase
+                    .get(&field_name.to_lowercase())
+                    .and_then(|spellings| {
+                        spellings.iter().find(|candidate| *candidate != field_name)
+                    })
+                {
+                    twins.insert(item_id.clone(), canonical.clone());
+                }
+            }
+        }
+        twins
+    }
 }
 
 pub(super) fn parse_form_dynamic_list_field_name_by_item_id(
@@ -6681,14 +6769,17 @@ pub(super) fn parse_form_dynamic_list_required_item_ids(settings_fields: &[&str]
 /// [`parse_form_dynamic_list_shadowed_field_item_ids`]); with no universe no
 /// marker is ever added. A marked field that remembers a twin is written under
 /// both names, each carrying its own marker.
-pub(super) fn form_dynamic_list_use_always_field_name(
+/// A required field-map id's `<UseAlways>` entry, marked `~` when the list has
+/// a field universe and `resolves(item id, name, twin)` says the name is not
+/// one of its fields.
+fn form_dynamic_list_use_always_field_name(
     attribute_name: &str,
     item_id: &str,
     field_name_by_item_id: &BTreeMap<String, String>,
     secondary_name_by_item_id: &BTreeMap<String, String>,
-    shadowed_item_ids: &BTreeSet<String>,
     main_table: Option<&str>,
-    universe: Option<&BTreeSet<String>>,
+    has_universe: bool,
+    resolves: impl Fn(&str, &str, Option<&str>) -> bool,
 ) -> Option<String> {
     let has_main_table = main_table.is_some();
     match item_id {
@@ -6702,15 +6793,8 @@ pub(super) fn form_dynamic_list_use_always_field_name(
         "-1" => None,
         _ => field_name_by_item_id.get(item_id).map(|field_name| {
             let secondary = secondary_name_by_item_id.get(item_id);
-            let unresolvable = universe.is_some_and(|universe| {
-                !form_dynamic_list_field_item_is_resolvable(
-                    item_id,
-                    field_name,
-                    secondary.map(String::as_str),
-                    shadowed_item_ids,
-                    universe,
-                )
-            });
+            let unresolvable =
+                has_universe && !resolves(item_id, field_name, secondary.map(String::as_str));
             if unresolvable {
                 match secondary {
                     Some(secondary) if secondary != field_name => {
@@ -6725,25 +6809,12 @@ pub(super) fn form_dynamic_list_use_always_field_name(
     }
 }
 
-/// Whether a remembered field-map entry resolves against the list's fields: its
-/// name must be one of them, and no earlier entry of the map may have claimed
-/// that name already.
-pub(super) fn form_dynamic_list_field_item_is_resolvable(
-    item_id: &str,
-    field_name: &str,
-    secondary_name: Option<&str>,
-    shadowed_item_ids: &BTreeSet<String>,
-    universe: &BTreeSet<String>,
-) -> bool {
-    !shadowed_item_ids.contains(item_id)
-        && form_dynamic_list_field_name_is_resolvable(field_name, secondary_name, universe)
-}
-
 /// Whether a remembered field name resolves against the list's field universe.
 ///
 /// The map remembers a standard attribute under its English name and keeps the
 /// Russian spelling beside it; both name the same field, so either one
 /// resolving is enough.
+#[cfg(test)]
 pub(super) fn form_dynamic_list_field_name_is_resolvable(
     field_name: &str,
     secondary_name: Option<&str>,
@@ -6770,11 +6841,28 @@ fn form_data_path_name_eq_ignore_case(left: &str, right: &str) -> bool {
 /// whose target is stated without type inference -- a table's standard `Ref`
 /// and one of its tabular sections. `Some(false)` is therefore strong negative
 /// evidence, not the absence of a guessed type.
+#[cfg(test)]
 pub(super) fn form_dynamic_list_nested_field_is_declared(
     main_table: &str,
     field_name: &str,
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
+) -> Option<bool> {
+    form_dynamic_list_nested_field_is_declared_indexed(
+        main_table,
+        field_name,
+        object_refs,
+        declarations,
+        None,
+    )
+}
+
+fn form_dynamic_list_nested_field_is_declared_indexed(
+    main_table: &str,
+    field_name: &str,
+    object_refs: &BTreeMap<String, String>,
+    declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> Option<bool> {
     let mut segments = field_name.split('.');
     let head = segments.next()?;
@@ -6835,6 +6923,21 @@ pub(super) fn form_dynamic_list_nested_field_is_declared(
         return form_metadata_owner_declares_direct_member(owner, terminal, Some(declarations));
     }
 
+    if let Some(index) = FormObjectRefIndex::of(object_ref_index, object_refs) {
+        let section = index
+            .children(main_table)
+            .iter()
+            .find(|(kind, name, _)| {
+                *kind == "TabularSection" && form_data_path_name_eq_ignore_case(name, head)
+            })
+            .map(|(_, _, reference)| *reference)?;
+        if matches!(terminal, "LineNumber" | "НомерСтроки") {
+            return Some(true);
+        }
+        return Some(index.children(section).iter().any(|(kind, name, _)| {
+            *kind == "Attribute" && form_data_path_name_eq_ignore_case(name, terminal)
+        }));
+    }
     let section = object_refs.values().find(|reference| {
         reference
             .strip_prefix(&format!("{main_table}.TabularSection."))
@@ -6912,6 +7015,7 @@ pub(super) fn form_dynamic_list_use_always_universe(
     settings_fields: &[&str],
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> Option<BTreeSet<String>> {
     let settings = settings?;
     let mut universe;
@@ -6937,6 +7041,7 @@ pub(super) fn form_dynamic_list_use_always_universe(
                         &selection,
                         object_refs,
                         declarations,
+                        object_ref_index,
                     )?);
                 }
                 if let Some(main_table) = settings.main_table.as_deref() {
@@ -6945,6 +7050,7 @@ pub(super) fn form_dynamic_list_use_always_universe(
                         &selection,
                         object_refs,
                         declarations,
+                        object_ref_index,
                     )?);
                 }
             }
@@ -6966,10 +7072,7 @@ pub(super) fn form_dynamic_list_use_always_universe(
             return None;
         }
         let pairs = form_dynamic_list_std_attribute_pairs(kind)?;
-        if !object_refs
-            .values()
-            .any(|reference| reference == main_table)
-        {
+        if !form_object_refs_contain(object_refs, object_ref_index, main_table) {
             return None;
         }
         universe = BTreeSet::new();
@@ -6983,21 +7086,33 @@ pub(super) fn form_dynamic_list_use_always_universe(
             main_table,
             object_refs,
             FORM_DYNAMIC_LIST_MAIN_TABLE_CHILD_KINDS,
+            object_ref_index,
         ));
         // A common attribute is a field of the tables its own `<Content>`
         // puts it on, spelled the same on all of them. A configuration whose
         // common attributes this reader cannot decode admits all of their
         // names, as it did before it could read the content at all.
-        universe.extend(
-            object_refs
-                .values()
-                .filter_map(|reference| reference.strip_prefix("CommonAttribute."))
-                .filter(|name| !name.is_empty() && !name.contains('.'))
-                .filter(|name| {
-                    form_dynamic_list_table_carries_common_attribute(declarations, main_table, name)
-                })
-                .map(str::to_string),
-        );
+        let carried = |name: &&str| {
+            form_dynamic_list_table_carries_common_attribute(declarations, main_table, name)
+        };
+        match FormObjectRefIndex::of(object_ref_index, object_refs) {
+            Some(index) => universe.extend(
+                index
+                    .common_attributes()
+                    .iter()
+                    .copied()
+                    .filter(carried)
+                    .map(str::to_string),
+            ),
+            None => universe.extend(
+                object_refs
+                    .values()
+                    .filter_map(|reference| reference.strip_prefix("CommonAttribute."))
+                    .filter(|name| !name.is_empty() && !name.contains('.'))
+                    .filter(carried)
+                    .map(str::to_string),
+            ),
+        }
     }
     if let Some(server_state_xml) = &settings.server_state_xml {
         universe.extend(form_dynamic_list_calculated_field_data_paths(
@@ -7153,6 +7268,7 @@ fn form_dynamic_list_star_source_fields(
     selection: &FormDynamicListQuerySelection,
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> Option<BTreeSet<String>> {
     let alias = qualifier?;
     let table = selection
@@ -7167,7 +7283,7 @@ fn form_dynamic_list_star_source_fields(
     if table.matches('.').count() != 1 {
         return None;
     }
-    if !object_refs.values().any(|reference| reference == &table) {
+    if !form_object_refs_contain(object_refs, object_ref_index, &table) {
         return None;
     }
     let (kind, _) = table.split_once('.')?;
@@ -7180,6 +7296,7 @@ fn form_dynamic_list_star_source_fields(
         &table,
         object_refs,
         FORM_DYNAMIC_LIST_MAIN_TABLE_CHILD_KINDS,
+        object_ref_index,
     ));
     Some(fields)
 }
@@ -7469,6 +7586,18 @@ const FORM_DYNAMIC_LIST_MAIN_TABLE_CHILD_KINDS: &[&str] = &[
     "EnumValue",
 ];
 
+/// Whether some key of `object_refs` maps to exactly `reference`.
+fn form_object_refs_contain(
+    object_refs: &BTreeMap<String, String>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
+    reference: &str,
+) -> bool {
+    match FormObjectRefIndex::of(object_ref_index, object_refs) {
+        Some(index) => index.contains(reference),
+        None => object_refs.values().any(|value| value == reference),
+    }
+}
+
 /// Declared top-level children of a metadata table, read off the same
 /// object-reference index the rest of the form decoder resolves through:
 /// every `{table}.{kind}.{name}` reference contributes `name` when `kind` is
@@ -7477,7 +7606,16 @@ fn form_dynamic_list_main_table_children(
     table: &str,
     object_refs: &BTreeMap<String, String>,
     kinds: &[&str],
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> BTreeSet<String> {
+    if let Some(index) = FormObjectRefIndex::of(object_ref_index, object_refs) {
+        return index
+            .children(table)
+            .iter()
+            .filter(|(kind, name, _)| !name.is_empty() && kinds.contains(kind))
+            .map(|(_, name, _)| (*name).to_string())
+            .collect();
+    }
     let prefix = format!("{table}.");
     let mut names = BTreeSet::new();
     for reference in object_refs.values() {
@@ -7706,6 +7844,7 @@ fn form_dynamic_list_main_table_auto_fields(
     selection: &FormDynamicListQuerySelection,
     object_refs: &BTreeMap<String, String>,
     declarations: Option<&MetadataFieldDeclarationIndex>,
+    object_ref_index: Option<&FormObjectRefIndex<'_>>,
 ) -> Option<BTreeSet<String>> {
     let kind = main_table.split('.').next()?;
     let pairs = form_dynamic_list_std_attribute_pairs(kind)?;
@@ -7722,6 +7861,7 @@ fn form_dynamic_list_main_table_auto_fields(
             &base_table,
             object_refs,
             &["Dimension"],
+            object_ref_index,
         ));
     }
     let main_table_alias = selection.sources.iter().find_map(|(reference, alias)| {

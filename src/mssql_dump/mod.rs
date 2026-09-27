@@ -969,6 +969,7 @@ mod dcs;
 mod dynamic_generation;
 mod fetch;
 mod form_body;
+mod form_ref_index;
 mod form_v85;
 mod form_v85_load;
 mod form_v85_order;
@@ -1095,6 +1096,7 @@ use config_rows::*;
 pub(crate) use dcs::*;
 use fetch::*;
 use form_body::*;
+use form_ref_index::FormObjectRefIndex;
 use forms::*;
 use metadata::*;
 use moxel::*;
@@ -2828,6 +2830,8 @@ struct DumpRowContext<'a> {
     /// `owner-value:<owner>:<uuid>`, never a bare identifier -- so every
     /// existing lookup through this index answers exactly as before.
     form_object_refs: &'a BTreeMap<String, String>,
+    /// Reverse lookups over `form_object_refs`, built once per export.
+    form_object_ref_index: &'a FormObjectRefIndex<'a>,
     role_rights_object_refs: &'a BTreeMap<String, String>,
     metadata_order: &'a BTreeMap<String, usize>,
     /// Each top-level object's position inside its own Configuration root
@@ -3426,6 +3430,7 @@ fn dump_table_rows_with_options_mode(
         &type_index,
         &object_refs,
     ));
+    let form_object_ref_index = FormObjectRefIndex::new(&form_object_refs);
     let mut metadata_object_refs = object_refs.clone();
     extend_metadata_owner_value_references(&mut metadata_object_refs, &predefined_item_refs)?;
     extend_metadata_owner_value_references(
@@ -3496,6 +3501,7 @@ fn dump_table_rows_with_options_mode(
         root_recalculation_refs: &root_recalculation_refs,
         predefined_item_refs: &predefined_item_refs,
         form_object_refs: &form_object_refs,
+        form_object_ref_index: &form_object_ref_index,
         role_rights_object_refs: &role_rights_object_refs,
         metadata_order: &metadata_order,
         configuration_root_child_order: &configuration_root_child_order,
@@ -4737,6 +4743,7 @@ fn dump_table_rows_streamed(
         &type_index,
         &object_refs,
     ));
+    let form_object_ref_index = FormObjectRefIndex::new(&form_object_refs);
     let mut metadata_object_refs = object_refs.clone();
     extend_metadata_owner_value_references(&mut metadata_object_refs, &predefined_item_refs)?;
     extend_metadata_owner_value_references(
@@ -4842,6 +4849,7 @@ fn dump_table_rows_streamed(
         root_recalculation_refs: &root_recalculation_refs,
         predefined_item_refs: &predefined_item_refs,
         form_object_refs: &form_object_refs,
+        form_object_ref_index: &form_object_ref_index,
         role_rights_object_refs: &role_rights_object_refs,
         metadata_order: &metadata_order,
         configuration_root_child_order: &configuration_root_child_order,

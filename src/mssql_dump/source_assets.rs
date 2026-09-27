@@ -2437,6 +2437,7 @@ fn write_source_asset_inner(
             .with_metadata_command_refs(context.metadata_refs)
             .with_metadata_command_facts(context.metadata_command_facts)
             .with_metadata_field_declarations(context.metadata_field_declarations)
+            .with_object_ref_index(context.form_object_ref_index)
             .with_dcs_profiles(adapter.provider_id().clone(), dcs_target_profile);
             let extraction =
                 extract_form_body_xml_from_body_detailed_timed(body, &form_context, Some(timings))
