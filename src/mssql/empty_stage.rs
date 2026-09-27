@@ -99,6 +99,13 @@ impl EmptyStageContext {
     pub fn new(root: &Path, version: Option<&str>) -> Result<Self> {
         // No base rows exist: every base-row read fails naming its row.
         BASE_FREE_STAGE.store(true, Ordering::Relaxed);
+        // Nor any always-used constant: track A compiles each constant with
+        // the flag clear, and a constants set is written against that.
+        if crate::module_blob::clear_always_used_constants() {
+            eprintln!(
+                "IBCMD_RS_ALWAYS_USED_CONSTANTS is ignored: it names a target database's flags, and an empty infobase's constants carry none"
+            );
+        }
         let configuration_path = root.join("Configuration.xml");
         let configuration = fs::read(&configuration_path)
             .with_context(|| format!("failed to read {}", configuration_path.display()))?;

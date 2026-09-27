@@ -977,6 +977,7 @@ pub(crate) use form_v85_load::{
     compile_v85_form_body_in_v83_layout, compile_v85_native_form_body, down_convert_v85_form_xml,
     is_v85_form_xml, up_convert_v85_chart_records, up_convert_v85_primitives_in_place,
 };
+pub(crate) use refs::constant_row_always_used;
 pub(crate) use source_assets::declare_palette_namespace_beside_style;
 mod forms;
 pub mod help_audit;
