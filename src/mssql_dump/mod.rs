@@ -2189,7 +2189,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             args.extract_metadata_xml,
             source_version,
             args.collect_all_source_asset_diagnostics,
-            model_export::requested(args.model_export),
+            model_export::requested(args.model_export, args.legacy_export),
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -8023,11 +8023,13 @@ fn module_body_paths_from_texts(
         .collect::<BTreeSet<_>>();
     let mut paths = configuration_module_body_paths(&file_names);
 
-    for row in metadata_texts {
-        let Some(entries) = parse_module_body_source_paths_from_metadata_text(row, &file_names)
-        else {
-            continue;
-        };
+    // Read in parallel, added in row order.
+    let per_row = |row: &MetadataTextRow| {
+        parse_module_body_source_paths_from_metadata_text(row, &file_names)
+    };
+    let found = parallel::install(|| metadata_texts.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| metadata_texts.iter().map(per_row).collect());
+    for entries in found.into_iter().flatten() {
         paths.extend(entries);
     }
     let form_refs = build_complete_form_source_reference_index(metadata_texts);
@@ -35760,6 +35762,60 @@ struct BraceJumps {
     /// For each offset that opens a value (`{`) or a string (`"`) outside
     /// any string, the offset just past its end; 0 elsewhere.
     ends: Vec<u32>,
+    /// Where each uuid's header marker first stands in the text, built on
+    /// first use (see [`registered_header_marker`]).
+    header_markers: std::cell::OnceCell<HeaderMarkers>,
+}
+
+/// The first offset of `{1,0,<uuid>},` and of `{0,0,<uuid>},` in a text, by
+/// the 36 characters between (whatever they are).
+#[derive(Default)]
+struct HeaderMarkers {
+    modern: HashMap<String, usize>,
+    legacy: HashMap<String, usize>,
+}
+
+fn header_markers(text: &str) -> HeaderMarkers {
+    let mut markers = HeaderMarkers::default();
+    for (prefix, map) in [("{1,0,", &mut markers.modern), ("{0,0,", &mut markers.legacy)] {
+        // The prefix cannot overlap itself, so every occurrence is found.
+        for (start, _) in text.match_indices(prefix) {
+            let uuid_start = start + prefix.len();
+            let Some(uuid) = text.get(uuid_start..uuid_start + 36) else {
+                continue;
+            };
+            if text.get(uuid_start + 36..uuid_start + 38) == Some("},") {
+                map.entry(uuid.to_string()).or_insert(start);
+            }
+        }
+    }
+    markers
+}
+
+/// For a registered text (the whole text, not a part of it): the offset just
+/// past `{1,0,<uuid>},`'s first occurrence, else past `{0,0,<uuid>},`'s --
+/// what searching the text for each marker in turn finds. `None` when no
+/// table knows the text; `Some(None)` when it holds neither marker.
+fn registered_header_marker(text: &str, uuid: &str) -> Option<Option<usize>> {
+    if uuid.len() != 36 {
+        return None;
+    }
+    let base = text.as_ptr() as usize;
+    BRACE_JUMPS.with(|tables| {
+        let tables = tables.borrow();
+        let table = tables
+            .iter()
+            .find(|table| table.base == base && table.len == text.len())?;
+        let markers = table.header_markers.get_or_init(|| header_markers(text));
+        let marker_len = "{1,0,".len() + 36 + "},".len();
+        Some(
+            markers
+                .modern
+                .get(uuid)
+                .or_else(|| markers.legacy.get(uuid))
+                .map(|start| start + marker_len),
+        )
+    })
 }
 
 thread_local! {
@@ -35837,6 +35893,7 @@ fn build_brace_jumps(text: &str) -> BraceJumps {
         base: text.as_ptr() as usize,
         len: bytes.len(),
         ends,
+        header_markers: std::cell::OnceCell::new(),
     }
 }
 

@@ -1,6 +1,7 @@
-//! `mssql-dump-config --model-export` (or `IBCMD_RS_MODEL_EXPORT=1`): the
-//! descriptor rows of every kind the metadata model decodes go row -> model
-//! -> XML through `metadata_model::export` instead of the legacy converters.
+//! A full `mssql-dump-config` writes the descriptor rows of every kind the
+//! metadata model decodes row -> model -> XML through `metadata_model::export`
+//! instead of the legacy converters; `--legacy-export` (or
+//! `IBCMD_RS_LEGACY_EXPORT=1`) keeps the legacy converters.
 //!
 //! Two steps. A [`ModelPlan`], from the rows alone and before any legacy
 //! index: the root row's lists give every top-level object's kind, the
@@ -24,12 +25,22 @@ use crate::metadata_model::export::{
 use crate::metadata_model::index::ConfigIndex;
 use crate::metadata_model::objects::parts::Compat;
 
-/// The environment switch, for callers without the command-line flag.
+/// The environment switches, for callers without the command-line flags:
+/// `IBCMD_RS_LEGACY_EXPORT=1` (or `IBCMD_RS_MODEL_EXPORT=0`) opts out.
 pub(super) const MODEL_EXPORT_ENV: &str = "IBCMD_RS_MODEL_EXPORT";
+pub(super) const LEGACY_EXPORT_ENV: &str = "IBCMD_RS_LEGACY_EXPORT";
 
-/// `--model-export`, or `IBCMD_RS_MODEL_EXPORT=1`.
-pub(super) fn requested(flag: bool) -> bool {
-    flag || std::env::var(MODEL_EXPORT_ENV).is_ok_and(|value| value.trim() == "1")
+/// Whether a full export writes its descriptors through the model: yes,
+/// unless `--legacy-export`, `IBCMD_RS_LEGACY_EXPORT=1` or
+/// `IBCMD_RS_MODEL_EXPORT=0` asks for the legacy converters.
+/// (`--model-export` is the default spelled out.)
+pub(super) fn requested(model_flag: bool, legacy_flag: bool) -> bool {
+    let env_is = |name: &str, value: &str| std::env::var(name).is_ok_and(|set| set.trim() == value);
+    if legacy_flag || env_is(LEGACY_EXPORT_ENV, "1") || env_is(MODEL_EXPORT_ENV, "0") {
+        return false;
+    }
+    let _ = model_flag;
+    true
 }
 
 /// `IBCMD_RS_MODEL_EXPORT_SHADOW=1`: the legacy converter also runs on the

@@ -396,9 +396,12 @@ pub(super) fn parse_metadata_header_from_text(text: &str, uuid: &str) -> Option<
     // both header-block layouts the platform writes; only the tuple's own
     // first member differs. See `metadata_header_field_index` for the two
     // spellings and where each was observed.
-    let mut offset = [format!("{{1,0,{uuid}}},"), format!("{{0,0,{uuid}}},")]
-        .into_iter()
-        .find_map(|marker| text.find(&marker).map(|start| start + marker.len()))?;
+    let mut offset = match super::registered_header_marker(text, uuid) {
+        Some(found) => found?,
+        None => [format!("{{1,0,{uuid}}},"), format!("{{0,0,{uuid}}},")]
+            .into_iter()
+            .find_map(|marker| text.find(&marker).map(|start| start + marker.len()))?,
+    };
     offset = skip_ascii_ws_at(text, offset);
     let (name, consumed) = parse_1c_quoted_string_with_len(&text[offset..])?;
     offset += consumed;

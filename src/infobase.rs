@@ -210,6 +210,7 @@ fn export_config_report(
     let dump_args = MssqlDumpConfigArgs {
         rows_dir: None,
         model_export: false,
+        legacy_export: false,
         sqlcmd: sqlcmd.to_path_buf(),
         bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
         runtime_journal: None,
