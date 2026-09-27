@@ -263,6 +263,27 @@ fn collect_root_kinds(
 }
 
 // ---------------------------------------------------------------------------
+// A row's own header.
+
+/// The object's own md header in a descriptor row, as (uuid, name): the
+/// first `{3,{<n>,0,<uuid>},"<name>",<synonym>,"<comment>",...}` of nine
+/// members, in document order (the object's header precedes its children's).
+pub fn own_header(row: &Brace) -> Option<(String, String)> {
+    let members = row.as_list()?;
+    if members.len() == 9
+        && members.first().and_then(Brace::as_atom) == Some("3")
+        && let Some(identity) = members.get(1).and_then(Brace::as_list)
+        && identity.len() == 3
+        && identity.get(1).and_then(Brace::as_atom) == Some("0")
+        && let Some(uuid) = identity.get(2).and_then(Brace::as_atom)
+        && let Some(name) = members.get(2).and_then(Brace::as_str)
+    {
+        return Some((uuid.to_ascii_lowercase(), name.to_string()));
+    }
+    members.iter().find_map(own_header)
+}
+
+// ---------------------------------------------------------------------------
 // Owned objects: rows of their own that their owner's row lists by uuid.
 
 /// The class id an owner's row lists each kind of owned object under,

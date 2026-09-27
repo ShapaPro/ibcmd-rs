@@ -4362,6 +4362,7 @@ fn dump_table_rows_streamed(
     };
     timings.prepare_subsystem_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
+    let detail_started = Instant::now();
     let MetadataObjectReferenceIndexes {
         references: object_refs,
         resolutions: object_ref_resolutions,
@@ -4382,6 +4383,8 @@ fn dump_table_rows_streamed(
     } else {
         MetadataObjectReferenceIndexes::default()
     };
+    detail_ms(&mut timings, "object_refs.index", detail_started);
+    let detail_started = Instant::now();
     let configuration_root_object_refs = if extract_metadata_xml {
         build_configuration_root_object_reference_index_from_texts(
             &index_metadata_texts,
@@ -4392,6 +4395,7 @@ fn dump_table_rows_streamed(
     };
     let role_rights_object_refs =
         build_role_rights_object_reference_index(&object_refs, &form_refs);
+    detail_ms(&mut timings, "object_refs.root_and_role_copies", detail_started);
     timings.prepare_object_refs_ms += elapsed_ms(index_part_started);
     let metadata_order = if (extract_metadata_xml || needs_source_layout_refs)
         && source_reference_needs.metadata_order
@@ -4484,6 +4488,7 @@ fn dump_table_rows_streamed(
     timings.prepare_functional_option_refs_ms += elapsed_ms(index_part_started);
     let source_asset_metadata_texts = &index_metadata_texts;
     let index_part_started = Instant::now();
+    let detail_started = Instant::now();
     let mut source_assets = source_asset_paths_with_indexes(
         &write_index_rows,
         source_asset_metadata_texts,
@@ -4496,6 +4501,8 @@ fn dump_table_rows_streamed(
         &template_refs,
         &subsystem_refs,
     );
+    detail_ms(&mut timings, "source_assets.paths", detail_started);
+    let detail_started = Instant::now();
     // The index rows are headers here, so the parent-configuration list the
     // vendor `.cf` files are named from is fetched on its own.
     let parent_list_ids = source_assets::parent_configuration_list_ids(&source_assets)
@@ -4526,8 +4533,12 @@ fn dump_table_rows_streamed(
             &index_file_names,
         );
     }
+    detail_ms(&mut timings, "source_assets.parent_configurations", detail_started);
+    let detail_started = Instant::now();
     let source_asset_diagnostics =
         build_form_owner_resolution_diagnostics_from_texts(source_asset_metadata_texts);
+    detail_ms(&mut timings, "source_assets.form_owner_diagnostics", detail_started);
+    let detail_started = Instant::now();
     let write_rows_by_file_name = write_index_rows
         .iter()
         .map(|row| (row.file_name.as_str(), row))
@@ -4545,6 +4556,7 @@ fn dump_table_rows_streamed(
         &form_refs,
         &template_refs,
     );
+    detail_ms(&mut timings, "source_assets.discovery_misses", detail_started);
     timings.prepare_source_assets_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let help_refs = if extract_metadata_xml
@@ -4820,17 +4832,21 @@ fn dump_table_rows_streamed(
                 &predefined_names,
             )?
         };
+        // The legacy indexes fill in only while some kind's rows cannot
+        // name themselves yet.
+        let legacy = model_export::LegacyNames {
+            object_refs: &object_refs,
+            type_index: &type_index,
+            form_refs: &form_refs,
+            template_refs: &template_refs,
+        };
+        let complete = plan.names_from_rows_alone(&index_metadata_texts);
         let model = model_export::ModelExport::build(
             plan,
             &metadata_rows,
             &index_metadata_texts,
             &predefined_rows,
-            &model_export::LegacyNames {
-                object_refs: &object_refs,
-                type_index: &type_index,
-                form_refs: &form_refs,
-                template_refs: &template_refs,
-            },
+            (!complete).then_some(&legacy),
         )?;
         timings.prepare_model_index_ms += elapsed_ms(started);
         model.log_summary(elapsed_ms(started));
@@ -4839,6 +4855,20 @@ fn dump_table_rows_streamed(
         None
     };
     timings.prepare_indexes_ms = elapsed_ms(prepare_started);
+    if profile_indexes_only() {
+        return Ok(DumpedTable {
+            rows: Vec::new(),
+            failed_rows: Vec::new(),
+            binary_bytes: 0,
+            inflated_rows: 0,
+            module_text_rows: 0,
+            metadata_xml_rows: 0,
+            source_asset_rows: 0,
+            source_assets: SourceAssetCompletenessReport::default(),
+            metadata_root_inventory: RootMetadataInventoryReport::default(),
+            timings,
+        });
+    }
 
     let context = DumpRowContext {
         model_export: model.as_ref(),
@@ -5091,6 +5121,20 @@ fn form_body_override(file_name: &str) -> Option<String> {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// Adds the time since `started` to the named part of the index phase.
+fn detail_ms(timings: &mut MssqlDumpTimingReport, name: &str, started: Instant) {
+    *timings
+        .prepare_detail_ms
+        .entry(name.to_string())
+        .or_default() += elapsed_ms(started);
+}
+
+/// `IBCMD_RS_PROFILE_INDEXES_ONLY=1`: stop a streamed export after its index
+/// phase (lab profiling of that phase; no rows are written).
+fn profile_indexes_only() -> bool {
+    std::env::var("IBCMD_RS_PROFILE_INDEXES_ONLY").is_ok_and(|value| value.trim() == "1")
 }
 
 fn micros(started: Instant) -> u64 {

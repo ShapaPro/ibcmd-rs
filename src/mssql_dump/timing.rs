@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -107,6 +108,8 @@ pub struct MssqlDumpTimingReport {
     pub source_asset_schedule_cpu_ms: u64,
     pub source_asset_config_dump_info_cpu_ms: u64,
     pub source_asset_other_cpu_ms: u64,
+    /// Finer parts of the index phase, by name (`object_refs.index`, ...).
+    pub prepare_detail_ms: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -412,6 +415,9 @@ impl MssqlDumpTimingReport {
         self.prepare_help_refs_ms += other.prepare_help_refs_ms;
         self.prepare_standalone_refs_ms += other.prepare_standalone_refs_ms;
         self.prepare_body_owners_ms += other.prepare_body_owners_ms;
+        for (name, ms) in &other.prepare_detail_ms {
+            *self.prepare_detail_ms.entry(name.clone()).or_default() += ms;
+        }
         self.prepare_recalculation_refs_ms += other.prepare_recalculation_refs_ms;
         self.prepare_module_paths_ms += other.prepare_module_paths_ms;
         self.prepare_value_predefined_items_ms += other.prepare_value_predefined_items_ms;

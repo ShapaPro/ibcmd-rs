@@ -202,6 +202,19 @@ impl ModelPlan {
                 .all(|row| self.kind_of(&row.file_name).is_some())
     }
 
+    /// Whether the rows alone name everything: every top-level kind has
+    /// `object_names`, every owned kind `owned_object_names`, and the plan
+    /// places every descriptor row. Then the index takes nothing from the
+    /// legacy indexes.
+    pub(super) fn names_from_rows_alone(&self, texts: &[MetadataTextRow]) -> bool {
+        self.kinds.values().all(|kind| has_names(kind))
+            && self.owned.iter().all(|(_, kind, _)| has_owned_names(kind))
+            && texts
+                .iter()
+                .filter(|row| !row.file_name.contains('.') && row.header.is_some())
+                .all(|row| self.kind_of(&row.file_name).is_some())
+    }
+
     /// The descriptor rows the legacy converters still write, by kind (`?`
     /// for a row neither the root's nor an owner's lists name).
     pub(super) fn legacy_descriptor_kinds(
@@ -267,6 +280,9 @@ pub(super) struct ModelIndexReport {
     pub(super) legacy_types: usize,
     pub(super) predefined_bodies: usize,
     pub(super) compatibility_mode: Option<String>,
+    /// The legacy indexes were consulted (some kind's rows cannot name
+    /// themselves yet).
+    pub(super) used_legacy_indexes: bool,
 }
 
 pub(super) struct ModelExport {
@@ -282,7 +298,7 @@ impl ModelExport {
         metadata_rows: &[ConfigRow],
         texts: &[MetadataTextRow],
         predefined_rows: &[ConfigRow],
-        legacy: &LegacyNames<'_>,
+        legacy: Option<&LegacyNames<'_>>,
     ) -> Result<Self> {
         let raw_by_name = metadata_rows
             .iter()
@@ -404,37 +420,39 @@ impl ModelExport {
             index.set_name(uuid, &format!("{owner_name}.{kind}.{}", header.name));
             report.owned_names += 1;
         }
-        // What the owners' lists did not name, from the legacy path indexes.
-        for (uuid, form_ref) in legacy.form_refs {
-            if let Some(name) = form_source_reference_name(form_ref)
-                && index.insert_name(uuid, &name)
-            {
-                report.legacy_owned_names += 1;
-            }
-        }
-        for (uuid, template_ref) in legacy.template_refs {
-            if let Some(name) = template_source_reference_name(template_ref)
-                && index.insert_name(uuid, &name)
-            {
-                report.legacy_owned_names += 1;
-            }
-        }
-
-        // What else the kinds without `object_names` name (their children,
-        // a recalculation's dimensions, generated types): the legacy object
+        // While some kind's rows cannot name themselves: what the owners'
+        // lists did not name from the legacy path indexes, and the children
+        // and generated types of those kinds from the legacy object
         // references and type index.
-        for (uuid, name) in legacy.object_refs {
-            if root_kind(name) == "Configuration" {
-                continue;
+        if let Some(legacy) = legacy {
+            report.used_legacy_indexes = true;
+            for (uuid, form_ref) in legacy.form_refs {
+                if let Some(name) = form_source_reference_name(form_ref)
+                    && index.insert_name(uuid, &name)
+                {
+                    report.legacy_owned_names += 1;
+                }
             }
-            if index.insert_name(uuid, name) {
-                report.legacy_names += 1;
+            for (uuid, template_ref) in legacy.template_refs {
+                if let Some(name) = template_source_reference_name(template_ref)
+                    && index.insert_name(uuid, &name)
+                {
+                    report.legacy_owned_names += 1;
+                }
             }
-        }
-        for (type_id, name) in legacy.type_index {
-            let name = name.strip_prefix("cfg:").unwrap_or(name);
-            if index.insert_type(type_id, name) {
-                report.legacy_types += 1;
+            for (uuid, name) in legacy.object_refs {
+                if root_kind(name) == "Configuration" {
+                    continue;
+                }
+                if index.insert_name(uuid, name) {
+                    report.legacy_names += 1;
+                }
+            }
+            for (type_id, name) in legacy.type_index {
+                let name = name.strip_prefix("cfg:").unwrap_or(name);
+                if index.insert_type(type_id, name) {
+                    report.legacy_types += 1;
+                }
             }
         }
 
@@ -535,12 +553,17 @@ impl ModelExport {
         eprintln!(
             "model export: name index of {} names, {} types, {} predefined items in {elapsed_ms} ms; \
              object_names read {rows} rows ({failed} failed) of {} kinds, {} owned objects named \
-             through their owner; the legacy indexes gave {} names and {} types",
+             through their owner; the legacy indexes {} ({} names, {} types)",
             report.names,
             report.types,
             report.predefined,
             report.rows_by_kind.len(),
             report.owned_names,
+            if report.used_legacy_indexes {
+                "consulted"
+            } else {
+                "not consulted"
+            },
             report.legacy_names + report.legacy_owned_names,
             report.legacy_types,
         );
@@ -653,17 +676,19 @@ pub fn audit_name_index(
         "Config",
         &plan.predefined_body_file_names(),
     )?;
+    let legacy = LegacyNames {
+        object_refs: &object_refs,
+        type_index: &type_index,
+        form_refs: &form_refs,
+        template_refs: &template_refs,
+    };
+    let complete = plan.names_from_rows_alone(&texts);
     let model = ModelExport::build(
         plan,
         &metadata_rows,
         &texts,
         &predefined_rows,
-        &LegacyNames {
-            object_refs: &object_refs,
-            type_index: &type_index,
-            form_refs: &form_refs,
-            template_refs: &template_refs,
-        },
+        (!complete).then_some(&legacy),
     )?;
     let model_ms = elapsed_ms(model_started);
     let build_rows_ms = elapsed_ms(started);
