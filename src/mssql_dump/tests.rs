@@ -24321,7 +24321,11 @@ fn extracts_picture_decoration_picture_size_without_file_drag_mode_from_live_blo
     assert_eq!(item.tag, "PictureDecoration");
     assert_eq!(item.width.as_deref(), Some("50"));
     assert_eq!(item.height.as_deref(), Some("7"));
-    assert_eq!(item.auto_max_width, None);
+    // ERP УХ `DataProcessors/БизнесСеть/Forms/ПоискДокументаПоQRКоду` stores
+    // this very record for item 6 (its title only adds the `en` line), and
+    // the native export writes `<AutoMaxWidth>false</AutoMaxWidth>` for it,
+    // right after `<Width>`.
+    assert_eq!(item.auto_max_width, Some(false));
     assert_eq!(item.auto_max_height, Some(false));
     assert_eq!(item.picture_size, Some("Proportionally"));
     assert_eq!(
@@ -24332,7 +24336,7 @@ fn extracts_picture_decoration_picture_size_without_file_drag_mode_from_live_blo
 
     let xml = format_form_child_items_xml(&[item], 1);
     assert!(xml.contains("<Width>50</Width>"));
-    assert!(!xml.contains("<AutoMaxWidth>false</AutoMaxWidth>"));
+    assert!(xml.contains("<AutoMaxWidth>false</AutoMaxWidth>"));
     assert!(xml.contains("<Height>7</Height>"));
     assert!(xml.contains("<AutoMaxHeight>false</AutoMaxHeight>"));
     assert!(xml.contains("<PictureSize>Proportionally</PictureSize>"));
