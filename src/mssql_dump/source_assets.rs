@@ -2143,13 +2143,23 @@ pub(crate) fn write_source_xml_file(
     xml: impl AsRef<[u8]>,
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<()> {
+    fs::write(path, source_xml_file_bytes(xml, source_version))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// The bytes a source XML file gets: the dialect's version attribute, and on
+/// 2.21 the palette namespace beside every style one.
+pub(crate) fn source_xml_file_bytes(
+    xml: impl AsRef<[u8]>,
+    source_version: InfobaseConfigSourceVersion,
+) -> Vec<u8> {
     let adapter = MssqlLegacyAdapter::from_legacy_selector(source_version);
     let mut normalized =
         normalize_legacy_source_asset_xml_version_bytes(xml.as_ref(), adapter.xml_dialect());
     if source_version == InfobaseConfigSourceVersion::V2_21 {
         normalized = declare_palette_namespace_beside_style(normalized);
     }
-    fs::write(path, normalized).with_context(|| format!("failed to write {}", path.display()))
+    normalized
 }
 
 const STYLE_NAMESPACE_DECLARATION: &str = " xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\"";
@@ -2309,18 +2319,24 @@ fn write_source_asset_inner(
             })?;
             let xml_path = output_dir.join(&asset.primary_path);
             if let Some(parent) = xml_path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
 
             let picture_dir = output_dir.join(asset.primary_path.with_extension(""));
-            fs::create_dir_all(&picture_dir)
+            context
+                .output
+                .create_dir_all(&picture_dir)
                 .with_context(|| format!("failed to create {}", picture_dir.display()))?;
             let picture_file_name = ext_picture_file_name(&picture.content);
             let picture_path = picture_dir.join(picture_file_name);
-            fs::write(&picture_path, &picture.content)
+            context
+                .output
+                .write(&picture_path, &picture.content)
                 .with_context(|| format!("failed to write {}", picture_path.display()))?;
-            write_source_xml_file(
+            context.output.write_xml(
                 &xml_path,
                 format_ext_picture_xml(
                     picture_file_name,
@@ -2339,10 +2355,14 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
         SourceAssetKind::StandaloneContent => {
             let xml = extract_standalone_content_xml(bytes, context.standalone_refs).with_context(
@@ -2355,10 +2375,14 @@ fn write_source_asset_inner(
             )?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
         SourceAssetKind::StyleBody => {
             let xml = extract_style_body_xml(
@@ -2375,10 +2399,14 @@ fn write_source_asset_inner(
                 })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
         SourceAssetKind::Form { owner_reference } => {
             let form_xml_started = Instant::now();
@@ -2500,10 +2528,14 @@ fn write_source_asset_inner(
                     let form_write_started = Instant::now();
                     let path = output_dir.join(&asset.primary_path);
                     if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent)
+                        context
+                            .output
+                            .create_dir_all(parent)
                             .with_context(|| format!("failed to create {}", parent.display()))?;
                     }
-                    write_source_xml_file(&path, xml, context.source_version)?;
+                    context
+                        .output
+                        .write_xml(&path, xml, context.source_version)?;
                     timings.source_asset_form_write_cpu_ms += elapsed_ms(form_write_started);
 
                     let form_items_started = Instant::now();
@@ -2528,11 +2560,13 @@ fn write_source_asset_inner(
                             .join(sanitize_source_path_segment(&item_asset.item_name))
                             .join(&item_asset.file_name);
                         if let Some(parent) = item_path.parent() {
-                            fs::create_dir_all(parent).with_context(|| {
+                            context.output.create_dir_all(parent).with_context(|| {
                                 format!("failed to create {}", parent.display())
                             })?;
                         }
-                        fs::write(&item_path, &item_asset.content)
+                        context
+                            .output
+                            .write(&item_path, &item_asset.content)
                             .with_context(|| format!("failed to write {}", item_path.display()))?;
                     }
                     timings.source_asset_form_items_cpu_ms += elapsed_ms(form_items_started);
@@ -2577,32 +2611,42 @@ fn write_source_asset_inner(
             })?;
             let xml_path = output_dir.join(&asset.primary_path);
             if let Some(parent) = xml_path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
 
             let help_dir = output_dir.join(asset.primary_path.with_extension(""));
-            fs::create_dir_all(&help_dir)
+            context
+                .output
+                .create_dir_all(&help_dir)
                 .with_context(|| format!("failed to create {}", help_dir.display()))?;
             for page in &help.pages {
                 let page_path = help_dir.join(&page.file_name);
-                fs::write(
-                    &page_path,
-                    rewrite_help_links(&page.content, context.help_refs),
-                )
-                .with_context(|| format!("failed to write {}", page_path.display()))?;
+                context
+                    .output
+                    .write(
+                        &page_path,
+                        rewrite_help_links(&page.content, context.help_refs),
+                    )
+                    .with_context(|| format!("failed to write {}", page_path.display()))?;
             }
             if !help.files.is_empty() {
                 let files_dir = help_dir.join("_files");
-                fs::create_dir_all(&files_dir)
+                context
+                    .output
+                    .create_dir_all(&files_dir)
                     .with_context(|| format!("failed to create {}", files_dir.display()))?;
                 for file in &help.files {
                     let file_path = files_dir.join(&file.file_name);
-                    fs::write(&file_path, &file.content)
+                    context
+                        .output
+                        .write(&file_path, &file.content)
                         .with_context(|| format!("failed to write {}", file_path.display()))?;
                 }
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &xml_path,
                 format_help_xml(&help.pages),
                 context.source_version,
@@ -2656,10 +2700,14 @@ fn write_source_asset_inner(
             };
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, content, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, content, context.source_version)?;
         }
         SourceAssetKind::WsDefinition => {
             let inflated = inflate_raw_deflate(bytes).with_context(|| {
@@ -2684,9 +2732,13 @@ fn write_source_asset_inner(
                     )
                 })?
                 .to_path_buf();
-            fs::create_dir_all(&directory)
+            context
+                .output
+                .create_dir_all(&directory)
                 .with_context(|| format!("failed to create {}", directory.display()))?;
-            write_source_xml_file(&path, members.definition, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, members.definition, context.source_version)?;
             // Imported schemas travel inside the very same container as the
             // WSDL and are written out verbatim under their own member names
             // -- no BOM, no dialect rewrite. Census over the whole corpus (five
@@ -2697,7 +2749,9 @@ fn write_source_asset_inner(
             // byte-identical to the stored member payload.
             for (member_name, member_bytes) in members.imports {
                 let member_path = directory.join(&member_name);
-                fs::write(&member_path, member_bytes)
+                context
+                    .output
+                    .write(&member_path, member_bytes)
                     .with_context(|| format!("failed to write {}", member_path.display()))?;
             }
         }
@@ -2712,10 +2766,12 @@ fn write_source_asset_inner(
                     })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_home_page_work_area_xml(&work_area, context.source_version),
                 context.source_version,
@@ -2730,10 +2786,12 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_client_application_interface_xml(&interface),
                 context.source_version,
@@ -2760,10 +2818,14 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
         SourceAssetKind::UndeclaredFormType => {
             bail!(
@@ -2784,10 +2846,15 @@ fn write_source_asset_inner(
                 })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            fs::write(&path, cf).with_context(|| format!("failed to write {}", path.display()))?;
+            context
+                .output
+                .write(&path, cf)
+                .with_context(|| format!("failed to write {}", path.display()))?;
         }
         SourceAssetKind::InflatedBinary => {
             let inflated = inflate_raw_deflate(bytes).with_context(|| {
@@ -2798,13 +2865,19 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             if is_xml_path(&asset.primary_path) {
-                write_source_xml_file(&path, inflated, context.source_version)?;
+                context
+                    .output
+                    .write_xml(&path, inflated, context.source_version)?;
             } else {
-                fs::write(&path, inflated)
+                context
+                    .output
+                    .write(&path, inflated)
                     .with_context(|| format!("failed to write {}", path.display()))?;
             }
         }
@@ -2824,13 +2897,19 @@ fn write_source_asset_inner(
             };
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             if is_xml_path(&asset.primary_path) {
-                write_source_xml_file(&path, content, context.source_version)?;
+                context
+                    .output
+                    .write_xml(&path, content, context.source_version)?;
             } else {
-                fs::write(&path, content)
+                context
+                    .output
+                    .write(&path, content)
                     .with_context(|| format!("failed to write {}", path.display()))?;
             }
         }
@@ -2881,10 +2960,14 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
         SourceAssetKind::RoleRights => {
             let rights =
@@ -2897,10 +2980,12 @@ fn write_source_asset_inner(
                     })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_role_rights_xml(&rights),
                 context.source_version,
@@ -2921,10 +3006,12 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_command_interface_xml(&entries),
                 context.source_version,
@@ -2945,10 +3032,12 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_exchange_plan_content_xml(&items),
                 context.source_version,
@@ -2974,10 +3063,12 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 super::additional_indexes::format_additional_indexes_xml(&indexes),
                 context.source_version,
@@ -3000,15 +3091,17 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(
+            context.output.write_xml(
                 &path,
                 format_business_process_flowchart_xml(&flowchart),
                 context.source_version,
             )?;
-            write_graphical_scheme_pictures(&path, &flowchart)?;
+            write_graphical_scheme_pictures(context.output, &path, &flowchart)?;
         }
         SourceAssetKind::TemplateGraphicalScheme => {
             // A standalone `GraphicalSchema` Template body comes in one of
@@ -3034,7 +3127,9 @@ fn write_source_asset_inner(
             })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             let text = std::str::from_utf8(&inflated)
@@ -3055,14 +3150,16 @@ fn write_source_asset_inner(
                         asset.primary_path.display()
                     )
                 })?;
-                write_source_xml_file(
+                context.output.write_xml(
                     &path,
                     format_business_process_flowchart_xml(&flowchart),
                     context.source_version,
                 )?;
-                write_graphical_scheme_pictures(&path, &flowchart)?;
+                write_graphical_scheme_pictures(context.output, &path, &flowchart)?;
             } else {
-                write_source_xml_file(&path, inflated, context.source_version)?;
+                context
+                    .output
+                    .write_xml(&path, inflated, context.source_version)?;
             }
         }
         SourceAssetKind::MoxelSpreadsheet => {
@@ -3074,10 +3171,14 @@ fn write_source_asset_inner(
             )?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
+                context
+                    .output
+                    .create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            write_source_xml_file(&path, xml, context.source_version)?;
+            context
+                .output
+                .write_xml(&path, xml, context.source_version)?;
         }
     }
 
@@ -3101,6 +3202,7 @@ fn write_source_asset_inner(
 /// Template/Items/Декорация11/Picture.png` and the 69 other inline pictures
 /// of that corpus.
 fn write_graphical_scheme_pictures(
+    output: &OutputWriter,
     scheme_path: &Path,
     flowchart: &BusinessProcessFlowchart,
 ) -> Result<()> {
@@ -3117,10 +3219,13 @@ fn write_graphical_scheme_pictures(
             );
         }
         let directory = stem.join("Items").join(&item_name);
-        fs::create_dir_all(&directory)
+        output
+            .create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let file = directory.join(&file_name);
-        fs::write(&file, &data).with_context(|| format!("failed to write {}", file.display()))?;
+        output
+            .write(&file, &data)
+            .with_context(|| format!("failed to write {}", file.display()))?;
     }
     Ok(())
 }

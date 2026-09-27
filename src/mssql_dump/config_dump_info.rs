@@ -135,6 +135,7 @@ pub(super) enum ConfigDumpInfoPartialInventoryPolicy {
 /// Returns whether `ConfigDumpInfo.xml` was written (`false` = skipped under
 /// [`ConfigDumpInfoPartialInventoryPolicy::Skip`]).
 pub(super) fn write_config_dump_info(
+    output: &OutputWriter,
     output_dir: &Path,
     source_version: InfobaseConfigSourceVersion,
     versions_blob: &[u8],
@@ -283,7 +284,9 @@ pub(super) fn write_config_dump_info(
     metadata.sort_by(|left, right| left.name.cmp(&right.name));
     let xml = format_config_dump_info_xml(source_version, &metadata);
     let path = output_dir.join(CONFIG_DUMP_INFO_FILE_NAME);
-    fs::write(&path, xml).with_context(|| format!("failed to write {}", path.display()))?;
+    output
+        .write(&path, xml)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
 }
 
