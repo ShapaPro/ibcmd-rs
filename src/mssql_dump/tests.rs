@@ -16566,101 +16566,93 @@ fn extracts_button_group_compact_representation_from_layout_code() {
     assert!(xml.contains("<Representation>Compact</Representation>"));
 }
 
+/// The `<CommandName>` the exported XML gives the button named `button`.
+fn exported_button_command_name<'a>(xml: &'a str, button: &str) -> Option<&'a str> {
+    let start = xml.find(&format!("<Button name=\"{button}\" "))?;
+    let element = &xml[start..];
+    let element = &element[..element.find("</Button>")?];
+    let value = &element[element.find("<CommandName>")? + "<CommandName>".len()..];
+    Some(&value[..value.find("</CommandName>")?])
+}
+
+/// A button record `{<item id>,<standard command>}` names the item that owns
+/// the command, and the owner is resolved from the table records of the body
+/// itself (`FormChildItemIndexes::standard_command_owner_name_by_id`), not from
+/// a table-name map handed in beside one button. The fixtures used to be those
+/// buttons alone, cut to 32 of their 52 members, with one table
+/// named for all of them -- including `ФормаСнятьФлажки`, whose `{8,...}`
+/// names item 8. These are the platform's own bodies (BSP 3.1); the native
+/// export writes every command asserted here.
 #[test]
 fn extracts_table_standard_command_names_from_kind1_buttons() {
-    let table_name_by_id = BTreeMap::from([("1".to_string(), "МобильныеУстройства".to_string())]);
+    // Table `Получатели` is item 1; its buttons are `{1,2bbe4e12-...}`,
+    // `{1,58b2a785-...}` and `{1,49602716-...}`.
+    let resend = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/cc8cdc82-ee97-4426-b889-95d2286af37c.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    for (button, command) in [
+        (
+            "СортироватьСписокПоВозрастанию",
+            "Form.Item.Получатели.StandardCommand.SortListAsc",
+        ),
+        (
+            "СортироватьСписокПоУбыванию",
+            "Form.Item.Получатели.StandardCommand.SortListDesc",
+        ),
+        (
+            "ВывестиСписок",
+            "Form.Item.Получатели.StandardCommand.OutputList",
+        ),
+    ] {
+        assert_eq!(
+            exported_button_command_name(&resend, button),
+            Some(command),
+            "{button}"
+        );
+    }
 
-    let sort_asc = parse_form_child_item(
-            r#"{31,{25,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваСортироватьСписокПоВозрастанию",{1,0},1,{1,2bbe4e12-06d2-409b-a972-eea585125d83},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+    // `ФормаСнятьФлажки` is `{8,5048cc44-...}`: item 8 is the table
+    // `ДоступныеОбъектыДляИзменения`.
+    let kinds = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/51f9aff4-71da-4b1b-b48b-04122a17d855.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
     assert_eq!(
-        sort_asc.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.SortListAsc")
+        exported_button_command_name(&kinds, "ФормаСнятьФлажки"),
+        Some("Form.Item.ДоступныеОбъектыДляИзменения.StandardCommand.UncheckAll")
     );
 
-    let sort_desc = parse_form_child_item(
-            r#"{31,{27,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваСортироватьСписокПоУбыванию",{1,0},1,{1,58b2a785-23f6-4b0e-a324-9a1323285595},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        sort_desc.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.SortListDesc")
-    );
-
-    let output_list = parse_form_child_item(
-            r#"{31,{65,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваВывестиСписокКМ",{1,0},1,{1,49602716-fea6-497f-8047-726404038857},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        output_list.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.OutputList")
-    );
-
-    let uncheck_all = parse_form_child_item(
-            r#"{31,{31,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"ФормаСнятьФлажки",{1,0},1,{8,5048cc44-702b-44e3-8445-9af75c02724d},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        uncheck_all.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.UncheckAll")
-    );
-
-    let table_name_by_id = BTreeMap::from([("1".to_string(), "СписокКолонок".to_string())]);
-
-    let move_up = parse_form_child_item(
-            r#"{31,{33,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"СписокКолонокПереместитьВверх",{1,0},1,{1,37740564-9e86-44a0-bea9-3f485a5a3f91},{0},3,0,0,0,2,1,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        move_up.command_name.as_deref(),
-        Some("Form.Item.СписокКолонок.StandardCommand.MoveUp")
-    );
-
-    let move_down = parse_form_child_item(
-            r#"{31,{35,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"СписокКолонокПереместитьВниз",{1,0},1,{1,fa51b106-eae6-44c7-8054-76cbb3100603},{0},3,0,0,0,2,1,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        move_down.command_name.as_deref(),
-        Some("Form.Item.СписокКолонок.StandardCommand.MoveDown")
-    );
+    // Table `Список` is item 1: `{1,37740564-...}` and `{1,fa51b106-...}`.
+    let checklist = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/d2762764-b5c0-4aeb-8e89-3371972f22d8.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    for (button, command) in [
+        (
+            "СписокПереместитьВверх",
+            "Form.Item.Список.StandardCommand.MoveUp",
+        ),
+        (
+            "СписокПереместитьВниз",
+            "Form.Item.Список.StandardCommand.MoveDown",
+        ),
+    ] {
+        assert_eq!(
+            exported_button_command_name(&checklist, button),
+            Some(command),
+            "{button}"
+        );
+    }
 }
 
 #[test]
