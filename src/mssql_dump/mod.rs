@@ -4235,35 +4235,33 @@ fn dump_table_rows_streamed(
     let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
         model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
     });
+    // The shadow check runs the legacy converters too, so it keeps what
+    // they read.
     let modelled = |kinds: &[&str]| {
-        model_plan
-            .as_ref()
-            .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
+        !model_export::shadow()
+            && model_plan
+                .as_ref()
+                .is_some_and(|plan| plan.models_kinds(kinds, &index_metadata_texts))
     };
     // Who reads what: a recalculation's own XML the recalculation index, a
     // calculation register's the root recalculation index, a functional
-    // option's the functional option index; the predefined items of the
-    // descriptors' own values are read by these kinds' converters.
+    // option's the functional option index, and nothing else reads them.
+    // (The predefined items of the descriptors' own values stay: besides the
+    // descriptor converters, flowcharts and graphical schemes read them
+    // through the metadata object references.)
     let skip_recalculation_refs = modelled(&["Recalculation"]);
     let skip_root_recalculation_refs = modelled(&["CalculationRegister"]);
     let skip_functional_option_refs = modelled(&["FunctionalOption"]);
-    let skip_value_predefined_items = modelled(&[
-        "Catalog",
-        "DataProcessor",
-        "Document",
-        "Report",
-        "ChartOfCharacteristicTypes",
-        "ChartOfAccounts",
-        "ChartOfCalculationTypes",
-        "BusinessProcess",
-        "Task",
-        "InformationRegister",
-    ]);
     if let Some(plan) = &model_plan {
         eprintln!(
-            "model export: every descriptor through the model: {}; still legacy by kind: {:?};              left out: recalculation refs {skip_recalculation_refs}, root recalculation refs              {skip_root_recalculation_refs}, functional option refs {skip_functional_option_refs},              value predefined items {skip_value_predefined_items}",
+            "model export: every descriptor through the model: {}; still legacy by kind: {:?}; \
+             left out: recalculation refs {}, root recalculation refs {}, functional option \
+             refs {}",
             plan.models_every_descriptor(&index_metadata_texts),
-            plan.legacy_descriptor_kinds(&index_metadata_texts)
+            plan.legacy_descriptor_kinds(&index_metadata_texts),
+            skip_recalculation_refs,
+            skip_root_recalculation_refs,
+            skip_functional_option_refs,
         );
     }
     timings.prepare_model_index_ms += elapsed_ms(plan_started);
@@ -4272,6 +4270,7 @@ fn dump_table_rows_streamed(
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
+    let index_part_started = Instant::now();
     let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
@@ -4282,12 +4281,15 @@ fn dump_table_rows_streamed(
     } else {
         BTreeMap::new()
     };
+    timings.prepare_recalculation_refs_ms += elapsed_ms(index_part_started);
 
+    let index_part_started = Instant::now();
     let module_text_paths = if extract_module_text {
         module_body_paths_from_texts(&write_index_rows, &index_metadata_texts)
     } else {
         BTreeMap::new()
     };
+    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let source_reference_needs = selected_configuration_index_needs
         .or(selected_metadata_index_needs)
@@ -4399,11 +4401,14 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     let index_part_started = Instant::now();
+    let field_part_started = Instant::now();
     let field_refs = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_reference_index_from_texts(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
+    timings.prepare_field_names_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let field_type_refs = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_metadata_field_type_reference_index_from_texts(&index_metadata_texts, &type_index)
@@ -4411,12 +4416,16 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         },
     );
+    timings.prepare_field_types_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     // One index, two readers -- see the sibling construction site.
     let type_set_leaves = if extract_metadata_xml {
         build_metadata_type_set_leaf_index_from_texts(&index_metadata_texts, &type_index)
     } else {
         MetadataTypeSetLeafIndex::new()
     };
+    timings.prepare_type_set_leaves_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let information_register_field_refs =
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_field_reference_index_from_texts(
@@ -4427,6 +4436,8 @@ fn dump_table_rows_streamed(
         } else {
             BTreeMap::new()
         };
+    timings.prepare_register_fields_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let information_register_master_dimensions = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_master_dimension_index_from_texts(
@@ -4440,6 +4451,8 @@ fn dump_table_rows_streamed(
             InformationRegisterMasterDimensionIndex::new()
         },
     );
+    timings.prepare_master_dimensions_ms += elapsed_ms(field_part_started);
+    let field_part_started = Instant::now();
     let metadata_field_declarations = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_declaration_index_from_texts(
             &index_metadata_texts,
@@ -4450,6 +4463,7 @@ fn dump_table_rows_streamed(
     } else {
         MetadataFieldDeclarationIndex::default()
     };
+    timings.prepare_field_declarations_ms += elapsed_ms(field_part_started);
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
     let index_part_started = Instant::now();
     let functional_option_refs =
@@ -4592,7 +4606,7 @@ fn dump_table_rows_streamed(
     timings.prepare_body_owners_ms += elapsed_ms(index_part_started);
     let needs_predefined_item_refs =
         predefined_data_needs_item_references(&file_names, &body_owners);
-    let predefined_item_refs = if needs_predefined_item_refs {
+    let (predefined_item_refs, all_predefined_rows) = if needs_predefined_item_refs {
         let predefined_body_file_names = predefined_data_body_file_names(&body_owners);
         let metadata_fetch_started = Instant::now();
         let rows = if predefined_body_file_names.is_empty() {
@@ -4614,15 +4628,22 @@ fn dump_table_rows_streamed(
         if !predefined_body_file_names.is_empty() {
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
         }
-        build_predefined_item_reference_index(&rows, &body_owners, &type_index, &object_refs)?
+        let refs =
+            build_predefined_item_reference_index(&rows, &body_owners, &type_index, &object_refs)?;
+        (refs, Some(rows))
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), None)
     };
+    let value_items_started = Instant::now();
+    // When the index above covers every owner that stores predefined data,
+    // it already holds every owner-qualified item the metadata values and
+    // flowcharts could name, built the same way: the value owners' subset
+    // below would only repeat its entries into `metadata_object_refs`
+    // (owner-qualified keys do not depend on which other owners are read).
+    let items_covered = all_predefined_rows.is_some();
     let metadata_value_owner_file_names =
         streamed_metadata_value_owner_file_names(&index_metadata_texts, &selected_file_names);
-    // The predefined items the descriptors' own values name; flowcharts add
-    // theirs below.
-    let mut owner_ids = if skip_value_predefined_items {
+    let mut owner_ids = if items_covered {
         BTreeSet::new()
     } else {
         selected_metadata_predefined_owner_ids(
@@ -4633,7 +4654,11 @@ fn dump_table_rows_streamed(
             &body_owners,
         )
     };
-    let flowchart_file_names = business_process_flowchart_file_names(&index_metadata_texts);
+    let flowchart_file_names = if items_covered {
+        BTreeSet::new()
+    } else {
+        business_process_flowchart_file_names(&index_metadata_texts)
+    };
     if !flowchart_file_names.is_empty() {
         let flowchart_fetch_started = Instant::now();
         let flowchart_rows = fetch_config_rows_bcp(
@@ -4688,6 +4713,7 @@ fn dump_table_rows_streamed(
         &type_index,
         &object_refs,
     )?;
+    timings.prepare_value_predefined_items_ms += elapsed_ms(value_items_started);
     let configuration_root_child_order =
         build_configuration_root_child_order_from_texts(&index_metadata_texts);
     // A form names a predefined item of *any* object, not only of the objects
@@ -4704,7 +4730,9 @@ fn dump_table_rows_streamed(
     // them, so all 19 of those references were written as the identifier pair
     // the platform keeps only for a reference it cannot name.
     let form_predefined_file_names = predefined_data_body_file_names(&body_owners);
-    let form_predefined_rows = if form_predefined_file_names
+    let form_predefined_rows = if let Some(all_rows) = all_predefined_rows {
+        all_rows
+    } else if form_predefined_file_names
         .iter()
         .all(|name| body_file_names.contains(name))
     {

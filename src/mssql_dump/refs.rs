@@ -489,21 +489,11 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
         .filter(|reference| reference.split('.').count() == 2)
         .map(|reference| reference.to_lowercase())
         .collect();
-    const DATA_FIELD_KINDS: &[&str] = &[
-        "Attribute",
-        "TabularSection",
-        "Dimension",
-        "Resource",
-        "AddressingAttribute",
-        "AccountingFlag",
-        "ExtDimensionAccountingFlag",
-        "EnumValue",
-    ];
     for reference in object_refs.values() {
         let parts = reference.split('.').collect::<Vec<_>>();
         if parts.len() == 2 {
             index.data_fields.entry(reference.clone()).or_default();
-        } else if parts.len() == 4 && DATA_FIELD_KINDS.contains(&parts[2]) {
+        } else if parts.len() == 4 && DECLARED_DATA_FIELD_KINDS.contains(&parts[2]) {
             index
                 .data_fields
                 .entry(format!("{}.{}", parts[0], parts[1]))
@@ -511,122 +501,176 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
                 .insert(parts[3].to_lowercase());
         }
     }
+    // Every row is read on its own, in parallel; the index is filled in row
+    // order, so a later row still wins a shared key exactly as the
+    // sequential walk had it.
+    let per_row = |row: &MetadataTextRow| field_declarations_of_row(row, object_refs, type_index);
+    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    // The type sides of all rows first, then the declarations: the two
+    // walks the sequential builder made, in its order.
+    for row in &found {
+        for (table, field, owner) in &row.field_types {
+            index
+                .field_types
+                .entry(table.clone())
+                .or_default()
+                .insert(field.clone(), owner.clone());
+        }
+    }
+    for row in found {
+        match row.declared {
+            Some(RowFieldDeclaration::Table(table, declared)) => {
+                index.tables.insert(table, declared);
+            }
+            Some(RowFieldDeclaration::CommonAttribute(name, content)) => {
+                index.common_attributes.insert(name, content);
+            }
+            Some(RowFieldDeclaration::Constant(uuid, declared)) => {
+                index.constants.insert(uuid, declared);
+            }
+            Some(RowFieldDeclaration::DocumentJournal(journal, documents)) => {
+                index.document_journal_documents.insert(journal, documents);
+            }
+            None => {}
+        }
+        for (owner, field) in row.password_fields {
+            index.password_fields.entry(owner).or_default().insert(field);
+        }
+    }
+    index
+}
+
+const DECLARED_DATA_FIELD_KINDS: &[&str] = &[
+    "Attribute",
+    "TabularSection",
+    "Dimension",
+    "Resource",
+    "AddressingAttribute",
+    "AccountingFlag",
+    "ExtDimensionAccountingFlag",
+    "EnumValue",
+];
+
+/// What one metadata row declares for [`MetadataFieldDeclarationIndex`].
+struct RowFieldDeclarations {
+    /// (owning table, folded field name, owner its one reference type names).
+    field_types: Vec<(String, String, String)>,
+    declared: Option<RowFieldDeclaration>,
+    /// (owning table, folded field name) of password-mode fields.
+    password_fields: Vec<(String, String)>,
+}
+
+enum RowFieldDeclaration {
+    Table(String, MetadataTableStandardAttributes),
+    CommonAttribute(String, MetadataCommonAttributeContent),
+    Constant(String, MetadataConstantDeclaration),
+    DocumentJournal(String, BTreeSet<String>),
+}
+
+fn field_declarations_of_row(
+    row: &MetadataTextRow,
+    object_refs: &BTreeMap<String, String>,
+    type_index: &BTreeMap<String, String>,
+) -> RowFieldDeclarations {
+    let mut out = RowFieldDeclarations {
+        field_types: Vec::new(),
+        declared: None,
+        password_fields: Vec::new(),
+    };
     // The type side of the same field names: for every top-level data field
     // that declares exactly one reference type, the object that type names.
     // Read from the same header walk the field-type index is built from, and
     // keyed the way the query side asks -- by table and field name rather
     // than by the child's uuid.
-    for row in rows {
-        for (header, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-        {
-            let Some(reference) = object_refs.get(&header.uuid) else {
-                continue;
-            };
-            let parts = reference.split('.').collect::<Vec<_>>();
-            if parts.len() != 4 || !DATA_FIELD_KINDS.contains(&parts[2]) {
-                continue;
-            }
-            let value_types = parse_metadata_child_value_types_with_builtin(
-                &row.text,
-                marker_start,
-                &header.uuid,
-                type_index,
-                builtin_type_reference,
-            );
-            let [ConstantValueType::Reference {
-                reference: type_reference,
-            }] = value_types.as_slice()
-            else {
-                continue;
-            };
-            let Some(owner) =
-                parse_generated_metadata_reference_owner(type_reference).map(|owner| {
-                    let owner = owner.owner_reference();
-                    owner
-                })
-            else {
-                continue;
-            };
-            index
-                .field_types
-                .entry(format!("{}.{}", parts[0], parts[1]))
-                .or_default()
-                .insert(parts[3].to_lowercase(), owner);
-        }
-    }
-    for row in rows {
-        let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
+    for (header, marker_start) in
+        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
+    {
+        let Some(reference) = object_refs.get(&header.uuid) else {
             continue;
         };
-        match kind {
-            "Catalog" => {
-                if let Some(declared) = catalog_declared_standard_attributes(&row.text, header) {
-                    index
-                        .tables
-                        .insert(format!("Catalog.{}", header.name), declared);
-                }
-            }
-            "InformationRegister" => {
-                if let Some(declared) =
-                    information_register_declared_standard_attributes(&row.text, header)
-                {
-                    index
-                        .tables
-                        .insert(format!("InformationRegister.{}", header.name), declared);
-                }
-            }
-            "CommonAttribute" => {
-                if let Some(content) = common_attribute_declared_content(&row.text, object_refs) {
-                    index.common_attributes.insert(header.name.clone(), content);
-                }
-            }
-            "Constant" => {
-                if let Some(declared) = constant_declared_use_always(&row.text, &header.uuid) {
-                    index.constants.insert(header.uuid.clone(), declared);
-                }
-            }
-            "DocumentJournal" => {
-                if let Some(documents) =
-                    document_journal_registered_documents_from_text(&row.text, header, object_refs)
-                {
-                    index.document_journal_documents.insert(
+        let parts = reference.split('.').collect::<Vec<_>>();
+        if parts.len() != 4 || !DECLARED_DATA_FIELD_KINDS.contains(&parts[2]) {
+            continue;
+        }
+        let value_types = parse_metadata_child_value_types_with_builtin(
+            &row.text,
+            marker_start,
+            &header.uuid,
+            type_index,
+            builtin_type_reference,
+        );
+        let [ConstantValueType::Reference {
+            reference: type_reference,
+        }] = value_types.as_slice()
+        else {
+            continue;
+        };
+        let Some(owner) = parse_generated_metadata_reference_owner(type_reference)
+            .map(|owner| owner.owner_reference())
+        else {
+            continue;
+        };
+        out.field_types.push((
+            format!("{}.{}", parts[0], parts[1]),
+            parts[3].to_lowercase(),
+            owner,
+        ));
+    }
+    let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
+        return out;
+    };
+    out.declared = match kind {
+        "Catalog" => catalog_declared_standard_attributes(&row.text, header).map(|declared| {
+            RowFieldDeclaration::Table(format!("Catalog.{}", header.name), declared)
+        }),
+        "InformationRegister" => information_register_declared_standard_attributes(
+            &row.text, header,
+        )
+        .map(|declared| {
+            RowFieldDeclaration::Table(format!("InformationRegister.{}", header.name), declared)
+        }),
+        "CommonAttribute" => common_attribute_declared_content(&row.text, object_refs)
+            .map(|content| RowFieldDeclaration::CommonAttribute(header.name.clone(), content)),
+        "Constant" => constant_declared_use_always(&row.text, &header.uuid)
+            .map(|declared| RowFieldDeclaration::Constant(header.uuid.clone(), declared)),
+        "DocumentJournal" => {
+            document_journal_registered_documents_from_text(&row.text, header, object_refs).map(
+                |documents| {
+                    RowFieldDeclaration::DocumentJournal(
                         format!("DocumentJournal.{}", header.name),
                         documents.into_iter().collect(),
-                    );
-                }
-            }
-            _ => {}
+                    )
+                },
+            )
         }
-        let owner_reference = format!("{kind}.{}", header.name);
-        let child_prefix = format!("{owner_reference}.");
-        for (child, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
+        _ => None,
+    };
+    let owner_reference = format!("{kind}.{}", header.name);
+    let child_prefix = format!("{owner_reference}.");
+    for (child, marker_start) in
+        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
+    {
+        let Some(reference) = object_refs.get(&child.uuid) else {
+            continue;
+        };
+        let Some(child_reference) = reference.strip_prefix(&child_prefix) else {
+            continue;
+        };
+        let Some((_child_kind, child_name)) = child_reference.split_once('.') else {
+            continue;
+        };
+        if child_name.is_empty() || child_name.contains('.') {
+            continue;
+        }
+        if metadata_child_declares_password_mode(&row.text, marker_start, &child.uuid)
+            == Some(true)
         {
-            let Some(reference) = object_refs.get(&child.uuid) else {
-                continue;
-            };
-            let Some(child_reference) = reference.strip_prefix(&child_prefix) else {
-                continue;
-            };
-            let Some((_child_kind, child_name)) = child_reference.split_once('.') else {
-                continue;
-            };
-            if child_name.is_empty() || child_name.contains('.') {
-                continue;
-            }
-            if metadata_child_declares_password_mode(&row.text, marker_start, &child.uuid)
-                == Some(true)
-            {
-                index
-                    .password_fields
-                    .entry(owner_reference.clone())
-                    .or_default()
-                    .insert(child_name.to_lowercase());
-            }
+            out.password_fields
+                .push((owner_reference.clone(), child_name.to_lowercase()));
         }
     }
-    index
+    out
 }
 
 /// Reads only the registered-document declaration from a document-journal

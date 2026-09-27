@@ -15,11 +15,11 @@
 use super::*;
 use crate::metadata_model::brace::parse_row;
 use crate::metadata_model::export::names::{
-    IndexComparison, compare, has_decoder, has_names, may_own_objects, owned_objects,
-    predefined_items, predefined_suffix, root_kinds,
+    IndexComparison, compare, has_decoder, has_names, has_owned_names, may_own_objects,
+    owned_objects, predefined_items, predefined_suffix, root_kinds,
 };
 use crate::metadata_model::export::{
-    ExportContext, NameIndex, decode_object, object_names, write_document,
+    ExportContext, NameIndex, decode_object, object_names, owned_object_names, write_document,
 };
 use crate::metadata_model::index::ConfigIndex;
 use crate::metadata_model::objects::parts::Compat;
@@ -365,12 +365,40 @@ impl ModelExport {
             .map(|row| (row.file_name.as_str(), row))
             .collect::<HashMap<_, _>>();
         for (owner, kind, uuid) in &plan.owned {
-            let (Some(owner_name), Some(header)) = (
-                index.name(owner).map(str::to_string),
-                texts_by_name
+            let Some(owner_name) = index.name(owner).map(str::to_string) else {
+                continue;
+            };
+            // A kind that reads its owned rows gives the object, its children
+            // and its generated types; the others their own name.
+            if has_owned_names(kind) {
+                let names = raw_by_name
                     .get(uuid.as_str())
-                    .and_then(|row| row.header.as_ref()),
-            ) else {
+                    .ok_or_else(|| anyhow!("no stored row"))
+                    .and_then(|raw| raw_row_text(raw))
+                    .and_then(|text| parse_row(&text))
+                    .and_then(|tree| owned_object_names(kind, &tree, &owner_name));
+                match names {
+                    Ok(names) => {
+                        index.set_name(&names.uuid, &names.full_name);
+                        index.add(&names);
+                        *report.rows_by_kind.entry(kind.to_string()).or_default() += 1;
+                        report.owned_names += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        let line = format!("{error:#}");
+                        let line = line.lines().next().unwrap_or_default();
+                        *report
+                            .failures
+                            .entry(format!("{kind}: {line}"))
+                            .or_default() += 1;
+                    }
+                }
+            }
+            let Some(header) = texts_by_name
+                .get(uuid.as_str())
+                .and_then(|row| row.header.as_ref())
+            else {
                 continue;
             };
             index.set_name(uuid, &format!("{owner_name}.{kind}.{}", header.name));
