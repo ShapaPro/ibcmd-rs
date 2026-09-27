@@ -279,6 +279,14 @@ pub(crate) fn extract_form_body_xml(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let body = crate::compiler::bodies::form::decode_compatible_managed_form(bytes).ok()?;
+    // A platform 8.5 body is read through its 8.3.27 down-conversion, the way
+    // the source export reads one (`source_assets`). What the members 8.5
+    // appends say is only spelled by the 2.21 writer, which this 2.20 reading
+    // is not.
+    if super::form_v85::is_v85_form_body(body.parsed()) {
+        let (converted, _) = super::form_v85::down_convert_v85_form_body(body.parsed()).ok()?;
+        return extract_form_body_xml_from_body(&converted, object_refs, object_refs);
+    }
     extract_form_body_xml_from_body(body.parsed(), object_refs, object_refs)
 }
 
