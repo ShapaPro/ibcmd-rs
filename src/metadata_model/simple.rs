@@ -5,6 +5,9 @@
 //! Every row is `{1,<payload>,0}` (or, for objects with child collections,
 //! `{1,<payload>,<collection count>,<collection>...}`).
 
+#[path = "simple_export.rs"]
+pub(crate) mod export;
+
 use anyhow::{Result, anyhow, bail};
 
 use super::attribute::{attribute_body, bool_prop, localized_prop, typed_header};

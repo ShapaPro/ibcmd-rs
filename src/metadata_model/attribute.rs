@@ -39,6 +39,17 @@ use super::xml::Element;
 use super::{DescriptorContext, localized, md_base, native_text, parse_bool};
 use crate::brace_list;
 
+#[path = "attribute_export.rs"]
+pub(crate) mod export;
+
+// The stored codes of the body's enumerations, read by both directions.
+pub(crate) const CHOICE_FOLDERS_AND_ITEMS: &[(&str, i64)] =
+    &[("Items", 0), ("Folders", 1), ("FoldersAndItems", 2)];
+pub(crate) const QUICK_CHOICE: &[(&str, i64)] = &[("DontUse", 0), ("Use", 1), ("Auto", 2)];
+pub(crate) const FILL_CHECKING: &[(&str, i64)] = &[("DontCheck", 0), ("ShowError", 1)];
+pub(crate) const CREATE_ON_INPUT: &[(&str, i64)] = &[("Auto", 0), ("DontUse", 1), ("Use", 2)];
+pub(crate) const CHOICE_HISTORY_ON_INPUT: &[(&str, i64)] = &[("Auto", 0), ("DontUse", 1)];
+
 /// `{2,<md_base>,<type pattern>}`.
 pub fn typed_header(uuid: &str, properties: &Element, context: &DescriptorContext) -> Result<Brace> {
     Ok(brace_list![
@@ -122,52 +133,27 @@ fn enumerated(value: Option<&str>, name: &str, table: &[(&str, i64)], absent: i6
 
 /// `DontCheck` 0, `ShowError` 1.
 pub fn fill_checking(value: Option<&str>) -> Result<Brace> {
-    enumerated(
-        value,
-        "FillChecking",
-        &[("DontCheck", 0), ("ShowError", 1)],
-        0,
-    )
+    enumerated(value, "FillChecking", FILL_CHECKING, 0)
 }
 
 /// `DontUse` 0, `Use` 1, `Auto` 2.
 pub fn quick_choice(value: Option<&str>) -> Result<Brace> {
-    enumerated(
-        value,
-        "QuickChoice",
-        &[("DontUse", 0), ("Use", 1), ("Auto", 2)],
-        2,
-    )
+    enumerated(value, "QuickChoice", QUICK_CHOICE, 2)
 }
 
 /// `Auto` 0, `DontUse` 1, `Use` 2.
 pub fn create_on_input(value: Option<&str>) -> Result<Brace> {
-    enumerated(
-        value,
-        "CreateOnInput",
-        &[("Auto", 0), ("DontUse", 1), ("Use", 2)],
-        0,
-    )
+    enumerated(value, "CreateOnInput", CREATE_ON_INPUT, 0)
 }
 
 /// `Auto` 0, `DontUse` 1.
 pub fn choice_history_on_input(value: Option<&str>) -> Result<Brace> {
-    enumerated(
-        value,
-        "ChoiceHistoryOnInput",
-        &[("Auto", 0), ("DontUse", 1)],
-        0,
-    )
+    enumerated(value, "ChoiceHistoryOnInput", CHOICE_HISTORY_ON_INPUT, 0)
 }
 
 /// `Items` 0, `Folders` 1, `FoldersAndItems` 2.
 pub fn choice_folders_and_items(value: Option<&str>) -> Result<Brace> {
-    enumerated(
-        value,
-        "ChoiceFoldersAndItems",
-        &[("Items", 0), ("Folders", 1), ("FoldersAndItems", 2)],
-        0,
-    )
+    enumerated(value, "ChoiceFoldersAndItems", CHOICE_FOLDERS_AND_ITEMS, 0)
 }
 
 /// `{5006,<count>,"<name>",<segment count>,<segment>...,<0 clear | 1 don't change>,...}`.

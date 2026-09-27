@@ -11,6 +11,11 @@
 //! reference corpora (BSP and ERP УХ, 8.3.27 and 8.5) holds one, so there is
 //! no stored row to measure a layout against.
 
+#[path = "common_export.rs"]
+pub(crate) mod export;
+#[path = "forms_export.rs"]
+pub(crate) mod forms_export;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

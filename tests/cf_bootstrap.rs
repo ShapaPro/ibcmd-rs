@@ -179,7 +179,28 @@ fn checked_in_source_tree_bootstraps_and_exports_without_missing_or_extra_files(
     assert_eq!(report["command"], "export");
     assert_eq!(report["ok"], true);
     assert_eq!(report["export"]["storage"]["failed"], 0);
-    assert_eq!(relative_files(&exported), expected_sources);
+    // A CF exports to XML with its `ConfigDumpInfo.xml`, as the platform's own
+    // dump does: nothing is missing, and the one file beyond the sources is the
+    // version inventory of exactly the objects the CF stores.
+    let mut expected_exported = expected_sources.clone();
+    expected_exported.push("ConfigDumpInfo.xml".to_owned());
+    expected_exported.sort();
+    assert_eq!(relative_files(&exported), expected_exported);
+    let dump_info = fs::read_to_string(exported.join("ConfigDumpInfo.xml")).unwrap();
+    let names = dump_info
+        .split("<Metadata name=\"")
+        .skip(1)
+        .map(|entry| entry.split('"').next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "CommonModule.Portable",
+            "CommonModule.Portable.Module",
+            "Configuration.BootstrapFixture",
+        ],
+        "{dump_info}"
+    );
 }
 
 #[test]

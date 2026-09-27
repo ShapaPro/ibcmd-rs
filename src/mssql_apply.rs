@@ -160,6 +160,7 @@ pub fn apply_source_change(
     } else {
         let report = crate::mssql_dump::dump_config(&MssqlDumpConfigArgs {
             rows_dir: None,
+            model_export: false,
             sqlcmd: args.sqlcmd.clone(),
             bcp_executable: args.bcp_executable.clone(),
             runtime_journal: None,

@@ -16,6 +16,8 @@
 
 #[path = "export_audit.rs"]
 pub mod audit;
+#[path = "export_names.rs"]
+pub mod names;
 #[path = "export_values.rs"]
 pub mod values;
 
@@ -38,8 +40,10 @@ pub struct NameIndex {
     names: HashMap<String, String>,
     /// Generated types: type id -> name (`CatalogRef.X`, `DefinedType.Y`).
     types: HashMap<String, String>,
-    /// Predefined items of catalogs and charts: item uuid -> item name.
-    predefined: HashMap<String, String>,
+    /// Predefined items of catalogs and charts: item uuid -> (owner full
+    /// name, item name). A copied object keeps its items' ids, so one id can
+    /// name items of several owners.
+    predefined: HashMap<String, Vec<(String, String)>>,
 }
 
 impl NameIndex {
@@ -59,7 +63,7 @@ impl NameIndex {
         for generated in index.generated_types.values() {
             types.insert(generated.type_id.clone(), generated.name.clone());
         }
-        let mut predefined = HashMap::new();
+        let mut predefined = HashMap::<String, Vec<(String, String)>>::new();
         for entry in index.objects.values() {
             if !matches!(
                 entry.kind.as_str(),
@@ -78,7 +82,14 @@ impl NameIndex {
             if let Ok(bytes) = fs::read(&path)
                 && let Ok(root) = parse_element_tree(&bytes)
             {
-                collect_predefined(&root, &mut predefined);
+                let mut items = Vec::new();
+                collect_predefined(&root, &mut items);
+                for (uuid, name) in items {
+                    predefined
+                        .entry(uuid)
+                        .or_default()
+                        .push((entry.full_name.clone(), name));
+                }
             }
         }
         Self {
@@ -98,9 +109,25 @@ impl NameIndex {
         self.types.get(type_id).map(String::as_str)
     }
 
-    /// Name of a predefined item by its uuid.
+    /// Name of a predefined item by its uuid; `None` when the uuid names
+    /// items of several owners under different names (use
+    /// [`Self::predefined_in`]).
     pub fn predefined(&self, uuid: &str) -> Option<&str> {
-        self.predefined.get(uuid).map(String::as_str)
+        let items = self.predefined.get(uuid)?;
+        let (_, first) = items.first()?;
+        items
+            .iter()
+            .all(|(_, name)| name == first)
+            .then_some(first.as_str())
+    }
+
+    /// Name of a predefined item of `owner` (`Catalog.X`) by its uuid.
+    pub fn predefined_in(&self, owner: &str, uuid: &str) -> Option<&str> {
+        self.predefined
+            .get(uuid)?
+            .iter()
+            .find(|(item_owner, _)| item_owner == owner)
+            .map(|(_, name)| name.as_str())
     }
 
     /// Adds what one object contributes (for an index built from rows).
@@ -119,12 +146,12 @@ impl NameIndex {
     }
 }
 
-fn collect_predefined(element: &Element, out: &mut HashMap<String, String>) {
+fn collect_predefined(element: &Element, out: &mut Vec<(String, String)>) {
     for item in &element.children {
         if item.name == "Item"
             && let (Some(id), Some(name)) = (item.attr("id"), item.child_text("Name"))
         {
-            out.insert(id.to_ascii_lowercase(), name.to_string());
+            out.push((id.to_ascii_lowercase(), name.to_string()));
         }
         collect_predefined(item, out);
     }
@@ -180,7 +207,44 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::decode(kind, row, context),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::decode(kind, row, context),
         "Configuration" => super::root::export::decode(row, context),
+        "Constant"
+        | "DefinedType"
+        | "SessionParameter"
+        | "CommonAttribute"
+        | "FunctionalOption"
+        | "FunctionalOptionsParameter"
+        | "EventSubscription"
+        | "ScheduledJob"
+        | "SettingsStorage"
+        | "FilterCriterion"
+        | "Language" => super::simple::export::decode(kind, row, context),
+        "CommonModule"
+        | "CommonPicture"
+        | "CommonTemplate"
+        | "CommonCommand"
+        | "CommandGroup"
+        | "Role"
+        | "XDTOPackage"
+        | "StyleItem"
+        | "Style"
+        | "PaletteColor"
+        | "WebService"
+        | "HTTPService"
+        | "WSReference"
+        | "IntegrationService"
+        | "Bot" => super::common::export::decode(kind, row, context),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::decode(kind, row, context)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -199,7 +263,44 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "Report"
         | "DataProcessor"
         | "Enum" => super::objects::export::names(kind, row),
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister"
+        | "Recalculation"
+        | "DocumentJournal"
+        | "Sequence"
+        | "DocumentNumerator" => super::registers::export::names(kind, row),
         "Configuration" => super::root::export::names(row),
+        "Constant"
+        | "DefinedType"
+        | "SessionParameter"
+        | "CommonAttribute"
+        | "FunctionalOption"
+        | "FunctionalOptionsParameter"
+        | "EventSubscription"
+        | "ScheduledJob"
+        | "SettingsStorage"
+        | "FilterCriterion"
+        | "Language" => super::simple::export::names(kind, row),
+        "CommonModule"
+        | "CommonPicture"
+        | "CommonTemplate"
+        | "CommonCommand"
+        | "CommandGroup"
+        | "Role"
+        | "XDTOPackage"
+        | "StyleItem"
+        | "Style"
+        | "PaletteColor"
+        | "WebService"
+        | "HTTPService"
+        | "WSReference"
+        | "IntegrationService"
+        | "Bot" => super::common::export::names(kind, row),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::names(kind, row)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }

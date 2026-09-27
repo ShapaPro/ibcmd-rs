@@ -17,6 +17,8 @@ use anyhow::{Result, anyhow};
 
 #[path = "registers_parts.rs"]
 pub mod parts;
+#[path = "registers_export.rs"]
+pub(crate) mod export;
 
 use self::parts::{
     Generation, StandardAttributes, code, collection, command, generated, item, md_ref_list,

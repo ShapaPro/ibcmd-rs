@@ -8478,6 +8478,47 @@ fn extracts_form_scaling_mode_when_root_child_item_is_pages() {
     assert!(form_xml.contains("<ScalingMode>Compact</ScalingMode>"));
 }
 
+/// The `{59,...}` roots above are platform 8.5 roots: 8.5 keeps every member
+/// of the 8.3.27 root where 8.3.27 puts it, relabels the root and its trailer
+/// tuple `59` and appends twelve members to the trailer. The source export
+/// reads such a body through its 8.3.27 down-conversion (`form_v85`), and so
+/// does `extract_form_body_xml`; read straight, a `59` root has no trailer the
+/// 8.3.27 codec accepts and every trailer property goes missing. These two
+/// bodies are the platform's own (8.5.1.1150, BSP 3.2), and the native 8.5
+/// export writes each asserted property at the form root.
+#[test]
+fn reads_platform_85_form_roots_through_their_down_conversion() {
+    let save_window = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-v85-down-conversion/raw/1415ba25-2477-4d93-b248-95235d5086ed.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let root_end = save_window.find("<AutoCommandBar").unwrap();
+    assert!(
+        save_window[..root_end].contains("<SaveWindowSettings>false</SaveWindowSettings>"),
+        "{save_window}"
+    );
+
+    let long_operation = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-v85-down-conversion/raw/13797e94-aac4-40ef-a64b-a2fba16959b6.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let root_end = long_operation.find("<AutoCommandBar").unwrap();
+    assert!(
+        long_operation[..root_end].contains("<ShowTitle>false</ShowTitle>"),
+        "{long_operation}"
+    );
+    assert!(
+        long_operation[..root_end].contains("<ShowCloseButton>false</ShowCloseButton>"),
+        "{long_operation}"
+    );
+}
+
 #[test]
 fn does_not_extract_form_show_command_bar_from_root_slot() {
     let form_body = deflate_for_test(
@@ -9347,13 +9388,19 @@ fn extracts_form_save_data_in_settings_alongside_a_populated_property_bag() {
     assert!(form_xml.contains("<SaveDataInSettings>UseList</SaveDataInSettings>"));
 }
 
+/// `VerticalScroll` is a root-trailer slot, so the fixture must carry a whole
+/// trailer: the hand-made root this test used to read stopped at the trailer's
+/// `100` and declared neither the 8.3.27 `{50,...}` nor the 8.5 `{59,...}`
+/// trailer tuple, a root no platform writes. This is the platform's own body
+/// (BSP 3.1 `DataProcessors/ИнформационныйЦентр/Forms/ОтображениеСообщений`),
+/// whose native export writes `useIfNecessary`.
 #[test]
 fn extracts_form_vertical_scroll_use_if_necessary_from_tail() {
-    let form_body = deflate_for_test(
-            r#"{4,{59,0,1,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{1,0},0,0,1,1,1,0,0,{0},{0},1,{22,{-1,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,9,"ФормаКоманднаяПанель",{1,0}},1,77ffcc29-7f2d-4223-b22f-19666e7250ba,{48,{1,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,2,"Поле"},"","",0,1,"",2,0,0,0,0,0,3,3,0,0,2,100},"",{0}}"#.as_bytes(),
-        );
+    let form_body = include_bytes!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-root-vertical-scroll/raw/fc98b0f2-7cfb-4a04-8dca-f4a6bd08104f.deflate"
+    );
 
-    let form_xml = extract_form_body_xml(&form_body, &BTreeMap::new()).unwrap();
+    let form_xml = extract_form_body_xml(form_body, &BTreeMap::new()).unwrap();
 
     assert!(form_xml.contains("<VerticalScroll>useIfNecessary</VerticalScroll>"));
 }
@@ -9428,9 +9475,14 @@ fn extracts_form_attributes_and_commands_from_body_tail() {
         );
         text
     };
+    // The command is the 8.3.27 record `{9,...}` of nineteen members, the one
+    // the codec reads. It used to be the 8.5 record `{11,...}` of twenty-one
+    // (nineteen plus two appended), which only the 8.5 down-conversion turns
+    // into the 8.3.27 record, and this root is not an 8.5 root: the command
+    // was refused on its arity and `<Command>` never written.
     let form_body = deflate_for_test(
             with_evidenced_filter(format!(
-                r##"{{4,{{59,0,0,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{{1,0}},0,0,1,1,1,0,1,1,1}},"",{{4,1,{{9,{{1}},0,"Список",{{1,0}},{{"Pattern",{{"#",65abad24-838b-4987-8b35-ed9e2bd4d9c8}}}},{{0,{{0,{{"B",1}},0}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0}},{{0,0}},1,0,0,0,{{0,9,"QueryText",{{"S","ВЫБРАТЬ Ссылка, Наименование ИЗ Справочник.Товары"}},"MainTable",{{"#",fc01b5df-97fe-449b-83d4-218a090e681e,{catalog_uuid}}},"DynamicalDataSelection",{{"B",0}},"ManualQuery",{{"B",1}},"Filter",{{"#",21743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxGaWx0ZXIgeG1sbnM9Imh0dHA6Ly92OC4xYy5ydS84LjEvZGF0YS1jb21wb3NpdGlvbi1zeXN0ZW0vc2V0dGluZ3MiIHhtbG5zOnhzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+ZGZjZWNlOWQtNTA3Ny00NDBiLWI2YjMtNDVhNWNiNDUzOGViPC91c2VyU2V0dGluZ0lEPg0KPC9GaWx0ZXI+}}}},"Order",{{"#",11743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxPcmRlciB4bWxucz0iaHR0cDovL3Y4LjFjLnJ1LzguMS9kYXRhLWNvbXBvc2l0aW9uLXN5c3RlbS9zZXR0aW5ncyIgeG1sbnM6eHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIj4NCgk8aXRlbSB4c2k6dHlwZT0iT3JkZXJJdGVtRmllbGQiPg0KCQk8ZmllbGQ+0J3QsNC40LzQtdC90L7QstCw0L3QuNC10J/QvtC70L3QvtC1PC9maWVsZD4NCgkJPG9yZGVyVHlwZT5Bc2M8L29yZGVyVHlwZT4NCgk8L2l0ZW0+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+ODg2MTk3NjUtY2NiMy00NmM2LWFjNTItMzhlOWM5OTJlYmQ0PC91c2VyU2V0dGluZ0lEPg0KPC9PcmRlcj4=}}}},"ConditionalAppearance",{{"#",31743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxDb25kaXRpb25hbEFwcGVhcmFuY2UgeG1sbnM9Imh0dHA6Ly92OC4xYy5ydS84LjEvZGF0YS1jb21wb3NpdGlvbi1zeXN0ZW0vc2V0dGluZ3MiIHhtbG5zOnhzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+Yjc1ZmVjY2UtOTQyYi00YWVkLWFiYzktZTZhMDJlNDYwZmIzPC91c2VyU2V0dGluZ0lEPg0KPC9Db25kaXRpb25hbEFwcGVhcmFuY2U+}}}},"ItemsViewMode",{{"S","Normal"}},"ItemsUserSettingID",{{"S","911b6018-f537-43e8-a417-da56b22f9aec"}}}},{{0,0}}}}}},{{0,1,{{0,"Счет",{{"Pattern",{{"#",{parameter_type_uuid}}}}},1}}}},{{0,1,{{11,{{2,409b9a53-7f7e-4178-86c1-33176c7c7a7a}},"Выполнить",{{1,1,{{"ru","Выполнить"}}}},{{1,1,{{"ru","Выполнить действие"}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0,0}},{{4,0,{{0}},"",-1,-1,1,0,""}},"Выполнить",3,0,0,{{0,1,{option_uuid}}},1,0,1,0,0,1,0,0}}}},{{0}},0,0}}"##
+                r##"{{4,{{59,0,0,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{{1,0}},0,0,1,1,1,0,1,1,1}},"",{{4,1,{{9,{{1}},0,"Список",{{1,0}},{{"Pattern",{{"#",65abad24-838b-4987-8b35-ed9e2bd4d9c8}}}},{{0,{{0,{{"B",1}},0}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0}},{{0,0}},1,0,0,0,{{0,9,"QueryText",{{"S","ВЫБРАТЬ Ссылка, Наименование ИЗ Справочник.Товары"}},"MainTable",{{"#",fc01b5df-97fe-449b-83d4-218a090e681e,{catalog_uuid}}},"DynamicalDataSelection",{{"B",0}},"ManualQuery",{{"B",1}},"Filter",{{"#",21743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxGaWx0ZXIgeG1sbnM9Imh0dHA6Ly92OC4xYy5ydS84LjEvZGF0YS1jb21wb3NpdGlvbi1zeXN0ZW0vc2V0dGluZ3MiIHhtbG5zOnhzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+ZGZjZWNlOWQtNTA3Ny00NDBiLWI2YjMtNDVhNWNiNDUzOGViPC91c2VyU2V0dGluZ0lEPg0KPC9GaWx0ZXI+}}}},"Order",{{"#",11743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxPcmRlciB4bWxucz0iaHR0cDovL3Y4LjFjLnJ1LzguMS9kYXRhLWNvbXBvc2l0aW9uLXN5c3RlbS9zZXR0aW5ncyIgeG1sbnM6eHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIj4NCgk8aXRlbSB4c2k6dHlwZT0iT3JkZXJJdGVtRmllbGQiPg0KCQk8ZmllbGQ+0J3QsNC40LzQtdC90L7QstCw0L3QuNC10J/QvtC70L3QvtC1PC9maWVsZD4NCgkJPG9yZGVyVHlwZT5Bc2M8L29yZGVyVHlwZT4NCgk8L2l0ZW0+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+ODg2MTk3NjUtY2NiMy00NmM2LWFjNTItMzhlOWM5OTJlYmQ0PC91c2VyU2V0dGluZ0lEPg0KPC9PcmRlcj4=}}}},"ConditionalAppearance",{{"#",31743ff3-2db3-4cfc-9404-90ed8209437f,{{#base64:77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxDb25kaXRpb25hbEFwcGVhcmFuY2UgeG1sbnM9Imh0dHA6Ly92OC4xYy5ydS84LjEvZGF0YS1jb21wb3NpdGlvbi1zeXN0ZW0vc2V0dGluZ3MiIHhtbG5zOnhzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+DQoJPHZpZXdNb2RlPk5vcm1hbDwvdmlld01vZGU+DQoJPHVzZXJTZXR0aW5nSUQ+Yjc1ZmVjY2UtOTQyYi00YWVkLWFiYzktZTZhMDJlNDYwZmIzPC91c2VyU2V0dGluZ0lEPg0KPC9Db25kaXRpb25hbEFwcGVhcmFuY2U+}}}},"ItemsViewMode",{{"S","Normal"}},"ItemsUserSettingID",{{"S","911b6018-f537-43e8-a417-da56b22f9aec"}}}},{{0,0}}}}}},{{0,1,{{0,"Счет",{{"Pattern",{{"#",{parameter_type_uuid}}}}},1}}}},{{0,1,{{9,{{2,409b9a53-7f7e-4178-86c1-33176c7c7a7a}},"Выполнить",{{1,1,{{"ru","Выполнить"}}}},{{1,1,{{"ru","Выполнить действие"}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0,0}},{{4,0,{{0}},"",-1,-1,1,0,""}},"Выполнить",3,0,0,{{0,1,{option_uuid}}},1,0,1,0,0,1}}}},{{0}},0,0}}"##
             ))
             .as_bytes(),
         );
@@ -9483,7 +9535,10 @@ fn extracts_form_attributes_and_commands_from_body_tail() {
     assert!(form_xml.contains(r#"<Command name="Выполнить" id="2">"#));
     assert!(form_xml.contains("<Action>Выполнить</Action>"));
     assert!(form_xml.contains("<Item>FunctionalOption.ИспользоватьФункцию</Item>"));
-    assert!(!form_xml.contains("<CurrentRowUse>DontUse</CurrentRowUse>"));
+    // Slot 18 of the command record is its current-row use, and `1` is
+    // `DontUse` on every command that carries it: BSP 3.1 2 005 of 2 005, ERP
+    // УХ 51 147 of 51 147, and the 8.5 BSP 3.2 records 1 544 of 1 544.
+    assert!(form_xml.contains("<CurrentRowUse>DontUse</CurrentRowUse>"));
 }
 
 #[test]
@@ -13556,9 +13611,11 @@ fn extracts_form_body_xml_uses_type_index_for_parameters_without_breaking_object
     let catalog_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
     let option_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
     let parameter_type_uuid = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
+    // The command is the 8.3.27 record `{9,...}` of nineteen members; see
+    // `extracts_form_attributes_and_commands_from_body_tail`.
     let form_body = deflate_for_test(
             format!(
-                r##"{{4,{{59,0,0,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{{1,0}},0,0,1,1,1,0,1,1,1}},"",{{4,1,{{9,{{1}},0,"Список",{{1,0}},{{"Pattern",{{"#",65abad24-838b-4987-8b35-ed9e2bd4d9c8}}}},{{0,{{0,{{"B",1}},0}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0}},{{0,0}},1,0,0,0,{{0,4,"QueryText",{{"S","ВЫБРАТЬ Ссылка ИЗ Справочник.Товары"}},"MainTable",{{"#",fc01b5df-97fe-449b-83d4-218a090e681e,{catalog_uuid}}},"DynamicalDataSelection",{{"B",0}},"ManualQuery",{{"B",1}}}},{{0,0}}}}}},{{0,1,{{0,"Счет",{{"Pattern",{{"#",{parameter_type_uuid}}}}},1}}}},{{0,1,{{11,{{2,409b9a53-7f7e-4178-86c1-33176c7c7a7a}},"Выполнить",{{1,1,{{"ru","Выполнить"}}}},{{1,1,{{"ru","Выполнить действие"}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0,0}},{{4,0,{{0}},"",-1,-1,1,0,""}},"Выполнить",3,0,0,{{0,1,{option_uuid}}},1,0,1,0,0,1,0,0}}}},{{0}},0,0}}"##
+                r##"{{4,{{59,0,0,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{{1,0}},0,0,1,1,1,0,1,1,1}},"",{{4,1,{{9,{{1}},0,"Список",{{1,0}},{{"Pattern",{{"#",65abad24-838b-4987-8b35-ed9e2bd4d9c8}}}},{{0,{{0,{{"B",1}},0}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0}},{{0,0}},1,0,0,0,{{0,4,"QueryText",{{"S","ВЫБРАТЬ Ссылка ИЗ Справочник.Товары"}},"MainTable",{{"#",fc01b5df-97fe-449b-83d4-218a090e681e,{catalog_uuid}}},"DynamicalDataSelection",{{"B",0}},"ManualQuery",{{"B",1}}}},{{0,0}}}}}},{{0,1,{{0,"Счет",{{"Pattern",{{"#",{parameter_type_uuid}}}}},1}}}},{{0,1,{{9,{{2,409b9a53-7f7e-4178-86c1-33176c7c7a7a}},"Выполнить",{{1,1,{{"ru","Выполнить"}}}},{{1,1,{{"ru","Выполнить действие"}}}},{{0,{{0,{{"B",1}},0}}}},{{0,0,0}},{{4,0,{{0}},"",-1,-1,1,0,""}},"Выполнить",3,0,0,{{0,1,{option_uuid}}},1,0,1,0,0,1}}}},{{0}},0,0}}"##
             )
             .as_bytes(),
         );
@@ -13757,8 +13814,13 @@ fn formats_composite_type_qualifiers_in_native_order() {
 fn extracts_form_child_items_from_layout_pairs() {
     let form_uuid = "02023637-7868-4a5f-8576-835a76e0c9ba";
     let external_command_uuid = "11111111-1111-4111-8111-111111111111";
+    // An event identifier no event table names: the platform has no spelling
+    // for it and the identifier itself is written. The fixture used
+    // `213d1900-...`, which is the form's own `AfterWriteAtServer` and is
+    // named now.
+    let unnamed_event = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let layout = format!(
-        r#"{{59,2,aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,{{22,{{64,{form_uuid}}},0,0,0,0,"Панель",{{1,0}},0,1,1,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,{{34,{{44,{form_uuid}}},0,0,0,"Выполнить",{{1,0}},1,{{0,{external_command_uuid}}},{{2,{{25}},{{40}}}}}}}},cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"СписокТаблица",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged","StartChoice","NameChoice","ValueChoice","NameValueChoice",213d1900-dcad-4616-9f20-3f077156a40f,"NameUuidEvent"}},"OnGetDataAtServer","RowsGetData"}}}}"#
+        r#"{{59,2,aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,{{22,{{64,{form_uuid}}},0,0,0,0,"Панель",{{1,0}},0,1,1,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,{{34,{{44,{form_uuid}}},0,0,0,"Выполнить",{{1,0}},1,{{0,{external_command_uuid}}},{{2,{{25}},{{40}}}}}}}},cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"СписокТаблица",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged","StartChoice","NameChoice","ValueChoice","NameValueChoice",{unnamed_event},"NameUuidEvent"}},"OnGetDataAtServer","RowsGetData"}}}}"#
     );
     let layout_fields = split_1c_braced_fields(&layout, 0).unwrap();
     let attributes = vec![FormAttribute {
@@ -13808,7 +13870,6 @@ fn extracts_form_child_items_from_layout_pairs() {
     assert!(xml.contains(r#"<Button name="Выполнить" id="44">"#));
     assert!(xml.contains("<Type>CommandBarButton</Type>"));
     assert!(xml.contains("<CommandName>DataProcessor.Loader.Command.Load</CommandName>"));
-    assert!(xml.contains("<DataPath>Items.СписокТаблица.CurrentData.Наименование</DataPath>"));
     assert!(xml.contains(r#"<Table name="СписокТаблица" id="25">"#));
     assert!(xml.contains("<DataPath>Список</DataPath>"));
     assert!(xml.contains(r#"<InputField name="Наименование" id="40">"#));
@@ -13834,9 +13895,38 @@ fn extracts_form_child_items_from_layout_pairs() {
         1
     );
     assert_eq!(
-        xml.matches(r#"<Event name="213d1900-dcad-4616-9f20-3f077156a40f">NameUuidEvent</Event>"#)
-            .count(),
+        xml.matches(&format!(
+            r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#
+        ))
+        .count(),
         1
+    );
+
+    // A button bound to a table's current row names the table *item*:
+    // `{2,{<table item>,02023637-...},{<field>}}`. The hand-made button above
+    // carries `{2,{25},{40}}`, which is the platform's shape for an attribute
+    // path (`{2,{1},{-8}}` is `Объект.Ref` on BSP `Catalogs/ВариантыОтчетов/
+    // Forms/ФормаЭлемента`), so it names no current row; the current-row path
+    // is asserted on the platform's own record instead. BSP 3.1
+    // `Catalogs/_ДемоПроекты/Forms/ФормаСписка`, button 39 over table `Список`
+    // (item 1): `{2,{1,02023637-...},{16}}`, native
+    // `Items.Список.CurrentData.Ref`.
+    let projects = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-button-table-current-data/raw/b9b7a7e7-3e39-49cd-899d-c23839ab519c.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let button = &projects[projects
+        .find(
+            r#"<Button name="СписокКонтекстноеМенюСправочник_ДемоПроектыСделатьОсновным" id="39">"#,
+        )
+        .unwrap()..];
+    let button = &button[..button.find("</Button>").unwrap()];
+    assert!(
+        button.contains("<DataPath>Items.Список.CurrentData.Ref</DataPath>"),
+        "{button}"
     );
 }
 
@@ -15222,34 +15312,63 @@ fn keeps_input_hint_when_it_duplicates_title() {
     assert!(xml.contains("<InputHint>"));
 }
 
+/// A table record as the platform writes it: BSP 3.1
+/// `CommonForms/ПраваДоступаУпрощенно`, table `ВидыДоступа` (item 12, bound to
+/// attribute 2), whose native export writes every property asserted here. The
+/// fixture used to be a hand-made 31-member cut of an 8.5 table record
+/// (`{73,...}`), which the codec only ever reads down-converted to the 8.3.27
+/// record (`{55,...}`, 99 members and more), so the switches that live in the
+/// full record never resolved. The record also moves two expectations to what
+/// the platform writes: `RowSelectionMode` is written only as `Row` (BSP 88 of
+/// 88 tables, ERP УХ 407 of 407; `Cell` is the default and never written), and
+/// this table is two rows high.
 #[test]
 fn extracts_table_layout_properties() {
     let mut attribute_names_by_id = BTreeMap::new();
-    attribute_names_by_id.insert("6".to_string(), "Rows".to_string());
+    attribute_names_by_id.insert("2".to_string(), "ВидыДоступа".to_string());
 
     let item = parse_form_child_item_with_attrs(
-            r#"{73,{25,02023637-7868-4a5f-8576-835a76e0c9ba},0,1,0,"Rows",0,0,1,{1,0},0,{1,{6}},0,0,0,0,0,0,0,0,0,6,0,0,1,0,1,0,0,1,2}"#,
-            None,
-            None,
-            &attribute_names_by_id,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-layout-record/records/32d4a42d-6e4d-49db-b5bc-1ea6dbe9fe4d.item-12.txt"
+        ),
+        None,
+        None,
+        &attribute_names_by_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &[],
+        &BTreeMap::new(),
+    )
+    .unwrap();
 
     assert_eq!(item.tag, "Table");
-    assert_eq!(item.data_path.as_deref(), Some("Rows"));
+    assert_eq!(item.data_path.as_deref(), Some("ВидыДоступа"));
     assert_eq!(item.table_representation, Some("List"));
     assert_eq!(item.skip_on_input, Some(false));
-    assert_eq!(item.height_in_table_rows.as_deref(), Some("6"));
-    assert_eq!(item.row_selection_mode, Some("Cell"));
+    assert_eq!(item.height_in_table_rows.as_deref(), Some("2"));
+    assert_eq!(item.row_selection_mode, Some("Row"));
     assert_eq!(item.enable_start_drag, Some(true));
     assert_eq!(item.enable_drag, Some(true));
     assert_eq!(item.file_drag_mode, Some("AsFile"));
+
+    let xml = format_form_child_items_xml(&[item], 1);
+    // The table's own properties come before its context menu; its columns
+    // follow with theirs.
+    let xml = &xml[..xml.find("<ContextMenu").unwrap()];
+    for element in [
+        "<Representation>List</Representation>",
+        "<SkipOnInput>false</SkipOnInput>",
+        "<HeightInTableRows>2</HeightInTableRows>",
+        "<RowSelectionMode>Row</RowSelectionMode>",
+        "<EnableStartDrag>true</EnableStartDrag>",
+        "<EnableDrag>true</EnableDrag>",
+        "<FileDragMode>AsFile</FileDragMode>",
+        "<DataPath>ВидыДоступа</DataPath>",
+    ] {
+        assert!(xml.contains(element), "{element}: {xml}");
+    }
 }
 
 #[test]
@@ -16509,101 +16628,93 @@ fn extracts_button_group_compact_representation_from_layout_code() {
     assert!(xml.contains("<Representation>Compact</Representation>"));
 }
 
+/// The `<CommandName>` the exported XML gives the button named `button`.
+fn exported_button_command_name<'a>(xml: &'a str, button: &str) -> Option<&'a str> {
+    let start = xml.find(&format!("<Button name=\"{button}\" "))?;
+    let element = &xml[start..];
+    let element = &element[..element.find("</Button>")?];
+    let value = &element[element.find("<CommandName>")? + "<CommandName>".len()..];
+    Some(&value[..value.find("</CommandName>")?])
+}
+
+/// A button record `{<item id>,<standard command>}` names the item that owns
+/// the command, and the owner is resolved from the table records of the body
+/// itself (`FormChildItemIndexes::standard_command_owner_name_by_id`), not from
+/// a table-name map handed in beside one button. The fixtures used to be those
+/// buttons alone, cut to 32 of their 52 members, with one table
+/// named for all of them -- including `ФормаСнятьФлажки`, whose `{8,...}`
+/// names item 8. These are the platform's own bodies (BSP 3.1); the native
+/// export writes every command asserted here.
 #[test]
 fn extracts_table_standard_command_names_from_kind1_buttons() {
-    let table_name_by_id = BTreeMap::from([("1".to_string(), "МобильныеУстройства".to_string())]);
+    // Table `Получатели` is item 1; its buttons are `{1,2bbe4e12-...}`,
+    // `{1,58b2a785-...}` and `{1,49602716-...}`.
+    let resend = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/cc8cdc82-ee97-4426-b889-95d2286af37c.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    for (button, command) in [
+        (
+            "СортироватьСписокПоВозрастанию",
+            "Form.Item.Получатели.StandardCommand.SortListAsc",
+        ),
+        (
+            "СортироватьСписокПоУбыванию",
+            "Form.Item.Получатели.StandardCommand.SortListDesc",
+        ),
+        (
+            "ВывестиСписок",
+            "Form.Item.Получатели.StandardCommand.OutputList",
+        ),
+    ] {
+        assert_eq!(
+            exported_button_command_name(&resend, button),
+            Some(command),
+            "{button}"
+        );
+    }
 
-    let sort_asc = parse_form_child_item(
-            r#"{31,{25,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваСортироватьСписокПоВозрастанию",{1,0},1,{1,2bbe4e12-06d2-409b-a972-eea585125d83},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+    // `ФормаСнятьФлажки` is `{8,5048cc44-...}`: item 8 is the table
+    // `ДоступныеОбъектыДляИзменения`.
+    let kinds = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/51f9aff4-71da-4b1b-b48b-04122a17d855.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
     assert_eq!(
-        sort_asc.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.SortListAsc")
+        exported_button_command_name(&kinds, "ФормаСнятьФлажки"),
+        Some("Form.Item.ДоступныеОбъектыДляИзменения.StandardCommand.UncheckAll")
     );
 
-    let sort_desc = parse_form_child_item(
-            r#"{31,{27,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваСортироватьСписокПоУбыванию",{1,0},1,{1,58b2a785-23f6-4b0e-a324-9a1323285595},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        sort_desc.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.SortListDesc")
-    );
-
-    let output_list = parse_form_child_item(
-            r#"{31,{65,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"МобильныеУстройстваВывестиСписокКМ",{1,0},1,{1,49602716-fea6-497f-8047-726404038857},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        output_list.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.OutputList")
-    );
-
-    let uncheck_all = parse_form_child_item(
-            r#"{31,{31,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"ФормаСнятьФлажки",{1,0},1,{8,5048cc44-702b-44e3-8445-9af75c02724d},{0},3,0,0,0,2,2,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        uncheck_all.command_name.as_deref(),
-        Some("Form.Item.МобильныеУстройства.StandardCommand.UncheckAll")
-    );
-
-    let table_name_by_id = BTreeMap::from([("1".to_string(), "СписокКолонок".to_string())]);
-
-    let move_up = parse_form_child_item(
-            r#"{31,{33,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"СписокКолонокПереместитьВверх",{1,0},1,{1,37740564-9e86-44a0-bea9-3f485a5a3f91},{0},3,0,0,0,2,1,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        move_up.command_name.as_deref(),
-        Some("Form.Item.СписокКолонок.StandardCommand.MoveUp")
-    );
-
-    let move_down = parse_form_child_item(
-            r#"{31,{35,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,"СписокКолонокПереместитьВниз",{1,0},1,{1,fa51b106-eae6-44c7-8054-76cbb3100603},{0},3,0,0,0,2,1,0,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,{4,0,{0},"",-1,-1,1,0,""},1,{"Pattern"},"",2,0,1}"#,
-            None,
-            None,
-            &table_name_by_id,
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    assert_eq!(
-        move_down.command_name.as_deref(),
-        Some("Form.Item.СписокКолонок.StandardCommand.MoveDown")
-    );
+    // Table `Список` is item 1: `{1,37740564-...}` and `{1,fa51b106-...}`.
+    let checklist = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-standard-command-owners/raw/d2762764-b5c0-4aeb-8e89-3371972f22d8.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    for (button, command) in [
+        (
+            "СписокПереместитьВверх",
+            "Form.Item.Список.StandardCommand.MoveUp",
+        ),
+        (
+            "СписокПереместитьВниз",
+            "Form.Item.Список.StandardCommand.MoveDown",
+        ),
+    ] {
+        assert_eq!(
+            exported_button_command_name(&checklist, button),
+            Some(command),
+            "{button}"
+        );
+    }
 }
 
 #[test]
@@ -18115,32 +18226,50 @@ fn extracts_real_sfc_page_scroll_on_compress() {
     );
 }
 
+/// Child-item events stay with their items; none is hoisted to the form.
+///
+/// Two expectations follow the platform rather than the fixture's first
+/// reading. The table declares no `<DataPath>`, and the platform names a
+/// table's events only through the data the table shows: over the eight stand
+/// corpora 12 731 tables with a `<DataPath>` never carry a raw identifier, and
+/// the five without one write all ten of their events as raw identifiers
+/// (`parse_form_child_item_event_identifier`). And `213d1900-...`, the field's
+/// placeholder for an identifier nothing names, is the form's own
+/// `AfterWriteAtServer`, which the event tables name now; the placeholder is
+/// an identifier no table names.
 #[test]
 fn extracts_form_body_xml_keeps_child_events_nested() {
     let form_uuid = "02023637-7868-4a5f-8576-835a76e0c9ba";
+    let unnamed_event = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let layout = format!(
-        r#"{{59,1,cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"Список",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged",213d1900-dcad-4616-9f20-3f077156a40f,"NameUuidEvent"}},{{1,97365900-eadf-4dfd-a9aa-fbb9ecabd079,"RowsGetData",1,0,97365900-eadf-4dfd-a9aa-fbb9ecabd079,0,1}}}}}}"#
+        r#"{{59,1,cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"Список",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged",{unnamed_event},"NameUuidEvent"}},{{1,97365900-eadf-4dfd-a9aa-fbb9ecabd079,"RowsGetData",1,0,97365900-eadf-4dfd-a9aa-fbb9ecabd079,0,1}}}}}}"#
     );
     let form_body = deflate_for_test(format!(r#"{{4,{layout},"",{{0}}}}"#).as_bytes());
 
     let form_xml = extract_form_body_xml(&form_body, &BTreeMap::new()).unwrap();
 
     assert!(!form_xml.contains("\r\n\t<Events>\r\n"));
+    let table = &form_xml[form_xml.find(r#"<Table name="Список" id="25">"#).unwrap()..];
     assert_eq!(
-        form_xml
-            .matches(r#"<Event name="OnGetDataAtServer">RowsGetData</Event>"#)
+        table
+            .matches(r#"<Event name="97365900-eadf-4dfd-a9aa-fbb9ecabd079">RowsGetData</Event>"#)
             .count(),
         1
     );
+    let field = &table[table
+        .find(r#"<InputField name="Наименование" id="40">"#)
+        .unwrap()..];
     assert_eq!(
-        form_xml
+        field
             .matches(r#"<Event name="OnChange">NameChanged</Event>"#)
             .count(),
         1
     );
     assert_eq!(
-        form_xml
-            .matches(r#"<Event name="213d1900-dcad-4616-9f20-3f077156a40f">NameUuidEvent</Event>"#)
+        field
+            .matches(&format!(
+                r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#
+            ))
             .count(),
         1
     );
@@ -22813,9 +22942,23 @@ fn formats_table_search_additions_as_direct_sections() {
     assert!(!xml.contains("\t\t<ChildItems>\r\n\t\t\t<SearchStringAddition"));
 }
 
+/// A `UsualGroup` with the wide `{29,...}` property bag as the platform writes
+/// it: BSP 3.1 `DataProcessors/ПанельАдминистрированияБИП/Forms/
+/// ИнтернетПоддержкаИСервисы`, group `ГруппаОбновлениеКлассификаторов` (item
+/// 1898), whose native export writes every property asserted here.
+///
+/// The fixture used to be an 8.5 record (bag `{38,...}`, 8.5 colours and
+/// fonts), which the codec reads only down-converted to the `{29,...}` bag, and
+/// two of its expectations were not the platform's: its bag slot 4 was `1`, and
+/// slot 4 is `ShowTitle` (`0` writes `false` on 3 392 of 3 392 BSP groups, `1`
+/// writes nothing on 486 of 486), so that group showed its title; and 2.20
+/// never writes `<Group>HorizontalIfPossible</Group>` on a `UsualGroup` (BSP:
+/// `Vertical`, `Horizontal`, `AlwaysHorizontal` or nothing).
 #[test]
 fn parses_extended_usual_group_properties() {
-    let field = r#"{22,{22,22222222-2222-4222-8222-222222222222},0,0,0,5,"MainGroup",{1,0},{1,0},0,1,0,0,0,2,2,{4,4,{0},4},{8,3,0,1,100},{0,0,0},1,{38,1,0,3,1,{0},{1,0},{"Pattern"},"",{4,4,{0},4},1,1,0,1,{1,0},0,0,3,3,2,0,1,2,{4,4,{0},4},1,2,0,2,1,0,0,0,{4,0,{0},"",-1,-1,1,0,""},{0,1,0},0,3,2,0,2,0,0,2},0,1,0,1,{12,{23,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,0,"MainGroupРасширеннаяПодсказка",{1,0},{1,0},0,0,0,2,2,{4,4,{0},4},{4,4,{0},4},{4,4,{0},4},{0},0,0,0,1,{1,0},{0,0,0},0,3},0,3,3,0}"#;
+    let field = include_str!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-usual-group-record/records/c988cf4e-7b05-4bb9-b141-6a2b4dbe3b8e.item-1898.txt"
+    );
     let item = parse_form_child_item(
         field,
         None,
@@ -22827,14 +22970,20 @@ fn parses_extended_usual_group_properties() {
     )
     .unwrap();
 
-    assert_eq!(item.group, Some("HorizontalIfPossible"));
+    assert_eq!(item.tag, "UsualGroup");
+    assert_eq!(item.group, Some("Vertical"));
     assert_eq!(item.behavior, Some("Collapsible"));
+    assert_eq!(item.collapsed, Some(true));
     assert_eq!(item.representation, Some("NormalSeparation"));
     assert_eq!(item.show_title, Some(false));
 
     let xml = format_form_child_items_xml(&[item], 1);
-    assert!(xml.contains("<Group>HorizontalIfPossible</Group>"));
+    // The group's own properties come before its extended tooltip; its child
+    // items follow with theirs.
+    let xml = &xml[..xml.find("<ExtendedTooltip").unwrap()];
+    assert!(xml.contains("<Group>Vertical</Group>"));
     assert!(xml.contains("<Behavior>Collapsible</Behavior>"));
+    assert!(xml.contains("<Collapsed>true</Collapsed>"));
     assert!(xml.contains("<Representation>NormalSeparation</Representation>"));
     assert!(xml.contains("<ShowTitle>false</ShowTitle>"));
 }
@@ -24264,7 +24413,11 @@ fn extracts_picture_decoration_picture_size_without_file_drag_mode_from_live_blo
     assert_eq!(item.tag, "PictureDecoration");
     assert_eq!(item.width.as_deref(), Some("50"));
     assert_eq!(item.height.as_deref(), Some("7"));
-    assert_eq!(item.auto_max_width, None);
+    // ERP УХ `DataProcessors/БизнесСеть/Forms/ПоискДокументаПоQRКоду` stores
+    // this very record for item 6 (its title only adds the `en` line), and
+    // the native export writes `<AutoMaxWidth>false</AutoMaxWidth>` for it,
+    // right after `<Width>`.
+    assert_eq!(item.auto_max_width, Some(false));
     assert_eq!(item.auto_max_height, Some(false));
     assert_eq!(item.picture_size, Some("Proportionally"));
     assert_eq!(
@@ -24275,7 +24428,7 @@ fn extracts_picture_decoration_picture_size_without_file_drag_mode_from_live_blo
 
     let xml = format_form_child_items_xml(&[item], 1);
     assert!(xml.contains("<Width>50</Width>"));
-    assert!(!xml.contains("<AutoMaxWidth>false</AutoMaxWidth>"));
+    assert!(xml.contains("<AutoMaxWidth>false</AutoMaxWidth>"));
     assert!(xml.contains("<Height>7</Height>"));
     assert!(xml.contains("<AutoMaxHeight>false</AutoMaxHeight>"));
     assert!(xml.contains("<PictureSize>Proportionally</PictureSize>"));
@@ -30723,6 +30876,14 @@ fn non_streamed_information_register_resolves_predefined_design_time_refs() {
     let _ = fs::remove_dir_all(baseline_root);
 }
 
+/// The chart's descriptor is the platform-proven `CorpusCharacteristics` row
+/// (`chart-of-characteristic-types` evidence, 8.3.27.2214): the owner record of
+/// 59 members with its generated types at slots 1-12 and its header at slot 13.
+/// The descriptor this test used to build by hand was a seven-member owner
+/// record no platform writes; since the CCT decoder accepts only the evidenced
+/// shape (`accepts_only_evidenced_cct_attribute_and_tabular_wrappers`), no
+/// `ChartsOfCharacteristicTypes/*.xml` was written for it. The reference kind's
+/// type is the chart's own generated `Ref` type (slot 3).
 #[test]
 fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let root = std::env::temp_dir().join(format!(
@@ -30730,20 +30891,16 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
         uuid::Uuid::new_v4().hyphenated()
     ));
     fs::create_dir_all(&root).unwrap();
-    let chart_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
-    let object_type_uuid = "11111111-1111-4111-8111-111111111111";
-    let ref_type_uuid = "22222222-2222-4222-8222-222222222222";
-    let selection_type_uuid = "33333333-3333-4333-8333-333333333333";
+    let chart_uuid = "d003f1f8-d632-4f80-adad-af1583998864";
+    let ref_type_uuid = "9ede7dd8-7963-4f8c-a2fe-d486fa9931f0";
     let value_type_uuid = "f5c65050-3bbb-11d5-b988-0050bae0a95d";
     let predefined_type_uuid = "ae135932-4f94-44df-92c1-c91f15a92848";
     let string_item_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
     let ref_item_uuid = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
-    let metadata = deflate_for_test(
-            format!(
-                "{{1,{{34,{object_type_uuid},00000000-0000-0000-0000-000000000000,{ref_type_uuid},00000000-0000-0000-0000-000000000000,{selection_type_uuid},{{3,{{1,0,{chart_uuid}}},\"Kinds\",{{1,\"en\",\"Kinds\"}},\"\"}}}}}}"
-            )
-            .as_bytes(),
-        );
+    let metadata = include_bytes!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/chart-of-characteristic-types/raw/d003f1f8-d632-4f80-adad-af1583998864.deflate"
+    )
+    .to_vec();
     let predefined = deflate_for_test(
             format!(
                 "{{1,{{1,{{7}},{{2,{{1,1,{{2,0,6,{{\"#\",{predefined_type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"B\",1}},{{\"S\",\"Характеристики\"}},{{\"S\",\"\"}},{{\"S\",\"\"}},{{\"#\",{value_type_uuid},{{\"Pattern\"}}}},1,{{1,2,{{2,1,7,{{\"#\",{predefined_type_uuid},{{1,{string_item_uuid}}}}},{{\"B\",0}},{{\"S\",\"StringKind\"}},{{\"S\",\"\"}},{{\"S\",\"String kind\"}},{{\"#\",{value_type_uuid},{{\"Pattern\",{{\"S\",10,1}}}}}},{{\"N\",0}},0}},{{2,2,7,{{\"#\",{predefined_type_uuid},{{1,{ref_item_uuid}}}}},{{\"B\",0}},{{\"S\",\"RefKind\"}},{{\"S\",\"\"}},{{\"S\",\"Ref kind\"}},{{\"#\",{value_type_uuid},{{\"Pattern\",{{\"#\",{ref_type_uuid}}}}}}},{{\"N\",0}},0}}}}}}}}}},-1,1}}}}"
@@ -30753,7 +30910,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let mut type_index = BTreeMap::new();
     type_index.insert(
         ref_type_uuid.to_string(),
-        "cfg:ChartOfCharacteristicTypesRef.Kinds".to_string(),
+        "cfg:ChartOfCharacteristicTypesRef.CorpusCharacteristics".to_string(),
     );
     let parsed = parse_predefined_data_blob(&predefined, &type_index).unwrap();
     assert_eq!(parsed.len(), 2);
@@ -30775,9 +30932,15 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let dumped = dump_table_rows(&root, "Config", rows, false, false, true).unwrap();
 
     assert_eq!(dumped.metadata_xml_rows, 1);
+    assert!(
+        root.join("ChartsOfCharacteristicTypes/CorpusCharacteristics.xml")
+            .is_file()
+    );
     assert_eq!(dumped.source_asset_rows, 1);
-    let xml = fs::read_to_string(root.join("ChartsOfCharacteristicTypes/Kinds/Ext/Predefined.xml"))
-        .unwrap();
+    let xml = fs::read_to_string(
+        root.join("ChartsOfCharacteristicTypes/CorpusCharacteristics/Ext/Predefined.xml"),
+    )
+    .unwrap();
     assert!(xml.contains(r#"xsi:type="PlanOfCharacteristicKindPredefinedItems""#));
     assert!(xml.contains(&format!(r#"<Item id="{string_item_uuid}">"#)));
     assert!(xml.contains("<v8:Type>xs:string</v8:Type>"));
@@ -30786,7 +30949,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     assert!(xml.contains("<v8:AllowedLength>Variable</v8:AllowedLength>"));
     assert!(xml.contains(&format!(r#"<Item id="{ref_item_uuid}">"#)));
     assert!(
-            xml.contains(r#"<v8:Type xmlns:d4p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d4p1:ChartOfCharacteristicTypesRef.Kinds</v8:Type>"#)
+            xml.contains(r#"<v8:Type xmlns:d4p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d4p1:ChartOfCharacteristicTypesRef.CorpusCharacteristics</v8:Type>"#)
         );
     let predefined_row = dumped
         .rows
@@ -30795,7 +30958,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
         .unwrap();
     assert_eq!(
         predefined_row.source_asset_path.as_deref(),
-        Some("ChartsOfCharacteristicTypes/Kinds/Ext/Predefined.xml")
+        Some("ChartsOfCharacteristicTypes/CorpusCharacteristics/Ext/Predefined.xml")
     );
 
     let _ = fs::remove_dir_all(root);

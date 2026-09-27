@@ -115,7 +115,7 @@ pub(crate) fn format_native_color(
 }
 
 /// The platform 8.5 palette, by the index a colour tuple stores.
-const V85_PALETTE_COLORS: &[(&str, u8)] = &[
+pub(crate) const V85_PALETTE_COLORS: &[(&str, u8)] = &[
     ("FirstBrand", 0),
     ("SecondBrand", 1),
     ("Red", 2),
@@ -129,7 +129,7 @@ const V85_PALETTE_COLORS: &[(&str, u8)] = &[
 
 /// The codes the platform's own style colours carry, as the corpus spells
 /// them.
-const PLATFORM_STYLE_COLOR_CODES: &[(&str, &str)] = &[
+pub(crate) const PLATFORM_STYLE_COLOR_CODES: &[(&str, &str)] = &[
     ("AccentColor", "-46"),
     ("ActivityColor", "-44"),
     ("AuxiliaryNavigationColor", "-43"),
@@ -225,7 +225,7 @@ pub(crate) fn format_native_shortcut(text: &str) -> Option<String> {
 
 /// The web colours, with the index a body stores: the ones measured on form
 /// items, and the rest of the table the exporter reads the index back with.
-const WEB_COLOR_CODES: &[(&str, &str)] = &[
+pub(crate) const WEB_COLOR_CODES: &[(&str, &str)] = &[
     ("AliceBlue", "1"),
     ("Beige", "6"),
     ("Black", "8"),
@@ -307,7 +307,7 @@ const WEB_COLOR_CODES: &[(&str, &str)] = &[
 
 /// The Windows system colours the corpus names, with the index a body stores
 /// under `{3,1,{n}}` -- the ones the form exporter reads back.
-const WINDOWS_COLOR_CODES: &[(&str, &str)] = &[
+pub(crate) const WINDOWS_COLOR_CODES: &[(&str, &str)] = &[
     ("ActiveTitleBar", "2"),
     ("ButtonDarkShadow", "21"),
     ("ButtonText", "18"),
@@ -759,7 +759,7 @@ fn native_font_flag(value: &str) -> Option<bool> {
 /// The five platform fonts a `style:` reference can name, which no
 /// `StyleItems\<name>.xml` declares. Their codes are a table of their own --
 /// none of them collides with [`PLATFORM_STYLE_COLOR_CODES`].
-const PLATFORM_STYLE_FONT_CODES: &[(&str, &str)] = &[
+pub(crate) const PLATFORM_STYLE_FONT_CODES: &[(&str, &str)] = &[
     ("ExtraLargeTextFont", "-33"),
     ("LargeTextFont", "-32"),
     ("NormalTextFont", "-31"),

@@ -314,7 +314,7 @@ pub(crate) fn prepare_empty_object(
         track_d_body_rows(context, path, &xml, &properties, &relative, &mut object);
         for family in MetadataBodyFamily::ALL {
             if family == MetadataBodyFamily::KindBody
-                && crate::metadata_model::bodies_rows::owns_kind_body(&properties.kind)
+                && crate::metadata_model::bodies_rows::owns_kind_body(&properties.kind, &xml)
             {
                 continue;
             }

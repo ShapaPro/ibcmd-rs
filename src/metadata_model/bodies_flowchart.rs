@@ -1,5 +1,7 @@
-//! Business process flowcharts, base-free: `Ext/Flowchart.xml` -> the
-//! `<uuid>.7` row.
+//! Business process flowcharts and graphical-schema templates, base-free:
+//! `Ext/Flowchart.xml` -> the `<uuid>.7` row, a GraphicalSchema template's
+//! `Ext/Template.xml` (with the pictures under `Ext/Template/Items`) -> its
+//! `<uuid>.0` row. Both are stored in one grammar.
 //!
 //! `{5,{<scheme>},N,<code>,<item>...,N}`: the scheme (background, grid, print
 //! parameters), then each item as its kind code and record, in document
@@ -13,11 +15,20 @@
 //!   activities, processings and sub-processes; a pentagon for start and
 //!   completion whose point rises `w/2·tan 30°`; a hexagon for a condition
 //!   whose ends rise `h/2·tan 30°`; triangles for split and join;
-//! - a line records whether it leaves a condition through its true port;
-//! - the addressing attributes of an activity are ordered by uuid.
+//!   a group activity's rectangle stops 4 short of its right and bottom;
+//!   a start or completion whose point would not fit rises half its height;
+//! - a line records which branch it leaves: 1 from a condition's true port
+//!   (and from its right port, 3, unless that is the false port), the case
+//!   row from a switch (`(port - 6) / 2`), 0 otherwise;
+//! - the addressing attributes of an activity are ordered by uuid;
+//! - an activity's record ends `{3,2,0}` in a business process and
+//!   `{3,16,1}` in a template (every activity of the corpora);
+//! - an inline picture (`<Abs>`) is the file beside the scheme, stored as
+//!   base64 in lines of 64 separated by CR CR LF.
 //!
-//! Two stored flowcharts end with a larger count than their items: items
-//! were deleted, which the source does not record.
+//! The record closes with a counter the XML does not carry: the item count
+//! for a scheme never edited after deletions (18 of 20 flowcharts, 29 of 64
+//! templates of ERP УХ); the others count deleted items too.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,14 +56,52 @@ pub fn flowchart_path(owner_xml: &Path) -> PathBuf {
 
 /// The `<uuid>.7` row, `None` when the process has no `Ext/Flowchart.xml`.
 pub fn flowchart_row(owner_xml: &Path, context: &DescriptorContext) -> Result<Option<Brace>> {
-    let path = flowchart_path(owner_xml);
+    scheme_row(&flowchart_path(owner_xml), SchemeOwner::BusinessProcess, context)
+}
+
+/// `Ext/Template.xml` next to a template's XML.
+pub fn template_body_path(template_xml: &Path) -> PathBuf {
+    template_xml
+        .with_extension("")
+        .join("Ext")
+        .join("Template.xml")
+}
+
+/// Whether a template's XML declares a graphical schema.
+pub fn is_graphical_schema_template(template: &Element) -> bool {
+    template
+        .path(&["Properties", "TemplateType"])
+        .is_some_and(|kind| kind.text.trim() == "GraphicalSchema")
+}
+
+/// A GraphicalSchema template's `<uuid>.0` row, `None` without a body.
+pub fn graphical_schema_row(
+    template_xml: &Path,
+    context: &DescriptorContext,
+) -> Result<Option<Brace>> {
+    scheme_row(
+        &template_body_path(template_xml),
+        SchemeOwner::Template,
+        context,
+    )
+}
+
+/// Who owns a scheme: the one thing that changes its records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemeOwner {
+    BusinessProcess,
+    Template,
+}
+
+fn scheme_row(path: &Path, owner: SchemeOwner, context: &DescriptorContext) -> Result<Option<Brace>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let schema = parse_element_tree(&bytes)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    let mut row = Flowchart::new(&schema, context)?.to_brace()?;
+    let pictures = path.with_extension("").join("Items");
+    let mut row = Flowchart::new(&schema, context, owner, pictures)?.to_brace()?;
     crlf_strings(&mut row);
     if v85_layout(context) {
         up_convert_v85_primitives(&mut row);
@@ -64,6 +113,9 @@ struct Flowchart<'a> {
     schema: &'a Element,
     items: Vec<&'a Element>,
     context: &'a DescriptorContext,
+    owner: SchemeOwner,
+    /// `<scheme stem>/Items`: the inline pictures, one folder per item.
+    pictures: PathBuf,
 }
 
 fn text<'a>(element: &'a Element, name: &str) -> &'a str {
@@ -119,7 +171,12 @@ const SHAPES: &[(&str, i64)] = &[
 ];
 
 impl<'a> Flowchart<'a> {
-    fn new(schema: &'a Element, context: &'a DescriptorContext) -> Result<Self> {
+    fn new(
+        schema: &'a Element,
+        context: &'a DescriptorContext,
+        owner: SchemeOwner,
+        pictures: PathBuf,
+    ) -> Result<Self> {
         let items = schema
             .child("Items")
             .map(|items| items.children.iter().collect())
@@ -128,6 +185,8 @@ impl<'a> Flowchart<'a> {
             schema,
             items,
             context,
+            owner,
+            pictures,
         })
     }
 
@@ -276,22 +335,49 @@ impl<'a> Flowchart<'a> {
         ])
     }
 
-    /// The nine-member picture record: empty, or a platform picture by uuid.
-    fn picture(&self, element: Option<&Element>) -> Result<Brace> {
+    /// The picture record: empty, a platform picture by uuid (nine
+    /// members), or an inline picture (ten members, the file's bytes as
+    /// base64).
+    fn picture(&self, element: Option<&Element>, item_name: &str) -> Result<Brace> {
         let reference = element
             .and_then(|picture| picture.child_text("Ref"))
             .map(str::trim)
             .unwrap_or_default();
-        if element.and_then(|picture| picture.child("Abs")).is_some() {
-            bail!("an inline flowchart picture is not supported");
-        }
-        if reference.is_empty() {
+        let inline = element
+            .and_then(|picture| picture.child_text("Abs"))
+            .map(str::trim)
+            .unwrap_or_default();
+        if reference.is_empty() && inline.is_empty() {
             return literal("{4,0,{0},\"\",-1,-1,1,0,\"\"}");
         }
         let load_transparent = element
             .and_then(|picture| picture.child_text("LoadTransparent"))
-            .map(str::trim)
-            != Some("false");
+            .map(str::trim);
+        let pixel = element.and_then(|picture| picture.child("TransparentPixel"));
+        let coordinate = |name: &str| -> Result<i64> {
+            match pixel.and_then(|pixel| pixel.attr(name)) {
+                Some(value) => number(value, name),
+                None => Ok(-1),
+            }
+        };
+        let (x, y) = (coordinate("x")?, coordinate("y")?);
+        if !inline.is_empty() {
+            let path = self.pictures.join(item_name).join(inline);
+            let bytes = fs::read(&path)
+                .with_context(|| format!("failed to read picture {}", path.display()))?;
+            return Ok(brace_list![
+                Brace::num(4),
+                Brace::num(3),
+                brace_list![Brace::num(0)],
+                Brace::str(""),
+                Brace::num(x),
+                Brace::num(y),
+                Brace::flag(load_transparent == Some("true")),
+                brace_list![brace_list![Brace::atom(base64_lines(&bytes))]],
+                Brace::num(0),
+                Brace::str(""),
+            ]);
+        }
         let uuid = crate::mssql_dump::standard_picture_uuid(reference)
             .ok_or_else(|| anyhow!("unsupported flowchart picture {reference}"))?;
         Ok(brace_list![
@@ -299,9 +385,9 @@ impl<'a> Flowchart<'a> {
             Brace::num(1),
             brace_list![Brace::num(0), Brace::uuid(uuid)],
             Brace::str(""),
-            Brace::num(-1),
-            Brace::num(-1),
-            Brace::flag(load_transparent),
+            Brace::num(x),
+            Brace::num(y),
+            Brace::flag(load_transparent != Some("false")),
             Brace::num(0),
             Brace::str(""),
         ])
@@ -323,7 +409,8 @@ impl<'a> Flowchart<'a> {
     /// `{<style>,5,l,t,r,b,<n>,<points>...,<picture size>,<picture>,<border>}`.
     fn shape_geometry(&self, tag: &str, properties: &Element) -> Result<Brace> {
         let (left, top, right, bottom) = Self::location(properties)?;
-        let points = outline(tag, left, top, right, bottom)?;
+        let group = tag == "Activity" && flag(properties, "Group");
+        let points = outline(tag, group, left, top, right, bottom)?;
         let mut items = vec![
             self.style(properties)?,
             Brace::num(5),
@@ -342,7 +429,7 @@ impl<'a> Flowchart<'a> {
             text(properties, "PictureSize"),
             "PictureSize",
         )?));
-        items.push(self.picture(properties.child("Picture"))?);
+        items.push(self.picture(properties.child("Picture"), text(properties, "Name"))?);
         items.push(self.line_record(properties.child("Border"))?);
         Ok(Brace::List(items))
     }
@@ -416,7 +503,14 @@ impl<'a> Flowchart<'a> {
                 brace_list![
                     head()?,
                     Brace::num(8),
-                    shape(vec![Brace::num(3), Brace::num(2), Brace::num(0)])?,
+                    shape(match self.owner {
+                        SchemeOwner::BusinessProcess => {
+                            vec![Brace::num(3), Brace::num(2), Brace::num(0)]
+                        }
+                        SchemeOwner::Template => {
+                            vec![Brace::num(3), Brace::num(16), Brace::num(1)]
+                        }
+                    })?,
                     Brace::str(text(properties, "Explanation")),
                     Brace::flag(flag(properties, "Group")),
                     events(
@@ -435,6 +529,22 @@ impl<'a> Flowchart<'a> {
                     Brace::str(text(properties, "TaskDescription")),
                 ],
             ),
+            "Switch" => {
+                let cases = properties.children_named("Case").collect::<Vec<_>>();
+                let mut tail = vec![Brace::num(2), Brace::num(cases.len() as i64)];
+                let mut record = vec![head()?, Brace::num(2)];
+                for case in &cases {
+                    tail.push(localized(case.child("description")));
+                    tail.push(self.color(text(case, "backColor"))?);
+                }
+                record.push(shape(tail)?);
+                record.push(Brace::num(cases.len() as i64));
+                for case in &cases {
+                    record.push(Brace::str(text(case, "name")));
+                }
+                record.push(events(item, &["SwitchProcessing"]));
+                (6, Brace::List(record))
+            }
             "Split" => (
                 7,
                 brace_list![head()?, Brace::num(1), shape(vec![Brace::num(1)])?],
@@ -500,7 +610,7 @@ impl<'a> Flowchart<'a> {
                 text(properties, "PictureSize"),
                 "PictureSize"
             )?),
-            self.picture(properties.child("Picture"))?,
+            self.picture(properties.child("Picture"), text(properties, "Name"))?,
             Brace::flag(flag(properties, "Transparent")),
             Brace::num(code(SHAPES, text(properties, "Shape"), "Shape")?),
             Brace::num(0),
@@ -572,7 +682,7 @@ impl<'a> Flowchart<'a> {
             base,
             Brace::num(3),
             Brace::num(from_id),
-            Brace::flag(self.is_true_branch(&from_item, from_port)),
+            Brace::num(self.branch(&from_item, from_port)),
             Brace::num(to_id),
             Brace::flag(flag(properties, "DecorativeLine")),
             brace_list![Brace::List(geometry)],
@@ -593,18 +703,32 @@ impl<'a> Flowchart<'a> {
         number(item.attr("id").unwrap_or_default(), "item id")
     }
 
-    /// Whether a line leaves a condition through its true port.
-    fn is_true_branch(&self, from_item: &str, from_port: i64) -> bool {
-        self.items.iter().any(|item| {
-            item.name == "Condition"
-                && item
-                    .child("Properties")
-                    .is_some_and(|properties| {
-                        properties.child_text("Name") == Some(from_item)
-                            && text(properties, "TruePortIndex").trim()
-                                == from_port.to_string()
-                    })
-        })
+    /// The branch a line leaves its source by: from a condition 1 for its
+    /// true port (and for the right port, 3, unless that is the false one),
+    /// from a switch the case row of the port, 0 otherwise.
+    fn branch(&self, from_item: &str, from_port: i64) -> i64 {
+        let Some(source) = self.items.iter().find(|item| {
+            item.child("Properties")
+                .and_then(|properties| properties.child_text("Name"))
+                == Some(from_item)
+        }) else {
+            return 0;
+        };
+        let Some(properties) = source.child("Properties") else {
+            return 0;
+        };
+        match source.name.as_str() {
+            "Condition" => {
+                let port = |name: &str| text(properties, name).trim().parse::<i64>().ok();
+                let true_port = port("TruePortIndex");
+                let false_port = port("FalsePortIndex");
+                i64::from(
+                    Some(from_port) == true_port || (from_port == 3 && false_port != Some(3)),
+                )
+            }
+            "Switch" if from_port >= 6 => (from_port - 6) / 2,
+            _ => 0,
+        }
     }
 
     /// `{<count>,{<attribute uuid>,<value>}...}`, ordered by uuid.
@@ -667,16 +791,36 @@ fn rise(extent: i64) -> i64 {
     ((extent as f64) * (30f64.to_radians().tan()) / 2.0) as i64
 }
 
+/// A pentagon's point: `w/2·tan 30°`, or half the height when that does not
+/// fit (a 150×38 completion rises 19, not 43).
+fn roof(w: i64, h: i64) -> i64 {
+    let roof = rise(w);
+    if roof < h { roof } else { h / 2 }
+}
+
 /// A shape's outline as the platform stores it, from its location.
-fn outline(tag: &str, left: i64, top: i64, right: i64, bottom: i64) -> Result<Vec<(i64, i64)>> {
+fn outline(
+    tag: &str,
+    group: bool,
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+) -> Result<Vec<(i64, i64)>> {
     let (w, h) = (right - left, bottom - top);
     let (r, b) = (right - 1, bottom - 1);
     Ok(match tag {
-        "Activity" | "Processing" | "SubBusinessProcess" => {
+        "Activity" if group => vec![
+            (left, top),
+            (right - 4, top),
+            (right - 4, bottom - 4),
+            (left, bottom - 4),
+        ],
+        "Activity" | "Processing" | "SubBusinessProcess" | "Switch" => {
             vec![(left, top), (r, top), (r, b), (left, b)]
         }
         "Start" => {
-            let shoulder = bottom - rise(w);
+            let shoulder = bottom - roof(w, h);
             vec![
                 (left, top),
                 (r, top),
@@ -686,7 +830,7 @@ fn outline(tag: &str, left: i64, top: i64, right: i64, bottom: i64) -> Result<Ve
             ]
         }
         "Completion" => {
-            let shoulder = top + rise(w);
+            let shoulder = top + roof(w, h);
             vec![
                 (left + w / 2, top),
                 (r, shoulder),
@@ -713,6 +857,21 @@ fn outline(tag: &str, left: i64, top: i64, right: i64, bottom: i64) -> Result<Ve
     })
 }
 
+/// Base64 as the platform stores a picture: `#base64:` and lines of 64,
+/// each full line ended by CR CR LF (the last one too when it is full).
+fn base64_lines(bytes: &[u8]) -> String {
+    let encoded = crate::module_blob::encode_base64(bytes);
+    let mut out = String::with_capacity(encoded.len() + encoded.len() / 64 * 3 + 8);
+    out.push_str("#base64:");
+    for chunk in encoded.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        if chunk.len() == 64 {
+            out.push_str("\r\r\n");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::outline;
@@ -721,24 +880,34 @@ mod tests {
     fn computes_the_outlines_the_platform_stores() {
         // BSP `Задание` and ERP УХ flowcharts, point for point.
         assert_eq!(
-            outline("Start", 380, 20, 420, 60).unwrap(),
+            outline("Start", false, 380, 20, 420, 60).unwrap(),
             vec![(380, 20), (419, 20), (419, 49), (400, 59), (380, 49)]
         );
         assert_eq!(
-            outline("Completion", 180, 460, 220, 500).unwrap(),
+            outline("Completion", false, 180, 460, 220, 500).unwrap(),
             vec![(200, 460), (219, 471), (219, 499), (180, 499), (180, 471)]
         );
         assert_eq!(
-            outline("Condition", 140, 240, 260, 300).unwrap(),
+            outline("Condition", false, 140, 240, 260, 300).unwrap(),
             vec![(140, 270), (157, 240), (242, 240), (259, 270), (242, 299), (157, 299)]
         );
         assert_eq!(
-            outline("Split", 320, 160, 360, 180).unwrap(),
+            outline("Split", false, 320, 160, 360, 180).unwrap(),
             vec![(320, 160), (358, 160), (339, 179)]
         );
         assert_eq!(
-            outline("Join", 320, 400, 360, 420).unwrap(),
+            outline("Join", false, 320, 400, 360, 420).unwrap(),
             vec![(320, 419), (358, 419), (339, 400)]
+        );
+        // ERP УХ templates: a group activity, a completion too low for its
+        // point.
+        assert_eq!(
+            outline("Activity", true, 0, 0, 160, 60).unwrap(),
+            vec![(0, 0), (156, 0), (156, 56), (0, 56)]
+        );
+        assert_eq!(
+            outline("Completion", false, 0, 0, 150, 38).unwrap(),
+            vec![(75, 0), (149, 19), (149, 37), (0, 37), (0, 19)]
         );
     }
 }

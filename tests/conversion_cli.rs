@@ -210,7 +210,12 @@ fn xml_cf_xml_roundtrip_is_offline_and_atomic() {
     let to_xml_report: Value = serde_json::from_slice(&to_xml.stdout).unwrap();
     assert_eq!(to_xml_report["output_published"], true);
     assert_eq!(to_xml_report["preflight"]["opaque_entries"], 0);
-    assert_eq!(relative_files(&restored), relative_files(&input));
+    // The XML a CF exports to carries its `ConfigDumpInfo.xml`, as the
+    // platform's own dump does, so the round trip adds exactly that file.
+    let mut expected = relative_files(&input);
+    expected.push("ConfigDumpInfo.xml".to_owned());
+    expected.sort();
+    assert_eq!(relative_files(&restored), expected);
 
     let collision = convert(&[
         input.to_str().unwrap(),
