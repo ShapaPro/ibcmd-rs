@@ -626,6 +626,60 @@ mod tests {
     }
 
     #[test]
+    fn the_root_row_lists_give_each_top_level_object_its_kind() {
+        let text = concat!(
+            "{2,{\"#\",9fcd25a0-4822-11d4-9414-008048da11f9,",
+            "{cf4abea6-37b2-11d4-940f-008048da11f9,2,",
+            "aaaaaaaa-0000-0000-0000-000000000001,aaaaaaaa-0000-0000-0000-000000000002},",
+            "{f6a80749-5ad7-400b-8519-39dc5dff2542,1,bbbbbbbb-0000-0000-0000-000000000001},",
+            "{0195e80c-b157-11d4-9435-004095e12fc7,0}}}"
+        );
+        let kinds = root_kinds(&parse_row(text.as_bytes()).unwrap());
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds["aaaaaaaa-0000-0000-0000-000000000002"], "Catalog");
+        assert_eq!(kinds["bbbbbbbb-0000-0000-0000-000000000001"], "Enum");
+    }
+
+    #[test]
+    fn an_owner_row_lists_its_forms_and_templates_by_class() {
+        let text = concat!(
+            "{1,{57,{1,0,cccccccc-0000-0000-0000-000000000000},",
+            "{fdf816d2-1ead-11d5-b975-0050bae0a95d,1,dddddddd-0000-0000-0000-000000000001},",
+            "{3daea016-69b7-4ed4-9453-127911372fe6,2,",
+            "eeeeeeee-0000-0000-0000-000000000001,eeeeeeee-0000-0000-0000-000000000002},",
+            "{cf4abea7-37b2-11d4-940f-008048da11f9,0}}}"
+        );
+        assert!(may_own_objects(text));
+        let owned = owned_objects(&parse_row(text.as_bytes()).unwrap());
+        assert_eq!(
+            owned,
+            vec![
+                ("Form", "dddddddd-0000-0000-0000-000000000001".to_string()),
+                ("Template", "eeeeeeee-0000-0000-0000-000000000001".to_string()),
+                ("Template", "eeeeeeee-0000-0000-0000-000000000002".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn predefined_items_are_kept_per_owner() {
+        let mut index = NameIndex::default();
+        index.insert_predefined("Catalog.A", "11111111-1111-1111-1111-111111111111", "Один");
+        index.insert_predefined("Catalog.B", "11111111-1111-1111-1111-111111111111", "Другой");
+        index.insert_predefined("Catalog.C", "22222222-2222-2222-2222-222222222222", "Третий");
+        assert_eq!(index.predefined("11111111-1111-1111-1111-111111111111"), None);
+        assert_eq!(
+            index.predefined_in("Catalog.B", "11111111-1111-1111-1111-111111111111"),
+            Some("Другой")
+        );
+        assert_eq!(
+            index.predefined("22222222-2222-2222-2222-222222222222"),
+            Some("Третий")
+        );
+        assert_eq!(index.sizes().2, 3);
+    }
+
+    #[test]
     fn a_comparison_names_what_is_missing_extra_and_different() {
         let mut expected = NameIndex::default();
         expected.insert_name("a", "Catalog.A");
