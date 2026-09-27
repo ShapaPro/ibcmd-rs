@@ -35578,8 +35578,11 @@ fn split_1c_braced_fields_bounded(
     start: usize,
     max_fields: usize,
 ) -> Option<Vec<&str>> {
+    if let Some(fields) = split_1c_braced_fields_jumped(&text[start..], max_fields) {
+        return fields;
+    }
     let mut fields = Vec::new();
-    for_each_1c_braced_field(text, start, |value, _| {
+    walk_1c_braced_fields(&text[start..], |value, _| {
         if fields.len() >= max_fields {
             return false;
         }
@@ -35607,6 +35610,15 @@ fn for_each_1c_braced_field<'t>(
     if let Some(walked) = for_each_1c_braced_field_jumped(rest, &mut field) {
         return walked;
     }
+    walk_1c_braced_fields(rest, field)
+}
+
+/// [`for_each_1c_braced_field`] without the registered tables: the byte walk
+/// over the value at `rest[0]`.
+fn walk_1c_braced_fields<'t>(
+    rest: &'t str,
+    mut field: impl FnMut(&'t str, usize) -> bool,
+) -> Option<()> {
     let bytes = rest.as_bytes();
     if bytes.first() != Some(&b'{') {
         return None;
@@ -35754,6 +35766,80 @@ fn build_brace_jumps(text: &str) -> BraceJumps {
         len: bytes.len(),
         ends,
     }
+}
+
+/// The registered table and the value it knows at `rest[0]`: (table, the
+/// value's offset in it, the value's length), when the value lies within
+/// `rest`.
+fn brace_jump_value<'a>(
+    tables: &'a [BraceJumps],
+    rest: &str,
+) -> Option<(&'a BraceJumps, usize, usize)> {
+    if rest.as_bytes().first() != Some(&b'{') {
+        return None;
+    }
+    let at = rest.as_ptr() as usize;
+    let table = tables
+        .iter()
+        .find(|table| at >= table.base && at < table.base + table.len)?;
+    let offset = at - table.base;
+    let end = table.ends[offset] as usize;
+    (end != 0 && end - offset <= rest.len()).then_some((table, offset, end - offset))
+}
+
+/// [`split_1c_braced_fields_bounded`] through the registered table: the
+/// value's top level is walked once to count its fields, and once more to
+/// collect them into a vector of that size. `None` when no table knows the
+/// value; `Some(None)` is the split's own `None` (more than `max_fields`).
+fn split_1c_braced_fields_jumped(rest: &str, max_fields: usize) -> Option<Option<Vec<&str>>> {
+    BRACE_JUMPS.with(|tables| {
+        let tables = tables.borrow();
+        let (table, offset, len) = brace_jump_value(&tables, rest)?;
+        let value = &rest[..len];
+        let bytes = value.as_bytes();
+        let last = len - 1;
+        // Every value and string inside a closed value is closed too, so each
+        // has its end; checked while counting, before anything is collected.
+        let mut count = 1usize;
+        let mut index = 1usize;
+        while index < last {
+            match bytes[index] {
+                b'"' | b'{' => {
+                    let jump = table.ends[offset + index] as usize;
+                    if jump <= offset + index || jump > offset + len {
+                        return None;
+                    }
+                    index = jump - offset;
+                    continue;
+                }
+                b',' => count += 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        if count > max_fields {
+            return Some(None);
+        }
+        let mut fields = Vec::with_capacity(count);
+        let mut field_start = 1usize;
+        let mut index = 1usize;
+        while index < last {
+            match bytes[index] {
+                b'"' | b'{' => {
+                    index = table.ends[offset + index] as usize - offset;
+                    continue;
+                }
+                b',' => {
+                    fields.push(value[field_start..index].trim());
+                    field_start = index + 1;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        fields.push(value[field_start..last].trim());
+        Some(Some(fields))
+    })
 }
 
 /// The fields of the value at `rest[0]` through the registered table, or

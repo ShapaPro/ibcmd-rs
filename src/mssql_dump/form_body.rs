@@ -1972,6 +1972,14 @@ impl From<FormChoiceParametersEmitError> for FormSchemaWriteError {
 }
 
 fn verified_form_choice_list_policy() -> Result<WriterPolicy, FormSchemaWriteError> {
+    static POLICY: std::sync::OnceLock<Result<WriterPolicy, FormSchemaWriteError>> =
+        std::sync::OnceLock::new();
+    POLICY
+        .get_or_init(verified_form_choice_list_policy_uncached)
+        .clone()
+}
+
+fn verified_form_choice_list_policy_uncached() -> Result<WriterPolicy, FormSchemaWriteError> {
     let corpus = bundled_writer_rules()?;
     let rule = corpus.exact_rule(WriterRuleKey {
         source_release: "2025.2.3+30",
@@ -1988,6 +1996,14 @@ fn verified_form_choice_list_policy() -> Result<WriterPolicy, FormSchemaWriteErr
 }
 
 fn verified_form_choice_parameters_policy() -> Result<WriterPolicy, FormSchemaWriteError> {
+    static POLICY: std::sync::OnceLock<Result<WriterPolicy, FormSchemaWriteError>> =
+        std::sync::OnceLock::new();
+    POLICY
+        .get_or_init(verified_form_choice_parameters_policy_uncached)
+        .clone()
+}
+
+fn verified_form_choice_parameters_policy_uncached() -> Result<WriterPolicy, FormSchemaWriteError> {
     let corpus = bundled_writer_rules()?;
     let rule = corpus.exact_rule(WriterRuleKey {
         source_release: "2025.2.3+30",
@@ -3875,6 +3891,8 @@ pub(super) fn extract_form_item_assets(bytes: &[u8]) -> Vec<FormItemAsset> {
 }
 
 pub(super) fn extract_form_item_assets_from_text(text: &str) -> Vec<FormItemAsset> {
+    // Each marker is placed by scanning every value that opens before it.
+    let _brace_jumps = register_brace_jumps([text]);
     let mut assets = Vec::new();
     let mut offset = 0usize;
     let prefix = "{#base64:";
@@ -21698,10 +21716,37 @@ fn parse_form_extended_tooltip_option_events(fields: &[&str]) -> Option<Vec<Form
     (events.len() == count).then_some(events)
 }
 
+/// The leading member of a braced value, as its split would trim it, and the
+/// byte that ends it (`,`, or `}` for a one-member value); `None` when the
+/// value is not braced or its leading member is itself a value or a string.
+/// Readers that accept only a few leading members answer every other value
+/// from this alone, without splitting it.
+fn form_braced_leading_member(field: &str) -> Option<(&str, u8)> {
+    let rest = field.trim().strip_prefix('{')?;
+    let end = rest
+        .bytes()
+        .position(|byte| matches!(byte, b',' | b'}' | b'{' | b'"'))?;
+    match rest.as_bytes()[end] {
+        delimiter @ (b',' | b'}') => Some((rest[..end].trim(), delimiter)),
+        _ => None,
+    }
+}
+
+/// Whether a member could be an extended tooltip record: a braced value whose
+/// leading member is the decoration class's `12` or its short revision `11`,
+/// the only two that read as `12` once the record revision is normalized.
+/// Every member of every item is asked, and almost none is a tooltip.
+fn form_member_may_be_extended_tooltip(field: &str) -> bool {
+    form_braced_leading_member(field).is_some_and(|(member, _)| matches!(member, "12" | "11"))
+}
+
 /// Identity of the extended tooltip nested in a child-item record, read with
 /// the same shape test the tooltip reader itself uses.
 fn form_child_item_extended_tooltip_identity(fields: &[&str]) -> Option<(String, String)> {
     fields.iter().find_map(|field| {
+        if !form_member_may_be_extended_tooltip(field) {
+            return None;
+        }
         let split_nested = split_1c_braced_fields(field.trim(), 0)?;
         let revision_nested = normalize_form_item_record_revision(&split_nested);
         let nested = revision_nested.unwrap_or(split_nested);
@@ -21726,6 +21771,9 @@ pub(super) fn parse_form_child_item_extended_tooltip(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<FormExtendedTooltip> {
     fields.iter().find_map(|field| {
+        if !form_member_may_be_extended_tooltip(field) {
+            return None;
+        }
         let split_nested = split_1c_braced_fields(field.trim(), 0)?;
         let revision_nested = normalize_form_item_record_revision(&split_nested);
         let raw_nested = revision_nested.unwrap_or(split_nested);
@@ -29356,6 +29404,11 @@ pub(super) fn form_command_interface_item_schema(
 pub(super) fn form_command_interface_visibility_schema(
     field: &str,
 ) -> Option<FormCommandInterfaceVisibilitySchema> {
+    // The envelope is `{0,{0,...}}`: a value led by anything but `0` and a
+    // comma is not one, which is most of what this is asked about.
+    if form_braced_leading_member(field) != Some(("0", b',')) {
+        return None;
+    }
     let fields = split_1c_braced_fields(field.trim(), 0)?;
     let scope = split_1c_braced_fields(fields.get(1)?.trim(), 0)?;
     parse_form_typed_bool(scope.get(1)?)?;
