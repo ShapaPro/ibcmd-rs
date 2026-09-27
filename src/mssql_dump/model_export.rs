@@ -642,6 +642,10 @@ pub struct NameIndexAudit {
     pub fetch_ms: u64,
     pub legacy_ms: u64,
     pub model_ms: u64,
+    /// The legacy object references and type index against the row-built
+    /// index: whether the body writers could read the latter instead.
+    pub object_refs: LegacyMapComparison,
+    pub type_index: LegacyMapComparison,
 }
 
 /// Builds the index from a folder of stored rows the way the export does and
@@ -697,6 +701,17 @@ pub fn audit_name_index(
     let expected = NameIndex::from_config_index(&config_index);
     let build_tree_ms = elapsed_ms(started);
     let comparison = compare(&expected, model.names(), max_samples);
+    let object_refs_comparison =
+        compare_legacy_map("object refs", &object_refs, model.names().name_entries(), max_samples);
+    let type_index_comparison = compare_legacy_map(
+        "type index",
+        &type_index
+            .iter()
+            .map(|(id, name)| (id.clone(), name.strip_prefix("cfg:").unwrap_or(name).to_string()))
+            .collect(),
+        model.names().type_entries(),
+        max_samples,
+    );
     Ok(NameIndexAudit {
         tree_compatibility_mode: config_index.compatibility_mode.clone(),
         rows_compatibility_mode: model.report.compatibility_mode.clone(),
@@ -708,5 +723,69 @@ pub fn audit_name_index(
         fetch_ms,
         legacy_ms,
         model_ms,
+        object_refs: object_refs_comparison,
+        type_index: type_index_comparison,
     })
+}
+
+/// How a legacy uuid -> name map relates to the row-built index: the keys
+/// both hold with the same or another name, and what each holds alone, by
+/// the kind the name starts with and its second-to-last segment
+/// (`Catalog/Attribute`).
+#[derive(Debug, Default, Serialize)]
+pub struct LegacyMapComparison {
+    pub legacy: usize,
+    pub index: usize,
+    pub equal: usize,
+    pub different: BTreeMap<String, usize>,
+    pub legacy_only: BTreeMap<String, usize>,
+    pub index_only: BTreeMap<String, usize>,
+    pub samples: Vec<String>,
+}
+
+fn name_shape(name: &str) -> String {
+    let parts = name.split('.').collect::<Vec<_>>();
+    match parts.len() {
+        0 | 1 => name.to_string(),
+        2 => parts[0].to_string(),
+        n => format!("{}/{}", parts[0], parts[n - 2]),
+    }
+}
+
+fn compare_legacy_map<'a>(
+    what: &str,
+    legacy: &BTreeMap<String, String>,
+    index: impl Iterator<Item = (&'a str, &'a str)>,
+    max_samples: usize,
+) -> LegacyMapComparison {
+    let index = index.collect::<HashMap<_, _>>();
+    let mut out = LegacyMapComparison {
+        legacy: legacy.len(),
+        index: index.len(),
+        ..LegacyMapComparison::default()
+    };
+    let mut sample = |text: String, samples: &mut Vec<String>| {
+        if samples.len() < max_samples * 8 {
+            samples.push(format!("{what}: {text}"));
+        }
+    };
+    for (uuid, name) in legacy {
+        match index.get(uuid.as_str()) {
+            Some(found) if *found == name.as_str() => out.equal += 1,
+            Some(found) => {
+                *out.different.entry(name_shape(name)).or_default() += 1;
+                sample(format!("{uuid}: legacy {name}, index {found}"), &mut out.samples);
+            }
+            None => {
+                *out.legacy_only.entry(name_shape(name)).or_default() += 1;
+                sample(format!("{uuid}: legacy only {name}"), &mut out.samples);
+            }
+        }
+    }
+    for (uuid, name) in &index {
+        if !legacy.contains_key(*uuid) {
+            *out.index_only.entry(name_shape(name)).or_default() += 1;
+        }
+    }
+    out
 }

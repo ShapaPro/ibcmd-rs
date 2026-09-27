@@ -126,6 +126,20 @@ impl NameIndex {
         self.types.contains_key(type_id)
     }
 
+    /// Every (uuid, full name).
+    pub fn name_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.names
+            .iter()
+            .map(|(uuid, name)| (uuid.as_str(), name.as_str()))
+    }
+
+    /// Every (type id, generated type name).
+    pub fn type_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.types
+            .iter()
+            .map(|(id, name)| (id.as_str(), name.as_str()))
+    }
+
     /// (names, generated types, predefined items).
     pub fn sizes(&self) -> (usize, usize, usize) {
         (
