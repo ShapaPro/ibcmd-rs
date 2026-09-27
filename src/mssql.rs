@@ -75,6 +75,7 @@ use crate::source_audit::{
 };
 
 mod empty_stage;
+mod stage_timing;
 
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,

@@ -22,6 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use super::stage_timing;
 use super::{
     BASE_FREE_MISSING_ROW, BASE_FREE_STAGE, BulkStageRow, GeneratedBlobReport, MetadataBodyFamily,
     SqlAuth, StageSourceObjectsReport, StagedMetadataBodyReport, StagedMetadataObjectReport,
@@ -151,6 +152,20 @@ fn relative_of(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// The kind a timing line is filed under: a template also names its type.
+fn timing_kind(kind: &str, xml: &[u8]) -> String {
+    if !matches!(kind, "Template" | "CommonTemplate") {
+        return kind.to_string();
+    }
+    let text = String::from_utf8_lossy(xml);
+    let template_type = text
+        .find("<TemplateType>")
+        .map(|at| &text[at + "<TemplateType>".len()..])
+        .and_then(|rest| rest.find("</TemplateType>").map(|end| &rest[..end]))
+        .unwrap_or("?");
+    format!("{kind}/{template_type}")
+}
+
 fn error_text(error: &anyhow::Error) -> String {
     format!("{error:#}")
 }
@@ -243,6 +258,7 @@ pub(crate) fn prepare_empty_object(
             error,
         });
     };
+    let read_started = stage_timing::start();
     let xml = match fs::read(path) {
         Ok(xml) => xml,
         Err(error) => {
@@ -266,11 +282,19 @@ pub(crate) fn prepare_empty_object(
             return object;
         }
     };
+    let kind = if stage_timing::enabled() {
+        timing_kind(&properties.kind, &xml)
+    } else {
+        String::new()
+    };
+    stage_timing::record(read_started, "xml read and parse", &kind, &relative);
 
     // The descriptor row.
-    match catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
-        .and_then(|plain| Ok((deflate_raw(&plain)?, plain)))
-    {
+    let started = stage_timing::start();
+    let descriptor = catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
+        .and_then(|plain| Ok((deflate_raw(&plain)?, plain)));
+    stage_timing::record(started, "descriptor", &kind, &relative);
+    match descriptor {
         Ok((blob, plain)) => object.rows.push(EmptyStageRow {
             file_name: properties.uuid.clone(),
             family: "descriptor".to_string(),
@@ -292,7 +316,10 @@ pub(crate) fn prepare_empty_object(
     if properties.kind == "CommonModule" {
         if let Some(text_path) = source_module_body_path(infer_common_module_text_path(path)) {
             let body_id = format!("{}.0", properties.uuid);
-            match catch(|| pack_module_body_source(&text_path, &body_id, &axes)) {
+            let started = stage_timing::start();
+            let packed = catch(|| pack_module_body_source(&text_path, &body_id, &axes));
+            stage_timing::record(started, "module", &kind, &relative);
+            match packed {
                 Ok(packed) => object.rows.push(EmptyStageRow {
                     file_name: body_id,
                     family: "module".to_string(),
@@ -311,13 +338,16 @@ pub(crate) fn prepare_empty_object(
         }
     } else {
         // Track D: predefined data, flowcharts and aggregates, base-free.
+        let started = stage_timing::start();
         track_d_body_rows(context, path, &xml, &properties, &relative, &mut object);
+        stage_timing::record(started, "model bodies", &kind, &relative);
         for family in MetadataBodyFamily::ALL {
             if family == MetadataBodyFamily::KindBody
                 && crate::metadata_model::bodies_rows::owns_kind_body(&properties.kind, &xml)
             {
                 continue;
             }
+            let started = stage_timing::start();
             let result = catch(|| {
                 prepare_metadata_body_family(
                     family,
@@ -332,6 +362,7 @@ pub(crate) fn prepare_empty_object(
                     &axes,
                 )
             });
+            stage_timing::record(started, family.label(), &kind, &relative);
             match result {
                 Ok(rows) => object
                     .rows
@@ -448,14 +479,26 @@ impl EmptyStage {
 }
 
 pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<EmptyStage> {
+    stage_timing::reset_from_env();
+    let setup = stage_timing::start();
     let context = EmptyStageContext::new(root, version)?;
+    stage_timing::record(setup, "setup: context", "", "");
+    let setup = stage_timing::start();
     let paths = descriptor_xmls(root);
+    stage_timing::record(setup, "setup: descriptor list", "", "");
+    let started = std::time::Instant::now();
     let objects = parallel::install(|| {
         paths
             .par_iter()
             .map(|path| prepare_empty_object(&context, path, false))
             .collect::<Vec<_>>()
     })?;
+    if stage_timing::enabled() {
+        eprintln!(
+            "{}",
+            stage_timing::report(started.elapsed(), parallel::bounded_worker_count())
+        );
+    }
     let names = objects
         .iter()
         .flat_map(|object| object.rows.iter().map(|row| row.file_name.clone()))
@@ -876,8 +919,13 @@ pub fn audit_empty_stage(
     version: Option<&str>,
     options: &EmptyStageAuditOptions,
 ) -> Result<EmptyStageAuditReport> {
+    stage_timing::reset_from_env();
+    let setup = stage_timing::start();
     let stored = StoredRows::scan(rows)?;
+    stage_timing::record(setup, "setup: stored row list", "", "");
+    let setup = stage_timing::start();
     let context = EmptyStageContext::new(root, version)?;
+    stage_timing::record(setup, "setup: context", "", "");
     if let Some(dir) = &options.rows_out {
         fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     }
@@ -889,7 +937,9 @@ pub fn audit_empty_stage(
         }
         Ok(())
     };
+    let setup = stage_timing::start();
     let paths = descriptor_xmls(root);
+    stage_timing::record(setup, "setup: descriptor list", "", "");
 
     // Owner kind of every uuid the tree names.
     let mut kinds: HashMap<String, String> = HashMap::new();
@@ -919,6 +969,7 @@ pub fn audit_empty_stage(
     let keep_samples = options.diff_dir.is_some();
 
     // Produce and compare object by object, in parallel; keep outcomes only.
+    let parallel_started = std::time::Instant::now();
     let per_object = parallel::install(|| {
         paths
             .par_iter()
@@ -929,6 +980,7 @@ pub fn audit_empty_stage(
                     Vec<(String, String, usize, String, String)>,
                 )> {
                     let object = prepare_empty_object(&context, path, true);
+                    let audit_started = stage_timing::start();
                     let mut measured = Vec::new();
                     let mut names = Vec::new();
                     let mut manifest = Vec::new();
@@ -989,6 +1041,12 @@ pub fn audit_empty_stage(
                             },
                         });
                     }
+                    stage_timing::record(
+                        audit_started,
+                        "audit: compare and write",
+                        &object.kind,
+                        &object.relative,
+                    );
                     for failure in &object.failures {
                         measured.push(Measured {
                             file_name: failure.file_name.clone().unwrap_or_default(),
@@ -1013,7 +1071,14 @@ pub fn audit_empty_stage(
             )
             .collect::<Result<Vec<_>>>()
     })??;
+    if stage_timing::enabled() {
+        eprintln!(
+            "{}",
+            stage_timing::report(parallel_started.elapsed(), parallel::bounded_worker_count())
+        );
+    }
 
+    let tail_started = std::time::Instant::now();
     let mut measured = Vec::new();
     let mut names = Vec::new();
     let mut manifest = Vec::new();
@@ -1235,6 +1300,12 @@ pub fn audit_empty_stage(
             text.push_str(&format!("{name}\t{family}\t{bytes}\t{blob}\t{plain}\n"));
         }
         fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: serial tail (service rows, missing rows, report) {:.1} s",
+            tail_started.elapsed().as_secs_f64()
+        );
     }
     Ok(report)
 }
