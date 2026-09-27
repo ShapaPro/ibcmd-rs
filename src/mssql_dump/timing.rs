@@ -93,6 +93,10 @@ pub struct MssqlDumpTimingReport {
     pub source_asset_form_command_interface_cpu_ms: u64,
     pub source_asset_form_format_cpu_ms: u64,
     pub source_asset_form_items_cpu_ms: u64,
+    /// Creating the form's folder and writing its `Form.xml`: file-system
+    /// time, which waits on the disk and the other writers rather than
+    /// working the CPU.
+    pub source_asset_form_write_cpu_ms: u64,
     pub source_asset_help_cpu_ms: u64,
     pub source_asset_moxel_cpu_ms: u64,
     pub source_asset_inflated_cpu_ms: u64,
@@ -340,6 +344,7 @@ fn form_cpu_breakdown(timings: &MssqlDumpTimingReport) -> Vec<MssqlDumpCpuTiming
         ),
         ("format", timings.source_asset_form_format_cpu_ms),
         ("items", timings.source_asset_form_items_cpu_ms),
+        ("write", timings.source_asset_form_write_cpu_ms),
     ])
 }
 
@@ -455,6 +460,7 @@ impl MssqlDumpTimingReport {
             other.source_asset_form_command_interface_cpu_ms;
         self.source_asset_form_format_cpu_ms += other.source_asset_form_format_cpu_ms;
         self.source_asset_form_items_cpu_ms += other.source_asset_form_items_cpu_ms;
+        self.source_asset_form_write_cpu_ms += other.source_asset_form_write_cpu_ms;
         self.source_asset_help_cpu_ms += other.source_asset_help_cpu_ms;
         self.source_asset_moxel_cpu_ms += other.source_asset_moxel_cpu_ms;
         self.source_asset_inflated_cpu_ms += other.source_asset_inflated_cpu_ms;
