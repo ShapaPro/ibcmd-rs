@@ -286,12 +286,30 @@ fn color_member(value: &str, what: &str, source: Option<&MetadataSourceContext>)
         .ok_or_else(|| anyhow!("{what}: the writer cannot place the colour {value}"))
 }
 
+/// The layout a 2.21 form body is stored in: 8.5's own, or -- for a
+/// configuration kept in an 8.3 compatibility mode under 8.5 (ERP УХ 8.5) --
+/// the 8.3.27 one, which has no 8.5 tail to hold a member's absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredLayout {
+    V85,
+    V83,
+}
+
 /// Takes out of a 2.21 `Form.xml` what only the members 8.5 appends hold and
 /// returns the XML the 8.3.27 writer reads, with those members as facts.
 pub(crate) fn down_convert_v85_form_xml(
     xml: &str,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
+) -> Result<(String, V85FormLoadFacts)> {
+    down_convert_v85_form_xml_as(xml, source, items_root, StoredLayout::V85)
+}
+
+fn down_convert_v85_form_xml_as(
+    xml: &str,
+    source: Option<&MetadataSourceContext>,
+    items_root: Option<&Path>,
+    layout: StoredLayout,
 ) -> Result<(String, V85FormLoadFacts)> {
     let mut facts = V85FormLoadFacts::default();
     let mut edits = XmlEdits::new_lenient(xml)?;
@@ -335,7 +353,7 @@ pub(crate) fn down_convert_v85_form_xml(
             name: name.clone(),
             ..ItemFacts::default()
         };
-        load_item(&mut edits, element, &tag, &name, &mut item, source, items_root)
+        load_item(&mut edits, element, &tag, &name, &mut item, source, items_root, layout)
             .with_context(|| format!("2.21 form item <{tag}> {name} (id {id})"))?;
         facts.items.insert(id, item);
     }
@@ -517,6 +535,7 @@ fn load_item(
     item: &mut ItemFacts,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
+    layout: StoredLayout,
 ) -> Result<()> {
     if FIELD_TAGS.contains(&tag) {
         load_field(edits, element, tag, name, item, source, items_root)?;
@@ -542,7 +561,7 @@ fn load_item(
                 Some(other) => bail!("OnMainServerUnavalableBehavior {other} has no 8.5 code"),
             }
         }
-        "Table" => load_table(edits, element, item)?,
+        "Table" => load_table(edits, element, item, layout)?,
         "UsualGroup" => load_usual_group(edits, element, item)?,
         "Page" => {
             let group = peek(edits, element, "Group")?;
@@ -752,9 +771,17 @@ fn load_field(
     Ok(())
 }
 
-fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) -> Result<()> {
+fn load_table(
+    edits: &mut XmlEdits<'_>,
+    element: usize,
+    item: &mut ItemFacts,
+    layout: StoredLayout,
+) -> Result<()> {
     // The line and alternation flags: 8.5 reads the `...BWA` members and keeps
-    // the 8.3.27 slot true only when the member says true.
+    // the 8.3.27 slot true only when the member says true. A body kept in the
+    // 8.3.27 layout has only the slot: its export writes a member for a false
+    // slot alone (`upgrade_table`), so there an absent member is a true slot,
+    // as ERP УХ 8.5 (compatibility 8.3.27 under 8.5.1) stores it.
     for (index, bwa, old, old_when_not_true) in [
         (0, "HorizontalLinesBWA", "HorizontalLines", Some("false")),
         (1, "VerticalLinesBWA", "VerticalLines", Some("false")),
@@ -766,7 +793,11 @@ fn load_table(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFacts) ->
         if let Some(stale) = take(edits, element, old)? {
             bail!("<Table> writes the 8.3.27 <{old}>{stale} under 2.21");
         }
-        match (value.as_deref(), old_when_not_true) {
+        let value = match (layout, value.as_deref()) {
+            (StoredLayout::V83, None) => Some("true"),
+            (_, value) => value,
+        };
+        match (value, old_when_not_true) {
             (Some("true"), Some(_)) => {}
             (Some("true"), None) => put(edits, element, old, "true")?,
             (_, Some(spelling)) => put(edits, element, old, spelling)?,
@@ -1936,13 +1967,48 @@ pub(crate) fn compile_v85_form_body_in_v83_layout(
     items_root: Option<&Path>,
 ) -> Result<String> {
     let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
-    let (xml20, _) = down_convert_v85_form_xml(xml, source, items_root)?;
+    let (xml20, _) = down_convert_v85_form_xml_as(xml, source, items_root, StoredLayout::V83)?;
     crate::module_blob::compile_native_form_body_v83(xml20.as_bytes(), module_text, source, items_root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unset_table_line_member_is_a_true_slot_only_in_the_83_layout() {
+        let form = |members: &str| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Form xmlns=\"http://v8.1c.ru/8.3/xcf/logform\" version=\"2.21\">\r\n\t<ChildItems>\r\n\t\t<Table name=\"Список\" id=\"1\">\r\n\t\t\t<Representation>List</Representation>\r\n{members}\t\t\t<DataPath>Список</DataPath>\r\n\t\t</Table>\r\n\t</ChildItems>\r\n</Form>"
+            )
+        };
+        let table = |xml: &str, layout| {
+            let (xml20, _) = down_convert_v85_form_xml_as(xml, None, None, layout).unwrap();
+            let start = xml20.find("<Table").unwrap();
+            let end = xml20.find("</Table>").unwrap();
+            xml20[start..end].to_string()
+        };
+        // Unset: 8.5 keeps false slots (its tail says unset); the 8.3.27 layout
+        // stores true ones, as its export (`upgrade_table`) reads them back.
+        let unset = form("");
+        let v85 = table(&unset, StoredLayout::V85);
+        assert!(v85.contains("<HorizontalLines>false</HorizontalLines>"), "{v85}");
+        assert!(v85.contains("<VerticalLines>false</VerticalLines>"), "{v85}");
+        assert!(!v85.contains("UseAlternationRowColor"), "{v85}");
+        let v83 = table(&unset, StoredLayout::V83);
+        assert!(!v83.contains("HorizontalLines") && !v83.contains("VerticalLines"), "{v83}");
+        assert!(v83.contains("<UseAlternationRowColor>true</UseAlternationRowColor>"), "{v83}");
+        // An explicit false reads the same in both.
+        let off = form(
+            "\t\t\t<HorizontalLinesBWA>false</HorizontalLinesBWA>\r\n\t\t\t<VerticalLinesBWA>false</VerticalLinesBWA>\r\n\t\t\t<UseAlternationRowColorBWA>false</UseAlternationRowColorBWA>\r\n",
+        );
+        for layout in [StoredLayout::V85, StoredLayout::V83] {
+            let read = table(&off, layout);
+            assert!(read.contains("<HorizontalLines>false</HorizontalLines>"), "{read}");
+            assert!(read.contains("<VerticalLines>false</VerticalLines>"), "{read}");
+            assert!(!read.contains("UseAlternationRowColor"), "{read}");
+        }
+    }
 
     #[test]
     fn bag_table_inverts_the_exporter_table() {
