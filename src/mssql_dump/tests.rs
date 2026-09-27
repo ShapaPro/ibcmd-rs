@@ -30825,6 +30825,14 @@ fn non_streamed_information_register_resolves_predefined_design_time_refs() {
     let _ = fs::remove_dir_all(baseline_root);
 }
 
+/// The chart's descriptor is the platform-proven `CorpusCharacteristics` row
+/// (`chart-of-characteristic-types` evidence, 8.3.27.2214): the owner record of
+/// 59 members with its generated types at slots 1-12 and its header at slot 13.
+/// The descriptor this test used to build by hand was a seven-member owner
+/// record no platform writes; since the CCT decoder accepts only the evidenced
+/// shape (`accepts_only_evidenced_cct_attribute_and_tabular_wrappers`), no
+/// `ChartsOfCharacteristicTypes/*.xml` was written for it. The reference kind's
+/// type is the chart's own generated `Ref` type (slot 3).
 #[test]
 fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let root = std::env::temp_dir().join(format!(
@@ -30832,20 +30840,16 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
         uuid::Uuid::new_v4().hyphenated()
     ));
     fs::create_dir_all(&root).unwrap();
-    let chart_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
-    let object_type_uuid = "11111111-1111-4111-8111-111111111111";
-    let ref_type_uuid = "22222222-2222-4222-8222-222222222222";
-    let selection_type_uuid = "33333333-3333-4333-8333-333333333333";
+    let chart_uuid = "d003f1f8-d632-4f80-adad-af1583998864";
+    let ref_type_uuid = "9ede7dd8-7963-4f8c-a2fe-d486fa9931f0";
     let value_type_uuid = "f5c65050-3bbb-11d5-b988-0050bae0a95d";
     let predefined_type_uuid = "ae135932-4f94-44df-92c1-c91f15a92848";
     let string_item_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
     let ref_item_uuid = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
-    let metadata = deflate_for_test(
-            format!(
-                "{{1,{{34,{object_type_uuid},00000000-0000-0000-0000-000000000000,{ref_type_uuid},00000000-0000-0000-0000-000000000000,{selection_type_uuid},{{3,{{1,0,{chart_uuid}}},\"Kinds\",{{1,\"en\",\"Kinds\"}},\"\"}}}}}}"
-            )
-            .as_bytes(),
-        );
+    let metadata = include_bytes!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/chart-of-characteristic-types/raw/d003f1f8-d632-4f80-adad-af1583998864.deflate"
+    )
+    .to_vec();
     let predefined = deflate_for_test(
             format!(
                 "{{1,{{1,{{7}},{{2,{{1,1,{{2,0,6,{{\"#\",{predefined_type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"B\",1}},{{\"S\",\"Характеристики\"}},{{\"S\",\"\"}},{{\"S\",\"\"}},{{\"#\",{value_type_uuid},{{\"Pattern\"}}}},1,{{1,2,{{2,1,7,{{\"#\",{predefined_type_uuid},{{1,{string_item_uuid}}}}},{{\"B\",0}},{{\"S\",\"StringKind\"}},{{\"S\",\"\"}},{{\"S\",\"String kind\"}},{{\"#\",{value_type_uuid},{{\"Pattern\",{{\"S\",10,1}}}}}},{{\"N\",0}},0}},{{2,2,7,{{\"#\",{predefined_type_uuid},{{1,{ref_item_uuid}}}}},{{\"B\",0}},{{\"S\",\"RefKind\"}},{{\"S\",\"\"}},{{\"S\",\"Ref kind\"}},{{\"#\",{value_type_uuid},{{\"Pattern\",{{\"#\",{ref_type_uuid}}}}}}},{{\"N\",0}},0}}}}}}}}}},-1,1}}}}"
@@ -30855,7 +30859,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let mut type_index = BTreeMap::new();
     type_index.insert(
         ref_type_uuid.to_string(),
-        "cfg:ChartOfCharacteristicTypesRef.Kinds".to_string(),
+        "cfg:ChartOfCharacteristicTypesRef.CorpusCharacteristics".to_string(),
     );
     let parsed = parse_predefined_data_blob(&predefined, &type_index).unwrap();
     assert_eq!(parsed.len(), 2);
@@ -30877,9 +30881,15 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     let dumped = dump_table_rows(&root, "Config", rows, false, false, true).unwrap();
 
     assert_eq!(dumped.metadata_xml_rows, 1);
+    assert!(
+        root.join("ChartsOfCharacteristicTypes/CorpusCharacteristics.xml")
+            .is_file()
+    );
     assert_eq!(dumped.source_asset_rows, 1);
-    let xml = fs::read_to_string(root.join("ChartsOfCharacteristicTypes/Kinds/Ext/Predefined.xml"))
-        .unwrap();
+    let xml = fs::read_to_string(
+        root.join("ChartsOfCharacteristicTypes/CorpusCharacteristics/Ext/Predefined.xml"),
+    )
+    .unwrap();
     assert!(xml.contains(r#"xsi:type="PlanOfCharacteristicKindPredefinedItems""#));
     assert!(xml.contains(&format!(r#"<Item id="{string_item_uuid}">"#)));
     assert!(xml.contains("<v8:Type>xs:string</v8:Type>"));
@@ -30888,7 +30898,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
     assert!(xml.contains("<v8:AllowedLength>Variable</v8:AllowedLength>"));
     assert!(xml.contains(&format!(r#"<Item id="{ref_item_uuid}">"#)));
     assert!(
-            xml.contains(r#"<v8:Type xmlns:d4p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d4p1:ChartOfCharacteristicTypesRef.Kinds</v8:Type>"#)
+            xml.contains(r#"<v8:Type xmlns:d4p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d4p1:ChartOfCharacteristicTypesRef.CorpusCharacteristics</v8:Type>"#)
         );
     let predefined_row = dumped
         .rows
@@ -30897,7 +30907,7 @@ fn writes_chart_of_characteristic_types_predefined_data_with_types() {
         .unwrap();
     assert_eq!(
         predefined_row.source_asset_path.as_deref(),
-        Some("ChartsOfCharacteristicTypes/Kinds/Ext/Predefined.xml")
+        Some("ChartsOfCharacteristicTypes/CorpusCharacteristics/Ext/Predefined.xml")
     );
 
     let _ = fs::remove_dir_all(root);
