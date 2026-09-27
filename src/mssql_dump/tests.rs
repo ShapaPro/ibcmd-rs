@@ -13870,7 +13870,6 @@ fn extracts_form_child_items_from_layout_pairs() {
     assert!(xml.contains(r#"<Button name="Выполнить" id="44">"#));
     assert!(xml.contains("<Type>CommandBarButton</Type>"));
     assert!(xml.contains("<CommandName>DataProcessor.Loader.Command.Load</CommandName>"));
-    assert!(xml.contains("<DataPath>Items.СписокТаблица.CurrentData.Наименование</DataPath>"));
     assert!(xml.contains(r#"<Table name="СписокТаблица" id="25">"#));
     assert!(xml.contains("<DataPath>Список</DataPath>"));
     assert!(xml.contains(r#"<InputField name="Наименование" id="40">"#));
@@ -13899,6 +13898,31 @@ fn extracts_form_child_items_from_layout_pairs() {
         xml.matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
             .count(),
         1
+    );
+
+    // A button bound to a table's current row names the table *item*:
+    // `{2,{<table item>,02023637-...},{<field>}}`. The hand-made button above
+    // carries `{2,{25},{40}}`, which is the platform's shape for an attribute
+    // path (`{2,{1},{-8}}` is `Объект.Ref` on BSP `Catalogs/ВариантыОтчетов/
+    // Forms/ФормаЭлемента`), so it names no current row; the current-row path
+    // is asserted on the platform's own record instead. BSP 3.1
+    // `Catalogs/_ДемоПроекты/Forms/ФормаСписка`, button 39 over table `Список`
+    // (item 1): `{2,{1,02023637-...},{16}}`, native
+    // `Items.Список.CurrentData.Ref`.
+    let projects = extract_form_body_xml(
+        include_bytes!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-button-table-current-data/raw/b9b7a7e7-3e39-49cd-899d-c23839ab519c.deflate"
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let button = &projects[projects
+        .find(r#"<Button name="СписокКонтекстноеМенюСправочник_ДемоПроектыСделатьОсновным" id="39">"#)
+        .unwrap()..];
+    let button = &button[..button.find("</Button>").unwrap()];
+    assert!(
+        button.contains("<DataPath>Items.Список.CurrentData.Ref</DataPath>"),
+        "{button}"
     );
 }
 
