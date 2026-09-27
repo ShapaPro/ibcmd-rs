@@ -75,7 +75,25 @@ pub struct ConfigurationFacts {
     pub uuid: String,
     pub compatibility: u32,
     pub shape: ConfigurationShape,
+    /// The restricted-compatibility features the configuration uses, the
+    /// uuids `version` lists (see [`version_row`]).
+    pub features: Vec<&'static str>,
 }
+
+/// The platform's feature "palette colors" (since 8.5.1). The platform keeps
+/// a registry of features an older platform cannot use -- backend.dll
+/// 8.5.1.1150 builds it from thirteen (uuid, packed version) pairs, twelve of
+/// them 8.3.9 .. 8.3.26 and this one 8.5.1 -- and, on save, lists in
+/// `version` those the configuration's objects report using (its
+/// `RestrictedCompatibilityUsedFeatures`). A platform that does not know a
+/// listed uuid refuses the configuration ("Для использования этой
+/// конфигурации требуется более новая версия платформы"). Every PaletteColor
+/// object reports this one, unconditionally (the palette colour class's
+/// feature method is the only code that names it). The 8.3 features are
+/// reported by other objects (web service operation parameters, templates,
+/// ...) under conditions not worked out; no measured configuration (БСП
+/// 8.3.24 and 8.5, ERP УХ 8.3.27) lists one.
+const PALETTE_COLOR_FEATURE: &str = "2dd2d9e1-40c8-430b-a433-a81ec6856ab0";
 
 /// Reads `Configuration.xml` for the service rows.
 pub fn configuration_facts(xml: &[u8]) -> Result<ConfigurationFacts> {
@@ -92,10 +110,17 @@ pub fn configuration_facts(xml: &[u8]) -> Result<ConfigurationFacts> {
         .child("Properties")
         .ok_or_else(|| anyhow!("<Configuration> has no <Properties>"))?;
     let compatibility = compatibility_of(properties)?;
+    let features = object
+        .child("ChildObjects")
+        .is_some_and(|children| children.children_named("PaletteColor").next().is_some())
+        .then_some(PALETTE_COLOR_FEATURE)
+        .into_iter()
+        .collect();
     Ok(ConfigurationFacts {
         uuid,
         compatibility,
         shape: ConfigurationShape::for_compatibility(compatibility),
+        features,
     })
 }
 
@@ -110,27 +135,40 @@ pub fn root_row(facts: &ConfigurationFacts) -> Vec<u8> {
     ])
 }
 
-/// `version`: `{{216,0,{<compatibility>,0}}}` for the 8.3 shapes, and
-/// `{{217,0,{<compatibility>,1,{<uuid>}}}}` for 8.5, whose one uuid is a
-/// value the platform generates on save (nothing else in БСП 8.5 names it).
-pub fn version_row(facts: &ConfigurationFacts, generation: &str) -> Vec<u8> {
-    let body = match facts.shape {
-        ConfigurationShape::V67 | ConfigurationShape::V68 => brace_list![
-            Brace::num(216),
-            Brace::num(0),
-            brace_list![Brace::num(facts.compatibility as i64), Brace::num(0)],
-        ],
-        ConfigurationShape::V76 => brace_list![
-            Brace::num(217),
-            Brace::num(0),
-            brace_list![
-                Brace::num(facts.compatibility as i64),
-                Brace::num(1),
-                brace_list![Brace::uuid(generation)],
-            ],
-        ],
+/// `version`: `{{<format>,0,{<compatibility>,<n>,{<feature uuid>}×n}}}`,
+/// format 216 for the 8.3 shapes and 217 for 8.5. The list is the
+/// restricted-compatibility features the configuration uses
+/// ([`ConfigurationFacts::features`]): fixed uuids from the platform's
+/// registry, not values generated on save. БСП 8.5 lists the palette colour
+/// feature and every measured 8.3 row lists none. Apply refused a generated
+/// uuid there as a feature of a newer platform. An 8.5 row without palette
+/// colours (`{80501,0}`) follows from the platform's code, not from a
+/// stored row; a compatibility other than 8.5.1 has no stored row at all and
+/// is refused rather than guessed.
+pub fn version_row(facts: &ConfigurationFacts) -> Result<Vec<u8>> {
+    let format = match facts.shape {
+        ConfigurationShape::V67 | ConfigurationShape::V68 => 216,
+        ConfigurationShape::V76 if facts.compatibility == 80501 => 217,
+        ConfigurationShape::V76 => bail!(
+            "no stored `version` row of compatibility {} is measured (only 8.5.1, БСП 8.5): its format number and feature list are unknown",
+            facts.compatibility
+        ),
     };
-    serialize_row(&brace_list![body])
+    let mut record = vec![
+        Brace::num(facts.compatibility as i64),
+        Brace::num(facts.features.len() as i64),
+    ];
+    record.extend(
+        facts
+            .features
+            .iter()
+            .map(|uuid| brace_list![Brace::uuid(uuid)]),
+    );
+    Ok(serialize_row(&brace_list![brace_list![
+        Brace::num(format),
+        Brace::num(0),
+        Brace::List(record),
+    ]]))
 }
 
 /// `versions`: `{1,<count>,"",<uuid>,"<file>",<uuid>,...}` -- one generation
@@ -1171,30 +1209,60 @@ mod tests {
     }
 
     #[test]
+    fn palette_colours_bring_the_85_feature() {
+        let xml = |children: &str| {
+            format!(
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\"><Configuration uuid=\"66193438-ABC5-410b-a1f1-a204102d1a62\"><Properties><Name>Б</Name><CompatibilityMode>Version8_5_1</CompatibilityMode></Properties><ChildObjects>{children}</ChildObjects></Configuration></MetaDataObject>"
+            )
+        };
+        let with = configuration_facts(xml("<Language>Русский</Language><PaletteColor>Фон</PaletteColor>").as_bytes()).unwrap();
+        assert_eq!(with.features, vec![PALETTE_COLOR_FEATURE]);
+        assert_eq!(with.uuid, "66193438-abc5-410b-a1f1-a204102d1a62");
+        let without = configuration_facts(xml("<Language>Русский</Language>").as_bytes()).unwrap();
+        assert!(without.features.is_empty());
+    }
+
+    #[test]
     fn service_rows_match_the_stored_layout() {
         let facts = ConfigurationFacts {
             uuid: "66193438-abc5-410b-a1f1-a204102d1a62".into(),
             compatibility: 80324,
             shape: ConfigurationShape::V67,
+            features: Vec::new(),
         };
         assert_eq!(
             root_row(&facts),
             "\u{feff}{2,66193438-abc5-410b-a1f1-a204102d1a62,}".as_bytes()
         );
         assert_eq!(
-            version_row(&facts, ""),
+            version_row(&facts).unwrap(),
             "\u{feff}{\r\n{216,0,\r\n{80324,0}\r\n}\r\n}".as_bytes()
         );
+        // БСП 8.5's stored row: its two palette colours bring the feature.
         let v85 = ConfigurationFacts {
             compatibility: 80501,
             shape: ConfigurationShape::V76,
-            ..facts
+            features: vec![PALETTE_COLOR_FEATURE],
+            ..facts.clone()
         };
         assert_eq!(
-            version_row(&v85, "2dd2d9e1-40c8-430b-a433-a81ec6856ab0"),
+            version_row(&v85).unwrap(),
             "\u{feff}{\r\n{217,0,\r\n{80501,1,\r\n{2dd2d9e1-40c8-430b-a433-a81ec6856ab0}\r\n}\r\n}\r\n}"
                 .as_bytes()
         );
+        let bare = ConfigurationFacts {
+            features: Vec::new(),
+            ..v85.clone()
+        };
+        assert_eq!(
+            version_row(&bare).unwrap(),
+            "\u{feff}{\r\n{217,0,\r\n{80501,0}\r\n}\r\n}".as_bytes()
+        );
+        let unmeasured = ConfigurationFacts {
+            compatibility: 80502,
+            ..v85
+        };
+        assert!(version_row(&unmeasured).is_err());
         let mut counter = 0;
         let versions = versions_row(&["b".to_string(), "a.0".to_string()], || {
             counter += 1;
