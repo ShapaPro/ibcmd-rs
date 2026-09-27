@@ -360,6 +360,11 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     context: &FormParseContext<'_>,
     mut timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
+    // Every reader below splits the values it meets, each once per value that
+    // encloses them; the body's nesting is read once for all of them instead.
+    let _brace_jumps = register_brace_jumps(
+        std::iter::once(body.layout.as_str()).chain(body.trailing.iter().map(String::as_str)),
+    );
     let started = Instant::now();
     let form_fields = split_1c_braced_fields(&body.layout, 0)?;
     if let Some(timings) = timings.as_deref_mut() {
