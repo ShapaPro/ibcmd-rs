@@ -16,7 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
@@ -189,6 +190,76 @@ fn descriptor_xmls_parallel(root: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+/// Where an object goes in the stage's dispatch order: 0 first. Templates,
+/// roles, exchange plans and the configuration hold the stage's longest single
+/// rows (ERP УХ: spreadsheets of 15-27 s, roles of 10-15 s, an exchange plan's
+/// content), and in tree order the heaviest spreadsheets
+/// (`Reports/РегламентированныйОтчетСтатистика…`) came last and ran alone at
+/// the end of the stage.
+fn dispatch_rank(root: &Path, path: &Path) -> u8 {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let heavy = match components.as_slice() {
+        [file] => file == "configuration.xml",
+        [folder, _] => matches!(
+            folder.as_str(),
+            "roles" | "commontemplates" | "exchangeplans"
+        ),
+        [.., folder, _] => folder == "templates",
+        [] => false,
+    };
+    if heavy { 0 } else { 1 }
+}
+
+/// `work` over every path on the file-bound pool, the results in `paths`
+/// order. The paths are dispatched one at a time in `dispatch_rank` order
+/// (tree order within a rank) rather than split into ranges, so a heavy object
+/// starts when its turn comes, not when its range does.
+fn map_heaviest_first<T: Send>(
+    root: &Path,
+    paths: &[PathBuf],
+    work: impl Fn(&Path) -> T + Sync,
+) -> Result<Vec<T>> {
+    let mut order = (0..paths.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| dispatch_rank(root, &paths[index]));
+    let next = AtomicUsize::new(0);
+    let results = paths
+        .iter()
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<Mutex<Option<T>>>>();
+    parallel::install_io_bound(|| {
+        rayon::scope(|scope| {
+            for _ in 0..rayon::current_num_threads() {
+                scope.spawn(|_| {
+                    loop {
+                        let position = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&index) = order.get(position) else {
+                            break;
+                        };
+                        let result = work(&paths[index]);
+                        if let Ok(mut slot) = results[index].lock() {
+                            *slot = Some(result);
+                        }
+                    }
+                });
+            }
+        });
+    })?;
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.into_inner()
+                .ok()
+                .flatten()
+                .ok_or_else(|| anyhow!("no result for {}", paths[index].display()))
+        })
+        .collect()
 }
 
 /// Every descriptor XML of the list, read on the file-bound pool: the index,
@@ -567,12 +638,9 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
     stage_timing::record(setup, "setup: context", "", "");
     let started = std::time::Instant::now();
     // One task per source XML, each mostly waiting for its files: the
-    // file-bound pool (`parallel::install_io_bound`).
-    let objects = parallel::install_io_bound(|| {
-        paths
-            .par_iter()
-            .map(|path| prepare_empty_object(&context, path, false))
-            .collect::<Vec<_>>()
+    // file-bound pool, heaviest first.
+    let objects = map_heaviest_first(root, &paths, |path| {
+        prepare_empty_object(&context, path, false)
     })?;
     if stage_timing::enabled() {
         eprintln!(
@@ -1055,107 +1123,106 @@ pub fn audit_empty_stage(
 
     // Produce and compare object by object, in parallel; keep outcomes only.
     let parallel_started = std::time::Instant::now();
-    let per_object = parallel::install_io_bound(|| {
-        paths
-            .par_iter()
-            .map(
-                |path| -> Result<(
-                    Vec<Measured>,
-                    Vec<String>,
-                    Vec<(String, String, usize, String, String)>,
-                )> {
-                    let object = prepare_empty_object(&context, path, true);
-                    let audit_started = stage_timing::start();
-                    let mut measured = Vec::new();
-                    let mut names = Vec::new();
-                    let mut manifest = Vec::new();
-                    for row in &object.rows {
-                        write_row(row)?;
-                        names.push(row.file_name.clone());
-                        let plain = match &row.plain {
-                            Some(plain) => plain.clone(),
-                            None => inflate_raw(&row.blob).unwrap_or_else(|_| row.blob.clone()),
-                        };
-                        if options.manifest.is_some() {
-                            manifest.push((
-                                row.file_name.clone(),
-                                row.family.clone(),
-                                row.blob.len(),
-                                hex_sha256(&row.blob),
-                                hex_sha256(&plain),
-                            ));
+    let per_object = map_heaviest_first(
+        root,
+        &paths,
+        |path| -> Result<(
+            Vec<Measured>,
+            Vec<String>,
+            Vec<(String, String, usize, String, String)>,
+        )> {
+            let object = prepare_empty_object(&context, path, true);
+            let audit_started = stage_timing::start();
+            let mut measured = Vec::new();
+            let mut names = Vec::new();
+            let mut manifest = Vec::new();
+            for row in &object.rows {
+                write_row(row)?;
+                names.push(row.file_name.clone());
+                let plain = match &row.plain {
+                    Some(plain) => plain.clone(),
+                    None => inflate_raw(&row.blob).unwrap_or_else(|_| row.blob.clone()),
+                };
+                if options.manifest.is_some() {
+                    manifest.push((
+                        row.file_name.clone(),
+                        row.family.clone(),
+                        row.blob.len(),
+                        hex_sha256(&row.blob),
+                        hex_sha256(&plain),
+                    ));
+                }
+                let (outcome, benign, offset, brace_path, detail, expected) =
+                    match stored.plain(&row.file_name)? {
+                        None => (Outcome::Extra, None, None, None, String::new(), None),
+                        Some(expected) if expected == plain => {
+                            (Outcome::Identical, None, None, None, String::new(), None)
                         }
-                        let (outcome, benign, offset, brace_path, detail, expected) =
-                            match stored.plain(&row.file_name)? {
-                                None => (Outcome::Extra, None, None, None, String::new(), None),
-                                Some(expected) if expected == plain => {
-                                    (Outcome::Identical, None, None, None, String::new(), None)
-                                }
-                                Some(expected) => {
-                                    let offset = first_difference(&expected, &plain);
-                                    let detail = format!(
-                                        "stored {} | produced {}",
-                                        excerpt(&expected, offset),
-                                        excerpt(&plain, offset)
-                                    );
-                                    (
-                                        Outcome::Different,
-                                        benign_difference(&expected, &plain),
-                                        Some(offset),
-                                        Some(brace_path_at(&expected, offset)),
-                                        detail,
-                                        Some(expected),
-                                    )
-                                }
-                            };
-                        measured.push(Measured {
-                            file_name: row.file_name.clone(),
-                            kind: object.kind.clone(),
-                            family: row.family.clone(),
-                            source: row.source.clone(),
-                            outcome,
-                            benign,
-                            offset,
-                            brace_path,
-                            detail,
-                            expected: if keep_samples { expected } else { None },
-                            actual: if keep_samples && outcome == Outcome::Different {
-                                Some(plain)
-                            } else {
-                                None
-                            },
-                        });
-                    }
-                    stage_timing::record(
-                        audit_started,
-                        "audit: compare and write",
-                        &object.kind,
-                        &object.relative,
-                    );
-                    for failure in &object.failures {
-                        measured.push(Measured {
-                            file_name: failure.file_name.clone().unwrap_or_default(),
-                            kind: if failure.kind.is_empty() {
-                                "<unparsed>".to_string()
-                            } else {
-                                failure.kind.clone()
-                            },
-                            family: failure.family.clone(),
-                            source: failure.source.clone(),
-                            outcome: Outcome::Failed,
-                            benign: None,
-                            offset: None,
-                            brace_path: None,
-                            detail: failure.error.clone(),
-                            expected: None,
-                            actual: None,
-                        });
-                    }
-                    Ok((measured, names, manifest))
-                },
-            )
-            .collect::<Result<Vec<_>>>()
-    })??;
+                        Some(expected) => {
+                            let offset = first_difference(&expected, &plain);
+                            let detail = format!(
+                                "stored {} | produced {}",
+                                excerpt(&expected, offset),
+                                excerpt(&plain, offset)
+                            );
+                            (
+                                Outcome::Different,
+                                benign_difference(&expected, &plain),
+                                Some(offset),
+                                Some(brace_path_at(&expected, offset)),
+                                detail,
+                                Some(expected),
+                            )
+                        }
+                    };
+                measured.push(Measured {
+                    file_name: row.file_name.clone(),
+                    kind: object.kind.clone(),
+                    family: row.family.clone(),
+                    source: row.source.clone(),
+                    outcome,
+                    benign,
+                    offset,
+                    brace_path,
+                    detail,
+                    expected: if keep_samples { expected } else { None },
+                    actual: if keep_samples && outcome == Outcome::Different {
+                        Some(plain)
+                    } else {
+                        None
+                    },
+                });
+            }
+            stage_timing::record(
+                audit_started,
+                "audit: compare and write",
+                &object.kind,
+                &object.relative,
+            );
+            for failure in &object.failures {
+                measured.push(Measured {
+                    file_name: failure.file_name.clone().unwrap_or_default(),
+                    kind: if failure.kind.is_empty() {
+                        "<unparsed>".to_string()
+                    } else {
+                        failure.kind.clone()
+                    },
+                    family: failure.family.clone(),
+                    source: failure.source.clone(),
+                    outcome: Outcome::Failed,
+                    benign: None,
+                    offset: None,
+                    brace_path: None,
+                    detail: failure.error.clone(),
+                    expected: None,
+                    actual: None,
+                });
+            }
+            Ok((measured, names, manifest))
+        },
+    )?
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     if stage_timing::enabled() {
         eprintln!(
             "{}",
@@ -1696,9 +1763,16 @@ pub(super) fn stage_source_objects_base_free(
             tail_started.elapsed().as_secs_f64()
         );
     }
+    let source_version = Some(stage.context.version.clone());
+    // Freeing the stage -- every row's bytes and the tree's metadata XMLs, some
+    // million allocations -- took 26 s of ERP УХ's stage on the lab
+    // workstation after all the work was done. A thread of its own frees it
+    // while the caller writes its report, and the process's exit does not
+    // wait for it.
+    std::thread::spawn(move || drop(stage));
     Ok(StageSourceObjectsReport {
         database: args.database.clone(),
-        source_version: Some(stage.context.version.clone()),
+        source_version,
         metadata_objects,
         common_modules: Vec::new(),
         scripts: vec![prepare_path, apply_path.clone()],
