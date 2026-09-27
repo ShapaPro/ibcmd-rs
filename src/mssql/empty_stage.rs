@@ -487,7 +487,9 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
     let paths = descriptor_xmls(root);
     stage_timing::record(setup, "setup: descriptor list", "", "");
     let started = std::time::Instant::now();
-    let objects = parallel::install(|| {
+    // One task per source XML, each mostly waiting for its files: the
+    // file-bound pool (`parallel::install_io_bound`).
+    let objects = parallel::install_io_bound(|| {
         paths
             .par_iter()
             .map(|path| prepare_empty_object(&context, path, false))
@@ -496,7 +498,7 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
     if stage_timing::enabled() {
         eprintln!(
             "{}",
-            stage_timing::report(started.elapsed(), parallel::bounded_worker_count())
+            stage_timing::report(started.elapsed(), parallel::io_bound_worker_count())
         );
     }
     let names = objects
@@ -970,7 +972,7 @@ pub fn audit_empty_stage(
 
     // Produce and compare object by object, in parallel; keep outcomes only.
     let parallel_started = std::time::Instant::now();
-    let per_object = parallel::install(|| {
+    let per_object = parallel::install_io_bound(|| {
         paths
             .par_iter()
             .map(
@@ -1074,7 +1076,7 @@ pub fn audit_empty_stage(
     if stage_timing::enabled() {
         eprintln!(
             "{}",
-            stage_timing::report(parallel_started.elapsed(), parallel::bounded_worker_count())
+            stage_timing::report(parallel_started.elapsed(), parallel::io_bound_worker_count())
         );
     }
 
