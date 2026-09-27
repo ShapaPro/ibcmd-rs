@@ -18,8 +18,8 @@ use super::mxl::{
 };
 use super::{BodyProfileError, SelectedBodyProfile};
 use crate::compiler::families::native::{
-    NativeError, deflate_bytes, exact_list, exact_token, inflate, parse_optional_bom, required_list,
-    required_text, required_token,
+    NativeError, deflate_bytes, exact_list, exact_token, inflate, parse_optional_bom,
+    required_list, required_text, required_token,
 };
 use crate::module_blob::{
     MetadataSourceContext, SpreadsheetNumberFormatHint, decode_base64_mime,
@@ -313,7 +313,13 @@ pub(crate) fn compile_evidenced_template_with_resolvers(
             .map_err(|error| TemplateCodecError::Mxl(error.to_string()))?,
         (kind, _) => return Err(TemplateCodecError::WrongSource(kind)),
     };
-    decode_evidenced_template(kind, &blob)?;
+    // A spreadsheet has just been read back, strictly, by
+    // `compile_evidenced_mxl`, which is all `decode_evidenced_template` does
+    // for it: a second decode of the same blob cost ERP УХ's base-free stage
+    // 56 CPU-seconds over its 13 901 spreadsheet templates.
+    if kind != TemplateKind::SpreadsheetDocument {
+        decode_evidenced_template(kind, &blob)?;
+    }
     Ok(blob)
 }
 
