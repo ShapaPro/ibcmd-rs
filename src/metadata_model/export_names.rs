@@ -703,6 +703,23 @@ mod tests {
     }
 
     #[test]
+    fn an_owned_row_names_itself_from_its_first_header() {
+        let text = concat!(
+            "{1,{0,{13,{3,{1,0,aaaaaaaa-0000-0000-0000-000000000001},\"Форма\",{0},\"\",0,0,",
+            "00000000-0000-0000-0000-000000000000,0},0,{1,{3,{1,0,bbbbbbbb-0000-0000-0000-000000000001},",
+            "\"Вложенная\",{0},\"\",0,0,00000000-0000-0000-0000-000000000000,0}}}}}"
+        );
+        let row = parse_row(text.as_bytes()).unwrap();
+        assert_eq!(
+            own_header(&row),
+            Some((
+                "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
+                "Форма".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn predefined_items_are_kept_per_owner() {
         let mut index = NameIndex::default();
         index.insert_predefined("Catalog.A", "11111111-1111-1111-1111-111111111111", "Один");

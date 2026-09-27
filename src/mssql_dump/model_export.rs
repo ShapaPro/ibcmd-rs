@@ -812,3 +812,61 @@ fn compare_legacy_map<'a>(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A registered text answers a header search from its marker table
+    /// exactly as the plain search does: the first `{1,0,..}` marker, else
+    /// the first `{0,0,..}` one, and nothing for a uuid it does not hold.
+    #[test]
+    fn a_registered_text_finds_the_same_headers() {
+        let first = "11111111-1111-1111-1111-111111111111";
+        let second = "22222222-2222-2222-2222-222222222222";
+        let third = "33333333-3333-3333-3333-333333333333";
+        let mut text = String::from("{1,{3,");
+        // Padding past the registration threshold.
+        text.push_str(&"{\"#\",0},".repeat(700));
+        text.push_str(&format!(
+            "{{0,0,{first}}},\"Старое\",{{0}},\"\",{{1,0,{first}}},\"Имя\",{{1,\"ru\",\"Синоним\"}},\"Комментарий\",\
+             {{1,0,{second}}},\"Второе\",{{0}},\"\",{{0,0,{third}}},\"Третье\",{{0}},\"x\",{{1,0,{second}}},\"Дубль\",{{0}},\"\"}}}}"
+        ));
+        assert!(text.len() >= BRACE_JUMPS_MIN_TEXT);
+        let plain = [first, second, third, "44444444-4444-4444-4444-444444444444"]
+            .map(|uuid| parse_metadata_header_from_text(&text, uuid));
+        let _registered = register_brace_jumps([text.as_str()]);
+        let jumped = [first, second, third, "44444444-4444-4444-4444-444444444444"]
+            .map(|uuid| parse_metadata_header_from_text(&text, uuid));
+        assert_eq!(plain, jumped);
+        assert_eq!(
+            jumped[0].as_ref().map(|header| header.name.as_str()),
+            Some("Имя")
+        );
+        assert_eq!(
+            jumped[1].as_ref().map(|header| header.name.as_str()),
+            Some("Второе")
+        );
+        assert_eq!(
+            jumped[2].as_ref().map(|header| header.comment.as_str()),
+            Some("x")
+        );
+        assert_eq!(jumped[3], None);
+    }
+
+    #[test]
+    fn kinds_go_to_their_folders() {
+        for (kind, folder) in [
+            ("Catalog", "Catalogs"),
+            ("ChartOfAccounts", "ChartsOfAccounts"),
+            ("BusinessProcess", "BusinessProcesses"),
+            ("FilterCriterion", "FilterCriteria"),
+            ("Form", "Forms"),
+            ("Recalculation", "Recalculations"),
+            ("Subsystem", "Subsystems"),
+        ] {
+            assert_eq!(kind_folder(kind).as_deref(), Some(folder), "{kind}");
+        }
+        assert_eq!(kind_folder("Configuration"), None);
+    }
+}
