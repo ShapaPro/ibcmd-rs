@@ -35,7 +35,7 @@ use super::{
 };
 use crate::cli::MssqlStageSourceObjectsArgs;
 use crate::compiler::families::assets::SourceAssetRegistry;
-use crate::metadata_model::audit::{brace_path_at, descriptor_xmls};
+use crate::metadata_model::audit::{brace_path_at, is_descriptor_xml};
 use crate::metadata_model::root::{
     ConfigurationFacts, MODULE_GROUP_CLASS_ID, configuration_facts, root_row, version_row,
     versions_row,
@@ -97,7 +97,12 @@ pub(crate) struct EmptyStageContext {
 }
 
 impl EmptyStageContext {
-    pub fn new(root: &Path, version: Option<&str>) -> Result<Self> {
+    /// `files` is every descriptor XML of the tree, read (`read_descriptor_xmls`).
+    pub fn new(
+        root: &Path,
+        version: Option<&str>,
+        files: &[(PathBuf, std::sync::Arc<Vec<u8>>)],
+    ) -> Result<Self> {
         // No base rows exist: every base-row read fails naming its row.
         BASE_FREE_STAGE.store(true, Ordering::Relaxed);
         // Nor any always-used constant: track A compiles each constant with
@@ -122,7 +127,7 @@ impl EmptyStageContext {
             version != "2.20" && facts.compatibility < 80500,
             Ordering::Relaxed,
         );
-        let descriptors = DescriptorContext::new(root, &version)?;
+        let descriptors = DescriptorContext::with_files(root, &version, files)?;
         let module_group = module_group_of(&configuration);
         Ok(Self {
             root: root.to_path_buf(),
@@ -132,6 +137,70 @@ impl EmptyStageContext {
             module_group,
         })
     }
+}
+
+/// `audit::descriptor_xmls(root)` walked in parallel: the same files in the
+/// same (sorted) order. Walking ERP УХ's 140 709 files on one thread took
+/// 25-75 s, and a stage used to walk the tree twice (once for the index, once
+/// for the objects). Here every directory is listed on a task of its own, and
+/// no `Ext` folder is entered: `is_descriptor_xml` refuses every path with an
+/// `ext` component, and they hold 72 874 of ERP УХ's 130 638 folders.
+fn descriptor_xmls_parallel(root: &Path) -> Vec<PathBuf> {
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        for entry in entries.flatten() {
+            // Not followed: a link is neither a file nor a directory here,
+            // as it is not to `WalkDir`.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !entry.file_name().to_string_lossy().eq_ignore_ascii_case("ext") {
+                    dirs.push(entry.path());
+                }
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+        files.extend(
+            dirs.par_iter()
+                .flat_map_iter(|dir| files_under(dir))
+                .collect::<Vec<_>>(),
+        );
+        files
+    }
+    let files =
+        parallel::install_io_bound(|| files_under(root)).unwrap_or_else(|_| files_under(root));
+    let mut paths = files
+        .into_iter()
+        .filter(|path| {
+            path.strip_prefix(root)
+                .map(|relative| is_descriptor_xml(&relative.to_string_lossy()))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+/// Every descriptor XML of the list, read on the file-bound pool: the index,
+/// the descriptors and the name resolvers of every body writer then read them
+/// from memory. ERP УХ: 56 758 files, 366 MB.
+fn read_descriptor_xmls(paths: &[PathBuf]) -> Result<Vec<(PathBuf, std::sync::Arc<Vec<u8>>)>> {
+    parallel::install_io_bound(|| {
+        paths
+            .par_iter()
+            .map(|path| {
+                fs::read(path)
+                    .with_context(|| format!("failed to read {}", path.display()))
+                    .map(|bytes| (path.clone(), std::sync::Arc::new(bytes)))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?
 }
 
 /// `<xr:ContainedObject>` of the module-group class in `Configuration.xml`.
@@ -259,7 +328,8 @@ pub(crate) fn prepare_empty_object(
         });
     };
     let read_started = stage_timing::start();
-    let xml = match fs::read(path) {
+    // Read once, up front (`read_descriptor_xmls`); from disk only when not.
+    let xml = match context.descriptors.source.read_source(path) {
         Ok(xml) => xml,
         Err(error) => {
             fail(&mut object, "read", error.to_string());
@@ -481,11 +551,15 @@ impl EmptyStage {
 pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<EmptyStage> {
     stage_timing::reset_from_env();
     let setup = stage_timing::start();
-    let context = EmptyStageContext::new(root, version)?;
-    stage_timing::record(setup, "setup: context", "", "");
-    let setup = stage_timing::start();
-    let paths = descriptor_xmls(root);
+    let paths = descriptor_xmls_parallel(root);
     stage_timing::record(setup, "setup: descriptor list", "", "");
+    let setup = stage_timing::start();
+    let files = read_descriptor_xmls(&paths)?;
+    stage_timing::record(setup, "setup: descriptor reads", "", "");
+    let setup = stage_timing::start();
+    let context = EmptyStageContext::new(root, version, &files)?;
+    drop(files);
+    stage_timing::record(setup, "setup: context", "", "");
     let started = std::time::Instant::now();
     // One task per source XML, each mostly waiting for its files: the
     // file-bound pool (`parallel::install_io_bound`).
@@ -926,7 +1000,14 @@ pub fn audit_empty_stage(
     let stored = StoredRows::scan(rows)?;
     stage_timing::record(setup, "setup: stored row list", "", "");
     let setup = stage_timing::start();
-    let context = EmptyStageContext::new(root, version)?;
+    let paths = descriptor_xmls_parallel(root);
+    stage_timing::record(setup, "setup: descriptor list", "", "");
+    let setup = stage_timing::start();
+    let files = read_descriptor_xmls(&paths)?;
+    stage_timing::record(setup, "setup: descriptor reads", "", "");
+    let setup = stage_timing::start();
+    let context = EmptyStageContext::new(root, version, &files)?;
+    drop(files);
     stage_timing::record(setup, "setup: context", "", "");
     if let Some(dir) = &options.rows_out {
         fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -939,9 +1020,6 @@ pub fn audit_empty_stage(
         }
         Ok(())
     };
-    let setup = stage_timing::start();
-    let paths = descriptor_xmls(root);
-    stage_timing::record(setup, "setup: descriptor list", "", "");
 
     // Owner kind of every uuid the tree names.
     let mut kinds: HashMap<String, String> = HashMap::new();
@@ -1666,6 +1744,39 @@ mod tests {
         );
         let names = versions_names(b"{1,3,\"\",u,\"a\",u,\"root\",u}");
         assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["a", "root"]);
+    }
+
+    #[test]
+    fn parallel_descriptor_walk_matches_the_serial_one() {
+        let root = std::env::temp_dir().join(format!(
+            "ibcmd-rs-descriptor-walk-{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        for file in [
+            "Configuration.xml",
+            "ConfigDumpInfo.xml",
+            "Catalogs/A.xml",
+            "Catalogs/A/Ext/ObjectModule.bsl",
+            "Catalogs/A/Forms/F.xml",
+            "Catalogs/A/Forms/F/Ext/Form.xml",
+            "Catalogs/A/Forms/F/Ext/Form/Items/X.xml",
+            "Catalogs/B.xml",
+            "Subsystems/S.xml",
+            "Subsystems/S/Subsystems/T.xml",
+            "Subsystems/S/Ext/CommandInterface.xml",
+            "Subsystems/S/EXT/Other.xml",
+            "Ext/Top.xml",
+            "Languages/Русский.xml",
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"x").unwrap();
+        }
+        let serial = crate::metadata_model::audit::descriptor_xmls(&root);
+        let parallel = descriptor_xmls_parallel(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(serial.len(), 7, "{serial:?}");
+        assert_eq!(parallel, serial);
     }
 
     #[test]

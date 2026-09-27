@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -128,7 +129,23 @@ impl ConfigIndex {
                 .map(|path| parse_one(root, path))
                 .collect::<Result<Vec<_>>>()
         })??;
+        Ok(Self::assemble(parsed))
+    }
 
+    /// The same index from descriptor XMLs the caller already read: `(path,
+    /// bytes)` for every file `descriptor_xmls(root)` lists, in its order. A
+    /// base-free stage reads each metadata XML of its tree once.
+    pub fn build_from_files(root: &Path, files: &[(PathBuf, Arc<Vec<u8>>)]) -> Result<Self> {
+        let parsed = parallel::install(|| {
+            files
+                .par_iter()
+                .map(|(path, bytes)| parse_bytes(root, path, bytes))
+                .collect::<Result<Vec<_>>>()
+        })??;
+        Ok(Self::assemble(parsed))
+    }
+
+    fn assemble(parsed: Vec<Option<Parsed>>) -> Self {
         // Full names follow the folders: `Catalogs/X.xml` is `Catalog.X`,
         // `Catalogs/X/Forms/F.xml` is `Catalog.X.Form.F`.
         let mut full_by_relative: HashMap<String, String> = HashMap::new();
@@ -179,7 +196,7 @@ impl ConfigIndex {
                 },
             );
         }
-        Ok(index)
+        index
     }
 
     /// uuid of an object or child object by full name.
@@ -204,14 +221,19 @@ impl ConfigIndex {
 }
 
 fn parse_one(root: &Path, path: &Path) -> Result<Option<Parsed>> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    parse_bytes(root, path, &bytes)
+}
+
+/// `parse_one` of a file already read.
+fn parse_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<Option<Parsed>> {
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     // A file this reader cannot parse is left out; its own compile reports it.
-    let Ok(doc) = MetadataXml::parse(&bytes) else {
+    let Ok(doc) = MetadataXml::parse(bytes) else {
         return Ok(None);
     };
     let Ok(object) = doc.object() else {

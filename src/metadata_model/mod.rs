@@ -63,6 +63,30 @@ impl DescriptorContext {
         })
     }
 
+    /// The same context from descriptor XMLs the caller already read (`(path,
+    /// bytes)` for what `audit::descriptor_xmls(root)` lists): the index is
+    /// built from them, and the source context's resolvers read them from
+    /// memory instead of from disk.
+    pub fn with_files(
+        root: &Path,
+        version: &str,
+        files: &[(PathBuf, std::sync::Arc<Vec<u8>>)],
+    ) -> Result<Self> {
+        let preloaded = std::sync::Arc::new(
+            files
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
+        Ok(Self {
+            root: root.to_path_buf(),
+            index: ConfigIndex::build_from_files(root, files)
+                .context("failed to index the source tree")?,
+            source: MetadataSourceContext::with_preloaded(root.to_path_buf(), preloaded),
+            version: version.to_string(),
+        })
+    }
+
     /// 8.5 (`2.21`) rather than 8.3.27 (`2.20`).
     pub fn is_v85(&self) -> bool {
         self.version != "2.20"

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::ops::Range;
@@ -1105,6 +1105,22 @@ pub struct MetadataSourceContext {
     help_references: Arc<Mutex<BTreeMap<String, Result<help_pages::HelpReference, String>>>>,
     /// `Configuration.xml`'s own uuid, read once (`None` when it cannot be).
     configuration_uuid: Arc<std::sync::OnceLock<Option<String>>>,
+    /// Source files already read into memory, by the path they were read at:
+    /// a base-free stage reads every metadata XML of its tree once, up front,
+    /// and the resolvers below read those files from here. On the lab
+    /// workstation every file open waits in the on-access scanner's queue;
+    /// ERP УХ's stage re-read metadata XMLs 150 000 times, about 20 ms each.
+    preloaded: PreloadedSourceFiles,
+}
+
+/// Source files read into memory, by path: shared, and printed as a count.
+#[derive(Clone, Default)]
+pub(crate) struct PreloadedSourceFiles(pub(crate) Arc<HashMap<PathBuf, Arc<Vec<u8>>>>);
+
+impl std::fmt::Debug for PreloadedSourceFiles {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} preloaded files", self.0.len())
+    }
 }
 
 impl MetadataSourceContext {
@@ -1120,6 +1136,32 @@ impl MetadataSourceContext {
             style_items: Arc::new(std::sync::OnceLock::new()),
             help_references: Arc::new(Mutex::new(BTreeMap::new())),
             configuration_uuid: Arc::new(std::sync::OnceLock::new()),
+            preloaded: PreloadedSourceFiles::default(),
+        }
+    }
+
+    /// A context whose resolvers read the given files from memory: `files`
+    /// maps the paths a tree walk gave (`<root>/<folder>/<name>.xml`) to their
+    /// bytes. A file not among them is read from disk as before.
+    pub fn with_preloaded(
+        source_root: PathBuf,
+        files: Arc<HashMap<PathBuf, Arc<Vec<u8>>>>,
+    ) -> Self {
+        Self {
+            role_rights_source: Arc::new(SourceTreeRoleRightsSource::with_preloaded(
+                source_root.clone(),
+                PreloadedSourceFiles(files.clone()),
+            )),
+            preloaded: PreloadedSourceFiles(files),
+            ..Self::new(source_root)
+        }
+    }
+
+    /// The bytes of a source file: from memory when preloaded, else read.
+    pub(crate) fn read_source(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        match self.preloaded.0.get(path) {
+            Some(bytes) => Ok(bytes.as_ref().clone()),
+            None => fs::read(path),
         }
     }
 
@@ -1127,7 +1169,7 @@ impl MetadataSourceContext {
     pub(crate) fn configuration_uuid(&self) -> Option<String> {
         self.configuration_uuid
             .get_or_init(|| {
-                let xml = fs::read(self.source_root.join("Configuration.xml")).ok()?;
+                let xml = self.read_source(&self.source_root.join("Configuration.xml")).ok()?;
                 let properties = parse_simple_metadata_xml_properties(&xml).ok()?;
                 (properties.kind == "Configuration").then_some(properties.uuid)
             })
@@ -1190,7 +1232,7 @@ impl MetadataSourceContext {
         let (class, name) = key.split_once('.')?;
         let folder = configuration_object_source_folder(class)?;
         let path = self.source_root.join(folder).join(format!("{name}.xml"));
-        let xml = fs::read(&path).ok()?;
+        let xml = self.read_source(&path).ok()?;
         let object = parse_configuration_object_xml(&xml).ok().flatten()?;
         (object.class == class).then(|| Arc::new(object))
     }
@@ -1220,7 +1262,7 @@ impl MetadataSourceContext {
             if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("xml") {
                 continue;
             }
-            let xml = fs::read(&path)
+            let xml = self.read_source(&path)
                 .with_context(|| format!("failed to read metadata XML {}", path.display()))?;
             let properties = parse_simple_metadata_xml_properties(&xml)
                 .with_context(|| format!("failed to parse metadata XML {}", path.display()))?;
@@ -1240,7 +1282,7 @@ impl MetadataSourceContext {
             .source_root
             .join("CommonPictures")
             .join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read CommonPicture XML {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)?;
         if properties.kind != "CommonPicture" {
@@ -1273,7 +1315,7 @@ impl MetadataSourceContext {
             .join(owner_name)
             .join("Ext")
             .join("Predefined.xml");
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read Predefined XML {}", path.display()))?;
         let items = parse_predefined_data_xml(&xml)?;
         find_predefined_item_id(&items, item_name).ok_or_else(|| {
@@ -1287,7 +1329,7 @@ impl MetadataSourceContext {
             .source_root
             .join("DefinedTypes")
             .join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read DefinedType XML {}", path.display()))?;
         parse_defined_type_type_id(&xml, name)
             .with_context(|| format!("failed to resolve TypeId from {}", path.display()))
@@ -1302,7 +1344,7 @@ impl MetadataSourceContext {
             .source_root
             .join("CommandGroups")
             .join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read CommandGroup XML {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)?;
         if properties.kind != "CommandGroup" {
@@ -1324,7 +1366,7 @@ impl MetadataSourceContext {
             .source_root
             .join("StyleItems")
             .join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read StyleItem XML {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)?;
         if properties.kind != "StyleItem" {
@@ -1349,7 +1391,7 @@ impl MetadataSourceContext {
             .strip_prefix(prefix)
             .ok_or_else(|| anyhow!("unsupported {expected_kind} reference: {reference}"))?;
         let path = self.source_root.join(folder).join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read {expected_kind} XML {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)?;
         if properties.kind != expected_kind {
@@ -1375,7 +1417,7 @@ impl MetadataSourceContext {
             .source_root
             .join("InformationRegisters")
             .join(format!("{register}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read InformationRegister XML {}", path.display()))?;
         let mut reader = Reader::from_reader(xml.as_slice());
         let mut buffer = Vec::new();
@@ -1446,7 +1488,7 @@ impl MetadataSourceContext {
             .map(|(_, name)| name)
             .ok_or_else(|| anyhow!("invalid metadata type reference: {reference}"))?;
         let path = self.source_root.join(folder).join(format!("{name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read metadata XML {}", path.display()))?;
         parse_generated_type_type_id(&xml, generated_type_name)
             .with_context(|| format!("failed to resolve TypeId from {}", path.display()))
@@ -1486,7 +1528,7 @@ impl MetadataSourceContext {
             None
         };
         if let Some((path, kind)) = nested {
-            let xml = fs::read(&path)
+            let xml = self.read_source(&path)
                 .with_context(|| format!("failed to read {kind} XML {}", path.display()))?;
             let properties = parse_simple_metadata_xml_properties(&xml)?;
             if properties.kind != kind {
@@ -1520,7 +1562,7 @@ impl MetadataSourceContext {
             .source_root
             .join(folder)
             .join(format!("{owner_name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read command owner XML {}", path.display()))?;
         parse_nested_command_uuid_from_xml(&xml, command_name)
             .with_context(|| format!("failed to resolve command {reference}"))
@@ -1547,7 +1589,16 @@ impl MetadataSourceContext {
                 .join("Forms")
                 .join(format!("{form}.xml"))
         };
-        let text = fs::read_to_string(&path)
+        let text = self
+                .read_source(&path)
+                .and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "stream did not contain valid UTF-8",
+                        )
+                    })
+                })
             .with_context(|| format!("failed to read form XML {}", path.display()))?;
         for marker in ["<Form uuid=\"", "<CommonForm uuid=\""] {
             if let Some(at) = text.find(marker) {
@@ -25549,7 +25600,7 @@ impl MetadataSourceContext {
             .strip_prefix("Configuration.")
             .ok_or_else(|| anyhow!("unsupported Configuration reference: {reference}"))?;
         let path = self.source_root.join("Configuration.xml");
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read Configuration XML {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)?;
         if properties.kind != "Configuration" || properties.name != expected_name {
@@ -25582,7 +25633,7 @@ impl MetadataSourceContext {
             .source_root
             .join(folder)
             .join(format!("{owner_name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read child owner XML {}", path.display()))?;
         parse_nested_metadata_child_uuid_from_xml(&xml, child_kind, child_name).with_context(|| {
             format!("failed to resolve child {owner_reference}.{child_kind}.{child_name}")
@@ -25605,7 +25656,7 @@ impl MetadataSourceContext {
             .source_root
             .join(folder)
             .join(format!("{service_name}.xml"));
-        let xml = fs::read(&path)
+        let xml = self.read_source(&path)
             .with_context(|| format!("failed to read HTTPService XML {}", path.display()))?;
         parse_http_service_method_uuid_from_xml(&xml, template_name, method_name).with_context(
             || {
