@@ -15279,34 +15279,63 @@ fn keeps_input_hint_when_it_duplicates_title() {
     assert!(xml.contains("<InputHint>"));
 }
 
+/// A table record as the platform writes it: BSP 3.1
+/// `CommonForms/ПраваДоступаУпрощенно`, table `ВидыДоступа` (item 12, bound to
+/// attribute 2), whose native export writes every property asserted here. The
+/// fixture used to be a hand-made 31-member cut of an 8.5 table record
+/// (`{73,...}`), which the codec only ever reads down-converted to the 8.3.27
+/// record (`{55,...}`, 99 members and more), so the switches that live in the
+/// full record never resolved. The record also moves two expectations to what
+/// the platform writes: `RowSelectionMode` is written only as `Row` (BSP 88 of
+/// 88 tables, ERP УХ 407 of 407; `Cell` is the default and never written), and
+/// this table is two rows high.
 #[test]
 fn extracts_table_layout_properties() {
     let mut attribute_names_by_id = BTreeMap::new();
-    attribute_names_by_id.insert("6".to_string(), "Rows".to_string());
+    attribute_names_by_id.insert("2".to_string(), "ВидыДоступа".to_string());
 
     let item = parse_form_child_item_with_attrs(
-            r#"{73,{25,02023637-7868-4a5f-8576-835a76e0c9ba},0,1,0,"Rows",0,0,1,{1,0},0,{1,{6}},0,0,0,0,0,0,0,0,0,6,0,0,1,0,1,0,0,1,2}"#,
-            None,
-            None,
-            &attribute_names_by_id,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/form-table-layout-record/records/32d4a42d-6e4d-49db-b5bc-1ea6dbe9fe4d.item-12.txt"
+        ),
+        None,
+        None,
+        &attribute_names_by_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &[],
+        &BTreeMap::new(),
+    )
+    .unwrap();
 
     assert_eq!(item.tag, "Table");
-    assert_eq!(item.data_path.as_deref(), Some("Rows"));
+    assert_eq!(item.data_path.as_deref(), Some("ВидыДоступа"));
     assert_eq!(item.table_representation, Some("List"));
     assert_eq!(item.skip_on_input, Some(false));
-    assert_eq!(item.height_in_table_rows.as_deref(), Some("6"));
-    assert_eq!(item.row_selection_mode, Some("Cell"));
+    assert_eq!(item.height_in_table_rows.as_deref(), Some("2"));
+    assert_eq!(item.row_selection_mode, Some("Row"));
     assert_eq!(item.enable_start_drag, Some(true));
     assert_eq!(item.enable_drag, Some(true));
     assert_eq!(item.file_drag_mode, Some("AsFile"));
+
+    let xml = format_form_child_items_xml(&[item], 1);
+    // The table's own properties come before its context menu; its columns
+    // follow with theirs.
+    let xml = &xml[..xml.find("<ContextMenu").unwrap()];
+    for element in [
+        "<Representation>List</Representation>",
+        "<SkipOnInput>false</SkipOnInput>",
+        "<HeightInTableRows>2</HeightInTableRows>",
+        "<RowSelectionMode>Row</RowSelectionMode>",
+        "<EnableStartDrag>true</EnableStartDrag>",
+        "<EnableDrag>true</EnableDrag>",
+        "<FileDragMode>AsFile</FileDragMode>",
+        "<DataPath>ВидыДоступа</DataPath>",
+    ] {
+        assert!(xml.contains(element), "{element}: {xml}");
+    }
 }
 
 #[test]
