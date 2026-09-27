@@ -9388,13 +9388,19 @@ fn extracts_form_save_data_in_settings_alongside_a_populated_property_bag() {
     assert!(form_xml.contains("<SaveDataInSettings>UseList</SaveDataInSettings>"));
 }
 
+/// `VerticalScroll` is a root-trailer slot, so the fixture must carry a whole
+/// trailer: the hand-made root this test used to read stopped at the trailer's
+/// `100` and declared neither the 8.3.27 `{50,...}` nor the 8.5 `{59,...}`
+/// trailer tuple, a root no platform writes. This is the platform's own body
+/// (BSP 3.1 `DataProcessors/ИнформационныйЦентр/Forms/ОтображениеСообщений`),
+/// whose native export writes `useIfNecessary`.
 #[test]
 fn extracts_form_vertical_scroll_use_if_necessary_from_tail() {
-    let form_body = deflate_for_test(
-            r#"{4,{59,0,1,0,0,1,0,0,00000000-0000-0000-0000-000000000000,1,{1,0},0,0,1,1,1,0,0,{0},{0},1,{22,{-1,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,9,"ФормаКоманднаяПанель",{1,0}},1,77ffcc29-7f2d-4223-b22f-19666e7250ba,{48,{1,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,2,"Поле"},"","",0,1,"",2,0,0,0,0,0,3,3,0,0,2,100},"",{0}}"#.as_bytes(),
-        );
+    let form_body = include_bytes!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-root-vertical-scroll/raw/fc98b0f2-7cfb-4a04-8dca-f4a6bd08104f.deflate"
+    );
 
-    let form_xml = extract_form_body_xml(&form_body, &BTreeMap::new()).unwrap();
+    let form_xml = extract_form_body_xml(form_body, &BTreeMap::new()).unwrap();
 
     assert!(form_xml.contains("<VerticalScroll>useIfNecessary</VerticalScroll>"));
 }
