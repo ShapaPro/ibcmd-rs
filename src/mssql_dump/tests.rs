@@ -13895,8 +13895,10 @@ fn extracts_form_child_items_from_layout_pairs() {
         1
     );
     assert_eq!(
-        xml.matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
-            .count(),
+        xml.matches(&format!(
+            r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#
+        ))
+        .count(),
         1
     );
 
@@ -13917,7 +13919,9 @@ fn extracts_form_child_items_from_layout_pairs() {
     )
     .unwrap();
     let button = &projects[projects
-        .find(r#"<Button name="СписокКонтекстноеМенюСправочник_ДемоПроектыСделатьОсновным" id="39">"#)
+        .find(
+            r#"<Button name="СписокКонтекстноеМенюСправочник_ДемоПроектыСделатьОсновным" id="39">"#,
+        )
         .unwrap()..];
     let button = &button[..button.find("</Button>").unwrap()];
     assert!(
@@ -18252,7 +18256,9 @@ fn extracts_form_body_xml_keeps_child_events_nested() {
             .count(),
         1
     );
-    let field = &table[table.find(r#"<InputField name="Наименование" id="40">"#).unwrap()..];
+    let field = &table[table
+        .find(r#"<InputField name="Наименование" id="40">"#)
+        .unwrap()..];
     assert_eq!(
         field
             .matches(r#"<Event name="OnChange">NameChanged</Event>"#)
@@ -18261,7 +18267,9 @@ fn extracts_form_body_xml_keeps_child_events_nested() {
     );
     assert_eq!(
         field
-            .matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
+            .matches(&format!(
+                r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#
+            ))
             .count(),
         1
     );
