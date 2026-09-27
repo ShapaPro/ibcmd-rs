@@ -2875,37 +2875,48 @@ pub(super) fn build_form_source_reference_index(
 pub(super) fn build_form_source_reference_index_from_texts(
     rows: &[MetadataTextRow],
 ) -> BTreeMap<String, FormSourceReference> {
-    let mut forms = Vec::<MetadataHeader>::new();
-    let mut owner_paths_by_ref = BTreeMap::<String, BTreeSet<PathBuf>>::new();
-
-    for row in rows {
-        if is_form_metadata_text(&row.text, &row.file_name) {
-            if let Some(header) = row.header.as_ref() {
-                forms.push(header.clone());
-            }
-        }
-    }
+    // Which rows are forms, in parallel; the forms in row order.
+    let is_form = |row: &MetadataTextRow| is_form_metadata_text(&row.text, &row.file_name);
+    let form_flags = parallel::install(|| rows.par_iter().map(is_form).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(is_form).collect());
+    let forms = rows
+        .iter()
+        .zip(&form_flags)
+        .filter(|(_, is_form)| **is_form)
+        .filter_map(|(row, _)| row.header.clone())
+        .collect::<Vec<MetadataHeader>>();
     let form_uuids = forms
         .iter()
         .map(|form| form.uuid.clone())
         .collect::<BTreeSet<_>>();
 
-    for row in rows {
-        if is_form_metadata_text(&row.text, &row.file_name) {
-            continue;
+    // Each owner's form uuids, in parallel; each form's owners form a set, so
+    // the order they are added in does not matter.
+    let owned = |(row, is_form): (&MetadataTextRow, &bool)| {
+        if *is_form {
+            return None;
         }
         let (Some(kind), Some(folder), Some(header)) =
             (row.kind.as_deref(), row.folder, row.header.as_ref())
         else {
-            continue;
+            return None;
         };
         if !metadata_kind_can_own_forms(kind) {
-            continue;
+            return None;
         }
         let owner_path = PathBuf::from(folder).join(sanitize_source_path_segment(&header.name));
-        let Some(references) = owned_form_uuid_values_matching(&row.text, &form_uuids) else {
-            continue;
-        };
+        let references = owned_form_uuid_values_matching(&row.text, &form_uuids)?;
+        Some((owner_path, references))
+    };
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(form_flags.par_iter())
+            .map(owned)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(form_flags.iter()).map(owned).collect());
+    let mut owner_paths_by_ref = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    for (owner_path, references) in found.into_iter().flatten() {
         for reference in references {
             owner_paths_by_ref
                 .entry(reference)

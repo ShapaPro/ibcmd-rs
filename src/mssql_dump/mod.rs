@@ -4299,15 +4299,6 @@ fn dump_table_rows_streamed(
 
     let index_part_started = Instant::now();
     let index_part_cpu = process_cpu_ms();
-    let module_text_paths = if extract_module_text {
-        module_body_paths_from_texts(&write_index_rows, &index_metadata_texts)
-    } else {
-        BTreeMap::new()
-    };
-    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
-    cpu_add(&mut timings, "prepare.module_paths", index_part_cpu);
-    let index_part_started = Instant::now();
-    let index_part_cpu = process_cpu_ms();
     let source_reference_needs = selected_configuration_index_needs
         .or(selected_metadata_index_needs)
         .unwrap_or_else(SourceReferenceIndexNeeds::full);
@@ -4365,6 +4356,26 @@ fn dump_table_rows_streamed(
     };
     timings.prepare_form_refs_ms += elapsed_ms(index_part_started);
     cpu_add(&mut timings, "prepare.form_refs", index_part_cpu);
+    // The module paths read the complete form index when the export built
+    // it above, instead of building it again.
+    let form_refs_complete = (extract_metadata_xml
+        && (source_reference_needs.form_refs
+            || source_reference_needs.object_refs
+            || build_selected_local_refs))
+        || needs_standalone_refs;
+    let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    let module_text_paths = if extract_module_text {
+        module_body_paths_from_texts_with_forms(
+            &write_index_rows,
+            &index_metadata_texts,
+            form_refs_complete.then_some(&form_refs),
+        )
+    } else {
+        BTreeMap::new()
+    };
+    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.module_paths", index_part_cpu);
     let index_part_started = Instant::now();
     let index_part_cpu = process_cpu_ms();
     let template_refs = if (extract_metadata_xml
@@ -8119,6 +8130,16 @@ fn module_body_paths_from_texts(
     rows: &[ConfigRow],
     metadata_texts: &[MetadataTextRow],
 ) -> BTreeMap<String, PathBuf> {
+    module_body_paths_from_texts_with_forms(rows, metadata_texts, None)
+}
+
+/// [`module_body_paths_from_texts`], reading `form_refs` when the caller
+/// already built the complete form index of these texts.
+fn module_body_paths_from_texts_with_forms(
+    rows: &[ConfigRow],
+    metadata_texts: &[MetadataTextRow],
+    form_refs: Option<&BTreeMap<String, FormSourceReference>>,
+) -> BTreeMap<String, PathBuf> {
     let file_names = rows
         .iter()
         .map(|row| row.file_name.as_str())
@@ -8127,6 +8148,7 @@ fn module_body_paths_from_texts(
 
     // Read in parallel, added in row order.
     let per_row = |row: &MetadataTextRow| {
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
         parse_module_body_source_paths_from_metadata_text(row, &file_names)
     };
     let found = parallel::install(|| metadata_texts.par_iter().map(per_row).collect::<Vec<_>>())
@@ -8134,8 +8156,15 @@ fn module_body_paths_from_texts(
     for entries in found.into_iter().flatten() {
         paths.extend(entries);
     }
-    let form_refs = build_complete_form_source_reference_index(metadata_texts);
-    paths.extend(form_module_body_paths(&form_refs, &file_names));
+    let built;
+    let form_refs = match form_refs {
+        Some(form_refs) => form_refs,
+        None => {
+            built = build_complete_form_source_reference_index(metadata_texts);
+            &built
+        }
+    };
+    paths.extend(form_module_body_paths(form_refs, &file_names));
 
     paths
 }
@@ -10679,14 +10708,20 @@ fn build_metadata_type_indexes_from_texts(rows: &[MetadataTextRow]) -> MetadataT
             },
         );
     }
-    for row in rows {
-        let entries = recalculation_refs
+    // Each row's generated types read in parallel, merged in row order (which
+    // type id a collision keeps depends on it).
+    let per_row = |row: &MetadataTextRow| {
+        recalculation_refs
             .get(&row.file_name)
             .and_then(|recalculation_ref| {
                 parse_indexed_recalculation_generated_types_from_text(row, recalculation_ref)
             })
             .or_else(|| parse_indexed_generated_types_from_text(row))
-            .or_else(|| parse_indexed_generated_types_from_source_xml_text(&row.text));
+            .or_else(|| parse_indexed_generated_types_from_source_xml_text(&row.text))
+    };
+    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    for entries in found {
         let Some(entries) = entries else { continue };
         for entry in entries {
             let type_id = entry.type_id.to_ascii_lowercase();
