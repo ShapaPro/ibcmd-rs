@@ -690,8 +690,14 @@ mod tests {
             owned,
             vec![
                 ("Form", "dddddddd-0000-0000-0000-000000000001".to_string()),
-                ("Template", "eeeeeeee-0000-0000-0000-000000000001".to_string()),
-                ("Template", "eeeeeeee-0000-0000-0000-000000000002".to_string()),
+                (
+                    "Template",
+                    "eeeeeeee-0000-0000-0000-000000000001".to_string()
+                ),
+                (
+                    "Template",
+                    "eeeeeeee-0000-0000-0000-000000000002".to_string()
+                ),
             ]
         );
     }
@@ -700,9 +706,20 @@ mod tests {
     fn predefined_items_are_kept_per_owner() {
         let mut index = NameIndex::default();
         index.insert_predefined("Catalog.A", "11111111-1111-1111-1111-111111111111", "Один");
-        index.insert_predefined("Catalog.B", "11111111-1111-1111-1111-111111111111", "Другой");
-        index.insert_predefined("Catalog.C", "22222222-2222-2222-2222-222222222222", "Третий");
-        assert_eq!(index.predefined("11111111-1111-1111-1111-111111111111"), None);
+        index.insert_predefined(
+            "Catalog.B",
+            "11111111-1111-1111-1111-111111111111",
+            "Другой",
+        );
+        index.insert_predefined(
+            "Catalog.C",
+            "22222222-2222-2222-2222-222222222222",
+            "Третий",
+        );
+        assert_eq!(
+            index.predefined("11111111-1111-1111-1111-111111111111"),
+            None
+        );
         assert_eq!(
             index.predefined_in("Catalog.B", "11111111-1111-1111-1111-111111111111"),
             Some("Другой")

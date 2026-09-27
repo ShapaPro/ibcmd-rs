@@ -712,13 +712,22 @@ pub fn audit_name_index(
     let expected = NameIndex::from_config_index(&config_index);
     let build_tree_ms = elapsed_ms(started);
     let comparison = compare(&expected, model.names(), max_samples);
-    let object_refs_comparison =
-        compare_legacy_map("object refs", &object_refs, model.names().name_entries(), max_samples);
+    let object_refs_comparison = compare_legacy_map(
+        "object refs",
+        &object_refs,
+        model.names().name_entries(),
+        max_samples,
+    );
     let type_index_comparison = compare_legacy_map(
         "type index",
         &type_index
             .iter()
-            .map(|(id, name)| (id.clone(), name.strip_prefix("cfg:").unwrap_or(name).to_string()))
+            .map(|(id, name)| {
+                (
+                    id.clone(),
+                    name.strip_prefix("cfg:").unwrap_or(name).to_string(),
+                )
+            })
             .collect(),
         model.names().type_entries(),
         max_samples,
@@ -785,7 +794,10 @@ fn compare_legacy_map<'a>(
             Some(found) if *found == name.as_str() => out.equal += 1,
             Some(found) => {
                 *out.different.entry(name_shape(name)).or_default() += 1;
-                sample(format!("{uuid}: legacy {name}, index {found}"), &mut out.samples);
+                sample(
+                    format!("{uuid}: legacy {name}, index {found}"),
+                    &mut out.samples,
+                );
             }
             None => {
                 *out.legacy_only.entry(name_shape(name)).or_default() += 1;
