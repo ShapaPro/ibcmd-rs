@@ -242,6 +242,9 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "WSReference"
         | "IntegrationService"
         | "Bot" => super::common::export::decode(kind, row, context),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::decode(kind, row, context)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -295,6 +298,9 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "WSReference"
         | "IntegrationService"
         | "Bot" => super::common::export::names(kind, row),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::names(kind, row)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
