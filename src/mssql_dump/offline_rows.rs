@@ -7,16 +7,23 @@
 //! `audit-empty-stage --rows-out` writes. While a folder is active every
 //! Config read of the export is answered from it; any other query the export
 //! would send to the server is refused, so an offline run never touches SQL.
+//!
+//! The folder is listed once. A query looks its names up (or walks the rows
+//! once when it filters by shape), and the selected parts are read in
+//! parallel, in the order the query returns them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
+use rayon::prelude::*;
 
 use super::config_rows::{BinaryConfigRow, ConfigRowHeader};
-use super::dynamic_generation::{is_dynamic_generation_alias, storage_generation_overlay_for};
+use super::dynamic_generation::{
+    StorageGenerationOverlay, is_dynamic_generation_alias, storage_generation_overlay_for,
+};
 
 /// One stored part.
 #[derive(Debug, Clone)]
@@ -25,10 +32,33 @@ struct StoredPart {
     bytes: u64,
 }
 
-/// The rows of one folder, by stored file name and part number.
+/// The parts of one stored row, in part order (0, 1, ...).
+type Parts = Vec<StoredPart>;
+
+/// The rows of one folder, by stored file name.
 #[derive(Debug)]
 pub(super) struct OfflineRows {
-    rows: BTreeMap<String, BTreeMap<i32, StoredPart>>,
+    rows: BTreeMap<String, Parts>,
+    /// The published view under the last overlay a query saw.
+    overlay_view: Mutex<Option<Arc<OverlayView>>>,
+}
+
+/// The names a table publishes while a dynamic generation's overlay is
+/// installed: its aliases under their published names, without the rows they
+/// replace and without any other generation's aliases, as the SQL view reads
+/// it. Published name -> stored name.
+#[derive(Debug)]
+struct OverlayView {
+    table: String,
+    overlay: StorageGenerationOverlay,
+    published: BTreeMap<String, String>,
+}
+
+/// How a query sees the table.
+enum View {
+    /// No overlay: the stored names are the published names.
+    Plain,
+    Overlay(Arc<OverlayView>),
 }
 
 static ACTIVE: RwLock<Option<Arc<OfflineRows>>> = RwLock::new(None);
@@ -79,15 +109,30 @@ fn parse_part_file_name(name: &str) -> Option<(String, i32)> {
     Some((file_name.to_string(), part.parse().ok()?))
 }
 
+/// The stored bytes of one row: its parts concatenated in order.
+fn read_parts(parts: &[StoredPart]) -> Result<Vec<u8>> {
+    if let [part] = parts {
+        return fs::read(&part.path)
+            .with_context(|| format!("failed to read {}", part.path.display()));
+    }
+    let mut binary = Vec::with_capacity(parts.iter().map(|part| part.bytes).sum::<u64>() as usize);
+    for part in parts {
+        binary.extend(
+            fs::read(&part.path)
+                .with_context(|| format!("failed to read {}", part.path.display()))?,
+        );
+    }
+    Ok(binary)
+}
+
 impl OfflineRows {
     fn load(dir: &Path) -> Result<Self> {
-        let mut rows = BTreeMap::<String, BTreeMap<i32, StoredPart>>::new();
+        let mut found = BTreeMap::<String, BTreeMap<i32, StoredPart>>::new();
         let entries =
             fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
         for entry in entries {
             let entry = entry.with_context(|| format!("failed to read {}", dir.display()))?;
-            let file_type = entry.file_type()?;
-            if !file_type.is_file() {
+            if !entry.file_type()?.is_file() {
                 continue;
             }
             let name = entry.file_name();
@@ -95,7 +140,7 @@ impl OfflineRows {
                 continue;
             };
             let bytes = entry.metadata()?.len();
-            rows.entry(file_name).or_default().insert(
+            found.entry(file_name).or_default().insert(
                 part_no,
                 StoredPart {
                     path: entry.path(),
@@ -103,13 +148,11 @@ impl OfflineRows {
                 },
             );
         }
-        if rows.is_empty() {
-            bail!(
-                "{} holds no <FileName>__part<N>.bin rows",
-                dir.display()
-            );
+        if found.is_empty() {
+            bail!("{} holds no <FileName>__part<N>.bin rows", dir.display());
         }
-        for (file_name, parts) in &rows {
+        let mut rows = BTreeMap::new();
+        for (file_name, parts) in found {
             for (expected, part_no) in parts.keys().enumerate() {
                 if *part_no != expected as i32 {
                     bail!(
@@ -118,8 +161,12 @@ impl OfflineRows {
                     );
                 }
             }
+            rows.insert(file_name, parts.into_values().collect());
         }
-        Ok(Self { rows })
+        Ok(Self {
+            rows,
+            overlay_view: Mutex::new(None),
+        })
     }
 
     fn check_table(&self, table: &str) -> Result<()> {
@@ -130,30 +177,91 @@ impl OfflineRows {
         }
     }
 
-    /// The rows the table publishes, by published name: the stored names,
-    /// or -- when an active dynamic generation's overlay is installed -- its
-    /// aliases under their published names, without the rows they replace
-    /// and without any other generation's aliases, as the SQL view reads it.
-    fn published(&self, table: &str) -> BTreeMap<String, &BTreeMap<i32, StoredPart>> {
-        let overlay = storage_generation_overlay_for(table);
-        let mut out = BTreeMap::new();
-        for (file_name, parts) in &self.rows {
-            match &overlay {
-                None => {
-                    out.insert(file_name.clone(), parts);
-                }
-                Some(overlay) => {
-                    if let Some(published) = overlay.published_name(file_name) {
-                        out.insert(published.to_string(), parts);
-                    } else if !is_dynamic_generation_alias(file_name)
-                        && !overlay.hides(file_name)
-                    {
-                        out.insert(file_name.clone(), parts);
-                    }
-                }
+    /// The view a query on `table` reads: the stored rows as they are, or the
+    /// published view of the overlay installed for the table, built once per
+    /// overlay and kept until another one is installed.
+    fn view(&self, table: &str) -> View {
+        let Some(overlay) = storage_generation_overlay_for(table) else {
+            return View::Plain;
+        };
+        let mut cached = self
+            .overlay_view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(view) = cached.as_ref()
+            && view.table == table
+            && view.overlay == overlay
+        {
+            return View::Overlay(view.clone());
+        }
+        let mut published = BTreeMap::new();
+        for file_name in self.rows.keys() {
+            if let Some(name) = overlay.published_name(file_name) {
+                published.insert(name.to_string(), file_name.clone());
+            } else if !is_dynamic_generation_alias(file_name) && !overlay.hides(file_name) {
+                published.insert(file_name.clone(), file_name.clone());
             }
         }
-        out
+        let view = Arc::new(OverlayView {
+            table: table.to_string(),
+            overlay,
+            published,
+        });
+        *cached = Some(view.clone());
+        View::Overlay(view)
+    }
+
+    /// The rows of a view whose published name passes `keep`, in published
+    /// name order.
+    fn select<'a>(&'a self, view: &'a View, keep: impl Fn(&str) -> bool) -> Vec<(&'a str, &'a Parts)> {
+        match view {
+            View::Plain => self
+                .rows
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .map(|(name, parts)| (name.as_str(), parts))
+                .collect(),
+            View::Overlay(view) => view
+                .published
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .filter_map(|(name, stored)| Some((name.as_str(), self.rows.get(stored)?)))
+                .collect(),
+        }
+    }
+
+    /// The rows of a view with these published names, looked up, in name
+    /// order; a name the view lacks is skipped, as `WHERE FileName IN (...)`
+    /// skips it.
+    fn lookup<'a>(&'a self, view: &'a View, names: &'a BTreeSet<String>) -> Vec<(&'a str, &'a Parts)> {
+        names
+            .iter()
+            .filter_map(|name| {
+                let parts = match view {
+                    View::Plain => self.rows.get(name)?,
+                    View::Overlay(view) => self.rows.get(view.published.get(name)?)?,
+                };
+                Some((name.as_str(), parts))
+            })
+            .collect()
+    }
+
+    /// Reads and assembles the selected rows in parallel, keeping their order.
+    fn read(selected: Vec<(&str, &Parts)>) -> Result<Vec<BinaryConfigRow>> {
+        crate::parallel::install(|| {
+            selected
+                .par_iter()
+                .map(|(file_name, parts)| {
+                    let binary = read_parts(parts)?;
+                    Ok(BinaryConfigRow {
+                        file_name: file_name.to_string(),
+                        part_no: 0,
+                        data_size: binary.len() as i64,
+                        binary,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?
     }
 
     /// `SELECT FileName, PartNo, DataSize ... ORDER BY FileName, PartNo`.
@@ -163,16 +271,19 @@ impl OfflineRows {
         selected: &BTreeSet<String>,
     ) -> Result<Vec<ConfigRowHeader>> {
         self.check_table(table)?;
-        let mut headers = Vec::new();
-        for (file_name, parts) in self.published(table) {
-            if !selected.is_empty() && !selected.contains(&file_name) {
-                continue;
-            }
-            let data_size = parts.values().map(|part| part.bytes).sum::<u64>() as i64;
-            for part_no in parts.keys() {
+        let view = self.view(table);
+        let rows = if selected.is_empty() {
+            self.select(&view, |_| true)
+        } else {
+            self.lookup(&view, selected)
+        };
+        let mut headers = Vec::with_capacity(rows.len());
+        for (file_name, parts) in rows {
+            let data_size = parts.iter().map(|part| part.bytes).sum::<u64>() as i64;
+            for part_no in 0..parts.len() {
                 headers.push(ConfigRowHeader {
-                    file_name: file_name.clone(),
-                    part_no: *part_no,
+                    file_name: file_name.to_string(),
+                    part_no: part_no as i32,
                     data_size,
                 });
             }
@@ -188,26 +299,8 @@ impl OfflineRows {
         keep: impl Fn(&str) -> bool,
     ) -> Result<Vec<BinaryConfigRow>> {
         self.check_table(table)?;
-        let mut rows = Vec::new();
-        for (file_name, parts) in self.published(table) {
-            if !keep(&file_name) {
-                continue;
-            }
-            let mut binary = Vec::with_capacity(parts.values().map(|part| part.bytes).sum::<u64>() as usize);
-            for part in parts.values() {
-                binary.extend(
-                    fs::read(&part.path)
-                        .with_context(|| format!("failed to read {}", part.path.display()))?,
-                );
-            }
-            rows.push(BinaryConfigRow {
-                file_name,
-                part_no: 0,
-                data_size: binary.len() as i64,
-                binary,
-            });
-        }
-        Ok(rows)
+        let view = self.view(table);
+        Self::read(self.select(&view, keep))
     }
 
     /// Rows by exact name (all rows when `names` is empty); a name the folder
@@ -217,25 +310,32 @@ impl OfflineRows {
         table: &str,
         names: &BTreeSet<String>,
     ) -> Result<Vec<BinaryConfigRow>> {
+        self.check_table(table)?;
+        let view = self.view(table);
         if names.is_empty() {
-            return self.rows(table, |_| true);
+            return Self::read(self.select(&view, |_| true));
         }
-        self.rows(table, |file_name| names.contains(file_name))
+        Self::read(self.lookup(&view, names))
     }
 
     /// Part 0 of every row, as stored (`fetch_config_part0_rows_bcp`).
-    pub(super) fn part0_rows(&self) -> Result<std::collections::HashMap<String, Vec<u8>>> {
-        let mut out = std::collections::HashMap::new();
-        for (file_name, parts) in &self.rows {
-            if let Some(part) = parts.get(&0) {
-                out.insert(
-                    file_name.clone(),
-                    fs::read(&part.path)
-                        .with_context(|| format!("failed to read {}", part.path.display()))?,
-                );
-            }
-        }
-        Ok(out)
+    pub(super) fn part0_rows(&self) -> Result<HashMap<String, Vec<u8>>> {
+        let parts = self
+            .rows
+            .iter()
+            .filter_map(|(file_name, parts)| Some((file_name, parts.first()?)))
+            .collect::<Vec<_>>();
+        let read = crate::parallel::install(|| {
+            parts
+                .par_iter()
+                .map(|(file_name, part)| {
+                    let bytes = fs::read(&part.path)
+                        .with_context(|| format!("failed to read {}", part.path.display()))?;
+                    Ok(((*file_name).clone(), bytes))
+                })
+                .collect::<Result<Vec<_>>>()
+        })??;
+        Ok(read.into_iter().collect())
     }
 }
 

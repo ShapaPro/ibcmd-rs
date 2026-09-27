@@ -78,6 +78,10 @@ pub enum Commands {
     /// stored row, write its XML and compare it with the tree's file.
     #[command(hide = true)]
     AuditMetadataExport(AuditMetadataExportArgs),
+    /// Build the export's name index from a folder of stored Config rows
+    /// and compare it with the index the source tree gives.
+    #[command(hide = true)]
+    AuditNameIndex(AuditNameIndexArgs),
     /// Build a load plan by comparing manifests.
     Plan(PlanArgs),
     /// Compare two 1C XML source trees by path and content hash.
@@ -1049,6 +1053,23 @@ pub struct AuditMetadataExportArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AuditNameIndexArgs {
+    /// Root folder with the native 1C XML sources (the oracle).
+    pub root: PathBuf,
+    /// Folder with the stored Config rows (`<FileName>__part<N>.bin`).
+    pub rows: PathBuf,
+    /// XML dialect: 2.20 (8.3.27) or 2.21 (8.5).
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    pub source_version: InfobaseConfigSourceVersion,
+    /// Differing entries kept per kind.
+    #[arg(long, default_value_t = 5)]
+    pub max_samples: usize,
+    /// Optional JSON report.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct AuditEmptyStageArgs {
     /// Root folder with the native 1C XML sources.
     pub root: PathBuf,
@@ -1363,6 +1384,10 @@ pub struct MssqlDumpConfigArgs {
     /// server or database is contacted.
     #[arg(long)]
     pub rows_dir: Option<PathBuf>,
+    /// Write the descriptors of the kinds the metadata model decodes through
+    /// the model (also `IBCMD_RS_MODEL_EXPORT=1`).
+    #[arg(long, hide = true)]
+    pub model_export: bool,
     /// Output directory for dumped rows and manifest.json.
     #[arg(short, long)]
     pub output_dir: PathBuf,

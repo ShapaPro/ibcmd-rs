@@ -18,6 +18,9 @@
 //! and with the evidence corpora; a property whose place no corpus shows is
 //! only accepted at the value every corpus has, and refused otherwise.
 
+#[path = "root_export.rs"]
+pub mod export;
+
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
