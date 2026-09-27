@@ -593,9 +593,9 @@ fn field_declarations_of_row(
     // Each child's type is read from the values enclosing its header, so the
     // record's nesting is read once for all of its children.
     let _brace_jumps = register_brace_jumps([row.text.as_str()]);
-    for (header, marker_start) in
-        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-    {
+    let nested = nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true);
+    for (header, marker_start) in &nested {
+        let marker_start = *marker_start;
         let Some(reference) = object_refs.get(&header.uuid) else {
             continue;
         };
@@ -658,9 +658,8 @@ fn field_declarations_of_row(
     };
     let owner_reference = format!("{kind}.{}", header.name);
     let child_prefix = format!("{owner_reference}.");
-    for (child, marker_start) in
-        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-    {
+    for (child, marker_start) in &nested {
+        let marker_start = *marker_start;
         let Some(reference) = object_refs.get(&child.uuid) else {
             continue;
         };
@@ -913,8 +912,59 @@ impl ReferenceSink for ReferenceOps {
     }
 }
 
+/// A row's nested children, each with its marker offset and the reference
+/// [`standalone_child_reference`] gives it without form or template
+/// references (what the object reference index reads). The standalone
+/// content references read the same children with those references laid
+/// over: `standalone_child_reference` consults them first and nothing after.
+pub(super) type RowChildReferences = Vec<(MetadataHeader, usize, Option<String>)>;
+
+/// [`RowChildReferences`] of every row with a kind and a header, read in
+/// parallel; `None` for the others. One reading for both indexes.
+pub(super) fn child_references_by_row(
+    rows: &[MetadataTextRow],
+) -> Vec<Option<RowChildReferences>> {
+    let per_row = |row: &MetadataTextRow| {
+        let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
+            return None;
+        };
+        let empty_form_refs = BTreeMap::new();
+        let empty_template_refs = BTreeMap::new();
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
+        Some(
+            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
+                .into_iter()
+                .map(|(child, marker_start)| {
+                    let base = standalone_child_reference(
+                        kind,
+                        &header.name,
+                        &header.uuid,
+                        &row.text,
+                        marker_start,
+                        &child,
+                        &empty_form_refs,
+                        &empty_template_refs,
+                    );
+                    (child, marker_start, base)
+                })
+                .collect(),
+        )
+    };
+    parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect())
+}
+
 pub(super) fn build_metadata_object_reference_indexes_from_texts(
     rows: &[MetadataTextRow],
+) -> MetadataObjectReferenceIndexes {
+    build_metadata_object_reference_indexes_with_children(rows, &child_references_by_row(rows))
+}
+
+/// [`build_metadata_object_reference_indexes_from_texts`] over children
+/// already read ([`child_references_by_row`] of the same rows).
+pub(super) fn build_metadata_object_reference_indexes_with_children(
+    rows: &[MetadataTextRow],
+    children: &[Option<RowChildReferences>],
 ) -> MetadataObjectReferenceIndexes {
     let mut index = MetadataObjectReferenceIndexes::default();
     let subsystem_refs = build_subsystem_source_reference_index_from_texts(rows);
@@ -922,9 +972,16 @@ pub(super) fn build_metadata_object_reference_indexes_from_texts(
     // Each row's references are read on their own, in parallel, and applied
     // in row order: the index (and which uuids it saw twice) comes out
     // exactly as the sequential walk made it.
-    let per_row = |row: &MetadataTextRow| object_references_of_row(row, &subsystem_refs);
-    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
-        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    let per_row = |(row, children): (&MetadataTextRow, &Option<RowChildReferences>)| {
+        object_references_of_row(row, &subsystem_refs, children.as_ref())
+    };
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(children.par_iter())
+            .map(per_row)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(children.iter()).map(per_row).collect());
     for ops in found {
         for (or_insert, uuid, reference) in ops.0 {
             if or_insert {
@@ -944,10 +1001,9 @@ pub(super) fn build_metadata_object_reference_indexes_from_texts(
 fn object_references_of_row(
     row: &MetadataTextRow,
     subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
+    children: Option<&RowChildReferences>,
 ) -> ReferenceOps {
     let mut index = ReferenceOps::default();
-    let empty_form_refs = BTreeMap::new();
-    let empty_template_refs = BTreeMap::new();
     {
         if let Some(name) = parse_configuration_reference_text_for_row(&row.text, &row.file_name) {
             index.insert(row.file_name.clone(), format!("Configuration.{name}"));
@@ -980,20 +1036,9 @@ fn object_references_of_row(
                 format!("{}.{}.Command.{}", kind, header.name, command.name),
             );
         }
-        for (child, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-        {
-            if let Some(reference) = standalone_child_reference(
-                kind,
-                &header.name,
-                &header.uuid,
-                &row.text,
-                marker_start,
-                &child,
-                &empty_form_refs,
-                &empty_template_refs,
-            ) {
-                index.or_insert(child.uuid, reference);
+        for (child, _, reference) in children.into_iter().flatten() {
+            if let Some(reference) = reference {
+                index.or_insert(child.uuid.clone(), reference.clone());
             }
         }
         if kind == "WebService" {
@@ -1321,6 +1366,26 @@ pub(super) fn build_standalone_content_references(
     template_refs: &BTreeMap<String, TemplateSourceReference>,
     subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
 ) -> StandaloneContentReferences {
+    build_standalone_content_references_with_children(
+        rows,
+        object_refs,
+        form_refs,
+        template_refs,
+        subsystem_refs,
+        &child_references_by_row(rows),
+    )
+}
+
+/// [`build_standalone_content_references`] over children already read
+/// ([`child_references_by_row`] of the same rows).
+pub(super) fn build_standalone_content_references_with_children(
+    rows: &[MetadataTextRow],
+    object_refs: &BTreeMap<String, String>,
+    form_refs: &BTreeMap<String, FormSourceReference>,
+    template_refs: &BTreeMap<String, TemplateSourceReference>,
+    subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
+    row_children: &[Option<RowChildReferences>],
+) -> StandaloneContentReferences {
     let mut standalone_object_refs = object_refs.clone();
     for (uuid, form_ref) in form_refs {
         if let Some(reference) = form_source_reference_name(form_ref) {
@@ -1342,28 +1407,26 @@ pub(super) fn build_standalone_content_references(
     // the form and template references its uuid-like values name. Applied in
     // row order, the second only where nothing named the uuid yet -- exactly
     // the sequential walk.
-    let per_row = |row: &MetadataTextRow| {
-        let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
-            return None;
-        };
-        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
+    let per_row = |(row, row_children): (&MetadataTextRow, &Option<RowChildReferences>)| {
+        let row_children = row_children.as_ref()?;
+        // `standalone_child_reference` with these form and template
+        // references: theirs first, else the reading without them.
         let mut seen = BTreeSet::new();
         let mut children = Vec::new();
-        for (child, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-        {
-            if let Some(reference) = standalone_child_reference(
-                kind,
-                &header.name,
-                &header.uuid,
-                &row.text,
-                marker_start,
-                &child,
-                form_refs,
-                template_refs,
-            ) && seen.insert(child.uuid.clone())
+        for (child, _, base) in row_children {
+            let reference = form_refs
+                .get(&child.uuid)
+                .and_then(form_source_reference_name)
+                .or_else(|| {
+                    template_refs
+                        .get(&child.uuid)
+                        .and_then(template_source_reference_name)
+                })
+                .or_else(|| base.clone());
+            if let Some(reference) = reference
+                && seen.insert(child.uuid.clone())
             {
-                children.push((child.uuid, reference));
+                children.push((child.uuid.clone(), reference));
             }
         }
         let mut named = Vec::new();
@@ -1379,8 +1442,13 @@ pub(super) fn build_standalone_content_references(
         }
         Some((children, named))
     };
-    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
-        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(row_children.par_iter())
+            .map(per_row)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(row_children.iter()).map(per_row).collect());
     for (children, named) in found.into_iter().flatten() {
         for (uuid, reference) in children {
             standalone_object_refs.insert(uuid, reference);

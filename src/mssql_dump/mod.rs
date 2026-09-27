@@ -4402,6 +4402,12 @@ fn dump_table_rows_streamed(
     cpu_add(&mut timings, "prepare.subsystem_refs", index_part_cpu);
     let index_part_started = Instant::now();
     let index_part_cpu = process_cpu_ms();
+    // Each row's nested children read once, for the object references here
+    // and the standalone content references below.
+    let child_references = std::cell::OnceCell::new();
+    let row_children = || {
+        child_references.get_or_init(|| child_references_by_row(&index_metadata_texts))
+    };
     let detail_started = PartClock::start();
     let MetadataObjectReferenceIndexes {
         references: object_refs,
@@ -4409,7 +4415,9 @@ fn dump_table_rows_streamed(
     } = if (extract_metadata_xml || needs_source_layout_refs)
         && (source_reference_needs.object_refs || build_selected_local_refs)
     {
-        build_metadata_object_reference_indexes_from_texts(&index_metadata_texts)
+        let children = row_children();
+        detail_ms(&mut timings, "object_refs.children", detail_started);
+        build_metadata_object_reference_indexes_with_children(&index_metadata_texts, children)
     } else if needs_standalone_refs {
         MetadataObjectReferenceIndexes::from_legacy(
             &build_standalone_object_reference_index_from_texts(
@@ -4625,12 +4633,13 @@ fn dump_table_rows_streamed(
             .any(|asset| matches!(asset.kind, SourceAssetKind::StandaloneContent))
     {
         if extract_metadata_xml {
-            build_standalone_content_references(
+            build_standalone_content_references_with_children(
                 &index_metadata_texts,
                 &configuration_root_object_refs,
                 &form_refs,
                 &template_refs,
                 &subsystem_refs,
+                row_children(),
             )
         } else {
             build_standalone_content_references_for_uuids(
