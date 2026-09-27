@@ -3766,6 +3766,7 @@ fn dump_table_rows_streamed(
         ..MssqlDumpTimingReport::default()
     };
     let prepare_started = Instant::now();
+    let prepare_cpu = process_cpu_ms();
     let mut file_names = headers
         .iter()
         .map(|row| row.file_name.clone())
@@ -3783,6 +3784,7 @@ fn dump_table_rows_streamed(
         .cloned()
         .collect::<BTreeSet<_>>();
     let metadata_fetch_started = Instant::now();
+    let metadata_fetch_cpu = process_cpu_ms();
     let mut metadata_fetch_used_bcp = false;
     let needs_source_layout_refs = !write_binary_rows;
     let mut metadata_rows = if extract_metadata_xml
@@ -3813,6 +3815,7 @@ fn dump_table_rows_streamed(
     };
     let elapsed = elapsed_ms(metadata_fetch_started);
     timings.prepare_metadata_fetch_ms += elapsed;
+    cpu_add(&mut timings, "prepare.metadata_fetch", metadata_fetch_cpu);
     if metadata_fetch_used_bcp {
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
     }
@@ -4238,6 +4241,7 @@ fn dump_table_rows_streamed(
     // modelled kinds read are left out. The index needs the whole row set;
     // a run that fetched part of it stays legacy.
     let plan_started = Instant::now();
+    let plan_cpu = process_cpu_ms();
     let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
         model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
     });
@@ -4271,12 +4275,15 @@ fn dump_table_rows_streamed(
         );
     }
     timings.prepare_model_index_ms += elapsed_ms(plan_started);
+    cpu_add(&mut timings, "prepare.model_plan", plan_cpu);
     let reference_indexes_started = Instant::now();
+    let reference_indexes_cpu = process_cpu_ms();
     let metadata_texts_by_file_name = index_metadata_texts
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
@@ -4288,15 +4295,19 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_recalculation_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.recalculation_refs", index_part_cpu);
 
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let module_text_paths = if extract_module_text {
         module_body_paths_from_texts(&write_index_rows, &index_metadata_texts)
     } else {
         BTreeMap::new()
     };
     timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.module_paths", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let source_reference_needs = selected_configuration_index_needs
         .or(selected_metadata_index_needs)
         .unwrap_or_else(SourceReferenceIndexNeeds::full);
@@ -4309,7 +4320,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_command_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.command_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let metadata_refs = Arc::new(
         if extract_metadata_xml
             && (source_reference_needs.metadata_refs || build_selected_local_refs)
@@ -4320,7 +4333,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_metadata_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.metadata_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let MetadataTypeIndexes {
         references: type_index,
         reference_collisions: type_index_collisions,
@@ -4335,7 +4350,9 @@ fn dump_table_rows_streamed(
     let moxel_generated_types =
         build_moxel_generated_type_index(&type_index, &type_index_collisions);
     timings.prepare_type_index_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.type_index", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let form_refs = if (extract_metadata_xml
         && (source_reference_needs.form_refs
             || source_reference_needs.object_refs
@@ -4347,7 +4364,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_form_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.form_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let template_refs = if (extract_metadata_xml
         && (source_reference_needs.template_refs || build_selected_local_refs))
         || needs_standalone_refs
@@ -4357,7 +4376,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_template_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.template_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let subsystem_refs = if (extract_metadata_xml
         && (source_reference_needs.subsystem_refs || build_selected_local_refs))
         || needs_standalone_refs
@@ -4367,8 +4388,10 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_subsystem_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.subsystem_refs", index_part_cpu);
     let index_part_started = Instant::now();
-    let detail_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    let detail_started = PartClock::start();
     let MetadataObjectReferenceIndexes {
         references: object_refs,
         resolutions: object_ref_resolutions,
@@ -4390,7 +4413,7 @@ fn dump_table_rows_streamed(
         MetadataObjectReferenceIndexes::default()
     };
     detail_ms(&mut timings, "object_refs.index", detail_started);
-    let detail_started = Instant::now();
+    let detail_started = PartClock::start();
     let configuration_root_object_refs = if extract_metadata_xml {
         build_configuration_root_object_reference_index_from_texts(
             &index_metadata_texts,
@@ -4403,6 +4426,7 @@ fn dump_table_rows_streamed(
         build_role_rights_object_reference_index(&object_refs, &form_refs);
     detail_ms(&mut timings, "object_refs.root_and_role_copies", detail_started);
     timings.prepare_object_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.object_refs", index_part_cpu);
     let metadata_order = if (extract_metadata_xml || needs_source_layout_refs)
         && source_reference_needs.metadata_order
     {
@@ -4411,6 +4435,7 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let field_part_started = Instant::now();
     let field_refs = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_reference_index_from_texts(&index_metadata_texts)
@@ -4475,7 +4500,9 @@ fn dump_table_rows_streamed(
     };
     timings.prepare_field_declarations_ms += elapsed_ms(field_part_started);
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.field_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let functional_option_refs =
         if extract_metadata_xml
             && source_reference_needs.functional_option_refs
@@ -4492,9 +4519,11 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         };
     timings.prepare_functional_option_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.functional_option_refs", index_part_cpu);
     let source_asset_metadata_texts = &index_metadata_texts;
     let index_part_started = Instant::now();
-    let detail_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    let detail_started = PartClock::start();
     let mut source_assets = source_asset_paths_with_indexes(
         &write_index_rows,
         source_asset_metadata_texts,
@@ -4508,7 +4537,7 @@ fn dump_table_rows_streamed(
         &subsystem_refs,
     );
     detail_ms(&mut timings, "source_assets.paths", detail_started);
-    let detail_started = Instant::now();
+    let detail_started = PartClock::start();
     // The index rows are headers here, so the parent-configuration list the
     // vendor `.cf` files are named from is fetched on its own.
     let parent_list_ids = source_assets::parent_configuration_list_ids(&source_assets)
@@ -4540,11 +4569,11 @@ fn dump_table_rows_streamed(
         );
     }
     detail_ms(&mut timings, "source_assets.parent_configurations", detail_started);
-    let detail_started = Instant::now();
+    let detail_started = PartClock::start();
     let source_asset_diagnostics =
         build_form_owner_resolution_diagnostics_from_texts(source_asset_metadata_texts);
     detail_ms(&mut timings, "source_assets.form_owner_diagnostics", detail_started);
-    let detail_started = Instant::now();
+    let detail_started = PartClock::start();
     let write_rows_by_file_name = write_index_rows
         .iter()
         .map(|row| (row.file_name.as_str(), row))
@@ -4564,7 +4593,9 @@ fn dump_table_rows_streamed(
     );
     detail_ms(&mut timings, "source_assets.discovery_misses", detail_started);
     timings.prepare_source_assets_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.source_assets", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let help_refs = if extract_metadata_xml
         && (source_reference_needs.help_refs || build_selected_local_refs)
     {
@@ -4573,7 +4604,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_help_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.help_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let standalone_refs = if (needs_standalone_refs
         || (extract_metadata_xml && source_reference_needs.standalone_refs))
         && source_assets
@@ -4612,7 +4645,9 @@ fn dump_table_rows_streamed(
         refs
     };
     timings.prepare_standalone_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.standalone_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let body_owners = if (extract_metadata_xml
         && (source_reference_needs.body_owners || build_selected_local_refs))
         || needs_source_layout_refs
@@ -4622,6 +4657,7 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_body_owners_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.body_owners", index_part_cpu);
     let needs_predefined_item_refs =
         predefined_data_needs_item_references(&file_names, &body_owners);
     let (predefined_item_refs, all_predefined_rows) = if needs_predefined_item_refs {
@@ -4819,11 +4855,13 @@ fn dump_table_rows_streamed(
         }
     }
     timings.prepare_reference_indexes_ms += elapsed_ms(reference_indexes_started);
+    cpu_add(&mut timings, "prepare.reference_indexes", reference_indexes_cpu);
     // `--model-export`: the descriptors of the modelled kinds are decoded
     // from their rows; names come from an index of the whole row set, so a
     // run that fetched only part of it keeps the legacy converters.
     let model = if let Some(plan) = model_plan {
         let started = Instant::now();
+        let model_cpu = process_cpu_ms();
         let predefined_names = plan.predefined_body_file_names();
         let predefined_rows = if predefined_names.is_empty() {
             Vec::new()
@@ -4856,12 +4894,14 @@ fn dump_table_rows_streamed(
             (!complete).then_some(&legacy),
         )?;
         timings.prepare_model_index_ms += elapsed_ms(started);
+        cpu_add(&mut timings, "prepare.model_index", model_cpu);
         model.log_summary(elapsed_ms(started));
         Some(model)
     } else {
         None
     };
     timings.prepare_indexes_ms = elapsed_ms(prepare_started);
+    cpu_add(&mut timings, "prepare", prepare_cpu);
     if profile_indexes_only() {
         return Ok(DumpedTable {
             rows: Vec::new(),
@@ -4940,6 +4980,7 @@ fn dump_table_rows_streamed(
     for chunk in file_name_batches {
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
+        let fetch_cpu = process_cpu_ms();
         let rows = fetch_binary_rows_bcp(
             sqlcmd,
             bcp,
@@ -4958,6 +4999,7 @@ fn dump_table_rows_streamed(
         })?;
         let elapsed = elapsed_ms(fetch_started);
         timings.fetch_rows_ms += elapsed;
+        cpu_add(&mut timings, "fetch_rows", fetch_cpu);
         timings.fetch_rows_bcp_ms += elapsed;
         timings.fetch_row_batches += 1;
         timings.fetch_row_batch_max_rows = timings.fetch_row_batch_max_rows.max(rows.len() as u64);
@@ -4976,6 +5018,7 @@ fn dump_table_rows_streamed(
             }
         }
         let process_started = Instant::now();
+        let process_cpu = process_cpu_ms();
         // Plain parallel map: dispatching the largest rows first started every
         // big spreadsheet of a chunk at once and made each 3-4x slower.
         let dumped_rows = parallel::install(|| {
@@ -4984,6 +5027,7 @@ fn dump_table_rows_streamed(
                 .collect::<Vec<_>>()
         })?;
         timings.process_rows_wall_ms += elapsed_ms(process_started);
+        cpu_add(&mut timings, "process_rows", process_cpu);
         for dumped in dumped_rows {
             let dumped = dumped?;
             binary_bytes += dumped.binary_bytes;
@@ -5131,12 +5175,70 @@ fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-/// Adds the time since `started` to the named part of the index phase.
-fn detail_ms(timings: &mut MssqlDumpTimingReport, name: &str, started: Instant) {
+/// CPU time the whole process has used so far (all threads), in ms.
+#[cfg(windows)]
+fn process_cpu_ms() -> u64 {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo handle of the current process and four writable
+    // FILETIMEs are all GetProcessTimes asks for.
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return 0;
+    }
+    let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    // 100-nanosecond ticks.
+    (ticks(kernel) + ticks(user)) / 10_000
+}
+
+#[cfg(not(windows))]
+fn process_cpu_ms() -> u64 {
+    0
+}
+
+/// A phase's start: wall clock and the process CPU used so far.
+#[derive(Clone, Copy)]
+struct PartClock {
+    wall: Instant,
+    cpu: u64,
+}
+
+impl PartClock {
+    fn start() -> Self {
+        Self {
+            wall: Instant::now(),
+            cpu: process_cpu_ms(),
+        }
+    }
+}
+
+/// Adds the process CPU used since `cpu_started` to the named phase.
+fn cpu_add(timings: &mut MssqlDumpTimingReport, name: &str, cpu_started: u64) {
+    *timings.cpu_ms.entry(name.to_string()).or_default() +=
+        process_cpu_ms().saturating_sub(cpu_started);
+}
+
+/// Adds the wall time and the CPU since `started` to the named part of the
+/// index phase.
+fn detail_ms(timings: &mut MssqlDumpTimingReport, name: &str, started: PartClock) {
     *timings
         .prepare_detail_ms
         .entry(name.to_string())
-        .or_default() += elapsed_ms(started);
+        .or_default() += elapsed_ms(started.wall);
+    cpu_add(timings, &format!("prepare.{name}"), started.cpu);
 }
 
 /// `IBCMD_RS_PROFILE_INDEXES_ONLY=1`: stop a streamed export after its index
