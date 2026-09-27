@@ -784,7 +784,7 @@ fn compare_legacy_map<'a>(
         index: index.len(),
         ..LegacyMapComparison::default()
     };
-    let mut sample = |text: String, samples: &mut Vec<String>| {
+    let sample = |text: String, samples: &mut Vec<String>| {
         if samples.len() < max_samples * 8 {
             samples.push(format!("{what}: {text}"));
         }
