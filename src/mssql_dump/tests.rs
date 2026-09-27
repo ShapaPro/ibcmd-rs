@@ -13814,8 +13814,13 @@ fn formats_composite_type_qualifiers_in_native_order() {
 fn extracts_form_child_items_from_layout_pairs() {
     let form_uuid = "02023637-7868-4a5f-8576-835a76e0c9ba";
     let external_command_uuid = "11111111-1111-4111-8111-111111111111";
+    // An event identifier no event table names: the platform has no spelling
+    // for it and the identifier itself is written. The fixture used
+    // `213d1900-...`, which is the form's own `AfterWriteAtServer` and is
+    // named now.
+    let unnamed_event = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let layout = format!(
-        r#"{{59,2,aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,{{22,{{64,{form_uuid}}},0,0,0,0,"Панель",{{1,0}},0,1,1,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,{{34,{{44,{form_uuid}}},0,0,0,"Выполнить",{{1,0}},1,{{0,{external_command_uuid}}},{{2,{{25}},{{40}}}}}}}},cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"СписокТаблица",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged","StartChoice","NameChoice","ValueChoice","NameValueChoice",213d1900-dcad-4616-9f20-3f077156a40f,"NameUuidEvent"}},"OnGetDataAtServer","RowsGetData"}}}}"#
+        r#"{{59,2,aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,{{22,{{64,{form_uuid}}},0,0,0,0,"Панель",{{1,0}},0,1,1,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,{{34,{{44,{form_uuid}}},0,0,0,"Выполнить",{{1,0}},1,{{0,{external_command_uuid}}},{{2,{{25}},{{40}}}}}}}},cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"СписокТаблица",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged","StartChoice","NameChoice","ValueChoice","NameValueChoice",{unnamed_event},"NameUuidEvent"}},"OnGetDataAtServer","RowsGetData"}}}}"#
     );
     let layout_fields = split_1c_braced_fields(&layout, 0).unwrap();
     let attributes = vec![FormAttribute {
@@ -13891,7 +13896,7 @@ fn extracts_form_child_items_from_layout_pairs() {
         1
     );
     assert_eq!(
-        xml.matches(r#"<Event name="213d1900-dcad-4616-9f20-3f077156a40f">NameUuidEvent</Event>"#)
+        xml.matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
             .count(),
         1
     );
@@ -18196,8 +18201,11 @@ fn extracts_real_sfc_page_scroll_on_compress() {
 #[test]
 fn extracts_form_body_xml_keeps_child_events_nested() {
     let form_uuid = "02023637-7868-4a5f-8576-835a76e0c9ba";
+    // An event identifier no event table names; see
+    // `extracts_form_child_items_from_layout_pairs`.
+    let unnamed_event = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let layout = format!(
-        r#"{{59,1,cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"Список",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged",213d1900-dcad-4616-9f20-3f077156a40f,"NameUuidEvent"}},{{1,97365900-eadf-4dfd-a9aa-fbb9ecabd079,"RowsGetData",1,0,97365900-eadf-4dfd-a9aa-fbb9ecabd079,0,1}}}}}}"#
+        r#"{{59,1,cccccccc-cccc-4ccc-cccc-cccccccccccc,{{73,{{25,{form_uuid}}},0,1,0,"Список",0,0,0,{{1,0}},1,dddddddd-dddd-4ddd-dddd-dddddddddddd,{{48,{{40,{form_uuid}}},0,0,0,2,"Наименование",1,0,{{1,0}},"OnChange","NameChanged",{unnamed_event},"NameUuidEvent"}},{{1,97365900-eadf-4dfd-a9aa-fbb9ecabd079,"RowsGetData",1,0,97365900-eadf-4dfd-a9aa-fbb9ecabd079,0,1}}}}}}"#
     );
     let form_body = deflate_for_test(format!(r#"{{4,{layout},"",{{0}}}}"#).as_bytes());
 
@@ -18218,7 +18226,7 @@ fn extracts_form_body_xml_keeps_child_events_nested() {
     );
     assert_eq!(
         form_xml
-            .matches(r#"<Event name="213d1900-dcad-4616-9f20-3f077156a40f">NameUuidEvent</Event>"#)
+            .matches(&format!(r#"<Event name="{unnamed_event}">NameUuidEvent</Event>"#))
             .count(),
         1
     );
