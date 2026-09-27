@@ -713,6 +713,300 @@ impl<'a> NativeParser<'a> {
     }
 }
 
+/// The root of a native document, read with every check [`parse`] makes but
+/// without building the tree: only the root list's length and its first and
+/// last few values are kept.
+///
+/// A reader that only inspects a handful of root fields paid for the whole
+/// tree before: a spreadsheet body of ERP УХ 3.2.12.6 holds millions of
+/// nodes, and allocating and freeing them was a quarter of the time its
+/// conversion to XML took.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeRootOutline {
+    /// The number of values of the root list; `None` when the root is not a
+    /// list.
+    pub(crate) len: Option<usize>,
+    /// The root list's leading values, at most as many as were asked for.
+    pub(crate) head: Vec<NativeValue>,
+    /// The root list's trailing values in order, at most as many as were
+    /// asked for.
+    pub(crate) tail: Vec<NativeValue>,
+}
+
+/// [`parse`]'s outline: the same acceptance and the same errors.
+pub(crate) fn outline(
+    input: &[u8],
+    head: usize,
+    tail: usize,
+) -> Result<NativeRootOutline, NativeError> {
+    if input.len() > MAX_PLAIN_BYTES {
+        return Err(NativeError::PlainPayloadTooLarge {
+            maximum: MAX_PLAIN_BYTES,
+            actual: input.len(),
+        });
+    }
+    if !input.starts_with(UTF8_BOM) {
+        return Err(NativeError::MissingBom);
+    }
+    let mut parser = NativeParser::new(input);
+    parser.offset = UTF8_BOM.len();
+    parser.outline_document(head, tail)
+}
+
+/// [`parse_without_bom`]'s outline. The body is read in place: the parser
+/// never looks back at the BOM that version prepends, so only the node bound
+/// has to count it.
+pub(crate) fn outline_without_bom(
+    input: &[u8],
+    head: usize,
+    tail: usize,
+) -> Result<NativeRootOutline, NativeError> {
+    let total =
+        input
+            .len()
+            .checked_add(UTF8_BOM.len())
+            .ok_or(NativeError::PlainPayloadTooLarge {
+                maximum: MAX_PLAIN_BYTES,
+                actual: usize::MAX,
+            })?;
+    if total > MAX_PLAIN_BYTES {
+        return Err(NativeError::PlainPayloadTooLarge {
+            maximum: MAX_PLAIN_BYTES,
+            actual: total,
+        });
+    }
+    let mut parser = NativeParser::new(input);
+    parser.max_nodes = total.saturating_add(1);
+    parser.outline_document(head, tail)
+}
+
+impl NativeParser<'_> {
+    /// `parse` after its BOM check, keeping the outline instead of the tree.
+    fn outline_document(
+        &mut self,
+        head: usize,
+        tail: usize,
+    ) -> Result<NativeRootOutline, NativeError> {
+        self.bump_node(0)?;
+        self.whitespace();
+        let outline = match self.input.get(self.offset) {
+            Some(b'{') => self.outline_list(head, tail)?,
+            Some(b'"') => {
+                self.text()?;
+                NativeRootOutline {
+                    len: None,
+                    head: Vec::new(),
+                    tail: Vec::new(),
+                }
+            }
+            Some(_) => {
+                self.token()?;
+                NativeRootOutline {
+                    len: None,
+                    head: Vec::new(),
+                    tail: Vec::new(),
+                }
+            }
+            None => return Err(NativeError::UnexpectedEnd),
+        };
+        self.whitespace();
+        if self.offset != self.input.len() {
+            return Err(NativeError::TrailingBytes);
+        }
+        Ok(outline)
+    }
+
+    /// `list` at the root: the leading values are built as `list` builds
+    /// them, the others are only checked, and the trailing ones are built
+    /// again from where they start once the list has closed.
+    fn outline_list(&mut self, head: usize, tail: usize) -> Result<NativeRootOutline, NativeError> {
+        self.offset += 1;
+        self.whitespace();
+        let mut outline = NativeRootOutline {
+            len: Some(0),
+            head: Vec::new(),
+            tail: Vec::new(),
+        };
+        if self.input.get(self.offset) == Some(&b'}') {
+            self.offset += 1;
+            return Ok(outline);
+        }
+        // Where each trailing value starts; `None` is the empty token.
+        let mut trailing = std::collections::VecDeque::with_capacity(tail + 1);
+        let mut len = 0usize;
+        loop {
+            let start = if len != 0 && self.input.get(self.offset) == Some(&b',') {
+                self.bump_node(1)?;
+                if len < head {
+                    outline.head.push(NativeValue::Token(String::new()));
+                }
+                None
+            } else {
+                let start = self.offset;
+                if len < head {
+                    let value = self.value(1)?;
+                    outline.head.push(value);
+                } else {
+                    self.skip_value(1)?;
+                }
+                Some(start)
+            };
+            len += 1;
+            if tail > 0 {
+                if trailing.len() == tail {
+                    trailing.pop_front();
+                }
+                trailing.push_back(start);
+            }
+            self.whitespace();
+            match self.input.get(self.offset) {
+                Some(b',') => {
+                    self.offset += 1;
+                    self.whitespace();
+                    if self.input.get(self.offset) == Some(&b'}') {
+                        return Err(NativeError::TrailingComma);
+                    }
+                }
+                Some(b'}') => {
+                    self.offset += 1;
+                    break;
+                }
+                Some(_) => return Err(NativeError::ExpectedDelimiter),
+                None => return Err(NativeError::UnexpectedEnd),
+            }
+        }
+        outline.len = Some(len);
+        for start in trailing {
+            let value = match start {
+                None => NativeValue::Token(String::new()),
+                Some(start) => {
+                    // Already accepted above at this very depth, so no bound
+                    // can refuse it the second time.
+                    let mut again = NativeParser::new(self.input);
+                    again.offset = start;
+                    again.max_nodes = usize::MAX;
+                    again.value(1)?
+                }
+            };
+            outline.tail.push(value);
+        }
+        Ok(outline)
+    }
+
+    /// `value` without the value.
+    fn skip_value(&mut self, depth: usize) -> Result<(), NativeError> {
+        self.bump_node(depth)?;
+        self.whitespace();
+        match self.input.get(self.offset) {
+            Some(b'{') => self.skip_list(depth),
+            Some(b'"') => self.skip_text(),
+            Some(_) => self.skip_token(),
+            None => Err(NativeError::UnexpectedEnd),
+        }
+    }
+
+    /// `list` without the list.
+    fn skip_list(&mut self, depth: usize) -> Result<(), NativeError> {
+        self.offset += 1;
+        self.whitespace();
+        if self.input.get(self.offset) == Some(&b'}') {
+            self.offset += 1;
+            return Ok(());
+        }
+        let mut first = true;
+        loop {
+            if !first && self.input.get(self.offset) == Some(&b',') {
+                self.bump_node(depth + 1)?;
+            } else {
+                self.skip_value(depth + 1)?;
+            }
+            first = false;
+            self.whitespace();
+            match self.input.get(self.offset) {
+                Some(b',') => {
+                    self.offset += 1;
+                    self.whitespace();
+                    if self.input.get(self.offset) == Some(&b'}') {
+                        return Err(NativeError::TrailingComma);
+                    }
+                }
+                Some(b'}') => {
+                    self.offset += 1;
+                    return Ok(());
+                }
+                Some(_) => return Err(NativeError::ExpectedDelimiter),
+                None => return Err(NativeError::UnexpectedEnd),
+            }
+        }
+    }
+
+    /// `text` without the text. Its content is valid UTF-8 exactly when the
+    /// stored bytes between the quotes are: a doubled quote only loses one
+    /// ASCII byte next to its twin.
+    fn skip_text(&mut self) -> Result<(), NativeError> {
+        self.offset += 1;
+        let start = self.offset;
+        loop {
+            let Some(quote) = find_byte(self.input, self.offset, b'"') else {
+                return Err(NativeError::UnexpectedEnd);
+            };
+            self.offset = quote + 1;
+            if self.input.get(self.offset) == Some(&b'"') {
+                self.offset += 1;
+                continue;
+            }
+            return std::str::from_utf8(&self.input[start..self.offset - 1])
+                .map(|_| ())
+                .map_err(|_| NativeError::InvalidUtf8);
+        }
+    }
+
+    /// `token` without the token: its bytes are ASCII, so they are UTF-8.
+    fn skip_token(&mut self) -> Result<(), NativeError> {
+        if self.input[self.offset..].starts_with(b"#base64:") {
+            return self.line_wrapped_base64_token().map(|_| ());
+        }
+        let start = self.offset;
+        while let Some(byte) = self.input.get(self.offset) {
+            if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}') {
+                break;
+            }
+            if matches!(byte, b'{' | b'"') || !byte.is_ascii() {
+                return Err(NativeError::InvalidToken);
+            }
+            self.offset += 1;
+        }
+        if self.offset == start {
+            return Err(NativeError::InvalidToken);
+        }
+        Ok(())
+    }
+}
+
+/// Where the first `needle` at or after `from` sits, found eight bytes at a
+/// time: the lowest byte the zero-byte test flags is always a true match.
+fn find_byte(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let pattern = ONES * u64::from(needle);
+    let mut index = from;
+    while let Some(chunk) = bytes.get(index..index + 8) {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        let word = u64::from_le_bytes(word) ^ pattern;
+        let found = word.wrapping_sub(ONES) & !word & HIGHS;
+        if found != 0 {
+            return Some(index + (found.trailing_zeros() / 8) as usize);
+        }
+        index += 8;
+    }
+    bytes
+        .get(index..)?
+        .iter()
+        .position(|byte| *byte == needle)
+        .map(|offset| index + offset)
+}
+
 fn is_line_wrapped_base64_token(value: &[u8]) -> bool {
     let Some(payload) = value.strip_prefix(b"#base64:") else {
         return false;
