@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static PHASES: Mutex<BTreeMap<(String, String), Phase>> = Mutex::new(BTreeMap::new());
+/// The slowest single items of any phase: (wall, cpu, when it ended since the
+/// first record, phase, source).
+static SLOWEST: Mutex<Vec<(Duration, Duration, Duration, String, String)>> = Mutex::new(Vec::new());
+static FIRST: Mutex<Option<Instant>> = Mutex::new(None);
+const SLOWEST_KEPT: usize = 15;
 
 #[derive(Default)]
 struct Phase {
@@ -44,6 +49,12 @@ pub(crate) fn reset_from_env() {
     ENABLED.store(enabled, Ordering::Relaxed);
     if let Ok(mut phases) = PHASES.lock() {
         phases.clear();
+    }
+    if let Ok(mut slowest) = SLOWEST.lock() {
+        slowest.clear();
+    }
+    if let Ok(mut first) = FIRST.lock() {
+        *first = enabled.then(Instant::now);
     }
 }
 
@@ -90,6 +101,25 @@ pub(crate) fn record(started: Option<Mark>, phase: &str, kind: &str, source: &st
         entry.max = wall;
         entry.max_source = source.to_string();
     }
+    drop(phases);
+    let ended = FIRST
+        .lock()
+        .ok()
+        .and_then(|first| first.map(|first| first.elapsed()))
+        .unwrap_or_default();
+    if let Ok(mut slowest) = SLOWEST.lock()
+        && (slowest.len() < SLOWEST_KEPT || slowest.last().is_some_and(|last| wall > last.0))
+    {
+        slowest.push((
+            wall,
+            cpu,
+            ended,
+            format!("{phase} {kind}"),
+            source.to_string(),
+        ));
+        slowest.sort_by(|left, right| right.0.cmp(&left.0));
+        slowest.truncate(SLOWEST_KEPT);
+    }
 }
 
 /// The table, heaviest first, with the parallel part's wall time.
@@ -110,7 +140,16 @@ pub(crate) fn report(wall: Duration, workers: usize) -> String {
     )];
     lines.push(format!(
         "{:<28} {:<34} {:>7} {:>9} {:>6} {:>8} {:>8} {:>10} {:>8} {:>8}  slowest",
-        "phase", "kind", "count", "worker s", "share", "cpu s", "kernel s", "file ops", "mean ms", "max ms"
+        "phase",
+        "kind",
+        "count",
+        "worker s",
+        "share",
+        "cpu s",
+        "kernel s",
+        "file ops",
+        "mean ms",
+        "max ms"
     ));
     for ((phase, kind), item) in rows {
         lines.push(format!(
@@ -127,6 +166,20 @@ pub(crate) fn report(wall: Duration, workers: usize) -> String {
             1000.0 * item.max.as_secs_f64(),
             item.max_source,
         ));
+    }
+    if let Ok(slowest) = SLOWEST.lock() {
+        lines.push(
+            "slowest items: wall s, cpu s, ended at s (since the stage began), phase, source"
+                .to_string(),
+        );
+        for (wall, cpu, ended, phase, source) in slowest.iter() {
+            lines.push(format!(
+                "  {:>8.1} {:>8.1} {:>8.1}  {phase}  {source}",
+                wall.as_secs_f64(),
+                cpu.as_secs_f64(),
+                ended.as_secs_f64()
+            ));
+        }
     }
     lines.join("\n")
 }

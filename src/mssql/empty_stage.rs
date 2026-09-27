@@ -159,7 +159,11 @@ fn descriptor_xmls_parallel(root: &Path) -> Vec<PathBuf> {
                 continue;
             };
             if kind.is_dir() {
-                if !entry.file_name().to_string_lossy().eq_ignore_ascii_case("ext") {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("ext")
+                {
                     dirs.push(entry.path());
                 }
             } else if kind.is_file() {
@@ -361,8 +365,9 @@ pub(crate) fn prepare_empty_object(
 
     // The descriptor row.
     let started = stage_timing::start();
-    let descriptor = catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
-        .and_then(|plain| Ok((deflate_raw(&plain)?, plain)));
+    let descriptor =
+        catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
+            .and_then(|plain| Ok((deflate_raw(&plain)?, plain)));
     stage_timing::record(started, "descriptor", &kind, &relative);
     match descriptor {
         Ok((blob, plain)) => object.rows.push(EmptyStageRow {
@@ -1154,7 +1159,10 @@ pub fn audit_empty_stage(
     if stage_timing::enabled() {
         eprintln!(
             "{}",
-            stage_timing::report(parallel_started.elapsed(), parallel::io_bound_worker_count())
+            stage_timing::report(
+                parallel_started.elapsed(),
+                parallel::io_bound_worker_count()
+            )
         );
     }
 
@@ -1499,6 +1507,7 @@ pub(super) fn stage_source_objects_base_free(
     }
     let version = args.source_version.map(|version| version.as_str());
     let stage = prepare_empty_stage(&args.source_root, version)?;
+    let tail_started = std::time::Instant::now();
     let failures = stage.failures().collect::<Vec<_>>();
     // A partial row set is only ever written, never loaded: it lets the
     // bcp file be checked against the audit before every writer is done.
@@ -1559,7 +1568,14 @@ pub(super) fn stage_source_objects_base_free(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let table = bulk_stage_table_name(&args.database);
+    let write_started = std::time::Instant::now();
     write_bulk_stage_rows(&rows_path, &bulk)?;
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: bcp file written in {:.1} s",
+            write_started.elapsed().as_secs_f64()
+        );
+    }
     fs::write(&prepare_path, build_bulk_stage_prepare_sql(&table))
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
     fs::write(
@@ -1626,6 +1642,7 @@ pub(super) fn stage_source_objects_base_free(
         )?;
     }
 
+    let report_started = std::time::Instant::now();
     let versions = stage
         .service
         .iter()
@@ -1672,6 +1689,13 @@ pub(super) fn stage_source_objects_base_free(
             })
         })
         .collect();
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: report built in {:.1} s; after the stage {:.1} s",
+            report_started.elapsed().as_secs_f64(),
+            tail_started.elapsed().as_secs_f64()
+        );
+    }
     Ok(StageSourceObjectsReport {
         database: args.database.clone(),
         source_version: Some(stage.context.version.clone()),
