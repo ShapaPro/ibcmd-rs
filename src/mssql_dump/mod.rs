@@ -4605,7 +4605,7 @@ fn dump_table_rows_streamed(
     timings.prepare_body_owners_ms += elapsed_ms(index_part_started);
     let needs_predefined_item_refs =
         predefined_data_needs_item_references(&file_names, &body_owners);
-    let predefined_item_refs = if needs_predefined_item_refs {
+    let (predefined_item_refs, all_predefined_rows) = if needs_predefined_item_refs {
         let predefined_body_file_names = predefined_data_body_file_names(&body_owners);
         let metadata_fetch_started = Instant::now();
         let rows = if predefined_body_file_names.is_empty() {
@@ -4627,21 +4627,37 @@ fn dump_table_rows_streamed(
         if !predefined_body_file_names.is_empty() {
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
         }
-        build_predefined_item_reference_index(&rows, &body_owners, &type_index, &object_refs)?
+        let refs =
+            build_predefined_item_reference_index(&rows, &body_owners, &type_index, &object_refs)?;
+        (refs, Some(rows))
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), None)
     };
     let value_items_started = Instant::now();
+    // When the index above covers every owner that stores predefined data,
+    // it already holds every owner-qualified item the metadata values and
+    // flowcharts could name, built the same way: the value owners' subset
+    // below would only repeat its entries into `metadata_object_refs`
+    // (owner-qualified keys do not depend on which other owners are read).
+    let items_covered = all_predefined_rows.is_some();
     let metadata_value_owner_file_names =
         streamed_metadata_value_owner_file_names(&index_metadata_texts, &selected_file_names);
-    let mut owner_ids = selected_metadata_predefined_owner_ids(
-        &index_metadata_texts,
-        &metadata_value_owner_file_names,
-        &type_index,
-        &object_refs,
-        &body_owners,
-    );
-    let flowchart_file_names = business_process_flowchart_file_names(&index_metadata_texts);
+    let mut owner_ids = if items_covered {
+        BTreeSet::new()
+    } else {
+        selected_metadata_predefined_owner_ids(
+            &index_metadata_texts,
+            &metadata_value_owner_file_names,
+            &type_index,
+            &object_refs,
+            &body_owners,
+        )
+    };
+    let flowchart_file_names = if items_covered {
+        BTreeSet::new()
+    } else {
+        business_process_flowchart_file_names(&index_metadata_texts)
+    };
     if !flowchart_file_names.is_empty() {
         let flowchart_fetch_started = Instant::now();
         let flowchart_rows = fetch_config_rows_bcp(
@@ -4713,7 +4729,9 @@ fn dump_table_rows_streamed(
     // them, so all 19 of those references were written as the identifier pair
     // the platform keeps only for a reference it cannot name.
     let form_predefined_file_names = predefined_data_body_file_names(&body_owners);
-    let form_predefined_rows = if form_predefined_file_names
+    let form_predefined_rows = if let Some(all_rows) = all_predefined_rows {
+        all_rows
+    } else if form_predefined_file_names
         .iter()
         .all(|name| body_file_names.contains(name))
     {
