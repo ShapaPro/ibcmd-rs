@@ -11566,6 +11566,12 @@ fn collect_form_child_item_indexes_from_field_traced(
     owner_chain: &[String],
     trace_occurrence: &mut usize,
 ) {
+    // Every index this collects comes from an item (whose identity is itself
+    // a nested value), from a nested tooltip, or from a nested value further
+    // down; a value that nests nothing contributes none of them.
+    if !form_value_may_nest(field) {
+        return;
+    }
     let Some(split_fields) = split_1c_braced_fields(field.trim(), 0) else {
         return;
     };
@@ -12388,6 +12394,12 @@ fn parse_form_child_item_with_metadata_owners(
     type_index_collisions: &BTreeSet<String>,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<FormChildItem> {
+    // Every item this reads passes `form_child_item_tag`, which names only a
+    // few leading members; a record led by anything else is refused here
+    // without being split. Most of what the pair walk offers is not an item.
+    if !form_member_may_be_child_item(field) {
+        return None;
+    }
     let split_fields = split_1c_braced_fields(field.trim(), 0)?;
     let revision_fields = normalize_form_item_record_revision(&split_fields);
     let raw_fields = revision_fields.as_deref().unwrap_or(&split_fields);
@@ -21740,6 +21752,29 @@ fn form_braced_leading_member(field: &str) -> Option<(&str, u8)> {
     }
 }
 
+/// The leading members a child-item record can have: the wrappers
+/// [`form_child_item_tag`] names, and the older revisions
+/// `form_item_record_canonical_revision` normalizes to one of them.
+const FORM_CHILD_ITEM_LEADING_MEMBERS: &[&str] = &[
+    "5", "6", "11", "12", "22", "29", "30", "31", "34", "35", "37", "48", "54", "55", "73",
+];
+
+/// Whether a member could be a child-item record, by its leading member.
+fn form_member_may_be_child_item(field: &str) -> bool {
+    form_braced_leading_member(field)
+        .is_some_and(|(member, _)| FORM_CHILD_ITEM_LEADING_MEMBERS.contains(&member))
+}
+
+/// Whether a braced value holds a nested value, as far as its text can say:
+/// one with no `{` after its own opening brace holds none, and a walk over
+/// its members finds nothing to descend into.
+fn form_value_may_nest(field: &str) -> bool {
+    field
+        .trim()
+        .strip_prefix('{')
+        .is_some_and(|rest| rest.contains('{'))
+}
+
 /// Whether a member could be an extended tooltip record: a braced value whose
 /// leading member is the decoration class's `12` or its short revision `11`,
 /// the only two that read as `12` once the record revision is normalized.
@@ -22642,7 +22677,13 @@ pub(super) fn parse_form_child_item_event_fields(
     let mut events = Vec::new();
     for field in fields {
         let field = field.trim();
-        if !field.starts_with('{') {
+        // An event record leads with its positive event count and has members
+        // after it; both readers below refuse anything else.
+        if !field.starts_with('{')
+            || !form_braced_leading_member(field).is_some_and(|(count, delimiter)| {
+                delimiter == b',' && count.parse::<usize>().is_ok_and(|count| count > 0)
+            })
+        {
             continue;
         }
         let Some(nested) = split_1c_braced_fields(field, 0) else {
@@ -28849,7 +28890,9 @@ pub(super) fn collect_form_table_column_names_for_table(
 ) {
     for field in fields {
         let field = field.trim();
-        if !field.starts_with('{') {
+        // A column's identity is a nested value, and so is everything the walk
+        // descends into.
+        if !field.starts_with('{') || !form_value_may_nest(field) {
             continue;
         }
         let Some(split_nested) = split_1c_braced_fields(field, 0) else {
