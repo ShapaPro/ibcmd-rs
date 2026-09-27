@@ -167,6 +167,11 @@ fn xml_cf_xml_and_same_profile_cf_repack_cover_both_revisions_offline() {
     let temp = TempDirectory::new("cf-routes");
     let source = bootstrap_fixture();
     let source_files = relative_files(&source);
+    // The XML a CF exports to carries its `ConfigDumpInfo.xml`, as the
+    // platform's own dump does, so the round trip adds exactly that file.
+    let mut restored_files = source_files.clone();
+    restored_files.push("ConfigDumpInfo.xml".to_owned());
+    restored_files.sort();
 
     for revision in ["format15", "format16"] {
         let cf = temp.path().join(format!("configuration-{revision}.cf"));
@@ -232,7 +237,7 @@ fn xml_cf_xml_and_same_profile_cf_repack_cover_both_revisions_offline() {
         ));
         assert_completed_pipeline(&to_xml);
         assert_eq!(to_xml["preflight"]["opaque_entries"], 0);
-        assert_eq!(relative_files(&restored), source_files);
+        assert_eq!(relative_files(&restored), restored_files);
         assert_eq!(
             fs::read(restored.join("CommonModules/Portable/Ext/Module.bsl")).unwrap(),
             fs::read(source.join("CommonModules/Portable/Ext/Module.bsl")).unwrap()
