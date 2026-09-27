@@ -35,6 +35,23 @@ pub fn has_names(kind: &str) -> bool {
     answer
 }
 
+/// Whether `owned_object_names` reads owned rows of `kind`.
+pub fn has_owned_names(kind: &str) -> bool {
+    static KNOWN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(answer) = known.lock().ok().and_then(|map| map.get(kind).copied()) {
+        return answer;
+    }
+    let answer = match super::owned_object_names(kind, &Brace::List(Vec::new()), "") {
+        Ok(_) => true,
+        Err(error) => !is_not_yet(&error),
+    };
+    if let Ok(mut map) = known.lock() {
+        map.insert(kind.to_string(), answer);
+    }
+    answer
+}
+
 /// Whether `decode_object` decodes rows of `kind`.
 pub fn has_decoder(kind: &str) -> bool {
     static KNOWN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();

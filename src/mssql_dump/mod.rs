@@ -4260,9 +4260,15 @@ fn dump_table_rows_streamed(
     ]);
     if let Some(plan) = &model_plan {
         eprintln!(
-            "model export: every descriptor through the model: {}; still legacy by kind: {:?};              left out: recalculation refs {skip_recalculation_refs}, root recalculation refs              {skip_root_recalculation_refs}, functional option refs {skip_functional_option_refs},              value predefined items {skip_value_predefined_items}",
+            "model export: every descriptor through the model: {}; still legacy by kind: {:?}; \
+             left out: recalculation refs {}, root recalculation refs {}, functional option \
+             refs {}, value predefined items {}",
             plan.models_every_descriptor(&index_metadata_texts),
-            plan.legacy_descriptor_kinds(&index_metadata_texts)
+            plan.legacy_descriptor_kinds(&index_metadata_texts),
+            skip_recalculation_refs,
+            skip_root_recalculation_refs,
+            skip_functional_option_refs,
+            skip_value_predefined_items,
         );
     }
     timings.prepare_model_index_ms += elapsed_ms(plan_started);
