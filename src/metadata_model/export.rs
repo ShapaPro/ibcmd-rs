@@ -242,6 +242,9 @@ pub fn decode_object(kind: &str, row: &Brace, context: &ExportContext) -> Result
         | "WSReference"
         | "IntegrationService"
         | "Bot" => super::common::export::decode(kind, row, context),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::decode(kind, row, context)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -295,6 +298,9 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
         | "WSReference"
         | "IntegrationService"
         | "Bot" => super::common::export::names(kind, row),
+        "Subsystem" | "Form" | "Template" | "CommonForm" => {
+            super::common::forms_export::names(kind, row)
+        }
         other => bail!("not yet: no row decoder for {other}"),
     }
 }
@@ -304,6 +310,20 @@ pub fn object_names(kind: &str, row: &Brace) -> Result<ObjectNames> {
 /// from rows reads next.
 pub fn configuration_objects(row: &Brace) -> Result<Vec<(String, String)>> {
     super::root::export::top_level_objects(row)
+}
+
+/// What the row of an owned object (a recalculation, a nested subsystem)
+/// contributes to a name index. Its names start with its owner's full name
+/// (`owner`, `CalculationRegister.X`), which its own row does not hold: the
+/// owner's row lists it by uuid, and the index names the owners first.
+/// Owned forms and templates need no arm: their full name is the owner's
+/// and their own name, and they carry no child objects or generated types.
+#[allow(clippy::match_single_binding)]
+pub fn owned_object_names(kind: &str, row: &Brace, owner: &str) -> Result<ObjectNames> {
+    let _ = (row, owner);
+    match kind {
+        other => bail!("not yet: no owned-row names for {other}"),
+    }
 }
 
 /// A stored row (inflated, BOM optional) -> the XML file text.

@@ -3599,9 +3599,10 @@ fn native_form_attribute_use_always(
     // A constants set's record is a delta against each constant's own
     // always-used flag, which no exported property carries. A configuration
     // loaded from its source tree has every flag clear, and against clear
-    // flags the delta is the set itself -- which is what is written. A target
-    // database that already holds flagged constants names them through
-    // `IBCMD_RS_ALWAYS_USED_CONSTANTS`, and the delta is taken against those.
+    // flags the delta is the set itself -- which is what is written. A load
+    // onto a database that already holds flagged constants reads them off
+    // the target's own rows (`IBCMD_RS_ALWAYS_USED_CONSTANTS` overrides), and
+    // the delta is taken against those; an empty infobase has none.
     if fields.is_empty() {
         return Err(anyhow!("an empty <UseAlways> is not measured"));
     }
@@ -3654,21 +3655,61 @@ fn native_form_attribute_use_always(
     Ok(crate::compiler::bodies::form_native::format_form_attribute_save(&paths))
 }
 
-/// The constants the target database flags always-used, one uuid a line in
-/// the file `IBCMD_RS_ALWAYS_USED_CONSTANTS` names; none when it names none.
+/// Where a load onto a database reads its target's always-used constants
+/// from (their own rows); unset for an empty infobase, whose constants are
+/// compiled with the flag clear.
+static ALWAYS_USED_CONSTANTS_SOURCE: std::sync::OnceLock<
+    Box<dyn Fn() -> Vec<String> + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+/// Set for an empty infobase (`--base-free`, `audit-empty-stage`): its
+/// constants are compiled with the always-used flag clear, so a constants set
+/// is written against clear flags, whatever `IBCMD_RS_ALWAYS_USED_CONSTANTS`
+/// names (that file describes a target database, which an empty one is not).
+static ALWAYS_USED_CONSTANTS_CLEAR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Compiles constants sets against clear always-used flags (an empty
+/// infobase); returns whether `IBCMD_RS_ALWAYS_USED_CONSTANTS` is set and so
+/// ignored.
+pub(crate) fn clear_always_used_constants() -> bool {
+    ALWAYS_USED_CONSTANTS_CLEAR.store(true, std::sync::atomic::Ordering::Relaxed);
+    std::env::var_os("IBCMD_RS_ALWAYS_USED_CONSTANTS").is_some()
+}
+
+/// Installs the reader of the target's always-used constants; called once,
+/// before any form is compiled, and asked only when a constants set needs it.
+pub(crate) fn set_always_used_constants_source(
+    source: impl Fn() -> Vec<String> + Send + Sync + 'static,
+) {
+    let _ = ALWAYS_USED_CONSTANTS_SOURCE.set(Box::new(source));
+}
+
+/// The constants the target database flags always-used: none for an empty
+/// infobase; else one uuid a line in the file `IBCMD_RS_ALWAYS_USED_CONSTANTS`
+/// names (a lab override), else what the installed source reads off the
+/// target's rows, else none.
 fn target_always_used_constants() -> Vec<String> {
     static FLAGGED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     FLAGGED
         .get_or_init(|| {
-            std::env::var_os("IBCMD_RS_ALWAYS_USED_CONSTANTS")
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .map(|text| {
-                    text.lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
+            if ALWAYS_USED_CONSTANTS_CLEAR.load(std::sync::atomic::Ordering::Relaxed) {
+                return Vec::new();
+            }
+            if let Some(path) = std::env::var_os("IBCMD_RS_ALWAYS_USED_CONSTANTS") {
+                return std::fs::read_to_string(path)
+                    .map(|text| {
+                        text.lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            ALWAYS_USED_CONSTANTS_SOURCE
+                .get()
+                .map(|source| source())
                 .unwrap_or_default()
         })
         .clone()

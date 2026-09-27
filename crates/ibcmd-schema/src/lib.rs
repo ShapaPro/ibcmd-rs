@@ -13037,17 +13037,24 @@ pub fn bundled_metadata_order() -> Result<MetadataOrderCorpus, SchemaError> {
     MetadataOrderCorpus::parse(BUNDLED_METADATA_ORDER_JSON)
 }
 
+/// The embedded writer rules, parsed and bound to their proofs once: the form
+/// writers ask for them per item they write.
 pub fn bundled_writer_rules() -> Result<WriterRuleCorpus, SchemaError> {
-    let corpus = WriterRuleCorpus::parse(BUNDLED_WRITER_RULES_JSON)?;
-    bind_form_choice_list_string_writer_proof(
-        BUNDLED_FORM_CHOICE_LIST_STRING_WRITER_PROOF_JSON,
-        &corpus,
-    )?;
-    bind_form_choice_parameters_writer_evidence(
-        BUNDLED_FORM_CHOICE_PARAMETERS_WRITER_EVIDENCE_JSON,
-        &corpus,
-    )?;
-    Ok(corpus)
+    static CORPUS: OnceLock<Result<WriterRuleCorpus, SchemaError>> = OnceLock::new();
+    CORPUS
+        .get_or_init(|| {
+            let corpus = WriterRuleCorpus::parse(BUNDLED_WRITER_RULES_JSON)?;
+            bind_form_choice_list_string_writer_proof(
+                BUNDLED_FORM_CHOICE_LIST_STRING_WRITER_PROOF_JSON,
+                &corpus,
+            )?;
+            bind_form_choice_parameters_writer_evidence(
+                BUNDLED_FORM_CHOICE_PARAMETERS_WRITER_EVIDENCE_JSON,
+                &corpus,
+            )?;
+            Ok(corpus)
+        })
+        .clone()
 }
 
 pub fn bundled_form_choice_parameters_writer_evidence()

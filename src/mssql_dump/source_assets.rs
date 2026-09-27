@@ -2437,6 +2437,7 @@ fn write_source_asset_inner(
             .with_metadata_command_refs(context.metadata_refs)
             .with_metadata_command_facts(context.metadata_command_facts)
             .with_metadata_field_declarations(context.metadata_field_declarations)
+            .with_object_ref_index(context.form_object_ref_index)
             .with_dcs_profiles(adapter.provider_id().clone(), dcs_target_profile);
             let extraction =
                 extract_form_body_xml_from_body_detailed_timed(body, &form_context, Some(timings))
@@ -2496,12 +2497,14 @@ fn write_source_asset_inner(
                         None => (xml, Vec::new()),
                     };
                     diagnostics = extraction_diagnostics;
+                    let form_write_started = Instant::now();
                     let path = output_dir.join(&asset.primary_path);
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent)
                             .with_context(|| format!("failed to create {}", parent.display()))?;
                     }
                     write_source_xml_file(&path, xml, context.source_version)?;
+                    timings.source_asset_form_write_cpu_ms += elapsed_ms(form_write_started);
 
                     let form_items_started = Instant::now();
                     // An 8.5 body's item records carry 8.5 revisions the
