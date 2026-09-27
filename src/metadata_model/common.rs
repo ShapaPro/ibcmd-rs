@@ -13,6 +13,8 @@
 
 #[path = "common_export.rs"]
 pub(crate) mod export;
+#[path = "forms_export.rs"]
+pub(crate) mod forms_export;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
