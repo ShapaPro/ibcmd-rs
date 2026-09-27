@@ -22891,9 +22891,23 @@ fn formats_table_search_additions_as_direct_sections() {
     assert!(!xml.contains("\t\t<ChildItems>\r\n\t\t\t<SearchStringAddition"));
 }
 
+/// A `UsualGroup` with the wide `{29,...}` property bag as the platform writes
+/// it: BSP 3.1 `DataProcessors/ПанельАдминистрированияБИП/Forms/
+/// ИнтернетПоддержкаИСервисы`, group `ГруппаОбновлениеКлассификаторов` (item
+/// 1898), whose native export writes every property asserted here.
+///
+/// The fixture used to be an 8.5 record (bag `{38,...}`, 8.5 colours and
+/// fonts), which the codec reads only down-converted to the `{29,...}` bag, and
+/// two of its expectations were not the platform's: its bag slot 4 was `1`, and
+/// slot 4 is `ShowTitle` (`0` writes `false` on 3 392 of 3 392 BSP groups, `1`
+/// writes nothing on 486 of 486), so that group showed its title; and 2.20
+/// never writes `<Group>HorizontalIfPossible</Group>` on a `UsualGroup` (BSP:
+/// `Vertical`, `Horizontal`, `AlwaysHorizontal` or nothing).
 #[test]
 fn parses_extended_usual_group_properties() {
-    let field = r#"{22,{22,22222222-2222-4222-8222-222222222222},0,0,0,5,"MainGroup",{1,0},{1,0},0,1,0,0,0,2,2,{4,4,{0},4},{8,3,0,1,100},{0,0,0},1,{38,1,0,3,1,{0},{1,0},{"Pattern"},"",{4,4,{0},4},1,1,0,1,{1,0},0,0,3,3,2,0,1,2,{4,4,{0},4},1,2,0,2,1,0,0,0,{4,0,{0},"",-1,-1,1,0,""},{0,1,0},0,3,2,0,2,0,0,2},0,1,0,1,{12,{23,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,0,"MainGroupРасширеннаяПодсказка",{1,0},{1,0},0,0,0,2,2,{4,4,{0},4},{4,4,{0},4},{4,4,{0},4},{0},0,0,0,1,{1,0},{0,0,0},0,3},0,3,3,0}"#;
+    let field = include_str!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-usual-group-record/records/c988cf4e-7b05-4bb9-b141-6a2b4dbe3b8e.item-1898.txt"
+    );
     let item = parse_form_child_item(
         field,
         None,
@@ -22905,14 +22919,20 @@ fn parses_extended_usual_group_properties() {
     )
     .unwrap();
 
-    assert_eq!(item.group, Some("HorizontalIfPossible"));
+    assert_eq!(item.tag, "UsualGroup");
+    assert_eq!(item.group, Some("Vertical"));
     assert_eq!(item.behavior, Some("Collapsible"));
+    assert_eq!(item.collapsed, Some(true));
     assert_eq!(item.representation, Some("NormalSeparation"));
     assert_eq!(item.show_title, Some(false));
 
     let xml = format_form_child_items_xml(&[item], 1);
-    assert!(xml.contains("<Group>HorizontalIfPossible</Group>"));
+    // The group's own properties come before its extended tooltip; its child
+    // items follow with theirs.
+    let xml = &xml[..xml.find("<ExtendedTooltip").unwrap()];
+    assert!(xml.contains("<Group>Vertical</Group>"));
     assert!(xml.contains("<Behavior>Collapsible</Behavior>"));
+    assert!(xml.contains("<Collapsed>true</Collapsed>"));
     assert!(xml.contains("<Representation>NormalSeparation</Representation>"));
     assert!(xml.contains("<ShowTitle>false</ShowTitle>"));
 }
