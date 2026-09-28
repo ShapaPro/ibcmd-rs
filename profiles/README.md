@@ -1,10 +1,12 @@
 # Version profiles
 
-Version profiles describe independent coordinates used by the standalone
-conversion core. A profile may name a platform build, XML dialect,
-compatibility mode, logical storage profile, container revision, and DBMS.
-None of these values is inferred from another value, and loading a registry
-never selects a profile for an artifact.
+Version profiles describe the coordinates used by the standalone conversion
+core. A profile may name a platform build, XML dialect, compatibility mode,
+logical storage profile, container revision, and DBMS. The scalar coordinates
+stay independent -- none is inferred from another, and loading a registry
+never selects a profile for an artifact -- with one explicit exception: a
+platform profile declares which XML format its build reads and writes (see
+"Platform registry" below).
 
 `schema.json` is the public JSON Schema for declaration format version 1. The
 Rust parser is also strict: unknown or duplicate fields, duplicate map keys,
@@ -20,11 +22,10 @@ dialects (`2.17`, `2.20`, and `2.21`) and four exact platform builds
 profiles form a parent-first `2.17` → `2.20` → `2.21` baseline/delta chain.
 Platform profiles stay independent with one evidenced exception: `8.3.27.2214`
 extends `8.3.27.1989` because a full native export comparison re-confirmed the
-same storage constants on that build. There is no mapping
-between a platform build and an XML dialect, and no compatibility, storage,
-container, or DBMS value is inferred. XML fingerprints record observed XCF
-evidence and the 2.21 profile declares only confirmed feature deltas; platform
-seeds deliberately contain no invented fingerprints or capabilities.
+same storage constants on that build. No compatibility, storage, container, or
+DBMS value is inferred. XML fingerprints record observed XCF evidence and the
+2.21 profile declares only confirmed feature deltas; platform seeds
+deliberately contain no invented fingerprints or capabilities.
 
 Native MSSQL write policy is declared by these profiles, not by code.
 `8.3.27.2214` declares `mssql.main.write` and `mssql.extension.write` as
@@ -38,6 +39,30 @@ is not yet reproduced.
 `profile_registry::BUNDLED_PROFILES` embeds these files at compile time and
 `load_bundled_profile_registry` resolves them without filesystem or platform
 access.
+
+## Platform registry
+
+A platform maps to its XML format explicitly: 8.3.x reads and writes 2.20,
+8.5.x reads and writes 2.21, and only for the builds the registry knows. Each
+supported platform profile declares, as constants,
+
+- `platform.xml_format`: the XML format of the build (`2.20`, `2.21`);
+- `platform.form_layout`: the stored layout of its managed forms, colours and
+  fonts, named by the version that introduced it (`8.3`, `8.5.1`);
+- `platform.feature.<name>`: a feature a configuration saved by the build may
+  list in its `version` row, with its fixed uuid (`palette-colors` on 8.5.1).
+
+`src/platform/` reads these declarations (it does not repeat them) and answers
+`--platform 8.3.27 | 8.5.1 | 8.3.27.2214 | 8.5.1.1150`: an exact build, or a
+release standing for every known build of it while they agree. A build whose
+profile declares no XML format (`8.3.24.1819`) is known but refused, and so is
+every version no profile names; nothing maps to the nearest version. The
+`--source-version` aliases `8.3`/`8.3.27` and `8.5`/`8.5.1` follow the same
+mapping. A new build that changes nothing for ibcmd-rs is one more profile; a
+changed layout or XML format also needs a delta module named after the full
+version (`layout_8_5_4.rs`, `xml_2_22_*`), see `src/platform/mod.rs`. The
+registry also reports live-activation support: an exact build whose profile
+declares `mssql.main.write` supported, as above.
 
 ## Exact detection
 

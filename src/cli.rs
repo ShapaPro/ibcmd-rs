@@ -128,6 +128,9 @@ pub enum Commands {
     SourceThreeWayOracle(SourceThreeWayOracleArgs),
     /// Print the current compatibility matrix for implemented operations.
     Compatibility(CompatibilityArgs),
+    /// Show the settings a command takes when its flags do not say (ibcmd-rs.toml,
+    /// the environment, native --config) and where each value came from.
+    Settings(SettingsArgs),
     /// Run an external command, measure it, and capture stdout/stderr.
     #[cfg(feature = "platform-oracle")]
     ProfileRun(ProfileRunArgs),
@@ -468,8 +471,17 @@ pub struct CfExportArgs {
     /// Explicit payload representation; payload bytes are never guessed.
     #[arg(long, value_enum, default_value_t = CfCompression::RawDeflate)]
     pub compression: CfCompression,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Target source XML dialect.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Replace files under the output directory.
     #[arg(long, alias = "force")]
@@ -488,8 +500,17 @@ pub struct CfOverlayArgs {
     /// Explicit representation of every present top-level CF payload.
     #[arg(long, value_enum, default_value_t = CfCompression::RawDeflate)]
     pub compression: CfCompression,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Source XML dialect; it is independent from the CF container revision.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Replace a native module row from BSL text (`STORAGE_KEY=FILE`); repeatable.
     #[arg(long = "module", value_name = "KEY=FILE")]
@@ -531,8 +552,18 @@ pub struct CfBootstrapArgs {
     pub source_dir: PathBuf,
     /// New CF destination. Existing files are never overwritten.
     pub output: PathBuf,
-    /// Source XML dialect; independent from platform and container revision.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
+    /// The source XML dialect itself (`--platform` names it through the
+    /// platform); independent from the container revision.
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Exact target platform profile selecting native family layouts.
     #[arg(long, default_value = "platform-8.3.27.1989")]
@@ -992,8 +1023,17 @@ pub struct AuditInterfaceWriterArgs {
     /// Folder with the inflated Config rows of the same database
     /// (`<file name>__part0.txt`).
     pub inflated: PathBuf,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// XML dialect the native tree was exported in.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Optional JSON output file with every difference.
     #[arg(short, long)]
@@ -1031,8 +1071,17 @@ pub struct AuditMetadataCompilerArgs {
     /// Folder with the stored Config rows of the same database
     /// (`<FileName>__part0.bin`, raw deflate, or `<FileName>__part0.txt`).
     pub rows: PathBuf,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// XML dialect of the tree: 2.20 (8.3.27) or 2.21 (8.5).
-    #[arg(long, default_value = "2.20")]
+    #[arg(long, default_value = "2.20", hide = true)]
     pub source_version: String,
     /// Only this kind, e.g. `Catalog` (repeatable).
     #[arg(long = "kind")]
@@ -1055,9 +1104,18 @@ pub struct AuditMetadataExportArgs {
     /// Folder with the stored Config rows of the same database
     /// (`<FileName>__part0.bin`, raw deflate, or `<FileName>__part0.txt`).
     pub rows: PathBuf,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// XML dialect of the tree: 2.20 (8.3.27) or 2.21 (8.5); read from
     /// Configuration.xml when omitted.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub source_version: Option<String>,
     /// Only this kind, e.g. `Catalog` (repeatable).
     #[arg(long = "kind")]
@@ -1082,8 +1140,17 @@ pub struct AuditNameIndexArgs {
     pub root: PathBuf,
     /// Folder with the stored Config rows (`<FileName>__part<N>.bin`).
     pub rows: PathBuf,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// XML dialect: 2.20 (8.3.27) or 2.21 (8.5).
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Differing entries kept per kind.
     #[arg(long, default_value_t = 5)]
@@ -1100,9 +1167,18 @@ pub struct AuditEmptyStageArgs {
     /// Folder with the stored Config rows of the same database
     /// (`<FileName>__part0.bin`, raw deflate, or `<FileName>__part0.txt`).
     pub rows: PathBuf,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// XML dialect of the tree: 2.20 (8.3.27) or 2.21 (8.5); read from
     /// Configuration.xml when omitted.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub source_version: Option<String>,
     /// Write the stored and the produced text of differing samples here.
     #[arg(long)]
@@ -1307,6 +1383,37 @@ pub struct CompatibilityArgs {
     pub output: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+pub struct SettingsArgs {
+    #[command(subcommand)]
+    pub command: SettingsCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommands {
+    /// Print the effective settings for a database and where each came from.
+    Show(SettingsShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SettingsShowArgs {
+    /// The SQL Server of the database to show the settings for.
+    #[arg(long)]
+    pub db_server: Option<String>,
+    /// The database to show the settings for (its [[database]] entry).
+    #[arg(long)]
+    pub db_name: Option<String>,
+    /// Native ibcmd's config file (the YAML `ibcmd server config init` writes).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Show what --platform would give instead of the settings.
+    #[arg(long, value_name = "VERSION")]
+    pub platform: Option<String>,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[cfg(feature = "platform-oracle")]
 #[derive(Debug, Args)]
 pub struct ProfileRunArgs {
@@ -1461,8 +1568,17 @@ pub struct MssqlDumpConfigArgs {
         conflicts_with_all = ["file_names", "file_name_lists"]
     )]
     pub collect_all_source_asset_diagnostics: bool,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Source XML version for reconstructed source files.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     /// Do not write raw Config/ConfigSave BinaryData rows. Useful for source parity and faster runs.
     #[arg(long)]
@@ -1557,14 +1673,24 @@ pub struct MssqlDumpExtensionArgs {
     /// Replace an existing output tree.
     #[arg(long)]
     pub overwrite: bool,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Hierarchical XML source version.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
 }
 
 #[derive(Debug, Args)]
 pub struct MssqlLoadExtensionArgs {
-    /// Exact native MSSQL platform layout. Independent from --source-version.
+    /// Exact native MSSQL platform layout. Without --platform (which must name
+    /// this build or its release) the XML format is this build's.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
     /// rac executable used to verify the exact RAS agent build.
@@ -1638,8 +1764,17 @@ pub struct MssqlLoadExtensionArgs {
     /// Pass sqlcmd -C to trust the SQL Server certificate during staging.
     #[arg(long)]
     pub sqlcmd_trust_cert: bool,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Hierarchical XML source version.
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
 }
 
@@ -1845,7 +1980,8 @@ pub struct MssqlActivateStagedMainArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct MssqlApplySourceChangeArgs {
-    /// Exact native MSSQL platform layout. Independent from --source-version.
+    /// Exact native MSSQL platform layout. Without --platform (which must name
+    /// this build or its release) the XML format is this build's.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
     #[arg(long, default_value = "sqlcmd")]
@@ -1876,7 +2012,16 @@ pub struct MssqlApplySourceChangeArgs {
     pub dry_run: bool,
     #[arg(long)]
     pub allow_non_lab: bool,
-    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20)]
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
     pub source_version: InfobaseConfigSourceVersion,
     #[arg(long)]
     pub script_output: Option<PathBuf>,
@@ -1922,8 +2067,17 @@ pub struct MssqlAuditSourceParityArgs {
     /// Optional maximum number of staged XML objects per SQL batch.
     #[arg(long)]
     pub batch_size: Option<usize>,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Expected source XML version. When set, selected root XML files must match it.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, hide = true)]
     pub source_version: Option<InfobaseConfigSourceVersion>,
     /// Optional source path prefix to audit. Can be repeated.
     #[arg(long)]
@@ -2423,8 +2577,17 @@ pub struct MssqlStageSourceObjectsArgs {
     /// Optional maximum number of staged XML objects per SQL batch.
     #[arg(long)]
     pub batch_size: Option<usize>,
+    /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
+    /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Expected source XML version. When set, selected root XML files must match it.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, hide = true)]
     pub source_version: Option<InfobaseConfigSourceVersion>,
     /// Optional source path prefix to stage. Can be repeated.
     #[arg(long)]

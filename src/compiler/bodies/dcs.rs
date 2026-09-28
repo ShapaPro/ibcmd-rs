@@ -645,9 +645,7 @@ fn validate_xml_document(
                     DcsCodecError::InvalidXml("DCS XML closes above its root".to_string())
                 })?;
             }
-            Event::Text(event)
-                if depth == 0 && !event.as_ref().iter().all(u8::is_ascii_whitespace) =>
-            {
+            Event::Text(event) if depth == 0 && !event.iter().all(u8::is_ascii_whitespace) => {
                 return Err(DcsCodecError::InvalidXml(
                     "DCS XML has text outside its root".to_string(),
                 ));

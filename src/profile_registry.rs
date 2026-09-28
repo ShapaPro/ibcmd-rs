@@ -376,6 +376,10 @@ mod tests {
                 profile.platform_build.as_ref().unwrap().value.to_string(),
                 version
             );
+            // The XML dialect stays an independent axis for detection; which
+            // XML a build reads and writes is declared as a constant the
+            // platform registry (`crate::platform`) reads: 8.3.x -> 2.20,
+            // 8.5.x -> 2.21.
             assert!(profile.xml_dialect.is_none());
             assert!(profile.compatibility_mode.is_none());
             if matches!(version, "8.3.27.1989" | "8.3.27.2214" | "8.5.1.1150") {
@@ -383,6 +387,33 @@ mod tests {
                     profile.storage_profile.as_ref().unwrap().value.as_str(),
                     "storage:mssql-config-configsave"
                 );
+            }
+            let platform_constants = profile
+                .constants
+                .iter()
+                .filter(|(key, _)| key.starts_with("platform."))
+                .map(|(key, value)| (key.as_str(), value.value.as_str()))
+                .collect::<Vec<_>>();
+            match version {
+                "8.3.24.1819" => assert!(platform_constants.is_empty()),
+                "8.3.27.1989" | "8.3.27.2214" => assert_eq!(
+                    platform_constants,
+                    [
+                        ("platform.form_layout", "8.3"),
+                        ("platform.xml_format", "2.20")
+                    ]
+                ),
+                _ => assert_eq!(
+                    platform_constants,
+                    [
+                        (
+                            "platform.feature.palette-colors",
+                            "2dd2d9e1-40c8-430b-a433-a81ec6856ab0"
+                        ),
+                        ("platform.form_layout", "8.5.1"),
+                        ("platform.xml_format", "2.21")
+                    ]
+                ),
             }
             if matches!(version, "8.3.27.1989" | "8.3.27.2214") {
                 assert_eq!(
@@ -519,7 +550,7 @@ mod tests {
                     "xdto-package-v1-crlf-utf8-bom"
                 );
             } else {
-                assert!(profile.constants.is_empty());
+                assert_eq!(profile.constants.len(), platform_constants.len());
             }
             if version == "8.3.27.2214" {
                 assert_eq!(

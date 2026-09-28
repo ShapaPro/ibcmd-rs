@@ -30,6 +30,7 @@ use super::xml_2_21_writer::{
     FIELD_TAGS, GROUPING, TRI_STATE, XmlEdits, child_text, element_name, simple_text,
 };
 use crate::module_blob::MetadataSourceContext;
+use crate::platform::FormLayout;
 
 const FORM_ITEM_CLASS_UUID: &str = "02023637-7868-4a5f-8576-835a76e0c9ba";
 const FORM_COMMAND_CLASS_UUID: &str = "409b9a53-7f7e-4178-86c1-33176c7c7a7a";
@@ -290,15 +291,6 @@ fn color_member(value: &str, what: &str, source: Option<&MetadataSourceContext>)
         .ok_or_else(|| anyhow!("{what}: the writer cannot place the colour {value}"))
 }
 
-/// The layout a 2.21 form body is stored in: 8.5's own, or -- for a
-/// configuration kept in an 8.3 compatibility mode under 8.5 (ERP УХ 8.5) --
-/// the 8.3.27 one, which has no 8.5 tail to hold a member's absence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StoredLayout {
-    V8_5_1,
-    V8_3,
-}
-
 /// Takes out of a 2.21 `Form.xml` what only the members 8.5 appends hold and
 /// returns the XML the 8.3.27 writer reads, with those members as facts.
 pub(crate) fn down_convert_xml_2_21_form(
@@ -306,14 +298,18 @@ pub(crate) fn down_convert_xml_2_21_form(
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
 ) -> Result<(String, FormLoadFactsV8_5_1)> {
-    down_convert_xml_2_21_form_as(xml, source, items_root, StoredLayout::V8_5_1)
+    down_convert_xml_2_21_form_as(xml, source, items_root, FormLayout::V8_5_1)
 }
 
+/// As [`down_convert_xml_2_21_form`], for a body stored in `layout`: 8.5.1's
+/// own, or -- for a configuration kept in an 8.3 compatibility mode under 8.5
+/// (ERP УХ 8.5) -- the 8.3 one, which has no 8.5.1 tail to hold a member's
+/// absence.
 fn down_convert_xml_2_21_form_as(
     xml: &str,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
-    layout: StoredLayout,
+    layout: FormLayout,
 ) -> Result<(String, FormLoadFactsV8_5_1)> {
     let mut facts = FormLoadFactsV8_5_1::default();
     let mut edits = XmlEdits::new_lenient(xml)?;
@@ -553,7 +549,7 @@ fn load_item(
     item: &mut ItemFacts,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
-    layout: StoredLayout,
+    layout: FormLayout,
 ) -> Result<()> {
     if FIELD_TAGS.contains(&tag) {
         load_field(edits, element, tag, name, item, source, items_root)?;
@@ -833,7 +829,7 @@ fn load_table(
     edits: &mut XmlEdits<'_>,
     element: usize,
     item: &mut ItemFacts,
-    layout: StoredLayout,
+    layout: FormLayout,
 ) -> Result<()> {
     // The line and alternation flags: 8.5 reads the `...BWA` members and keeps
     // the 8.3.27 slot true only when the member says true. A body kept in the
@@ -857,7 +853,7 @@ fn load_table(
             bail!("<Table> writes the 8.3.27 <{old}>{stale} under 2.21");
         }
         let value = match (layout, value.as_deref()) {
-            (StoredLayout::V8_3, None) => Some("true"),
+            (FormLayout::V8_3, None) => Some("true"),
             (_, value) => value,
         };
         match (value, old_when_not_true) {
@@ -2128,7 +2124,7 @@ pub(crate) fn compile_xml_2_21_form_body_in_layout_8_3(
     items_root: Option<&Path>,
 ) -> Result<String> {
     let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
-    let (xml20, _) = down_convert_xml_2_21_form_as(xml, source, items_root, StoredLayout::V8_3)?;
+    let (xml20, _) = down_convert_xml_2_21_form_as(xml, source, items_root, FormLayout::V8_3)?;
     crate::module_blob::compile_native_form_body_8_3(
         xml20.as_bytes(),
         module_text,
@@ -2157,7 +2153,7 @@ mod tests {
         // Unset: 8.5 keeps false slots (its tail says unset); the 8.3.27 layout
         // stores true ones, as its export (`upgrade_table`) reads them back.
         let unset = form("");
-        let v8_5_1 = table(&unset, StoredLayout::V8_5_1);
+        let v8_5_1 = table(&unset, FormLayout::V8_5_1);
         assert!(
             v8_5_1.contains("<HorizontalLines>false</HorizontalLines>"),
             "{v8_5_1}"
@@ -2167,7 +2163,7 @@ mod tests {
             "{v8_5_1}"
         );
         assert!(!v8_5_1.contains("UseAlternationRowColor"), "{v8_5_1}");
-        let v8_3 = table(&unset, StoredLayout::V8_3);
+        let v8_3 = table(&unset, FormLayout::V8_3);
         assert!(
             !v8_3.contains("HorizontalLines") && !v8_3.contains("VerticalLines"),
             "{v8_3}"
@@ -2180,7 +2176,7 @@ mod tests {
         let off = form(
             "\t\t\t<HorizontalLinesBWA>false</HorizontalLinesBWA>\r\n\t\t\t<VerticalLinesBWA>false</VerticalLinesBWA>\r\n\t\t\t<UseAlternationRowColorBWA>false</UseAlternationRowColorBWA>\r\n",
         );
-        for layout in [StoredLayout::V8_5_1, StoredLayout::V8_3] {
+        for layout in [FormLayout::V8_5_1, FormLayout::V8_3] {
             let read = table(&off, layout);
             assert!(
                 read.contains("<HorizontalLines>false</HorizontalLines>"),

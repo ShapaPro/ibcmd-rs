@@ -144,6 +144,7 @@ pub fn apply_source_change(
             all_extensions: false,
             output_dir: active_root.clone(),
             overwrite: false,
+            platform: None,
             source_version: args.source_version,
         })?;
         report
@@ -181,6 +182,7 @@ pub fn apply_source_change(
             require_complete_root_metadata: false,
             require_complete_source_assets: false,
             collect_all_source_asset_diagnostics: false,
+            platform: None,
             source_version: args.source_version,
             no_binary_rows: true,
             write_binary_rows: false,
@@ -297,6 +299,7 @@ pub fn apply_source_change(
             dry_run: args.dry_run,
             allow_non_lab: args.allow_non_lab,
             sqlcmd_trust_cert: args.sqlcmd_trust_cert,
+            platform: None,
             source_version: args.source_version,
         };
         // This command stages and publishes together, so the publisher's
@@ -316,6 +319,7 @@ pub fn apply_source_change(
                 source_root: proposed_root.clone(),
                 sqlcmd: args.sqlcmd.clone(),
                 batch_size: Some(1),
+                platform: None,
                 source_version: Some(args.source_version),
                 path_prefix: vec![path_prefix.clone()],
                 output: None,
@@ -334,6 +338,7 @@ pub fn apply_source_change(
                 replace_config_save: true,
                 allow_non_lab: args.allow_non_lab,
                 batch_size: Some(1),
+                platform: None,
                 source_version: Some(args.source_version),
                 path_prefix: vec![path_prefix.clone()],
                 script_output: None,
@@ -1366,6 +1371,7 @@ mod tests {
             mode: MssqlMainActivationModeArg::Exclusive,
             dry_run: false,
             allow_non_lab: true,
+            platform: None,
             source_version: crate::cli::InfobaseConfigSourceVersion::V2_20,
             script_output: None,
             recovery_output: None,
@@ -1411,6 +1417,7 @@ mod tests {
             mode: MssqlMainActivationModeArg::Worker,
             dry_run: false,
             allow_non_lab: true,
+            platform: None,
             source_version: crate::cli::InfobaseConfigSourceVersion::V2_21,
             script_output: None,
             recovery_output: None,

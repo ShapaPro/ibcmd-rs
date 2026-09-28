@@ -3,6 +3,9 @@
 # set (old path or model path) into its own folder, diff against the
 # reference tree. Nothing is shared with the tracks' own check folders.
 # usage: xcheck.sh <bsp|uha|bsp85|uha85> <old|model> <run id> <binary>
+# XCHECK_VERSION_FLAGS, when set, replaces `--source-version <VER>`: e.g.
+# "--platform 8.5.1", or empty to let the settings (IBCMD_RS_PLATFORM,
+# ibcmd-rs.toml) and auto-detection decide.
 set -uo pipefail
 corpus=$1; mode=$2; run=$3; B=$4
 case "$corpus" in
@@ -21,13 +24,14 @@ case "$mode" in
   model) FLAG="" ;;   # the default since the model export (012b8c2c)
   *) echo "mode?"; exit 2 ;;
 esac
+if [ "${XCHECK_VERSION_FLAGS+set}" = set ]; then VFLAGS=$XCHECK_VERSION_FLAGS; else VFLAGS="--source-version $VER"; fi
 R=/f/ibcmd/lab/model/integration/xcheck_${corpus}_${mode}_${run}
 [ -e "$R" ] && { echo "$R exists; pick another run id"; exit 2; }
 mkdir -p "$R"
 W=$(cygpath -m "$R")
 t0=$(date +%s)
 "$B" mssql-dump-config --rows-dir "$ROWS" -o "$W/dump" --overwrite --extract-module-text \
-  --extract-metadata-xml --no-binary-rows --source-version "$VER" $FLAG > "$R/export.log" 2>&1
+  --extract-metadata-xml --no-binary-rows $VFLAGS $FLAG > "$R/export.log" 2>&1
 echo "$corpus $mode export exit $? $(( $(date +%s) - t0 )) s"
 MSYS2_ARG_CONV_EXCL='*' robocopy "$(cygpath -w "$R/dump")" "$(cygpath -w "$R/tree")" /E /MOVE \
   /XD Config_inflated Config_raw ConfigSave_inflated ConfigSave_raw Config_module_text ConfigSave_module_text \

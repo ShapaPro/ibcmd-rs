@@ -6,9 +6,11 @@ use ibcmd_core::version::{CompatibilityMode, ContainerRevision, PlatformBuild, X
 
 /// Historical closed XML selector retained for CLI and legacy codec compatibility.
 ///
-/// Platform-looking aliases remain accepted only because old commands exposed
-/// them on `--source-version`. They select an XML dialect and never populate a
-/// platform build or any other independent version axis.
+/// Platform-looking aliases name the XML format of that platform family, the
+/// explicit mapping the platform registry (`crate::platform`) declares: 8.3.x
+/// reads and writes 2.20, 8.5.x 2.21. They select the XML dialect only and
+/// never populate a platform build or any other independent version axis; a
+/// command that knows the platform takes `--platform` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InfobaseConfigSourceVersion {
     /// Legacy XML dialect 2.20.

@@ -33,12 +33,14 @@ pub mod mssql_worker_switch;
 pub mod mxl_line_provenance;
 pub mod parallel;
 pub mod plan;
+pub mod platform;
 #[cfg(feature = "platform-oracle")]
 pub mod probe;
 #[cfg(feature = "platform-oracle")]
 pub mod profile;
 pub mod profile_registry;
 pub(crate) mod runtime_evidence_schema;
+pub mod settings;
 pub mod source;
 pub mod source_audit;
 pub(crate) mod source_listing;

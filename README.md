@@ -39,21 +39,51 @@
 [Releases](https://github.com/Untru/ibcmd-rs/releases) и распакуйте его.
 Версия утилиты: `ibcmd-rs --version`.
 
-## Как указать версию
+## Как указать платформу
 
-**Версия формата XML** задаётся параметром `--source-version`:
+**Платформа базы** задаётся параметром `--platform`: выпуск (`8.3.27`,
+`8.5.1`) или точная сборка (`8.3.27.2214`, `8.5.1.1150`). Она определяет
+формат XML:
 
-| Значение | Платформа | Как узнать |
+| Платформа | Формат XML | Как узнать по выгрузке |
 |---|---|---|
-| `2.20` | 8.3 (выгрузка `ibcmd` 8.3.27) | `version="2.20"` в первой строке `Configuration.xml` |
-| `2.21` | 8.5 | `version="2.21"` там же |
+| `8.3.27` | `2.20` | `version="2.20"` в первой строке `Configuration.xml` |
+| `8.5.1` | `2.21` | `version="2.21"` там же |
 
 При выгрузке это формат, в котором будет записан XML. При загрузке — формат
-загружаемых файлов: утилита проверяет, что он совпадает.
+загружаемых файлов: утилита проверяет, что он совпадает. Неизвестная версия
+отклоняется со списком известных. Прежний `--source-version 2.20 | 2.21`
+по-прежнему принимается.
+
+Без `--platform` платформа берётся по порядку:
+
+1. запись `[[database]]` для этой базы в `ibcmd-rs.toml`;
+2. переменная `IBCMD_RS_PLATFORM`;
+3. `platform` в `ibcmd-rs.toml`;
+4. каталог утилиты `...\1cv8\<версия>\bin`; при загрузке — `version` в
+   `Configuration.xml`; при выгрузке режим совместимости 8.5 означает 8.5.1;
+5. иначе 8.3.27 с предупреждением.
+
+Файлы `ibcmd-rs.toml` читаются рядом с утилитой, в `%APPDATA%\ibcmd-rs\` и в
+текущей папке (более поздний побеждает) или один файл из `IBCMD_RS_CONFIG`:
+
+```toml
+platform = "8.3.27.2214"        # для баз, которых нет в списке
+db-server = "sql01"
+
+[[database]]
+server = "sql02"                # необязательно: без него — любой сервер
+name = "bsp_*"                  # имя базы или маска со *
+platform = "8.5.1.1150"
+```
+
+`ibcmd-rs settings show --db-server sql02 --db-name bsp_test` показывает
+итоговые значения и откуда взято каждое.
 
 **Режим совместимости конфигурации** указывать не нужно, он берётся из
 `Configuration.xml`. Например, ERP УХ для 8.5 выгружается в формате `2.21`,
-но с режимом совместимости 8.3.27.
+но с режимом совместимости 8.3.27; сама база не отличает 8.3.27 от 8.5,
+поэтому такую базу привязывают к 8.5.1 записью `[[database]]`.
 
 ## Подключение к SQL Server
 
@@ -61,6 +91,9 @@
 SQL Server укажите `--sql-user <логин>`, а пароль положите в переменную
 окружения `IBCMD_DB_PSW` или передайте `--sql-pwd`. Имя сервера задаёт
 `--server`. Путь к `sqlcmd` задаёт `--sqlcmd`; `bcp` ищется рядом с ним.
+Сервер и логин без параметров берутся из переменных `IBCMD_RS_DB_SERVER`,
+`IBCMD_RS_DB_USER` или из `db-server` и `db-user` в `ibcmd-rs.toml`; пароль в
+этом файле не хранится.
 
 В примерах ниже:
 
@@ -73,7 +106,7 @@ set SQLCMD=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\180\Tools\Binn\
 ```
 ibcmd-rs mssql-dump-config --database MyBase --sqlcmd "%SQLCMD%" ^
   --extract-metadata-xml --extract-module-text --no-binary-rows ^
-  --source-version 2.20 -o C:\export\MyBase
+  --platform 8.3.27 -o C:\export\MyBase
 ```
 
 В папке `C:\export\MyBase` окажется то же дерево XML, что у штатной выгрузки,
@@ -87,7 +120,7 @@ ibcmd-rs mssql-dump-config --database MyBase --sqlcmd "%SQLCMD%" ^
 
 ```
 ibcmd-rs mssql-stage-source-objects --database MyBase --sqlcmd "%SQLCMD%" ^
-  --source-root C:\export\MyBase --source-version 2.20 ^
+  --source-root C:\export\MyBase --platform 8.3.27 ^
   --replace-config-save --allow-non-lab
 
 ibcmd infobase config apply --dbms=MSSQLServer --db-server=localhost ^
@@ -105,7 +138,7 @@ ibcmd infobase create --dbms=MSSQLServer --db-server=localhost ^
   --db-name=NewBase --create-database
 
 ibcmd-rs mssql-stage-source-objects --database NewBase --sqlcmd "%SQLCMD%" ^
-  --source-root C:\export\MyBase --source-version 2.20 ^
+  --source-root C:\export\MyBase --platform 8.3.27 ^
   --replace-config-save --allow-non-lab --base-free
 
 ibcmd infobase config apply --dbms=MSSQLServer --db-server=localhost ^

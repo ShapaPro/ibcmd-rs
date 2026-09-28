@@ -168,8 +168,15 @@ pub struct ExportContext {
 }
 
 impl ExportContext {
+    /// The XML is written in dialect `2.21` rather than `2.20`.
     pub fn is_xml_2_21(&self) -> bool {
         self.version != "2.20"
+    }
+
+    /// The platform the XML is written for, as the platform registry maps
+    /// its dialect: `2.20` -> 8.3.27, `2.21` -> 8.5.1.
+    pub fn platform(&self) -> crate::platform::PlatformSpec {
+        crate::platform::of_xml_dialect(&self.version)
     }
 }
 
