@@ -605,9 +605,10 @@ pub struct InfobaseConfigExportArgs {
     /// Environment variable containing the infobase user password.
     #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Replace files under the output directory.
     #[arg(long, alias = "force")]
     pub overwrite: bool,
@@ -654,9 +655,10 @@ pub struct InfobaseConfigImportArgs {
     /// Environment variable containing the infobase user password.
     #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Replace existing ConfigSave rows before staging import rows.
     #[arg(long, alias = "force")]
     pub replace_config_save: bool,
@@ -715,9 +717,10 @@ pub struct InfobaseConfigRoundtripArgs {
     /// Environment variable containing the infobase user password.
     #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// ibcmd executable path. Auto-detects a recent 8.3 build when omitted.
     #[arg(long)]
     pub ibcmd: Option<PathBuf>,
@@ -795,9 +798,10 @@ pub struct InfobaseConfigSweepArgs {
     /// Environment variable containing the infobase user password.
     #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// ibcmd executable path. Auto-detects a recent 8.3 build when omitted.
     #[arg(long)]
     pub ibcmd: Option<PathBuf>,
@@ -1359,19 +1363,20 @@ pub struct DumpSourcesArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlDumpConfigArgs {
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     /// Durable atomic JSON journal for nested sqlcmd and bcp subprocesses.
     #[arg(long)]
     pub runtime_journal: Option<PathBuf>,
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL Server login. Uses sqlcmd default authentication when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
     /// SQL Server password. Prefer --sql-pwd-env for shell history.
@@ -1465,9 +1470,10 @@ pub enum MssqlExtensionListFormat {
 
 #[derive(Debug, Args)]
 pub struct MssqlExtensionListArgs {
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
@@ -1480,7 +1486,7 @@ pub struct MssqlExtensionListArgs {
     /// Environment variable containing the SQL Server password.
     #[arg(long, default_value = "IBCMD_DB_PSW")]
     pub sql_pwd_env: String,
-    /// Pass sqlcmd -C to trust the SQL Server certificate.
+    /// Trust the SQL Server certificate without validating it (sqlcmd -C).
     #[arg(long)]
     pub sqlcmd_trust_cert: bool,
     /// SQL Server database name.
@@ -1493,12 +1499,13 @@ pub struct MssqlExtensionListArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlDumpExtensionArgs {
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
@@ -1565,12 +1572,13 @@ pub struct MssqlLoadExtensionArgs {
     /// Infobase administrator password; empty when omitted.
     #[arg(long)]
     pub infobase_pwd: Option<String>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
@@ -1615,7 +1623,8 @@ pub struct MssqlLoadExtensionArgs {
     /// Required acknowledgement for direct writes to a non-lab database.
     #[arg(long)]
     pub allow_non_lab: bool,
-    /// Pass sqlcmd -C to trust the SQL Server certificate during staging.
+    /// Trust the SQL Server certificate during staging without validating
+    /// it (sqlcmd -C).
     #[arg(long)]
     pub sqlcmd_trust_cert: bool,
     /// Hierarchical XML source version.
@@ -1640,10 +1649,13 @@ pub struct MssqlActivateStagedExtensionArgs {
     pub infobase_user: Option<String>,
     #[arg(long)]
     pub infobase_pwd: Option<String>,
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     #[arg(long, default_value = "localhost")]
     pub server: String,
     #[arg(long)]
@@ -1707,9 +1719,10 @@ pub struct MssqlCompareArgs {
     /// SQL Server name passed to sqlcmd -S.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Left database name.
     #[arg(long)]
     pub left: String,
@@ -1729,9 +1742,10 @@ pub struct MssqlActivationSnapshotArgs {
     /// Database to inspect. This command is read-only.
     #[arg(long)]
     pub database: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// JSON destination. Existing files are never replaced.
     #[arg(short, long)]
     pub output: PathBuf,
@@ -1763,15 +1777,17 @@ pub struct MssqlActivateStagedMainArgs {
     /// Exact native MSSQL platform layout.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
-    /// Pass sqlcmd -C while verifying and activating the native database.
+    /// Trust the SQL Server certificate while verifying and activating the
+    /// native database (sqlcmd -C).
     #[arg(long)]
     pub sqlcmd_trust_cert: bool,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
@@ -1828,10 +1844,13 @@ pub struct MssqlApplySourceChangeArgs {
     /// Exact native MSSQL platform layout. Independent from --source-version.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    #[arg(long, default_value = "bcp")]
-    pub bcp_executable: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
     #[arg(long, default_value = "localhost")]
     pub server: String,
     #[arg(long)]
@@ -1896,9 +1915,10 @@ pub struct MssqlAuditSourceParityArgs {
     /// Root folder with XML sources to scan.
     #[arg(long)]
     pub source_root: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Optional maximum number of staged XML objects per SQL batch.
     #[arg(long)]
     pub batch_size: Option<usize>,
@@ -1918,9 +1938,10 @@ pub struct MssqlCloneArgs {
     /// SQL Server name passed to sqlcmd -S.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Source database name.
     #[arg(long)]
     pub source: String,
@@ -1949,10 +1970,12 @@ pub struct MssqlStorageExportArgs {
     /// Output bundle directory.
     #[arg(short, long)]
     pub output_dir: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// bcp.exe: the bundle files are bcp native-format files, so these lab
+    /// commands run bcp.exe even without --sqlcmd.
     #[arg(long, default_value = "bcp")]
     pub bcp: PathBuf,
     /// Pass bcp -u (trust server certificate). Needed for bcp 18+ over an
@@ -1976,10 +1999,12 @@ pub struct MssqlStorageImportArgs {
     /// Input bundle directory produced by `mssql-storage-export`.
     #[arg(short, long)]
     pub input_dir: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// bcp.exe: the bundle files are bcp native-format files, so these lab
+    /// commands run bcp.exe even without --sqlcmd.
     #[arg(long, default_value = "bcp")]
     pub bcp: PathBuf,
     /// Pass bcp -u (trust server certificate). Needed for bcp 18+ over an
@@ -2006,10 +2031,12 @@ pub struct MssqlDeltaExportArgs {
     /// Output bundle directory.
     #[arg(short, long)]
     pub output_dir: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// bcp.exe: the bundle files are bcp native-format files, so these lab
+    /// commands run bcp.exe even without --sqlcmd.
     #[arg(long, default_value = "bcp")]
     pub bcp: PathBuf,
     /// Pass bcp -u (trust server certificate). Needed for bcp 18+ over an
@@ -2033,10 +2060,12 @@ pub struct MssqlDeltaImportArgs {
     /// Input bundle directory produced by `mssql-delta-export`.
     #[arg(short, long)]
     pub input_dir: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
-    /// bcp executable path.
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// bcp.exe: the bundle files are bcp native-format files, so these lab
+    /// commands run bcp.exe even without --sqlcmd.
     #[arg(long, default_value = "bcp")]
     pub bcp: PathBuf,
     /// Pass bcp -u (trust server certificate). Needed for bcp 18+ over an
@@ -2107,9 +2136,10 @@ pub struct MssqlStageCommonModuleArgs {
     /// BSL module body file.
     #[arg(long)]
     pub text: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2141,9 +2171,10 @@ pub struct MssqlStageCommonModulesArgs {
     /// Common module change in the form `<metadata-uuid>=<path-to-Module.bsl>`.
     #[arg(long = "module", required = true)]
     pub modules: Vec<String>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2178,9 +2209,10 @@ pub struct MssqlStageCommonModuleMetadataArgs {
     /// Common module XML file.
     #[arg(long)]
     pub xml: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2218,9 +2250,10 @@ pub struct MssqlStageCommonModuleObjectArgs {
     /// BSL module body file. Defaults to sibling <module-name>\Ext\Module.bsl.
     #[arg(long)]
     pub text: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2252,9 +2285,10 @@ pub struct MssqlStageCommonModuleObjectsArgs {
     /// Common module XML files. Each sibling <module-name>\Ext\Module.bsl is loaded too.
     #[arg(long = "xml", required = true)]
     pub xmls: Vec<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2289,9 +2323,10 @@ pub struct MssqlStageMetadataObjectsArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2323,9 +2358,10 @@ pub struct MssqlStageSourceMetadataObjectsArgs {
     /// Root folder with XML sources to scan.
     #[arg(long)]
     pub source_root: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2357,9 +2393,10 @@ pub struct MssqlStageSourceCommonModuleObjectsArgs {
     /// Root folder with XML sources to scan.
     #[arg(long)]
     pub source_root: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2391,9 +2428,10 @@ pub struct MssqlStageSourceObjectsArgs {
     /// Root folder with XML sources to scan.
     #[arg(long)]
     pub source_root: PathBuf,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2425,7 +2463,7 @@ pub struct MssqlStageSourceObjectsArgs {
     /// of the bulk load (cheaper for a handful of objects).
     #[arg(long, conflicts_with = "bulk")]
     pub per_row: bool,
-    /// bcp executable for --bulk. Defaults to bcp beside --sqlcmd.
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
     #[arg(long)]
     pub bcp_executable: Option<PathBuf>,
     /// Stage for an EMPTY infobase: every row of the tree (descriptors from
@@ -2450,9 +2488,10 @@ pub struct MssqlStageExchangePlanObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2478,9 +2517,10 @@ pub struct MssqlStageBusinessProcessObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2506,9 +2546,10 @@ pub struct MssqlStageDocumentJournalObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2534,9 +2575,10 @@ pub struct MssqlStageReportObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2562,9 +2604,10 @@ pub struct MssqlStageDataProcessorObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2590,9 +2633,10 @@ pub struct MssqlStageCatalogObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2618,9 +2662,10 @@ pub struct MssqlStageInformationRegisterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2646,9 +2691,10 @@ pub struct MssqlStageScheduledJobObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2674,9 +2720,10 @@ pub struct MssqlStageXdtopackageObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2702,9 +2749,10 @@ pub struct MssqlStageRoleObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2730,9 +2778,10 @@ pub struct MssqlStageConstantObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2758,9 +2807,10 @@ pub struct MssqlStageDefinedTypeObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2786,9 +2836,10 @@ pub struct MssqlStageSessionParameterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2814,9 +2865,10 @@ pub struct MssqlStageSettingsStorageObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2842,9 +2894,10 @@ pub struct MssqlStageFunctionalOptionObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2870,9 +2923,10 @@ pub struct MssqlStageFunctionalOptionsParameterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2898,9 +2952,10 @@ pub struct MssqlStageEventSubscriptionObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2926,9 +2981,10 @@ pub struct MssqlStageHTTPServiceObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2954,9 +3010,10 @@ pub struct MssqlStageWebServiceObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -2982,9 +3039,10 @@ pub struct MssqlStageCommonAttributeObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3010,9 +3068,10 @@ pub struct MssqlStageLanguageObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3038,9 +3097,10 @@ pub struct MssqlStageStyleItemObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3066,9 +3126,10 @@ pub struct MssqlStageStyleObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3094,9 +3155,10 @@ pub struct MssqlStageBotObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3122,9 +3184,10 @@ pub struct MssqlStageDocumentNumeratorObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3150,9 +3213,10 @@ pub struct MssqlStageIntegrationServiceObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3178,9 +3242,10 @@ pub struct MssqlStageSequenceObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3206,9 +3271,10 @@ pub struct MssqlStageWSReferenceObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3234,9 +3300,10 @@ pub struct MssqlStageTaskObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3262,9 +3329,10 @@ pub struct MssqlStageSubsystemObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3290,9 +3358,10 @@ pub struct MssqlStageCommandGroupObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3318,9 +3387,10 @@ pub struct MssqlStageEnumObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3346,9 +3416,10 @@ pub struct MssqlStageDocumentObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3374,9 +3445,10 @@ pub struct MssqlStageFilterCriteriaObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3402,9 +3474,10 @@ pub struct MssqlStageAccountingRegisterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3430,9 +3503,10 @@ pub struct MssqlStageAccumulationRegisterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3458,9 +3532,10 @@ pub struct MssqlStageCalculationRegisterObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3486,9 +3561,10 @@ pub struct MssqlStageChartOfCharacteristicTypesObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3514,9 +3590,10 @@ pub struct MssqlStageChartOfAccountsObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3542,9 +3619,10 @@ pub struct MssqlStageChartOfCalculationTypesObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3570,9 +3648,10 @@ pub struct MssqlStageChartOfCalculationRegistersObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3598,9 +3677,10 @@ pub struct MssqlStageCommonCommandObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3626,9 +3706,10 @@ pub struct MssqlStageCommonFormObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3654,9 +3735,10 @@ pub struct MssqlStageCommonPictureObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -3682,9 +3764,10 @@ pub struct MssqlStageCommonTemplateObjectArgs {
     /// Root folder with full XML sources, used to resolve metadata references.
     #[arg(long)]
     pub source_root: Option<PathBuf>,
-    /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
-    pub sqlcmd: PathBuf,
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
     /// Required confirmation: delete existing ConfigSave rows first.
     #[arg(long)]
     pub replace_config_save: bool,
@@ -4965,7 +5048,10 @@ mod tests {
                     args.runtime_journal,
                     Some(PathBuf::from(r"C:\logs\candidate-runtime.json"))
                 );
-                assert_eq!(args.bcp_executable, PathBuf::from(r"C:\tools\bcp.exe"));
+                assert_eq!(
+                    args.bcp_executable,
+                    Some(PathBuf::from(r"C:\tools\bcp.exe"))
+                );
                 assert_eq!(args.sql_user.as_deref(), Some("test-sql-user"));
                 assert_eq!(
                     args.sql_pwd.as_deref(),

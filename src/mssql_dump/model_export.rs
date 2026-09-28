@@ -669,8 +669,9 @@ pub fn audit_name_index(
 ) -> Result<NameIndexAudit> {
     let _offline = offline_rows::activate(rows_dir)?;
     let started = Instant::now();
-    let none = Path::new("");
-    let metadata_rows = fetch_metadata_rows_bcp(none, none, "", None, None, "", "Config")?;
+    // The offline rows answer every read; nothing may reach a database.
+    let sql = crate::sql::SqlExec::detached("the name-index audit reads a rows folder only");
+    let metadata_rows = fetch_metadata_rows(&sql, "", "Config")?;
     let texts = build_metadata_text_rows_audited(&metadata_rows).rows;
     let fetch_ms = elapsed_ms(started);
     let legacy_started = Instant::now();
@@ -681,16 +682,8 @@ pub fn audit_name_index(
     let legacy_ms = elapsed_ms(legacy_started);
     let model_started = Instant::now();
     let plan = ModelPlan::new(&metadata_rows, &texts, source_version);
-    let predefined_rows = fetch_config_rows_bcp(
-        none,
-        none,
-        "",
-        None,
-        None,
-        "",
-        "Config",
-        &plan.predefined_body_file_names(),
-    )?;
+    let predefined_rows =
+        fetch_config_rows(&sql, "", "Config", &plan.predefined_body_file_names())?;
     let legacy = LegacyNames {
         object_refs: &object_refs,
         type_index: &type_index,

@@ -17,6 +17,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::sql::{SqlExec, SqlLogin, SqlTarget};
+
 /// Capability that admits main-configuration writes for a platform profile.
 pub const CAPABILITY_MAIN_WRITE: &str = "mssql.main.write";
 /// Capability that admits extension writes for a platform profile.
@@ -105,7 +107,9 @@ pub struct MssqlNativeProfileVerification {
 }
 
 pub struct MssqlNativeProfileVerificationOptions<'a> {
-    pub sqlcmd: &'a Path,
+    /// sqlcmd.exe for the schema probe (`--sqlcmd`); the built-in SQL client
+    /// otherwise.
+    pub sqlcmd: Option<&'a Path>,
     pub rac: &'a Path,
     pub ras_endpoint: &'a str,
     pub server: &'a str,
@@ -331,19 +335,16 @@ fn normalized_sql_server(value: &str) -> String {
 }
 
 fn run_probe(options: &MssqlNativeProfileVerificationOptions<'_>) -> Result<String> {
-    let sql = "SET NOCOUNT ON;\n\
+    let sql_text = "SET NOCOUNT ON;\n\
          IF OBJECT_ID(N'dbo.IBVersion', N'U') IS NULL THROW 57320, 'IBVersion table is missing', 1;\n\
          SELECT CONCAT(N'IDENTITY|', IBVersion, N'|', PlatformVersionReq) FROM dbo.IBVersion;\n\
          SELECT CONCAT(N'COLUMN|', t.name, N'|', c.column_id, N'|', c.name, N'|', TYPE_NAME(c.user_type_id), N'|', c.max_length, N'|', c.precision, N'|', c.scale, N'|', CONVERT(int, c.is_nullable))\n\
          FROM sys.tables t JOIN sys.columns c ON c.object_id = t.object_id\n\
          WHERE t.name IN (N'Config', N'ConfigSave', N'Params', N'ConfigCAS', N'ConfigCASSave')\n\
          ORDER BY t.name, c.column_id;";
-    let mut command = Command::new(options.sqlcmd);
-    command.arg("-S").arg(options.server);
-    match options.sql_user {
-        Some(user) => {
-            command.arg("-U").arg(user);
-            let password = options
+    let password = match options.sql_user {
+        Some(_) => Some(
+            options
                 .sql_pwd
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
@@ -354,13 +355,49 @@ fn run_probe(options: &MssqlNativeProfileVerificationOptions<'_>) -> Result<Stri
                 })
                 .ok_or_else(|| {
                     anyhow!("SQL login requires --sql-pwd or {}", options.sql_pwd_env)
-                })?;
-            command.env("SQLCMDPASSWORD", password);
-        }
+                })?,
+        ),
         None => {
             if options.sql_pwd.is_some_and(|value| !value.is_empty()) {
                 bail!("--sql-pwd requires --sql-user");
             }
+            None
+        }
+    };
+    let Some(sqlcmd) = options.sqlcmd else {
+        // The query builds each output line itself (`CONCAT`), one column a row.
+        let sql = SqlExec::sql_server(SqlTarget {
+            server: options.server.to_owned(),
+            database: Some(options.database.to_owned()),
+            login: SqlLogin::from_user(options.sql_user, password.as_deref()),
+            trust_server_certificate: options.sqlcmd_trust_cert,
+        })?;
+        let client = sql
+            .client()
+            .ok_or_else(|| anyhow!("the built-in SQL client is not available"))?;
+        let mut lines = String::new();
+        client
+            .read_rows(sql_text, &[], &mut |row| {
+                lines.push_str(&row.value(0)?.to_text());
+                lines.push('\n');
+                if lines.len() > MAX_PROBE_OUTPUT_BYTES {
+                    bail!(
+                        "native profile verification output exceeds {MAX_PROBE_OUTPUT_BYTES} bytes"
+                    );
+                }
+                Ok(())
+            })
+            .context("native profile verification query failed")?;
+        return Ok(lines);
+    };
+    let mut command = Command::new(sqlcmd);
+    command.arg("-S").arg(options.server);
+    match (options.sql_user, password) {
+        (Some(user), Some(password)) => {
+            command.arg("-U").arg(user);
+            command.env("SQLCMDPASSWORD", password);
+        }
+        _ => {
             command.arg("-E");
         }
     }
@@ -380,9 +417,9 @@ fn run_probe(options: &MssqlNativeProfileVerificationOptions<'_>) -> Result<Stri
             .arg("-w")
             .arg("65535")
             .arg("-Q")
-            .arg(sql),
+            .arg(sql_text),
     )
-    .with_context(|| format!("failed to launch sqlcmd at {}", options.sqlcmd.display()))?;
+    .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
     if !output.status.success() {
         bail!(
             "native profile verification query failed: stdout={} stderr={}",

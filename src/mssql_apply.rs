@@ -20,6 +20,7 @@ use crate::cli::{
 use crate::mssql_source_change::{
     ActivationMode, ActivationTarget, SourceFileDigest, SourceInventory, classify_source_change,
 };
+use crate::sql::{SqlExec, SqlOptions};
 
 #[derive(Debug, Serialize)]
 pub struct MssqlApplySourceChangeReport {
@@ -69,7 +70,7 @@ pub fn apply_source_change(
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
-            sqlcmd: &args.sqlcmd,
+            sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
             ras_endpoint: &args.ras_endpoint,
             server: &args.server,
@@ -504,7 +505,7 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
     crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
-            sqlcmd: &args.sqlcmd,
+            sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
             ras_endpoint: &args.ras_endpoint,
             server: &args.server,
@@ -646,17 +647,19 @@ fn export_active_managed_form_fast(
     } else {
         None
     };
+    // The main activation's reads trusted the certificate (bcp -u) on the
+    // --sqlcmd path as well.
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: true,
+    })?;
     let fetch = |table: &str, names: &std::collections::BTreeSet<String>| {
-        crate::mssql_dump::fetch_main_activation_rows_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            password.as_deref(),
-            &args.database,
-            table,
-            names,
-        )
+        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, table, names)
     };
 
     let marker_name = std::collections::BTreeSet::from(["DynamicallyUpdated".to_owned()]);
@@ -1120,17 +1123,19 @@ fn overlay_active_dynamic_module(
     } else {
         None
     };
+    // The main activation's reads trusted the certificate (bcp -u) on the
+    // --sqlcmd path as well.
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: true,
+    })?;
     let fetch = |table: &str, names: &std::collections::BTreeSet<String>| {
-        crate::mssql_dump::fetch_main_activation_rows_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            password.as_deref(),
-            &args.database,
-            table,
-            names,
-        )
+        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, table, names)
     };
     let config_marker = fetch("Config", &marker_name)?;
     let params_marker = fetch("Params", &marker_name)?;
@@ -1352,8 +1357,8 @@ mod tests {
     fn runtime_profile_verification_fails_before_active_export() {
         let args = MssqlApplySourceChangeArgs {
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
-            sqlcmd: PathBuf::from("must-not-run-sqlcmd"),
-            bcp_executable: PathBuf::from("must-not-run-bcp"),
+            sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
+            bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
             server: "must-not-connect".to_owned(),
             sql_user: None,
             sql_pwd: None,
@@ -1397,8 +1402,8 @@ mod tests {
     fn runtime_profile_verification_fails_before_watch_reads_missing_source() {
         let args = MssqlApplySourceChangeArgs {
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
-            sqlcmd: PathBuf::from("must-not-run-sqlcmd"),
-            bcp_executable: PathBuf::from("must-not-run-bcp"),
+            sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
+            bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
             server: "must-not-connect".to_owned(),
             sql_user: None,
             sql_pwd: None,

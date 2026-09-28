@@ -17,6 +17,7 @@ use super::{
     quote_string,
 };
 use crate::runtime_evidence_schema::{SanitizedRuntimeArgumentKind, SubprocessJournalSchema};
+use crate::sql::{SqlBackend, SqlClient, SqlExec, SqlTools};
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct SanitizedSubprocessCall {
@@ -307,11 +308,67 @@ fn redact_password_value(arguments: &mut [String], password: Option<&str>) {
         }
     }
 }
+/// What the journal names as the executable of a request the built-in client
+/// made (there is no process to name).
+const CLIENT_JOURNAL_EXECUTABLE: &str = "ibcmd-rs (built-in SQL client)";
+
+/// Journals one request of the built-in client the way a sqlcmd or bcp run
+/// is journaled: server, login kind and the query's digest, never its text,
+/// and on failure no server message (it may quote data).
+fn journal_client_request<T>(
+    sql: &SqlExec,
+    query: &str,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut arguments = vec!["-S".to_owned(), sql.server().to_owned()];
+    match sql.user() {
+        Some(user) => arguments.extend(["-U".to_owned(), user.to_owned()]),
+        None => arguments.push("-E".to_owned()),
+    }
+    arguments.extend(["-Q".to_owned(), query_marker(query)]);
+    let journal_index = start_subprocess_call(SanitizedSubprocessCall {
+        executable: CLIENT_JOURNAL_EXECUTABLE.to_owned(),
+        arguments,
+        started_unix_ms: unix_time_ms(),
+        ended_unix_ms: None,
+        status: "running".to_owned(),
+        exit_code: None,
+        timed_out: false,
+        exception: None,
+    })?;
+    let result = work();
+    complete_subprocess_call(
+        journal_index,
+        if result.is_ok() { "passed" } else { "failed" },
+        None,
+        result
+            .is_err()
+            .then(|| "the built-in SQL client request failed".to_owned()),
+    )?;
+    result
+}
+
+/// `FileName, PartNo, DataSize, BinaryData` rows of a query, as stored.
+fn read_row_parts(client: &dyn SqlClient, query: &str) -> Result<Vec<BinaryConfigRow>> {
+    let mut parts = Vec::new();
+    client.read_rows(query, &[], &mut |mut row| {
+        let part_no = row.i64(1)?;
+        parts.push(BinaryConfigRow {
+            file_name: row.take_text(0)?,
+            part_no: i32::try_from(part_no)
+                .with_context(|| format!("PartNo {part_no} is out of range"))?,
+            data_size: row.i64(2)?,
+            binary: row.take_binary(3)?,
+        });
+        Ok(())
+    })?;
+    Ok(parts)
+}
+
+/// Every Config row a selection names (or every one), assembled from its
+/// parts.
 pub(super) fn fetch_rows(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
@@ -321,8 +378,17 @@ pub(super) fn fetch_rows(
             offline.rows_named(table, selected_file_names)?,
         ));
     }
-    let sql = build_fetch_rows_sql(database, table, selected_file_names);
-    let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
+    let SqlBackend::Tools(tools) = sql.backend() else {
+        return fetch_config_rows(sql, database, table, selected_file_names);
+    };
+    let query = build_fetch_rows_sql(database, table, selected_file_names);
+    let stdout = run_sql_capture_tsv(
+        &tools.sqlcmd,
+        sql.server(),
+        sql.user(),
+        sql.password(),
+        &query,
+    )?;
     let chunks = parse_config_chunk_rows(&stdout)
         .with_context(|| format!("failed to parse {table} row chunks for {database}"))?;
     assemble_config_rows(chunks)
@@ -331,10 +397,7 @@ pub(super) fn fetch_rows(
 
 #[allow(dead_code)]
 pub(super) fn fetch_rows_direct_hex(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
@@ -344,18 +407,23 @@ pub(super) fn fetch_rows_direct_hex(
             offline.rows_named(table, selected_file_names)?,
         ));
     }
-    let sql = build_fetch_rows_direct_hex_sql(database, table, selected_file_names);
-    let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
+    let SqlBackend::Tools(tools) = sql.backend() else {
+        return fetch_config_rows(sql, database, table, selected_file_names);
+    };
+    let query = build_fetch_rows_direct_hex_sql(database, table, selected_file_names);
+    let stdout = run_sql_capture_tsv(
+        &tools.sqlcmd,
+        sql.server(),
+        sql.user(),
+        sql.password(),
+        &query,
+    )?;
     parse_config_direct_rows(&stdout)
         .with_context(|| format!("failed to parse direct {table} rows for {database}"))
 }
 
-pub(super) fn fetch_binary_rows_bcp(
-    _sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(super) fn fetch_binary_rows(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
@@ -382,12 +450,10 @@ pub(super) fn fetch_binary_rows_bcp(
                 let first = batch.first().map(String::as_str).unwrap_or("<empty>");
                 let last = batch.last().map(String::as_str).unwrap_or("<empty>");
                 let query = build_fetch_binary_rows_query(database, table, &batch, false);
-                let mut batch_rows = fetch_binary_rows_bcp_query(
-                    bcp, server, user, password, database, table, &query,
-                )
-                .with_context(|| {
-                    format!("failed to fetch exact bcp batch for {table} rows {first}..{last}")
-                })?;
+                let mut batch_rows = fetch_binary_rows_query(sql, database, table, &query)
+                    .with_context(|| {
+                        format!("failed to fetch exact batch for {table} rows {first}..{last}")
+                    })?;
                 rows.append(&mut batch_rows);
             }
             return Ok(rows);
@@ -396,67 +462,144 @@ pub(super) fn fetch_binary_rows_bcp(
 
     let query =
         build_fetch_binary_rows_query(database, table, selected_file_names, use_range_filter);
-    fetch_binary_rows_bcp_query(bcp, server, user, password, database, table, &query)
+    fetch_binary_rows_query(sql, database, table, &query)
 }
 
-pub(super) fn fetch_binary_rows_bcp_query(
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(super) fn fetch_binary_rows_query(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     query: &str,
 ) -> Result<Vec<BinaryConfigRow>> {
-    let parts =
-        fetch_binary_row_parts_bcp_query(bcp, server, user, password, database, table, query)?;
+    let parts = fetch_binary_row_parts(sql, database, table, query)?;
     assemble_binary_config_rows(parts)
         .map(|rows| apply_row_overrides(table, rows))
-        .with_context(|| format!("failed to assemble native bcp rows for {database}.{table}"))
+        .with_context(|| format!("failed to assemble the rows of {database}.{table}"))
 }
 
-/// Part 0 of every Config row of a database, keyed by file name, read with
-/// one `bcp queryout` -- what staging otherwise fetches one sqlcmd call per
-/// object (and what `IBCMD_RS_BASE_ROWS_DIR`'s `<name>__part0.bin` files hold).
-pub(crate) fn fetch_config_part0_rows_bcp(
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+/// Part 0 of every Config row of a database, keyed by file name -- what
+/// staging otherwise fetches one query per object (and what
+/// `IBCMD_RS_BASE_ROWS_DIR`'s `<name>__part0.bin` files hold). The built-in
+/// client reads it in slices of file names on several connections at once;
+/// the `--sqlcmd` path with one `bcp queryout`.
+pub(crate) fn fetch_config_part0_rows(
+    sql: &SqlExec,
     database: &str,
 ) -> Result<std::collections::HashMap<String, Vec<u8>>> {
     if let Some(offline) = offline_rows::active() {
         return offline.part0_rows();
     }
-    let query = format!(
-        "SELECT FileName, PartNo, DataSize, BinaryData FROM {}.dbo.Config WHERE PartNo = 0",
-        super::quote_ident(database)
-    );
-    Ok(
-        fetch_binary_row_parts_bcp_query(bcp, server, user, password, database, "Config", &query)?
+    let table = format!("{}.dbo.Config", super::quote_ident(database));
+    let query =
+        format!("SELECT FileName, PartNo, DataSize, BinaryData FROM {table} WHERE PartNo = 0");
+    let SqlBackend::Client(client) = sql.backend() else {
+        return Ok(fetch_binary_row_parts(sql, database, "Config", &query)?
             .into_iter()
             .map(|part| (part.file_name, part.binary))
-            .collect(),
-    )
+            .collect());
+    };
+    let slices = client.max_connections();
+    let boundaries = if slices > 1 {
+        journal_client_request(sql, &query, || {
+            part0_slice_boundaries(client, &table, slices)
+        })?
+    } else {
+        Vec::new()
+    };
+    let queries = slice_queries(&query, &boundaries);
+    let parts = std::thread::scope(|scope| {
+        let readers = queries
+            .iter()
+            .map(|slice| scope.spawn(move || read_row_parts(client, slice)))
+            .collect::<Vec<_>>();
+        let mut parts = Vec::new();
+        for reader in readers {
+            match reader.join() {
+                Ok(slice) => parts.push(slice?),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        Ok::<_, anyhow::Error>(parts)
+    })
+    .with_context(|| format!("failed to read the Config rows of {database}"))?;
+    let mut rows = std::collections::HashMap::new();
+    for part in parts.into_iter().flatten() {
+        if rows.insert(part.file_name.clone(), part.binary).is_some() {
+            bail!("Config row {} was read twice", part.file_name);
+        }
+    }
+    Ok(rows)
 }
 
-/// Runs one `bcp queryout` of `FileName, PartNo, DataSize, BinaryData` rows
-/// and returns the parts as stored, unassembled.
-fn fetch_binary_row_parts_bcp_query(
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+/// The first file name of each slice after the first, when the rows of
+/// `table` with PartNo 0 are cut into `slices` slices of equal row count.
+fn part0_slice_boundaries(
+    client: &dyn SqlClient,
+    table: &str,
+    slices: usize,
+) -> Result<Vec<String>> {
+    let query = format!(
+        "SELECT MIN(FileName) FROM (SELECT FileName, NTILE({slices}) OVER (ORDER BY FileName) \
+         AS slice FROM {table} WHERE PartNo = 0) AS sliced \
+         GROUP BY slice HAVING slice > 1 ORDER BY MIN(FileName)"
+    );
+    client
+        .query_rows(&query, &[])?
+        .into_iter()
+        .map(|mut row| row.take_text(0))
+        .collect()
+}
+
+/// `query` (which ends in a WHERE clause) once per slice: the file names
+/// from one boundary up to the next. The column's own collation orders both
+/// the boundaries and the comparisons, so every row falls in one slice.
+fn slice_queries(query: &str, boundaries: &[String]) -> Vec<String> {
+    let mut queries = Vec::with_capacity(boundaries.len() + 1);
+    for index in 0..=boundaries.len() {
+        let mut slice = query.to_owned();
+        if let Some(low) = index.checked_sub(1).map(|low| &boundaries[low]) {
+            slice.push_str(&format!(" AND FileName >= N'{}'", quote_string(low)));
+        }
+        if let Some(high) = boundaries.get(index) {
+            slice.push_str(&format!(" AND FileName < N'{}'", quote_string(high)));
+        }
+        queries.push(slice);
+    }
+    queries
+}
+
+/// Runs one query of `FileName, PartNo, DataSize, BinaryData` rows and
+/// returns the parts as stored, unassembled: the built-in client streams
+/// them; the `--sqlcmd` path runs `bcp queryout` into a native-format file.
+fn fetch_binary_row_parts(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     query: &str,
 ) -> Result<Vec<BinaryConfigRow>> {
     if offline_rows::active().is_some() {
         return Err(offline_rows::refuse(&format!(
-            "the bcp query {}",
+            "the query {}",
             query_marker(query)
         )));
     }
+    match sql.backend() {
+        SqlBackend::Client(client) => journal_client_request(sql, query, || {
+            read_row_parts(client, query)
+                .with_context(|| format!("failed to read the rows of {database}.{table}"))
+        }),
+        SqlBackend::Tools(tools) => bcp_queryout_row_parts(sql, tools, database, table, query),
+    }
+}
+
+fn bcp_queryout_row_parts(
+    sql: &SqlExec,
+    tools: &SqlTools,
+    database: &str,
+    table: &str,
+    query: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let (bcp, server, user, password) = (&tools.bcp, sql.server(), sql.user(), sql.password());
     let output_path = std::env::temp_dir().join(format!(
         "ibcmd-rs-bcp-{}-{}.bcp",
         std::process::id(),
@@ -576,25 +719,9 @@ fn apply_row_overrides(table: &str, mut rows: Vec<BinaryConfigRow>) -> Vec<Binar
     rows
 }
 
-#[cfg_attr(not(feature = "platform-oracle"), allow(dead_code))]
-pub(crate) fn bcp_executable_for_sqlcmd(sqlcmd: &Path) -> PathBuf {
-    if let Some(parent) = sqlcmd.parent() {
-        for name in ["bcp.exe", "bcp"] {
-            let candidate = parent.join(name);
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from("bcp")
-}
-
 #[allow(dead_code)]
-pub(super) fn fetch_metadata_rows(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(super) fn fetch_metadata_rows_hex(
+    sql: &SqlExec,
     database: &str,
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
@@ -603,20 +730,26 @@ pub(super) fn fetch_metadata_rows(
             offline.rows(table, |file_name| !file_name.contains('.'))?,
         ));
     }
-    let sql = build_fetch_metadata_rows_sql(database, table);
-    let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
+    let SqlBackend::Tools(tools) = sql.backend() else {
+        return fetch_metadata_rows(sql, database, table);
+    };
+    let query = build_fetch_metadata_rows_sql(database, table);
+    let stdout = run_sql_capture_tsv(
+        &tools.sqlcmd,
+        sql.server(),
+        sql.user(),
+        sql.password(),
+        &query,
+    )?;
     let chunks = parse_config_chunk_rows(&stdout)
         .with_context(|| format!("failed to parse {table} metadata row chunks for {database}"))?;
     assemble_config_rows(chunks)
         .with_context(|| format!("failed to assemble {table} metadata rows for {database}"))
 }
 
-pub(super) fn fetch_metadata_rows_bcp(
-    _sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+/// Every metadata row (a file name without a dot) of the table.
+pub(super) fn fetch_metadata_rows(
+    sql: &SqlExec,
     database: &str,
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
@@ -625,16 +758,12 @@ pub(super) fn fetch_metadata_rows_bcp(
         return Ok(config_rows_from_binary(apply_row_overrides(table, rows)));
     }
     let query = build_fetch_metadata_rows_bcp_query(database, table);
-    let rows = fetch_binary_rows_bcp_query(bcp, server, user, password, database, table, &query)?;
+    let rows = fetch_binary_rows_query(sql, database, table, &query)?;
     Ok(config_rows_from_binary(rows))
 }
 
-pub(super) fn fetch_metadata_owner_rows_bcp(
-    _sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(super) fn fetch_metadata_owner_rows(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     metadata_file_names: &BTreeSet<String>,
@@ -667,36 +796,21 @@ pub(super) fn fetch_metadata_owner_rows_bcp(
         let last = batch.last().map(String::as_str).unwrap_or("<empty>");
         let query = build_fetch_metadata_owner_rows_bcp_query(database, table, &batch);
         let mut batch_rows =
-            fetch_binary_rows_bcp_query(bcp, server, user, password, database, table, &query)
-                .with_context(|| {
-                    format!("failed to fetch metadata owner rows batch {first}..{last}")
-                })?;
+            fetch_binary_rows_query(sql, database, table, &query).with_context(|| {
+                format!("failed to fetch metadata owner rows batch {first}..{last}")
+            })?;
         rows.append(&mut batch_rows);
     }
     Ok(config_rows_from_binary(rows))
 }
 
-pub(super) fn fetch_config_rows_bcp(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(super) fn fetch_config_rows(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRow>> {
-    let rows = fetch_binary_rows_bcp(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-        false,
-    )?;
+    let rows = fetch_binary_rows(sql, database, table, selected_file_names, false)?;
     Ok(config_rows_from_binary(rows))
 }
 
@@ -907,10 +1021,7 @@ pub(super) fn build_fetch_metadata_rows_sql(database: &str, table: &str) -> Stri
 }
 
 pub(super) fn fetch_row_headers(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
@@ -930,13 +1041,11 @@ pub(super) fn fetch_row_headers(
             for batch in batches {
                 let first = batch.first().map(String::as_str).unwrap_or("<empty>");
                 let last = batch.last().map(String::as_str).unwrap_or("<empty>");
-                let sql = build_fetch_row_headers_sql(database, table, &batch);
-                let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)
-                    .with_context(|| {
-                        format!("failed to fetch row header batch for {table} rows {first}..{last}")
-                    })?;
-                let mut batch_rows = parse_config_row_headers(&stdout).with_context(|| {
-                    format!("failed to parse {table} row header batch for {database} rows {first}..{last}")
+                let query = build_fetch_row_headers_sql(database, table, &batch);
+                let mut batch_rows = fetch_row_headers_query(sql, &query).with_context(|| {
+                    format!(
+                        "failed to fetch {table} row headers of {database} rows {first}..{last}"
+                    )
                 })?;
                 rows.append(&mut batch_rows);
             }
@@ -944,10 +1053,40 @@ pub(super) fn fetch_row_headers(
         }
     }
 
-    let sql = build_fetch_row_headers_sql(database, table, selected_file_names);
-    let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
-    parse_config_row_headers(&stdout)
-        .with_context(|| format!("failed to parse {table} row headers for {database}"))
+    let query = build_fetch_row_headers_sql(database, table, selected_file_names);
+    fetch_row_headers_query(sql, &query)
+        .with_context(|| format!("failed to fetch {table} row headers of {database}"))
+}
+
+/// `file_name, part_no, data_size` rows of one header query.
+fn fetch_row_headers_query(sql: &SqlExec, query: &str) -> Result<Vec<ConfigRowHeader>> {
+    match sql.backend() {
+        SqlBackend::Client(client) => journal_client_request(sql, query, || {
+            client
+                .query_rows(query, &[])?
+                .into_iter()
+                .map(|mut row| {
+                    let part_no = row.i64(1)?;
+                    Ok(ConfigRowHeader {
+                        file_name: row.take_text(0)?,
+                        part_no: i32::try_from(part_no)
+                            .with_context(|| format!("PartNo {part_no} is out of range"))?,
+                        data_size: row.i64(2)?,
+                    })
+                })
+                .collect()
+        }),
+        SqlBackend::Tools(tools) => {
+            let stdout = run_sql_capture_tsv(
+                &tools.sqlcmd,
+                sql.server(),
+                sql.user(),
+                sql.password(),
+                query,
+            )?;
+            parse_config_row_headers(&stdout)
+        }
+    }
 }
 
 pub(super) fn build_fetch_row_headers_sql(
@@ -1426,12 +1565,8 @@ pub(super) struct ExactStorageRow {
 
 /// Reads only one already-bound storage prefix. The lightweight header pass
 /// proves row shape and resource bounds before any BinaryData is materialized.
-pub(super) fn fetch_exact_prefix_rows_sqlcmd(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
-    trust_server_certificate: bool,
+pub(super) fn fetch_exact_prefix_rows(
+    sql: &SqlExec,
     database: &str,
     table: &str,
     prefix: &str,
@@ -1448,33 +1583,61 @@ pub(super) fn fetch_exact_prefix_rows_sqlcmd(
         qualified_storage_table(database, table),
         quote_string(&escaped_pattern),
     );
-    let stdout = run_sql_capture_tsv_with_policy(
-        sqlcmd,
-        server,
-        user,
-        password,
-        trust_server_certificate,
-        &header_sql,
-    )?;
+    // (file name, PartNo, Attributes, DataSize, DATALENGTH(BinaryData))
+    let header_rows: Vec<(String, i64, i64, i64, i64)> = match sql.backend() {
+        SqlBackend::Client(client) => journal_client_request(sql, &header_sql, || {
+            client
+                .query_rows(&header_sql, &[])?
+                .into_iter()
+                .map(|mut row| {
+                    Ok((
+                        row.take_text(0)?,
+                        row.i64(1)?,
+                        row.i64(2)?,
+                        row.i64(3)?,
+                        row.i64(4)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+        })?,
+        SqlBackend::Tools(tools) => {
+            let stdout = run_sql_capture_tsv_with_policy(
+                &tools.sqlcmd,
+                sql.server(),
+                sql.user(),
+                sql.password(),
+                sql.trust_server_certificate(),
+                &header_sql,
+            )?;
+            let mut rows = Vec::new();
+            for (line_index, line) in stdout.lines().enumerate() {
+                let line = line.trim_end();
+                if line.is_empty() || is_sqlcmd_header_or_separator(line) {
+                    continue;
+                }
+                let fields = line.split('\t').collect::<Vec<_>>();
+                if fields.len() != 5 {
+                    bail!("unexpected exact-prefix header line {}", line_index + 1);
+                }
+                rows.push((
+                    fields[0].trim_end().to_owned(),
+                    fields[1].trim().parse::<i64>()?,
+                    fields[2].trim().parse::<i64>()?,
+                    fields[3].trim().parse::<i64>()?,
+                    fields[4].trim().parse::<i64>()?,
+                ));
+            }
+            rows
+        }
+    };
     let mut headers = BTreeMap::<String, (i32, i32, i64)>::new();
     let mut total_bytes = 0_u64;
-    for (line_index, line) in stdout.lines().enumerate() {
-        let line = line.trim_end();
-        if line.is_empty() || is_sqlcmd_header_or_separator(line) {
-            continue;
-        }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 5 {
-            bail!("unexpected exact-prefix header line {}", line_index + 1);
-        }
-        let file_name = fields[0].trim_end().to_owned();
+    for (file_name, part_no, attributes, data_size, binary_size) in header_rows {
         if !file_name.starts_with(prefix) {
             bail!("exact-prefix query returned an unrelated FileName");
         }
-        let part_no = fields[1].trim().parse::<i32>()?;
-        let attributes = fields[2].trim().parse::<i32>()?;
-        let data_size = fields[3].trim().parse::<i64>()?;
-        let binary_size = fields[4].trim().parse::<i64>()?;
+        let part_no = i32::try_from(part_no)?;
+        let attributes = i32::try_from(attributes)?;
         if part_no != 0 {
             bail!("{table}.{file_name} uses unsupported PartNo {part_no}");
         }
@@ -1501,31 +1664,48 @@ pub(super) fn fetch_exact_prefix_rows_sqlcmd(
         return Ok(Vec::new());
     }
     let selected = headers.keys().cloned().collect::<BTreeSet<_>>();
-    let binary_sql = build_fetch_rows_sql(database, table, &selected);
-    let binary_stdout = run_sql_capture_tsv_with_policy(
-        sqlcmd,
-        server,
-        user,
-        password,
-        trust_server_certificate,
-        &binary_sql,
-    )?;
-    let chunks = parse_config_chunk_rows(&binary_stdout)?;
-    let binary_rows = assemble_config_rows(chunks)?;
+    // (file name, PartNo, DataSize, bytes) of every selected row.
+    let binary_rows: Vec<(String, i32, i64, Vec<u8>)> = match sql.backend() {
+        SqlBackend::Client(_) => {
+            let query = build_fetch_binary_rows_query(database, table, &selected, false);
+            assemble_binary_config_rows(fetch_binary_row_parts(sql, database, table, &query)?)?
+                .into_iter()
+                .map(|row| (row.file_name, row.part_no, row.data_size, row.binary))
+                .collect()
+        }
+        SqlBackend::Tools(tools) => {
+            let binary_sql = build_fetch_rows_sql(database, table, &selected);
+            let binary_stdout = run_sql_capture_tsv_with_policy(
+                &tools.sqlcmd,
+                sql.server(),
+                sql.user(),
+                sql.password(),
+                sql.trust_server_certificate(),
+                &binary_sql,
+            )?;
+            let chunks = parse_config_chunk_rows(&binary_stdout)?;
+            assemble_config_rows(chunks)?
+                .into_iter()
+                .map(|row| {
+                    let binary = row.binary_bytes()?.into_owned();
+                    Ok((row.file_name, row.part_no, row.data_size, binary))
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+    };
     if binary_rows.len() != headers.len() {
         bail!("exact-prefix BinaryData row count changed during snapshot");
     }
     let mut output = Vec::with_capacity(binary_rows.len());
-    for row in binary_rows {
+    for (file_name, row_part_no, row_data_size, binary) in binary_rows {
         let (part_no, attributes, data_size) = headers
-            .remove(&row.file_name)
+            .remove(&file_name)
             .ok_or_else(|| anyhow!("exact-prefix BinaryData returned an unexpected row"))?;
-        if row.part_no != part_no || row.data_size != data_size {
-            bail!("exact-prefix row {} changed during snapshot", row.file_name);
+        if row_part_no != part_no || row_data_size != data_size {
+            bail!("exact-prefix row {file_name} changed during snapshot");
         }
-        let binary = row.binary_bytes()?.into_owned();
         output.push(ExactStorageRow {
-            file_name: row.file_name,
+            file_name,
             part_no,
             attributes,
             data_size,
@@ -1661,15 +1841,19 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
 
+    use std::path::Path;
+
     use super::{
         BCP_INLINE_QUERY_MAX_CHARS, FAIL_NEXT_JOURNAL_PERSIST, SanitizedSubprocessCall,
         begin_subprocess_journal, build_fetch_binary_rows_query,
         build_fetch_metadata_owner_rows_bcp_query, build_fetch_row_headers_sql,
-        complete_subprocess_call, fetch_binary_rows_bcp_query, password_source_marker,
-        query_marker, redact_password_value, run_sql_capture_tsv,
-        split_selected_file_names_for_bcp_query, split_selected_file_names_for_owner_rows_query,
+        complete_subprocess_call, fetch_binary_rows_query, journal_client_request,
+        password_source_marker, query_marker, redact_password_value, run_sql_capture_tsv,
+        slice_queries, split_selected_file_names_for_bcp_query,
+        split_selected_file_names_for_owner_rows_query,
         split_selected_file_names_for_row_headers_query, start_subprocess_call,
     };
+    use crate::sql::{SqlExec, SqlOptions};
 
     #[test]
     fn subprocess_journal_uses_query_hashes_and_password_source_markers() {
@@ -1851,16 +2035,12 @@ mod tests {
             Some(&journal_path),
         )
         .unwrap();
-        let error = fetch_binary_rows_bcp_query(
-            &configured_bcp,
-            "localhost",
-            None,
-            None,
-            "test_db",
-            "Config",
-            "SELECT 1",
-        )
-        .unwrap_err();
+        let sql = SqlExec::from_options(SqlOptions {
+            bcp: Some(&configured_bcp),
+            ..SqlOptions::integrated("localhost", Some(Path::new("sqlcmd")))
+        })
+        .unwrap();
+        let error = fetch_binary_rows_query(&sql, "test_db", "Config", "SELECT 1").unwrap_err();
         guard.finish_failed(&error).unwrap();
 
         let journal: serde_json::Value =
@@ -1871,6 +2051,54 @@ mod tests {
         );
         assert_eq!(journal["calls"][0]["status"], "failed");
         let _ = fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn built_in_client_requests_are_journaled_without_query_text() {
+        let journal_path = std::env::temp_dir().join(format!(
+            "ibcmd-rs-client-runtime-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let guard = begin_subprocess_journal(
+            "<password-source:none>",
+            "127.0.0.1,1",
+            "test_db",
+            Some(&journal_path),
+        )
+        .unwrap();
+        let sql = SqlExec::from_options(SqlOptions::integrated("127.0.0.1,1", None)).unwrap();
+        let journaled = journal_client_request(&sql, "SELECT top-secret-query", || {
+            Err::<(), _>(anyhow::anyhow!("server said: top-secret-value"))
+        })
+        .unwrap_err();
+        guard.finish_failed(&journaled).unwrap();
+        let journal: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        assert_eq!(journal["calls"][0]["status"], "failed");
+        assert_eq!(
+            journal["calls"][0]["executable"],
+            super::CLIENT_JOURNAL_EXECUTABLE
+        );
+        let serialized = journal.to_string();
+        assert!(!serialized.contains("top-secret-query"));
+        assert!(!serialized.contains("top-secret-value"));
+        assert!(serialized.contains("<query-sha256:"));
+        let _ = fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn part0_slices_cover_every_file_name_once() {
+        let query = "SELECT FileName FROM [db].dbo.Config WHERE PartNo = 0";
+        assert_eq!(slice_queries(query, &[]), vec![query.to_owned()]);
+        let slices = slice_queries(query, &["b".to_owned(), "it's".to_owned()]);
+        assert_eq!(
+            slices,
+            vec![
+                format!("{query} AND FileName < N'b'"),
+                format!("{query} AND FileName >= N'b' AND FileName < N'it''s'"),
+                format!("{query} AND FileName >= N'it''s'"),
+            ]
+        );
     }
 
     #[test]

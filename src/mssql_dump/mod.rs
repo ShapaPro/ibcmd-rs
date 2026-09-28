@@ -1004,86 +1004,57 @@ mod source_asset_diagnostics;
 mod source_assets;
 mod timing;
 
-pub(crate) fn fetch_main_activation_rows_bcp(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub(crate) fn fetch_main_activation_rows(
+    sql: &crate::sql::SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<crate::mssql_main_activation::MainStorageRow>> {
-    fetch::fetch_binary_rows_bcp(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-        false,
-    )?
-    .into_iter()
-    .map(|row| {
-        let data_size = u64::try_from(row.data_size)
-            .with_context(|| format!("negative DataSize for {table}.{}", row.file_name))?;
-        Ok(crate::mssql_main_activation::MainStorageRow {
-            file_name: row.file_name,
-            part_no: row.part_no,
-            creation: String::new(),
-            modified: String::new(),
-            attributes: 0,
-            data_size,
-            binary_data: row.binary,
+    fetch::fetch_binary_rows(sql, database, table, selected_file_names, false)?
+        .into_iter()
+        .map(|row| {
+            let data_size = u64::try_from(row.data_size)
+                .with_context(|| format!("negative DataSize for {table}.{}", row.file_name))?;
+            Ok(crate::mssql_main_activation::MainStorageRow {
+                file_name: row.file_name,
+                part_no: row.part_no,
+                creation: String::new(),
+                modified: String::new(),
+                attributes: 0,
+                data_size,
+                binary_data: row.binary,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
-pub(crate) fn fetch_extension_activation_rows_sqlcmd(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
-    trust_server_certificate: bool,
+pub(crate) fn fetch_extension_activation_rows(
+    sql: &crate::sql::SqlExec,
     database: &str,
     table: &str,
     prefix: &str,
     max_rows: usize,
     max_total_bytes: u64,
 ) -> Result<Vec<crate::mssql_main_activation::MainStorageRow>> {
-    fetch::fetch_exact_prefix_rows_sqlcmd(
-        sqlcmd,
-        server,
-        user,
-        password,
-        trust_server_certificate,
-        database,
-        table,
-        prefix,
-        max_rows,
-        max_total_bytes,
-    )?
-    .into_iter()
-    .map(|row| {
-        let data_size = u64::try_from(row.data_size)
-            .with_context(|| format!("negative DataSize for {table}.{}", row.file_name))?;
-        Ok(crate::mssql_main_activation::MainStorageRow {
-            file_name: row.file_name,
-            part_no: row.part_no,
-            creation: String::new(),
-            modified: String::new(),
-            attributes: row.attributes,
-            data_size,
-            binary_data: row.binary,
+    fetch::fetch_exact_prefix_rows(sql, database, table, prefix, max_rows, max_total_bytes)?
+        .into_iter()
+        .map(|row| {
+            let data_size = u64::try_from(row.data_size)
+                .with_context(|| format!("negative DataSize for {table}.{}", row.file_name))?;
+            Ok(crate::mssql_main_activation::MainStorageRow {
+                file_name: row.file_name,
+                part_no: row.part_no,
+                creation: String::new(),
+                modified: String::new(),
+                attributes: row.attributes,
+                data_size,
+                binary_data: row.binary,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
-pub(crate) use fetch::{bcp_executable_for_sqlcmd, fetch_config_part0_rows_bcp};
+pub(crate) use fetch::fetch_config_part0_rows;
 
 use command_interface::*;
 pub(crate) use command_interface::{
@@ -2154,6 +2125,21 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         table_roles.push(MssqlConfigurationTableRole::Saved);
     }
 
+    let password = sql_password(
+        args.sql_user.as_deref(),
+        args.sql_pwd.as_deref(),
+        &args.sql_pwd_env,
+    );
+    let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: true,
+    })?;
+
     let mut reports = Vec::new();
     let mut manifest_tables = Vec::new();
     let mut total_timings = MssqlDumpTimingReport::default();
@@ -2169,16 +2155,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         );
         let table = role.sql_name();
         let dumped = dump_table_rows_streamed(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            sql_password(
-                args.sql_user.as_deref(),
-                args.sql_pwd.as_deref(),
-                &args.sql_pwd_env,
-            )
-            .as_deref(),
+            &sql,
             &args.database,
             &selected_file_names,
             inventory_plan,
@@ -2719,10 +2696,7 @@ fn export_direct_storage_rows_to_source(
 
 #[allow(dead_code)]
 fn dump_table_rows_eager(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &crate::sql::SqlExec,
     database: &str,
     inventory_plan: MssqlExportInventoryPlan,
     selected_file_names: &BTreeSet<String>,
@@ -2734,15 +2708,7 @@ fn dump_table_rows_eager(
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let (inventory_scope, source_asset_scope) = inventory_scopes(inventory_plan);
-    let rows = fetch_rows(
-        sqlcmd,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-    )?;
+    let rows = fetch_rows(sql, database, table, selected_file_names)?;
     dump_table_rows_with_options_mode(
         output_dir,
         table,
@@ -3710,11 +3676,7 @@ fn dump_table_rows_with_options_mode(
 }
 
 fn dump_table_rows_streamed(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &crate::sql::SqlExec,
     database: &str,
     selected_file_names: &BTreeSet<String>,
     inventory_plan: MssqlExportInventoryPlan,
@@ -3750,29 +3712,12 @@ fn dump_table_rows_streamed(
     }
 
     let headers_started = Instant::now();
-    let headers = fetch_row_headers(
-        sqlcmd,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-    )?;
+    let headers = fetch_row_headers(sql, database, table, selected_file_names)?;
     // Everything below reads the configuration an active dynamic generation
     // publishes; without one this leaves the headers and every later query
     // exactly as they were.
-    let headers = install_dynamic_generation_overlay(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        selected_file_names,
-        headers,
-    )?;
+    let headers =
+        install_dynamic_generation_overlay(sql, database, table, selected_file_names, headers)?;
     let fetch_headers_ms = elapsed_ms(headers_started);
     let mut timings = MssqlDumpTimingReport {
         fetch_headers_ms,
@@ -3808,21 +3753,12 @@ fn dump_table_rows_streamed(
     {
         if selected_file_names.is_empty() {
             metadata_fetch_used_bcp = true;
-            fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?
+            fetch_metadata_rows(sql, database, table)?
         } else if metadata_file_names.is_empty() {
             Vec::new()
         } else {
             metadata_fetch_used_bcp = true;
-            fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &metadata_file_names,
-            )?
+            fetch_config_rows(sql, database, table, &metadata_file_names)?
         }
     } else {
         Vec::new()
@@ -3835,16 +3771,7 @@ fn dump_table_rows_streamed(
     }
     let standalone_body_rows = if !standalone_body_file_names.is_empty() {
         let metadata_fetch_started = Instant::now();
-        let rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &standalone_body_file_names,
-        )?;
+        let rows = fetch_config_rows(sql, database, table, &standalone_body_file_names)?;
         let elapsed = elapsed_ms(metadata_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -3912,16 +3839,7 @@ fn dump_table_rows_streamed(
             .is_some_and(|needs| needs.command_refs || needs.metadata_refs)
     {
         let metadata_fetch_started = Instant::now();
-        selected_configuration_body_rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &file_names,
-        )?;
+        selected_configuration_body_rows = fetch_config_rows(sql, database, table, &file_names)?;
         let elapsed = elapsed_ms(metadata_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -3938,8 +3856,7 @@ fn dump_table_rows_streamed(
     }
     if broad_metadata_indexes && !selected_file_names.is_empty() {
         let metadata_fetch_started = Instant::now();
-        metadata_rows =
-            fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?;
+        metadata_rows = fetch_metadata_rows(sql, database, table)?;
         let elapsed = elapsed_ms(metadata_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -3955,16 +3872,7 @@ fn dump_table_rows_streamed(
         let mut metadata_fetch_used_bcp = false;
         if !targeted_metadata_file_names.is_empty() {
             metadata_fetch_used_bcp = true;
-            metadata_rows = fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &targeted_metadata_file_names,
-            )?;
+            metadata_rows = fetch_config_rows(sql, database, table, &targeted_metadata_file_names)?;
         }
         let elapsed = elapsed_ms(metadata_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
@@ -3988,8 +3896,7 @@ fn dump_table_rows_streamed(
             timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
             if !unresolved_command_refs.is_empty() {
                 let metadata_fetch_started = Instant::now();
-                let broad_metadata_rows =
-                    fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?;
+                let broad_metadata_rows = fetch_metadata_rows(sql, database, table)?;
                 let elapsed = elapsed_ms(metadata_fetch_started);
                 timings.prepare_metadata_fetch_ms += elapsed;
                 timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4021,16 +3928,8 @@ fn dump_table_rows_streamed(
         timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
         if !direct_metadata_file_names.is_empty() {
             let metadata_fetch_started = Instant::now();
-            let direct_metadata_rows = fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &direct_metadata_file_names,
-            )?;
+            let direct_metadata_rows =
+                fetch_config_rows(sql, database, table, &direct_metadata_file_names)?;
             let mut direct_form_file_names = form_metadata_file_names(&direct_metadata_rows);
             direct_form_file_names.extend(selected_form_file_names.iter().cloned());
             let elapsed = elapsed_ms(metadata_fetch_started);
@@ -4047,8 +3946,7 @@ fn dump_table_rows_streamed(
             metadata_rows = merge_config_rows_by_file_name(metadata_rows, direct_metadata_rows);
             if !unresolved.is_empty() || !direct_form_file_names.is_empty() {
                 let metadata_fetch_started = Instant::now();
-                let broad_metadata_rows =
-                    fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?;
+                let broad_metadata_rows = fetch_metadata_rows(sql, database, table)?;
                 let elapsed = elapsed_ms(metadata_fetch_started);
                 timings.prepare_metadata_fetch_ms += elapsed;
                 timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4069,8 +3967,7 @@ fn dump_table_rows_streamed(
             }
         } else if !selected_form_file_names.is_empty() {
             let metadata_fetch_started = Instant::now();
-            let broad_metadata_rows =
-                fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?;
+            let broad_metadata_rows = fetch_metadata_rows(sql, database, table)?;
             let elapsed = elapsed_ms(metadata_fetch_started);
             timings.prepare_metadata_fetch_ms += elapsed;
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4085,16 +3982,7 @@ fn dump_table_rows_streamed(
     }
     if !selected_file_names.is_empty() && !broad_metadata_indexes {
         let fetch_selected_rows_started = Instant::now();
-        let selected_body_rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &file_names,
-        )?;
+        let selected_body_rows = fetch_config_rows(sql, database, table, &file_names)?;
         let elapsed = elapsed_ms(fetch_selected_rows_started);
         timings.prepare_metadata_fetch_ms += elapsed;
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4105,16 +3993,8 @@ fn dump_table_rows_streamed(
         timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
         if !direct_body_metadata_file_names.is_empty() {
             let metadata_fetch_started = Instant::now();
-            let direct_metadata_rows = fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &direct_body_metadata_file_names,
-            )?;
+            let direct_metadata_rows =
+                fetch_config_rows(sql, database, table, &direct_body_metadata_file_names)?;
             let elapsed = elapsed_ms(metadata_fetch_started);
             timings.prepare_metadata_fetch_ms += elapsed;
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4129,8 +4009,7 @@ fn dump_table_rows_streamed(
             metadata_rows = merge_config_rows_by_file_name(metadata_rows, direct_metadata_rows);
             if !unresolved.is_empty() {
                 let metadata_fetch_started = Instant::now();
-                let broad_metadata_rows =
-                    fetch_metadata_rows_bcp(sqlcmd, bcp, server, user, password, database, table)?;
+                let broad_metadata_rows = fetch_metadata_rows(sql, database, table)?;
                 let elapsed = elapsed_ms(metadata_fetch_started);
                 timings.prepare_metadata_fetch_ms += elapsed;
                 timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4165,16 +4044,7 @@ fn dump_table_rows_streamed(
             }
 
             let metadata_fetch_started = Instant::now();
-            let fetched_rows = fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &next_metadata_file_names,
-            )?;
+            let fetched_rows = fetch_config_rows(sql, database, table, &next_metadata_file_names)?;
             let elapsed = elapsed_ms(metadata_fetch_started);
             timings.prepare_metadata_fetch_ms += elapsed;
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4203,16 +4073,8 @@ fn dump_table_rows_streamed(
         timings.prepare_metadata_texts_ms += elapsed_ms(metadata_texts_started);
         if !supplemental_metadata_file_names.is_empty() {
             let metadata_fetch_started = Instant::now();
-            supplemental_owner_rows = fetch_metadata_owner_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &supplemental_metadata_file_names,
-            )?;
+            supplemental_owner_rows =
+                fetch_metadata_owner_rows(sql, database, table, &supplemental_metadata_file_names)?;
             let elapsed = elapsed_ms(metadata_fetch_started);
             timings.prepare_metadata_fetch_ms += elapsed;
             timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4620,16 +4482,7 @@ fn dump_table_rows_streamed(
         .into_iter()
         .collect::<BTreeSet<_>>();
     if !parent_list_ids.is_empty() {
-        let list_rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &parent_list_ids,
-        )?;
+        let list_rows = fetch_config_rows(sql, database, table, &parent_list_ids)?;
         let list_texts = list_rows
             .iter()
             .filter(|row| row.part_no == 0)
@@ -4762,16 +4615,7 @@ fn dump_table_rows_streamed(
         let rows = if predefined_body_file_names.is_empty() {
             Vec::new()
         } else {
-            fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &predefined_body_file_names,
-            )?
+            fetch_config_rows(sql, database, table, &predefined_body_file_names)?
         };
         let elapsed = elapsed_ms(metadata_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
@@ -4811,16 +4655,7 @@ fn dump_table_rows_streamed(
     };
     if !flowchart_file_names.is_empty() {
         let flowchart_fetch_started = Instant::now();
-        let flowchart_rows = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &flowchart_file_names,
-        )?;
+        let flowchart_rows = fetch_config_rows(sql, database, table, &flowchart_file_names)?;
         timings.prepare_metadata_fetch_ms += elapsed_ms(flowchart_fetch_started);
         timings.prepare_metadata_fetch_bcp_ms += elapsed_ms(flowchart_fetch_started);
         owner_ids.extend(business_process_flowchart_predefined_owner_ids(
@@ -4841,16 +4676,7 @@ fn dump_table_rows_streamed(
     let rows = if body_file_names.is_empty() {
         Vec::new()
     } else {
-        fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &body_file_names,
-        )?
+        fetch_config_rows(sql, database, table, &body_file_names)?
     };
     let elapsed = elapsed_ms(metadata_fetch_started);
     timings.prepare_metadata_fetch_ms += elapsed;
@@ -4889,16 +4715,7 @@ fn dump_table_rows_streamed(
         Vec::new()
     } else {
         let form_predefined_fetch_started = Instant::now();
-        let fetched = fetch_config_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &form_predefined_file_names,
-        )?;
+        let fetched = fetch_config_rows(sql, database, table, &form_predefined_file_names)?;
         let elapsed = elapsed_ms(form_predefined_fetch_started);
         timings.prepare_metadata_fetch_ms += elapsed;
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
@@ -4966,16 +4783,7 @@ fn dump_table_rows_streamed(
         let predefined_rows = if predefined_names.is_empty() {
             Vec::new()
         } else {
-            fetch_config_rows_bcp(
-                sqlcmd,
-                bcp,
-                server,
-                user,
-                password,
-                database,
-                table,
-                &predefined_names,
-            )?
+            fetch_config_rows(sql, database, table, &predefined_names)?
         };
         // The legacy indexes fill in only while some kind's rows cannot
         // name themselves yet.
@@ -5085,12 +4893,8 @@ fn dump_table_rows_streamed(
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
         let fetch_cpu = process_cpu_ms();
-        let rows = fetch_binary_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
+        let rows = fetch_binary_rows(
+            sql,
             database,
             table,
             &selected,
@@ -44694,11 +44498,7 @@ fn quote_ident(value: &str) -> String {
 /// which is the defect this exists to close.
 #[allow(clippy::too_many_arguments)]
 fn install_dynamic_generation_overlay(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &crate::sql::SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
@@ -44714,16 +44514,7 @@ fn install_dynamic_generation_overlay(
         return Ok(headers);
     }
     let marker_name = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
-    let marker = fetch_config_rows_bcp(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table,
-        &marker_name,
-    )?;
+    let marker = fetch_config_rows(sql, database, table, &marker_name)?;
     let Some(marker) = marker.into_iter().find(|row| row.part_no == 0) else {
         return Ok(headers);
     };
@@ -44738,15 +44529,7 @@ fn install_dynamic_generation_overlay(
     let names: &[ConfigRowHeader] = if selected_file_names.is_empty() {
         &headers
     } else {
-        inventory = fetch_row_headers(
-            sqlcmd,
-            server,
-            user,
-            password,
-            database,
-            table,
-            &BTreeSet::new(),
-        )?;
+        inventory = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
         &inventory
     };
     let overlay = dynamic_generation::storage_generation_overlay(

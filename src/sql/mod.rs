@@ -312,6 +312,17 @@ impl SqlExec {
         Ok(Self::with_client(target, Box::new(client)))
     }
 
+    /// A handle whose every request fails with `reason`.
+    pub fn detached(reason: &'static str) -> Self {
+        let target = SqlTarget {
+            server: String::new(),
+            database: None,
+            login: SqlLogin::Integrated,
+            trust_server_certificate: false,
+        };
+        Self::with_client(target, Box::new(Detached { reason }))
+    }
+
     pub fn with_client(target: SqlTarget, client: Box<dyn SqlClient>) -> Self {
         Self {
             inner: Arc::new(SqlExecInner {
@@ -394,6 +405,52 @@ impl std::fmt::Debug for SqlExec {
     }
 }
 
+/// A client that refuses every request, for work that must not reach a
+/// database: a base-free stage compiles against no infobase at all.
+struct Detached {
+    reason: &'static str,
+}
+
+impl SqlClient for Detached {
+    fn dbms(&self) -> Dbms {
+        Dbms::SqlServer
+    }
+
+    fn max_connections(&self) -> usize {
+        1
+    }
+
+    fn run_script(&self, _script: &str, _variables: ScriptVariables) -> Result<()> {
+        bail!("{}", self.reason)
+    }
+
+    fn execute(&self, _statement: &str, _params: &[SqlParam<'_>]) -> Result<u64> {
+        bail!("{}", self.reason)
+    }
+
+    fn read_rows(
+        &self,
+        _query: &str,
+        _params: &[SqlParam<'_>],
+        _each: &mut dyn FnMut(SqlRow) -> Result<()>,
+    ) -> Result<()> {
+        bail!("{}", self.reason)
+    }
+
+    fn query_json(&self, _query: &str) -> Result<Option<String>> {
+        bail!("{}", self.reason)
+    }
+
+    fn write_rows(
+        &self,
+        _table: &str,
+        _columns: &[&str],
+        _rows: &[Vec<SqlParam<'_>>],
+    ) -> Result<u64> {
+        bail!("{}", self.reason)
+    }
+}
+
 fn connections_from_env() -> usize {
     std::env::var(CONNECTIONS_ENV)
         .ok()
@@ -470,6 +527,19 @@ mod tests {
             ..bad
         };
         assert!(SqlExec::from_options(with_sqlcmd).is_ok());
+    }
+
+    #[test]
+    fn a_detached_handle_refuses_every_request() {
+        let sql = SqlExec::detached("no database here");
+        let client = sql.client().unwrap();
+        let error = client
+            .query_scalar("SELECT 1", &[])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "no database here");
+        assert!(client.execute("SELECT 1", &[]).is_err());
+        assert!(client.write_rows("t", &["a"], &[]).is_err());
     }
 
     #[test]

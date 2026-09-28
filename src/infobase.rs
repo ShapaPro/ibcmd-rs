@@ -188,7 +188,7 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
     ensure_mssql(&config.dbms)?;
     export_config_report(
         &config,
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         &args.db_pwd_env,
         &args.output_dir,
         args.overwrite,
@@ -198,7 +198,7 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
 
 fn export_config_report(
     config: &ConnectionConfig,
-    sqlcmd: &Path,
+    sqlcmd: Option<&Path>,
     db_pwd_env: &str,
     output_dir_arg: &Path,
     overwrite: bool,
@@ -211,8 +211,8 @@ fn export_config_report(
         rows_dir: None,
         model_export: false,
         legacy_export: false,
-        sqlcmd: sqlcmd.to_path_buf(),
-        bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
+        sqlcmd: sqlcmd.map(Path::to_path_buf),
+        bcp_executable: None,
         runtime_journal: None,
         server: config.db_server.clone(),
         sql_user: config.db_user.clone(),
@@ -460,7 +460,7 @@ pub fn roundtrip_config(
             format: config.format,
             legacy_adapter: config.legacy_adapter.clone(),
         },
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         &args.db_pwd_env,
         &after_apply_dir,
         args.overwrite,
@@ -635,12 +635,14 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
             },
         };
         if args.drop_target_db_after_run {
-            if let Err(error) = crate::mssql::drop_database(
-                &args.sqlcmd,
+            let dropped = crate::sql::SqlExec::from_options(crate::sql::SqlOptions::integrated(
                 &config.db_server,
-                &entry.target_db,
-                args.allow_non_lab,
-            ) {
+                args.sqlcmd.as_deref(),
+            ))
+            .and_then(|sql| {
+                crate::mssql::drop_database(&sql, &entry.target_db, args.allow_non_lab)
+            });
+            if let Err(error) = dropped {
                 entry.cleanup_error = Some(format!("{error:#}"));
             }
         }

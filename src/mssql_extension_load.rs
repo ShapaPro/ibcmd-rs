@@ -20,15 +20,14 @@ use crate::cli::{
     MssqlLoadExtensionArgs,
 };
 use crate::compiler::bootstrap::compile_extension_overlay_source_tree;
-use crate::mssql_dump::cas::{
-    CasHash, MssqlStorageTable, fetch_cas_storage_image_with_manifest_bcp,
-};
+use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image_with_manifest};
 use crate::mssql_extension_stage::{
     ConfigInfoIdentity, ExtensionRegistrySnapshot, ExtensionStagePlan, ExtensionStageRow,
     extension_namespace_prefix, prepare_extension_stage,
 };
 use crate::mssql_extensions::{MssqlExtensionInfo, list_extensions};
 use crate::profile_registry::load_bundled_profile_registry;
+use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions};
 
 const MAX_ACTIVATION_STAGE_ROWS: usize = 100_000;
 const MAX_ACTIVATION_STAGE_BYTES: u64 = 512 * 1024 * 1024;
@@ -121,7 +120,7 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
-            sqlcmd: &args.sqlcmd,
+            sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
             ras_endpoint: &args.ras_endpoint,
             server: &args.server,
@@ -140,6 +139,15 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
         bail!("direct extension writes require explicit --allow-non-lab");
     }
     let password = resolve_password(args)?;
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: args.sqlcmd_trust_cert,
+    })?;
     let registry = list_extensions(&MssqlExtensionListArgs {
         sqlcmd: args.sqlcmd.clone(),
         server: args.server.clone(),
@@ -172,12 +180,8 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
             args.input_dir.clone()
         };
         let root = CasHash::parse_hex(&extension.active_cas_root)?;
-        let (active, manifest) = fetch_cas_storage_image_with_manifest_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            password.as_deref(),
+        let (active, manifest) = fetch_cas_storage_image_with_manifest(
+            &sql,
             &args.database,
             MssqlStorageTable::ConfigCas,
             root,
@@ -243,16 +247,12 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
             None
         } else {
             Some(crate::mssql_extension_stage::execute_configcassave_stage(
-                &args.sqlcmd,
-                &args.server,
-                args.sql_user.as_deref(),
-                password.as_deref(),
+                &sql,
                 &args.database,
                 &snapshot,
                 &item.plan,
                 args.replace_staging,
                 args.allow_non_lab,
-                args.sqlcmd_trust_cert,
             )?)
         };
         reports.push(MssqlExtensionLoadEntry {
@@ -290,7 +290,7 @@ pub fn activate_staged_extension(
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
-            sqlcmd: &args.sqlcmd,
+            sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
             ras_endpoint: &args.ras_endpoint,
             server: &args.server,
@@ -326,6 +326,15 @@ pub fn activate_staged_extension(
         }
         None
     };
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: args.sqlcmd_trust_cert,
+    })?;
     let registry = list_extensions(&MssqlExtensionListArgs {
         sqlcmd: args.sqlcmd.clone(),
         server: args.server.clone(),
@@ -343,12 +352,8 @@ pub fn activate_staged_extension(
         .ok_or_else(|| anyhow!("extension {:?} was not found", args.extension))?;
     let namespace = extension_namespace_prefix(extension.physical_registry_id);
     let prefix = format!("{namespace}__");
-    let selected_stage = crate::mssql_dump::fetch_extension_activation_rows_sqlcmd(
-        &args.sqlcmd,
-        &args.server,
-        args.sql_user.as_deref(),
-        password.as_deref(),
-        args.sqlcmd_trust_cert,
+    let selected_stage = crate::mssql_dump::fetch_extension_activation_rows(
+        &sql,
         &args.database,
         "ConfigCASSave",
         &prefix,
@@ -375,12 +380,8 @@ pub fn activate_staged_extension(
         .collect::<Result<Vec<_>>>()?;
     let stage = ExtensionStagePlan::from_complete_rows(extension.physical_registry_id, rows)?;
     let marker_name = format!("dbStruFinal{namespace}");
-    let marker_rows = crate::mssql_dump::fetch_extension_activation_rows_sqlcmd(
-        &args.sqlcmd,
-        &args.server,
-        args.sql_user.as_deref(),
-        password.as_deref(),
-        args.sqlcmd_trust_cert,
+    let marker_rows = crate::mssql_dump::fetch_extension_activation_rows(
+        &sql,
         &args.database,
         "ConfigCAS",
         &marker_name,
@@ -452,7 +453,7 @@ pub fn activate_staged_extension(
         &serde_json::to_vec_pretty(&rendered.recovery)?,
     )?;
     if !args.dry_run && !rendered.sql().is_empty() {
-        run_activation_sqlcmd(args, password.as_deref(), &script)?;
+        run_activation_script(&sql, &script)?;
     }
     Ok(MssqlExtensionActivationReport {
         database: args.database.clone(),
@@ -612,22 +613,36 @@ fn open_artifact_no_follow(path: &Path) -> Result<File> {
     Ok(options.open(path)?)
 }
 
-fn run_activation_sqlcmd(
-    args: &MssqlActivateStagedExtensionArgs,
-    password: Option<&str>,
-    script: &Path,
-) -> Result<()> {
-    let mut command = Command::new(&args.sqlcmd);
-    command.arg("-S").arg(&args.server);
-    if let Some(user) = args.sql_user.as_deref() {
+/// Runs the rendered activation script: through the built-in client on a
+/// session of its own, or `sqlcmd -x -b -i` with `--sqlcmd`. `$(` is literal
+/// text either way.
+fn run_activation_script(sql: &SqlExec, script: &Path) -> Result<()> {
+    let tools = match sql.backend() {
+        SqlBackend::Client(client) => {
+            let text = fs::read_to_string(script)
+                .with_context(|| format!("failed to read {}", script.display()))?;
+            return client
+                .run_script(&text, ScriptVariables::Literal)
+                .map_err(|error| {
+                    anyhow!(
+                        "extension activation failed: {}",
+                        bounded_subprocess_text(format!("{error:#}").as_bytes())
+                    )
+                });
+        }
+        SqlBackend::Tools(tools) => tools,
+    };
+    let mut command = Command::new(&tools.sqlcmd);
+    command.arg("-S").arg(sql.server());
+    if let Some(user) = sql.user() {
         command.arg("-U").arg(user);
-        if let Some(password) = password {
+        if let Some(password) = sql.password() {
             command.env("SQLCMDPASSWORD", password);
         }
     } else {
         command.arg("-E");
     }
-    if args.sqlcmd_trust_cert {
+    if sql.trust_server_certificate() {
         command.arg("-C");
     }
     let output = command
@@ -640,7 +655,7 @@ fn run_activation_sqlcmd(
         .arg("-i")
         .arg(script)
         .output()
-        .with_context(|| format!("failed to launch {}", args.sqlcmd.display()))?;
+        .with_context(|| format!("failed to launch {}", tools.sqlcmd.display()))?;
     if !output.status.success() {
         let stdout = bounded_subprocess_text(&output.stdout);
         let stderr = bounded_subprocess_text(&output.stderr);
@@ -1024,8 +1039,8 @@ mod tests {
             infobase_id: None,
             infobase_user: None,
             infobase_pwd: None,
-            sqlcmd: PathBuf::from("must-not-run-sqlcmd"),
-            bcp_executable: PathBuf::from("must-not-run-bcp"),
+            sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
+            bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
             server: "must-not-connect".to_owned(),
             sql_user: None,
             sql_pwd: None,
@@ -1055,8 +1070,8 @@ mod tests {
             infobase_id: None,
             infobase_user: None,
             infobase_pwd: None,
-            sqlcmd: PathBuf::from("must-not-run-sqlcmd"),
-            bcp_executable: PathBuf::from("must-not-run-bcp"),
+            sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
+            bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
             server: "must-not-connect".to_owned(),
             sql_user: None,
             sql_pwd: None,
