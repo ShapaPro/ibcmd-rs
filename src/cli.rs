@@ -1669,7 +1669,8 @@ pub struct MssqlDumpExtensionArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlLoadExtensionArgs {
-    /// Exact native MSSQL platform layout. Independent from --source-version.
+    /// Exact native MSSQL platform layout. Without --platform (which must name
+    /// this build or its release) the XML format is this build's.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
     /// rac executable used to verify the exact RAS agent build.
@@ -1959,7 +1960,8 @@ pub struct MssqlActivateStagedMainArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct MssqlApplySourceChangeArgs {
-    /// Exact native MSSQL platform layout. Independent from --source-version.
+    /// Exact native MSSQL platform layout. Without --platform (which must name
+    /// this build or its release) the XML format is this build's.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
     #[arg(long, default_value = "sqlcmd")]
