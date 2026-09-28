@@ -320,7 +320,8 @@ pub const OTHER_MODES: &[(&str, &str)] = &[
     ),
 ];
 
-/// A command line refused before anything runs; exit code 1.
+/// A command line refused before anything runs; `super::refusal_exit_code`
+/// gives its exit code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// An unknown option, a value where none is taken, an extra argument.

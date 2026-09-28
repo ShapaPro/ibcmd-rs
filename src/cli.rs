@@ -10,9 +10,12 @@ use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 #[derive(Debug, Parser)]
 #[command(name = "ibcmd-rs")]
 #[command(about = "Research-first replacement path for loading 1C configuration sources")]
-#[command(version)]
+#[command(version, disable_version_flag = true)]
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
+    /// Print version (`-v` as the platform's ibcmd, `-V` too)
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: (),
     #[command(subcommand)]
     pub command: Commands,
 }

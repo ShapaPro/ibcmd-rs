@@ -12,9 +12,11 @@
 //! operation starts and when it succeeds, `[ERROR] ...` lines on stderr when
 //! it fails, a bare line on stderr for a refused command line (the list of
 //! commands for an incomplete one goes to stdout, as natively). The JSON
-//! report is written only to `--report <file>`. Exit codes: 0 success,
-//! 1 failure (the platform uses 2 for a malformed command line and 255 for
-//! a failed operation; any script testing for "not 0" reads both alike).
+//! report is written only to `--report <file>`. Exit codes are the
+//! platform's (measured on 8.3.27.2214): 0 success, 2 a malformed or
+//! incomplete command line, -1 a failed operation (255 to a POSIX shell).
+//! 1 is ibcmd-rs's own: a mode, command, option or DBMS this version does
+//! not serve, which the platform would have run.
 
 pub mod help;
 pub mod parse;
@@ -30,6 +32,32 @@ use crate::infobase::OutputDirectoryNotEmpty;
 pub use parse::{Common, ExportRequest, ImportRequest, Invocation, Refusal};
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
+
+/// Exit code of what this version does not serve (no platform equivalent).
+pub const EXIT_UNSUPPORTED: i32 = 1;
+/// Exit code of a malformed or incomplete command line, as the platform's.
+pub const EXIT_MALFORMED: i32 = 2;
+/// Exit code of a failed operation, as the platform's: -1, which Windows
+/// shows as -1 (`%ERRORLEVEL%`, `$LASTEXITCODE`) and a POSIX shell as 255.
+pub const EXIT_FAILED: i32 = -1;
+
+/// The exit code of a refused command line: the platform's for a line it
+/// would refuse too, ibcmd-rs's own for one the platform would run.
+pub fn refusal_exit_code(refusal: &Refusal) -> i32 {
+    match refusal {
+        Refusal::Parse(_)
+        | Refusal::MissingValue(_)
+        | Refusal::Incomplete { .. }
+        | Refusal::UnknownDbms(_)
+        | Refusal::InvalidValue { .. } => EXIT_MALFORMED,
+        Refusal::UnsupportedCommand(_)
+        | Refusal::UnsupportedOption { .. }
+        | Refusal::UnsupportedServer(_)
+        | Refusal::UnsupportedDbms(_)
+        | Refusal::FileInfobase
+        | Refusal::ImportArchive(_) => EXIT_UNSUPPORTED,
+    }
+}
 
 /// The name the program was started as (`ibcmd` once renamed), for the
 /// usage lines of the help.
@@ -64,7 +92,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         Ok(Invocation::Import(request)) => run_import(request),
         Err(refusal) => {
             print_refusal(&refusal, &program_name());
-            1
+            refusal_exit_code(&refusal)
         }
     };
     finish(code)
@@ -73,7 +101,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
 /// `ibcmd server ...` and the platform's other modes: refused.
 pub fn run_other_mode(mode: &str) -> i32 {
     eprintln!("{}", unsupported_mode_message(mode));
-    finish(1)
+    finish(EXIT_UNSUPPORTED)
 }
 
 /// `ibcmd help [MODE]`: the platform's help mode for its modes, this
@@ -102,7 +130,7 @@ pub fn run_help(args: &[OsString]) -> i32 {
             eprintln!(
                 "Неизвестный режим: {name}. Список режимов: {program} help; команды ibcmd-rs: {program} --help"
             );
-            finish(1)
+            finish(EXIT_MALFORMED)
         }
     }
 }
@@ -361,7 +389,7 @@ impl Operation {
         }
         eprintln!("[ERROR] {} завершен с ошибкой", self.title);
         self.record_failure(message, report);
-        1
+        EXIT_FAILED
     }
 
     fn record_failure(&self, message: &str, report: Option<&Path>) {
@@ -413,7 +441,7 @@ fn run_export(mut request: ExportRequest) -> i32 {
             );
             eprintln!("[ERROR] {message}");
             EXPORT.record_failure(&message, report.as_deref());
-            1
+            EXIT_FAILED
         }
         Err(error) => EXPORT.fail_with(&format!("{error:#}"), report.as_deref()),
     }
@@ -592,5 +620,33 @@ mod tests {
         assert!(message.contains("- Импорт конфигурации из XML"));
         let (message, _) = refusal_message(&Refusal::Parse("--bogus".to_string()), "ibcmd");
         assert_eq!(message, "Ошибка разбора параметра: --bogus");
+    }
+
+    #[test]
+    fn refusals_exit_as_the_platform_where_it_refuses_too() {
+        // 8.3.27.2214: an unknown option, a missing value, an incomplete
+        // command and an unknown DBMS all exit 2.
+        for refusal in [
+            Refusal::Parse("--bogus".to_string()),
+            Refusal::MissingValue("path".to_string()),
+            Refusal::Incomplete {
+                path: vec!["config"],
+            },
+            Refusal::UnknownDbms("Foo".to_string()),
+            Refusal::InvalidValue {
+                option: "--threads".to_string(),
+                value: "many".to_string(),
+            },
+        ] {
+            assert_eq!(refusal_exit_code(&refusal), EXIT_MALFORMED, "{refusal:?}");
+        }
+        // what the platform would run exits 1, a code it never uses for them
+        for refusal in [
+            Refusal::UnsupportedCommand("infobase config apply".to_string()),
+            Refusal::UnsupportedDbms("PostgreSQL".to_string()),
+            Refusal::FileInfobase,
+        ] {
+            assert_eq!(refusal_exit_code(&refusal), EXIT_UNSUPPORTED, "{refusal:?}");
+        }
     }
 }

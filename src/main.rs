@@ -62,7 +62,7 @@ fn run() -> Result<()> {
                 std::process::exit(2);
             }
         },
-        // The platform ibcmd's modes: its syntax, its messages, exit 0 or 1.
+        // The platform ibcmd's modes: its syntax, its messages, its exit codes.
         Commands::Infobase(args) => std::process::exit(ibcmd_rs::dropin::run_infobase(&args.args)),
         Commands::Help(args) => std::process::exit(ibcmd_rs::dropin::run_help(&args.args)),
         Commands::Server(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("server")),

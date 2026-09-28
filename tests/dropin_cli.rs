@@ -1,7 +1,8 @@
 //! The drop-in command line, run as a process: every native mode and
-//! command either served or refused by name with exit code 1, in Russian,
-//! without a panic and without any database (the cases here fail before a
-//! connection would be opened).
+//! command either served or refused by name, in Russian, without a panic and
+//! without any database (the cases here fail before a connection would be
+//! opened). Exit codes as the platform's: 2 for a malformed line, -1 (255 on
+//! POSIX) for a failed operation; 1 for what ibcmd-rs does not serve.
 
 use std::fs;
 use std::io::Write;
@@ -42,12 +43,27 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// What ibcmd-rs does not serve.
+const UNSUPPORTED: i32 = 1;
+/// A malformed or incomplete command line, as the platform's.
+const MALFORMED: i32 = 2;
+/// A failed operation, as the platform's: `exit(-1)`.
+const FAILED: i32 = if cfg!(windows) { -1 } else { 255 };
+
 fn assert_refused(args: &[&str], stream_has: &str) -> Output {
+    assert_exit(args, UNSUPPORTED, stream_has)
+}
+
+fn assert_malformed(args: &[&str], stream_has: &str) -> Output {
+    assert_exit(args, MALFORMED, stream_has)
+}
+
+fn assert_exit(args: &[&str], code: i32, stream_has: &str) -> Output {
     let output = run(args);
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(code),
         "{args:?}\n{stdout}\n{stderr}"
     );
     assert!(
@@ -128,41 +144,43 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
                 );
             }
             NodeKind::Group => {
-                assert_refused(&args, "Указана неполная команда");
+                assert_malformed(&args, "Указана неполная команда");
             }
             // served: without its path it asks for one
             NodeKind::Export | NodeKind::Import => {
-                assert_refused(&args, "Не указано значение параметра");
+                assert_malformed(&args, "Не указано значение параметра");
             }
         }
     }
-    assert_refused(&["infobase"], "Указана неполная команда");
-    assert_refused(&["infobase", "config"], "ibcmd-rs infobase config load");
-    assert_refused(&["infobase", "bogus"], "Указана неполная команда");
+    assert_malformed(&["infobase"], "Указана неполная команда");
+    assert_malformed(&["infobase", "config"], "ibcmd-rs infobase config load");
+    assert_malformed(&["infobase", "bogus"], "Указана неполная команда");
 }
 
 #[test]
 fn unsupported_options_and_malformed_lines_are_refused() {
     let out = TempDir::new("options");
-    for (option, needle) in [
+    for (option, code, needle) in [
         (
             "--sync",
+            UNSUPPORTED,
             "Параметр `--sync` команды `infobase config export`",
         ),
-        ("--archive", "Параметр `--archive`"),
-        ("--base=info.xml", "Параметр `--base`"),
-        ("--file=a.cf", "Параметр `--file`"),
-        ("--extension=E", "Параметр `--extension`"),
-        ("--remote=http://h:1545", "Параметр `--remote`"),
-        ("--pid=1", "Параметр `--pid`"),
-        ("--bogus", "Ошибка разбора параметра: --bogus"),
-        ("-T4", "Ошибка разбора параметра: -T4"),
+        ("--archive", UNSUPPORTED, "Параметр `--archive`"),
+        ("--base=info.xml", UNSUPPORTED, "Параметр `--base`"),
+        ("--file=a.cf", UNSUPPORTED, "Параметр `--file`"),
+        ("--extension=E", UNSUPPORTED, "Параметр `--extension`"),
+        ("--remote=http://h:1545", UNSUPPORTED, "Параметр `--remote`"),
+        ("--pid=1", UNSUPPORTED, "Параметр `--pid`"),
+        ("--bogus", MALFORMED, "Ошибка разбора параметра: --bogus"),
+        ("-T4", MALFORMED, "Ошибка разбора параметра: -T4"),
         (
             "--threads=many",
+            MALFORMED,
             "Недопустимое значение параметра --threads: many",
         ),
     ] {
-        assert_refused(
+        assert_exit(
             &[
                 "infobase",
                 "config",
@@ -172,6 +190,7 @@ fn unsupported_options_and_malformed_lines_are_refused() {
                 option,
                 out.arg(),
             ],
+            code,
             needle,
         );
     }
@@ -209,13 +228,15 @@ fn unsupported_options_and_malformed_lines_are_refused() {
             &format!("СУБД `{dbms}` не поддерживается"),
         );
     }
-    assert_refused(
+    assert_malformed(
         &["infobase", "config", "export", "--dbms=Foo", out.arg()],
         "Указанный тип СУБД не поддерживается: 'Foo'",
     );
-    // no database at all: the platform would open a file infobase
-    assert_refused(
+    // no database at all: the platform would open a file infobase; the
+    // export starts and fails on the connection
+    assert_exit(
         &["infobase", "config", "export", out.arg()],
+        FAILED,
         "файловые информационные базы не поддерживаются",
     );
     assert_refused(
@@ -258,7 +279,7 @@ fn export_refuses_a_non_empty_directory_as_the_platform_does() {
         &format!("--report={}", report.display()),
         out.arg(),
     ]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(FAILED));
     assert_eq!(
         text(&output.stdout),
         "[INFO] Экспорт конфигурации в XML...\n"
@@ -289,7 +310,7 @@ fn import_reports_a_missing_tree_in_the_platforms_words() {
         "--db-name=ibcmd_rs_dropin_test",
         missing.to_str().unwrap(),
     ]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(FAILED));
     assert_eq!(
         text(&output.stdout),
         "[INFO] Импорт конфигурации из XML...\n"
@@ -326,7 +347,7 @@ fn the_database_password_can_come_from_stdin() {
         ],
         Some("secret\r\n"),
     );
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(FAILED));
     assert!(text(&output.stderr).contains("не пуст"));
     // without -W and without a password the user is told how to give one
     let output = run(&[
@@ -338,7 +359,7 @@ fn the_database_password_can_come_from_stdin() {
         "--db-user=sa",
         out.arg(),
     ]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(FAILED));
     assert!(
         text(&output.stderr).contains("не указан пароль пользователя сервера СУБД"),
         "{}",
@@ -370,8 +391,14 @@ fn help_and_version() {
     assert_eq!(output.status.code(), Some(0));
     assert!(text(&output.stdout).contains("Usage"));
     assert_refused(&["help", "server"], "Режим `server` не поддерживается");
-    assert_refused(&["help", "bogus"], "Неизвестный режим: bogus");
+    assert_malformed(&["help", "bogus"], "Неизвестный режим: bogus");
     let output = run(&["infobase", "--version"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(text(&output.stdout).starts_with("ibcmd-rs "));
+    // the platform's `ibcmd -v`
+    for flag in ["-v", "-V", "--version"] {
+        let output = run(&[flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert!(text(&output.stdout).starts_with("ibcmd-rs "), "{flag}");
+    }
 }
