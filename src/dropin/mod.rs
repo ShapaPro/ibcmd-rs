@@ -390,6 +390,11 @@ fn run_export(mut request: ExportRequest) -> i32 {
     if let Some(threads) = request.threads {
         crate::parallel::request_workers(threads);
     }
+    // The platform's lines only; `IBCMD_RS_VERBOSE=1` keeps the export's
+    // research summaries on stderr.
+    crate::mssql_dump::model_export::set_quiet_summaries(
+        std::env::var_os("IBCMD_RS_VERBOSE").is_none_or(|value| value != "1"),
+    );
     let args = export_args(&request);
     EXPORT.start();
     match crate::infobase::export_config(&args) {

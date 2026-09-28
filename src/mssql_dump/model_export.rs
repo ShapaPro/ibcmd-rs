@@ -25,6 +25,19 @@ use crate::metadata_model::export::{
 use crate::metadata_model::index::ConfigIndex;
 use crate::metadata_model::objects::parts::Compat;
 
+/// Whether the export keeps its research summaries (the model plan, the
+/// name index) off stderr: the drop-in `infobase config export` prints only
+/// the platform's own lines. Warnings about single rows still print.
+static QUIET_SUMMARIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_quiet_summaries(quiet: bool) {
+    QUIET_SUMMARIES.store(quiet, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(super) fn quiet_summaries() -> bool {
+    QUIET_SUMMARIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The environment switches, for callers without the command-line flags:
 /// `IBCMD_RS_LEGACY_EXPORT=1` (or `IBCMD_RS_MODEL_EXPORT=0`) opts out.
 pub(super) const MODEL_EXPORT_ENV: &str = "IBCMD_RS_MODEL_EXPORT";
@@ -558,6 +571,9 @@ impl ModelExport {
 
     /// One line on stderr: what the index holds and where it came from.
     pub(super) fn log_summary(&self, elapsed_ms: u64) {
+        if quiet_summaries() {
+            return;
+        }
         let report = &self.report;
         let rows = report.rows_by_kind.values().sum::<usize>();
         let failed = report.failures.values().sum::<usize>();

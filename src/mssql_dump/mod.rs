@@ -4278,7 +4278,10 @@ fn dump_table_rows_streamed(
     let skip_recalculation_refs = modelled(&["Recalculation"]);
     let skip_root_recalculation_refs = modelled(&["CalculationRegister"]);
     let skip_functional_option_refs = modelled(&["FunctionalOption"]);
-    if let Some(plan) = &model_plan {
+    if let Some(plan) = model_plan
+        .as_ref()
+        .filter(|_| !model_export::quiet_summaries())
+    {
         eprintln!(
             "model export: every descriptor through the model: {}; still legacy by kind: {:?}; \
              left out: recalculation refs {}, root recalculation refs {}, functional option \
