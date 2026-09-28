@@ -61,9 +61,10 @@ fn released_infobase_mode_refuses_rather_than_runs_the_platform() {
     assert!(help.contains("import"));
     for command in ORACLE_INFOBASE_COMMANDS {
         assert!(!help.contains(command), "help names `{command}`:\n{help}");
-        // not a command of the release: an incomplete `config`
+        // not a command of the release: an incomplete `config`, exit 2 as
+        // the platform gives for a command it does not know
         let output = run(&["infobase", "config", command, "--db-name=x"]);
-        assert_eq!(output.status.code(), Some(1), "{command}");
+        assert_eq!(output.status.code(), Some(2), "{command}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("Указана неполная команда"), "{stdout}");
     }

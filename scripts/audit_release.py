@@ -111,8 +111,9 @@ def audit_infobase_mode(binary: pathlib.Path, environment: dict) -> None:
     for command in ORACLE_INFOBASE_COMMANDS:
         if command in help_run.stdout:
             raise SystemExit(f"release `infobase --help` names the platform-oracle command {command}")
+        # an unknown command: exit 2, as the platform's ibcmd
         refused = run("config", command, "--db-name=audit")
-        if refused.returncode != 1 or "Указана неполная команда" not in refused.stdout:
+        if refused.returncode != 2 or "Указана неполная команда" not in refused.stdout:
             raise SystemExit(f"release `infobase config {command}` is not refused as unknown")
     refused = run("config", "apply", "--dbms=MSSQLServer", "--db-name=audit", "--force")
     if refused.returncode != 1 or "не поддерживается в этой версии ibcmd-rs" not in refused.stderr:
