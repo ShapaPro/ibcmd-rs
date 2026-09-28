@@ -1,20 +1,26 @@
-//! SQL Server access for every command that reads or writes an infobase.
+//! Database access for every command that reads or writes an infobase.
 //!
-//! A command talks to SQL Server itself, over TDS -- the protocol the 1C
-//! platform's own driver (MSOLEDBSQL, loaded by `sqlsrvr.dll`) speaks: the
-//! `tiberius` client runs inside the process, TLS goes through rustls, Windows
-//! logins through SSPI. Neither sqlcmd.exe, bcp.exe nor an ODBC/OLE DB driver
-//! has to be installed.
+//! A command reaches its database through [`SqlExec`]. By default that is a
+//! client built into the process, behind the DBMS-neutral [`SqlClient`]
+//! interface: for SQL Server, the TDS protocol the 1C platform's own driver
+//! (MSOLEDBSQL, loaded by `sqlsrvr.dll`) speaks, through `tiberius`, with TLS
+//! through rustls and Windows logins through SSPI -- neither sqlcmd.exe,
+//! bcp.exe nor an ODBC/OLE DB driver has to be installed. Everything that is
+//! SQL Server's own (TDS, instance names, `GO`, `sp_executesql`, `FOR JSON`
+//! rows, `varbinary(max)` writes) lives in [`mssql`]; a PostgreSQL client can
+//! implement the same interface beside it.
 //!
 //! A command given `--sqlcmd <path>` keeps the behaviour of ibcmd-rs 0.2
-//! instead: statements and scripts go through that sqlcmd.exe and bulk reads
-//! and writes through bcp.exe (`--bcp-executable`, else the bcp.exe beside
-//! sqlcmd). The lab bundle commands (`mssql-storage-*`, `mssql-delta-*`) keep
-//! bcp.exe for their native-format files either way.
+//! instead ([`SqlBackend::Tools`]): statements and scripts go through that
+//! sqlcmd.exe and bulk reads and writes through bcp.exe (`--bcp-executable`,
+//! else the bcp.exe beside sqlcmd). The lab bundle commands
+//! (`mssql-storage-*`, `mssql-delta-*`) keep bcp.exe for their native-format
+//! files either way.
+//!
+//! The SQL text the commands send is SQL Server's dialect today (see the
+//! report of the 0.3 SQL track for where).
 
-mod address;
-mod script;
-mod tds;
+pub mod mssql;
 mod value;
 
 use std::path::{Path, PathBuf};
@@ -22,23 +28,99 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-pub use address::{DEFAULT_PORT, ServerAddress};
-pub use script::{ScriptBatch, ScriptVariables, split_batches};
-pub use tds::{SqlParam, TdsConnection, TdsPool};
-pub use value::{SqlRow, SqlValue};
+pub use value::{SqlParam, SqlRow, SqlValue};
 
 /// The environment variable that sets how many connections a command may
-/// hold open at once for parallel reads (default 4).
+/// hold open at once for parallel reads and writes (default 4).
 pub const CONNECTIONS_ENV: &str = "IBCMD_RS_SQL_CONNECTIONS";
 const DEFAULT_CONNECTIONS: usize = 4;
 const MAX_CONNECTIONS: usize = 64;
+
+/// A database server product.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dbms {
+    SqlServer,
+}
+
+/// How a script treats the client-side variables of its command-line tool
+/// (sqlcmd's `$(name)`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptVariables {
+    /// The tool substituted them (sqlcmd without `-x`): a script that uses
+    /// one is refused, since nothing substitutes it now.
+    Refuse,
+    /// The tool left them alone (`sqlcmd -x`): `$(` is plain text.
+    Literal,
+}
+
+/// What a command needs from a database server, whatever the DBMS.
+///
+/// Every method may be called from several threads at once; a client keeps
+/// up to [`SqlClient::max_connections`] connections open for that. Session
+/// state a request sets up (the current database, `SET` options, temporary
+/// tables) ends with the request, except within [`SqlClient::run_script`].
+pub trait SqlClient: Send + Sync {
+    fn dbms(&self) -> Dbms;
+
+    /// How many requests may run at once (parallel reads should not split
+    /// into more parts than this).
+    fn max_connections(&self) -> usize;
+
+    /// Runs a script written for the DBMS's command-line tool (`sqlcmd -i`)
+    /// on a session of its own, batch after batch; stops at the first error.
+    fn run_script(&self, script: &str, variables: ScriptVariables) -> Result<()>;
+
+    /// Runs statements whose results nobody reads; returns the rows they
+    /// affected.
+    fn execute(&self, statement: &str, params: &[SqlParam<'_>]) -> Result<u64>;
+
+    /// Streams every row of a query to `each`, in order, as rows arrive --
+    /// the read of large binary rows. An error from `each` stops the read.
+    fn read_rows(
+        &self,
+        query: &str,
+        params: &[SqlParam<'_>],
+        each: &mut dyn FnMut(SqlRow) -> Result<()>,
+    ) -> Result<()>;
+
+    /// Every row of a query.
+    fn query_rows(&self, query: &str, params: &[SqlParam<'_>]) -> Result<Vec<SqlRow>> {
+        let mut rows = Vec::new();
+        self.read_rows(query, params, &mut |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
+    }
+
+    /// The first column of the first row, if there is a row.
+    fn query_scalar(&self, query: &str, params: &[SqlParam<'_>]) -> Result<Option<SqlValue>> {
+        let mut first = None;
+        self.read_rows(query, params, &mut |mut row| {
+            if first.is_none() && !row.values.is_empty() {
+                first = Some(row.values.swap_remove(0));
+            }
+            Ok(())
+        })?;
+        Ok(first)
+    }
+
+    /// The JSON document a query builds (`FOR JSON` on SQL Server); `None`
+    /// when the query returned no row.
+    fn query_json(&self, query: &str) -> Result<Option<String>>;
+
+    /// Writes rows into a table in bulk, each row one value per column, in
+    /// the given column order. `table` and `columns` are spelled in the
+    /// DBMS's own syntax.
+    fn write_rows(&self, table: &str, columns: &[&str], rows: &[Vec<SqlParam<'_>>]) -> Result<u64>;
+}
 
 /// How a command logs in.
 #[derive(Clone)]
 pub enum SqlLogin {
     /// The Windows account the process runs as (SSPI; sqlcmd `-E`).
     Integrated,
-    /// A SQL Server login (sqlcmd `-U`, the password from `--sql-pwd` or the
+    /// A database login (sqlcmd `-U`; the password from `--sql-pwd` or the
     /// environment).
     Sql {
         user: String,
@@ -93,7 +175,7 @@ impl std::fmt::Debug for SqlLogin {
     }
 }
 
-/// The SQL Server a command works against.
+/// The server a command works against.
 #[derive(Clone, Debug)]
 pub struct SqlTarget {
     /// The server as given (`host`, `host\instance`, `host,port`).
@@ -138,17 +220,17 @@ pub fn bcp_beside(sqlcmd: &Path) -> PathBuf {
     PathBuf::from("bcp")
 }
 
-/// Which way a command reaches SQL Server.
+/// Which way a command reaches its database.
 #[derive(Clone, Copy)]
 pub enum SqlBackend<'a> {
-    /// The built-in TDS client.
-    Tds(&'a TdsPool),
-    /// sqlcmd.exe and bcp.exe (`--sqlcmd`).
+    /// The built-in client.
+    Client(&'a dyn SqlClient),
+    /// sqlcmd.exe and bcp.exe (`--sqlcmd`, SQL Server only).
     Tools(&'a SqlTools),
 }
 
-/// A command's handle on SQL Server: the target and the way to reach it.
-/// Cheap to clone; clones share the connections.
+/// A command's handle on its database server: the target and the way to
+/// reach it. Cheap to clone; clones share the connections.
 #[derive(Clone)]
 pub struct SqlExec {
     inner: Arc<SqlExecInner>,
@@ -160,7 +242,7 @@ struct SqlExecInner {
 }
 
 enum Backend {
-    Tds(TdsPool),
+    Client(Box<dyn SqlClient>),
     Tools(SqlTools),
 }
 
@@ -181,8 +263,8 @@ pub struct SqlOptions<'a> {
 }
 
 impl<'a> SqlOptions<'a> {
-    /// Windows login, certificate trusted, the built-in client unless
-    /// `sqlcmd` is given.
+    /// The Windows login with the server certificate trusted: the built-in
+    /// client, or sqlcmd when `sqlcmd` is given.
     pub fn integrated(server: &'a str, sqlcmd: Option<&'a Path>) -> Self {
         Self {
             sqlcmd,
@@ -197,6 +279,8 @@ impl<'a> SqlOptions<'a> {
 }
 
 impl SqlExec {
+    /// The built-in SQL Server client, or the external tools when the
+    /// options name sqlcmd. Nothing connects until the first request.
     pub fn from_options(options: SqlOptions<'_>) -> Result<Self> {
         let target = SqlTarget {
             server: options.server.to_owned(),
@@ -217,20 +301,24 @@ impl SqlExec {
                         options.password_env
                     );
                 }
-                Self::tds(target)
+                Self::sql_server(target)
             }
         }
     }
 
-    /// The built-in client; no connection is opened until the first query.
-    pub fn tds(target: SqlTarget) -> Result<Self> {
-        let pool = TdsPool::new(target.clone(), connections_from_env())?;
-        Ok(Self {
+    /// The built-in SQL Server client for `target`.
+    pub fn sql_server(target: SqlTarget) -> Result<Self> {
+        let client = mssql::MssqlClient::new(target.clone(), connections_from_env())?;
+        Ok(Self::with_client(target, Box::new(client)))
+    }
+
+    pub fn with_client(target: SqlTarget, client: Box<dyn SqlClient>) -> Self {
+        Self {
             inner: Arc::new(SqlExecInner {
                 target,
-                backend: Backend::Tds(pool),
+                backend: Backend::Client(client),
             }),
-        })
+        }
     }
 
     pub fn with_tools(target: SqlTarget, tools: SqlTools) -> Self {
@@ -244,21 +332,23 @@ impl SqlExec {
 
     pub fn backend(&self) -> SqlBackend<'_> {
         match &self.inner.backend {
-            Backend::Tds(pool) => SqlBackend::Tds(pool),
+            Backend::Client(client) => SqlBackend::Client(client.as_ref()),
             Backend::Tools(tools) => SqlBackend::Tools(tools),
         }
     }
 
-    pub fn pool(&self) -> Option<&TdsPool> {
+    /// The built-in client, unless the command runs the external tools.
+    pub fn client(&self) -> Option<&dyn SqlClient> {
         match &self.inner.backend {
-            Backend::Tds(pool) => Some(pool),
+            Backend::Client(client) => Some(client.as_ref()),
             Backend::Tools(_) => None,
         }
     }
 
+    /// The external tools (`--sqlcmd`), if the command runs them.
     pub fn tools(&self) -> Option<&SqlTools> {
         match &self.inner.backend {
-            Backend::Tds(_) => None,
+            Backend::Client(_) => None,
             Backend::Tools(tools) => Some(tools),
         }
     }
@@ -287,7 +377,11 @@ impl SqlExec {
 impl std::fmt::Debug for SqlExec {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let backend = match &self.inner.backend {
-            Backend::Tds(pool) => format!("tds ({} connections)", pool.capacity()),
+            Backend::Client(client) => format!(
+                "{:?} client ({} connections)",
+                client.dbms(),
+                client.max_connections()
+            ),
             Backend::Tools(tools) => {
                 format!("{} + {}", tools.sqlcmd.display(), tools.bcp.display())
             }
@@ -312,7 +406,7 @@ fn connections_from_env() -> usize {
 mod tests {
     use std::path::Path;
 
-    use super::{SqlBackend, SqlExec, SqlLogin, SqlOptions};
+    use super::{Dbms, SqlBackend, SqlExec, SqlLogin, SqlOptions};
 
     fn options<'a>(sqlcmd: Option<&'a Path>, user: Option<&'a str>) -> SqlOptions<'a> {
         SqlOptions {
@@ -329,7 +423,10 @@ mod tests {
     #[test]
     fn the_built_in_client_is_the_default_and_opens_nothing_up_front() {
         let sql = SqlExec::from_options(options(None, None)).unwrap();
-        assert!(matches!(sql.backend(), SqlBackend::Tds(_)));
+        let SqlBackend::Client(client) = sql.backend() else {
+            panic!("the built-in client is the default");
+        };
+        assert_eq!(client.dbms(), Dbms::SqlServer);
         assert!(sql.tools().is_none());
         assert_eq!(sql.server(), "sql01\\ERP,1500");
         assert_eq!(sql.user(), None);
@@ -340,6 +437,7 @@ mod tests {
         let sql =
             SqlExec::from_options(options(Some(Path::new("no/such/dir/sqlcmd")), None)).unwrap();
         let tools = sql.tools().expect("--sqlcmd keeps the external tools");
+        assert!(sql.client().is_none());
         assert_eq!(tools.sqlcmd, Path::new("no/such/dir/sqlcmd"));
         assert_eq!(tools.bcp, Path::new("bcp"));
         let explicit = SqlOptions {

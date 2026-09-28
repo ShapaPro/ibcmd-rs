@@ -8,14 +8,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::TryStreamExt;
-use tiberius::{AuthMethod, Client, Config, EncryptionLevel, Query, QueryItem, Row, SqlBrowser};
+use tiberius::{
+    AuthMethod, Client, ColumnData, Config, EncryptionLevel, Query, QueryItem, Row, SqlBrowser,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::address::ServerAddress;
-use super::script::{ScriptBatch, ScriptVariables, split_batches};
-use super::value::SqlRow;
-use super::{SqlLogin, SqlTarget};
+use super::script::{ScriptBatch, split_batches};
+use crate::sql::{ScriptVariables, SqlLogin, SqlParam, SqlRow, SqlTarget, SqlValue};
 
 type TdsClient = Client<Compat<TcpStream>>;
 
@@ -29,29 +30,6 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Large packets carry the staged rows (tens of MB) in fewer round trips.
 const PACKET_SIZE: u32 = 32767;
 
-/// One parameter of a parameterized statement (`@P1`, `@P2`, ...).
-#[derive(Clone, Copy, Debug)]
-pub enum SqlParam<'a> {
-    Text(&'a str),
-    U8(u8),
-    I32(i32),
-    I64(i64),
-    Binary(&'a [u8]),
-}
-
-impl SqlParam<'_> {
-    /// Bytes the parameter adds to a request, for sizing batches.
-    pub fn wire_bytes(&self) -> usize {
-        match self {
-            Self::Text(value) => value.len() * 2,
-            Self::U8(_) => 1,
-            Self::I32(_) => 4,
-            Self::I64(_) => 8,
-            Self::Binary(value) => value.len(),
-        }
-    }
-}
-
 fn bind<'q>(query: &mut Query<'q>, param: SqlParam<'q>) {
     match param {
         SqlParam::Text(value) => query.bind(value),
@@ -62,10 +40,63 @@ fn bind<'q>(query: &mut Query<'q>, param: SqlParam<'q>) {
     }
 }
 
+/// A result row as owned values.
+pub fn sql_row(row: Row) -> SqlRow {
+    SqlRow {
+        result_set: row.result_index(),
+        values: row.into_iter().map(sql_value).collect(),
+    }
+}
+
+/// A column value as an owned value; binary and text move, not copy.
+pub fn sql_value(value: ColumnData<'static>) -> SqlValue {
+    match value {
+        ColumnData::U8(value) => value.map_or(SqlValue::Null, |value| SqlValue::Int(value.into())),
+        ColumnData::I16(value) => value.map_or(SqlValue::Null, |value| SqlValue::Int(value.into())),
+        ColumnData::I32(value) => value.map_or(SqlValue::Null, |value| SqlValue::Int(value.into())),
+        ColumnData::I64(value) => value.map_or(SqlValue::Null, SqlValue::Int),
+        ColumnData::Bit(value) => value.map_or(SqlValue::Null, |value| SqlValue::Int(value.into())),
+        ColumnData::F32(value) => {
+            value.map_or(SqlValue::Null, |value| SqlValue::Float(value.into()))
+        }
+        ColumnData::F64(value) => value.map_or(SqlValue::Null, SqlValue::Float),
+        ColumnData::String(value) => {
+            value.map_or(SqlValue::Null, |value| SqlValue::Text(value.into_owned()))
+        }
+        ColumnData::Binary(value) => {
+            value.map_or(SqlValue::Null, |value| SqlValue::Binary(value.into_owned()))
+        }
+        ColumnData::Xml(value) => value.map_or(SqlValue::Null, |value| {
+            SqlValue::Text(value.into_owned().into_string())
+        }),
+        ColumnData::Numeric(value) => value.map_or(SqlValue::Null, |value| {
+            if value.scale() == 0
+                && let Ok(value) = i64::try_from(value.value())
+            {
+                return SqlValue::Int(value);
+            }
+            SqlValue::Other(value.to_string())
+        }),
+        ColumnData::Guid(value) => {
+            value.map_or(SqlValue::Null, |value| SqlValue::Other(value.to_string()))
+        }
+        ColumnData::DateTime(None)
+        | ColumnData::SmallDateTime(None)
+        | ColumnData::Time(None)
+        | ColumnData::Date(None)
+        | ColumnData::DateTime2(None)
+        | ColumnData::DateTimeOffset(None) => SqlValue::Null,
+        other => SqlValue::Other(format!("{other:?}")),
+    }
+}
+
 /// One open connection to SQL Server.
 pub struct TdsConnection {
     runtime: tokio::runtime::Runtime,
     client: TdsClient,
+    /// The database the session started in, where a query that switched
+    /// databases (`USE`) brings it back.
+    home_database: String,
 }
 
 impl TdsConnection {
@@ -82,7 +113,11 @@ impl TdsConnection {
             let result = runtime.block_on(connect(target, address));
             match result {
                 Ok(client) => {
-                    let mut connection = Self { runtime, client };
+                    let mut connection = Self {
+                        runtime,
+                        client,
+                        home_database: String::new(),
+                    };
                     connection
                         .initialize_session()
                         .with_context(|| format!("SQL Server {}", target.server))?;
@@ -109,7 +144,26 @@ impl TdsConnection {
     /// (the only option in which the two sessions differ; checked with
     /// `@@OPTIONS`: 5688 under sqlcmd, 5944 under a bare TDS login).
     fn initialize_session(&mut self) -> Result<()> {
-        self.run_batch("SET QUOTED_IDENTIFIER OFF;")
+        self.run_batch("SET QUOTED_IDENTIFIER OFF;")?;
+        let mut home = None;
+        self.query_each("SELECT DB_NAME()", &[], |row| {
+            home = row.try_get::<&str, _>(0)?.map(ToOwned::to_owned);
+            Ok(())
+        })?;
+        self.home_database = home.context("the session reports no current database")?;
+        Ok(())
+    }
+
+    /// `sp_executesql` scopes a query's `SET` options and temporary tables,
+    /// but not its `USE`: a query that may have switched databases is
+    /// followed by a switch back, so a pooled connection comes back as it
+    /// went out.
+    fn restore_database(&mut self, sql: &str) -> Result<()> {
+        if !mentions_use(sql) || self.home_database.is_empty() {
+            return Ok(());
+        }
+        let statement = format!("USE [{}];", self.home_database.replace(']', "]]"));
+        self.run_batch(&statement)
     }
 
     /// Runs one batch as sqlcmd sends it (`simple_query`): statements that
@@ -118,7 +172,9 @@ impl TdsConnection {
     /// dropped; the first error of the batch is returned once the server has
     /// finished it, as `sqlcmd -b` would report it.
     pub fn run_batch(&mut self, sql: &str) -> Result<()> {
-        let Self { runtime, client } = self;
+        let Self {
+            runtime, client, ..
+        } = self;
         runtime.block_on(async {
             let mut stream = client.simple_query(sql).await?;
             while stream.try_next().await?.is_some() {}
@@ -128,16 +184,18 @@ impl TdsConnection {
     }
 
     /// Runs a query through `sp_executesql` and hands every row to `row`,
-    /// in order, as it arrives. Whatever the text changes in the session
-    /// (`USE`, `SET`, `#temp` tables) ends with the call, so a pooled
-    /// connection comes back as it went out.
+    /// in order, as it arrives. What the text changes in the session (`SET`
+    /// options, `#temp` tables, the current database) ends with the call, so
+    /// a pooled connection comes back as it went out.
     pub fn query_each<'q>(
         &mut self,
         sql: &'q str,
         params: &[SqlParam<'q>],
         mut row: impl FnMut(Row) -> Result<()>,
     ) -> Result<()> {
-        let Self { runtime, client } = self;
+        let Self {
+            runtime, client, ..
+        } = self;
         runtime.block_on(async {
             let mut query = Query::new(Cow::Borrowed(sql));
             for param in params {
@@ -149,14 +207,18 @@ impl TdsConnection {
                     row(value)?;
                 }
             }
-            Ok(())
-        })
+            Ok::<_, anyhow::Error>(())
+        })?;
+        self.restore_database(sql)
     }
 
     /// Runs a statement through `sp_executesql` and returns the rows it
-    /// affected (all statements of the text summed).
+    /// affected (all statements of the text summed); session changes end with
+    /// it as with [`TdsConnection::query_each`].
     pub fn execute<'q>(&mut self, sql: &'q str, params: &[SqlParam<'q>]) -> Result<u64> {
-        let Self { runtime, client } = self;
+        let Self {
+            runtime, client, ..
+        } = self;
         let result = runtime.block_on(async {
             let mut query = Query::new(Cow::Borrowed(sql));
             for param in params {
@@ -164,8 +226,24 @@ impl TdsConnection {
             }
             query.execute(client).await
         })?;
+        self.restore_database(sql)?;
         Ok(result.total())
     }
+}
+
+/// Whether a text may contain a `USE` statement: the word `use` (any case)
+/// followed by a blank or `[`. A false positive costs one round trip.
+fn mentions_use(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    bytes.windows(4).enumerate().any(|(index, window)| {
+        window[..3].eq_ignore_ascii_case(b"use")
+            && (window[3].is_ascii_whitespace() || window[3] == b'[')
+            && (index == 0 || !is_identifier_byte(bytes[index - 1]))
+    })
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'@' | b'#' | b'$') || byte >= 0x80
 }
 
 async fn connect(target: &SqlTarget, address: &ServerAddress) -> tiberius::Result<TdsClient> {
@@ -361,31 +439,10 @@ impl TdsPool {
     pub fn query_rows(&self, sql: &str) -> Result<Vec<SqlRow>> {
         let mut rows = Vec::new();
         self.query_each(sql, &[], |row| {
-            rows.push(SqlRow::from_row(row));
+            rows.push(sql_row(row));
             Ok(())
         })?;
         Ok(rows)
-    }
-
-    /// The document a `FOR JSON` query returns: SQL Server splits a long one
-    /// into rows of about 2 000 characters, joined here. `None` when the
-    /// query returned no row at all (a top-level `FOR JSON` over no rows).
-    pub fn query_json(&self, sql: &str) -> Result<Option<String>> {
-        let mut document: Option<String> = None;
-        let mut result_set = None;
-        self.query_each(sql, &[], |row| {
-            let index = row.result_index();
-            if *result_set.get_or_insert(index) != index {
-                return Ok(());
-            }
-            let part = row
-                .try_get::<&str, _>(0)
-                .context("a FOR JSON query returned a non-text column")?
-                .unwrap_or_default();
-            document.get_or_insert_with(String::new).push_str(part);
-            Ok(())
-        })?;
-        Ok(document)
     }
 
     /// Runs statements that return nothing the caller reads.
@@ -477,5 +534,88 @@ impl Drop for Lease<'_> {
             self.pool.lock().open -= 1;
         }
         self.pool.returned.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use tiberius::ColumnData;
+    use tiberius::numeric::Numeric;
+
+    use super::{mentions_use, sql_value};
+    use crate::sql::SqlValue;
+
+    #[test]
+    fn use_statements_are_spotted_in_any_spelling() {
+        for sql in [
+            "USE [db]; SELECT 1",
+            "SET NOCOUNT ON; use tempdb;
+SELECT 1",
+            "SET NOCOUNT ON;
+Use	[x]",
+        ] {
+            assert!(mentions_use(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT FileName FROM [db].dbo.Config",
+            "SELECT reused FROM t",
+            "SELECT @use FROM t",
+            "SELECT DATALENGTH(BinaryData) AS use_count FROM t",
+        ] {
+            assert!(!mentions_use(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn integers_of_every_width_read_as_i64() {
+        assert_eq!(sql_value(ColumnData::U8(Some(7))), SqlValue::Int(7));
+        assert_eq!(sql_value(ColumnData::I16(Some(-2))), SqlValue::Int(-2));
+        assert_eq!(
+            sql_value(ColumnData::I32(Some(1 << 20))),
+            SqlValue::Int(1 << 20)
+        );
+        assert_eq!(
+            sql_value(ColumnData::I64(Some(1 << 40))),
+            SqlValue::Int(1 << 40)
+        );
+        assert_eq!(sql_value(ColumnData::Bit(Some(true))), SqlValue::Int(1));
+        assert_eq!(
+            sql_value(ColumnData::Numeric(Some(Numeric::new_with_scale(42, 0)))),
+            SqlValue::Int(42)
+        );
+        assert_eq!(
+            sql_value(ColumnData::Numeric(Some(Numeric::new_with_scale(425, 1)))),
+            SqlValue::Other("42.5".to_owned())
+        );
+    }
+
+    #[test]
+    fn nulls_of_every_type_read_as_null() {
+        for value in [
+            ColumnData::I32(None),
+            ColumnData::String(None),
+            ColumnData::Binary(None),
+            ColumnData::DateTime2(None),
+            ColumnData::Guid(None),
+            ColumnData::Numeric(None),
+        ] {
+            assert!(sql_value(value).is_null());
+        }
+    }
+
+    #[test]
+    fn text_and_binary_move_into_owned_values() {
+        assert_eq!(
+            sql_value(ColumnData::String(Some(Cow::Owned(
+                "Конфигурация".to_owned()
+            )))),
+            SqlValue::Text("Конфигурация".to_owned())
+        );
+        assert_eq!(
+            sql_value(ColumnData::Binary(Some(Cow::Owned(vec![0x0a, 0xff])))),
+            SqlValue::Binary(vec![0x0a, 0xff])
+        );
     }
 }

@@ -9,15 +9,7 @@
 
 use anyhow::{Result, bail};
 
-/// How a script treats `$(name)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScriptVariables {
-    /// The script was run by `sqlcmd` without `-x`, which substitutes (or
-    /// fails on) every `$(name)`: such a script is refused.
-    Refuse,
-    /// The script was run with `sqlcmd -x`: `$(` is plain text.
-    Literal,
-}
+use crate::sql::ScriptVariables;
 
 /// One batch of a script and the line it starts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,7 +198,8 @@ fn scan_line(line: &str, mut state: LexState) -> LexState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScriptVariables, split_batches};
+    use super::split_batches;
+    use crate::sql::ScriptVariables;
 
     fn texts(script: &str) -> Vec<String> {
         split_batches(script, ScriptVariables::Refuse)

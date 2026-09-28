@@ -9946,21 +9946,23 @@ pub(super) fn spreadsheet_number_format_hint_from_text(
             std::iter::once(row.format_index).chain(row.cells.iter().map(|cell| cell.format_index))
         })
         .collect::<BTreeSet<_>>();
-    let drawing_format_indices = drawings
+    let mut drawing_format_indices = drawings
         .iter()
-        .map(|drawing| drawing.format_index)
-        .chain(
-            rows.iter()
-                .flat_map(|row| row.cells.iter())
-                .filter_map(|cell| cell.note.as_ref().map(|note| note.format_index))
-                .filter(|index| *index > 0 && !cell_format_indices.contains(index))
-                // The set is read against the entry's own 1-based place in
-                // the stored table, which a note's reference carries one
-                // higher; see the same conversion in
-                // `parse_moxel_spreadsheet`.
-                .map(|index| index - 1),
-        )
-        .collect::<BTreeSet<_>>();
+        .map(|drawing| (drawing.format_index, MoxelFormatRefKind::Drawing))
+        .collect::<MoxelFormatRefKinds>();
+    for index in rows
+        .iter()
+        .flat_map(|row| row.cells.iter())
+        .filter_map(|cell| cell.note.as_ref().map(|note| note.format_index))
+        .filter(|index| *index > 0 && !cell_format_indices.contains(index))
+    {
+        // The set is read against the entry's own 1-based place in the
+        // stored table, which a note's reference carries one higher; see the
+        // same conversion in `parse_moxel_spreadsheet`.
+        drawing_format_indices
+            .entry(index - 1)
+            .or_insert(MoxelFormatRefKind::Note);
+    }
     let column_format_slots = moxel_column_format_slots(&column_sets, column_count);
     let _sparse_source_format_refs = moxel_uses_sparse_source_format_refs(
         &column_sets,
