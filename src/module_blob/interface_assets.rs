@@ -378,7 +378,7 @@ impl Resolver<'_> {
         {
             return found.clone();
         }
-        let found = read_metadata_file_header(path);
+        let found = read_metadata_file_header(source, path);
         if let Ok(mut memo) = source.interface_memo.lock() {
             memo.headers.insert(path.to_path_buf(), found.clone());
         }
@@ -479,7 +479,8 @@ impl Resolver<'_> {
         let commands = match cached {
             Some(commands) => commands,
             None => {
-                let commands = fs::read(&path)
+                let commands = source
+                    .read_source(&path)
                     .ok()
                     .and_then(|xml| read_declared_commands(&xml).ok())
                     .map(Arc::new);
@@ -673,9 +674,12 @@ fn standard_command_code(class: &str, standard: &str) -> Result<u32> {
 
 /// `(class, uuid)` of a metadata file: the first element under
 /// `<MetaDataObject>`, which is all a reference needs.
-fn read_metadata_file_header(path: &Path) -> Option<(String, String)> {
-    let xml = fs::read(path).ok()?;
-    let mut reader = Reader::from_reader(xml.as_slice());
+fn read_metadata_file_header(
+    source: &MetadataSourceContext,
+    path: &Path,
+) -> Option<(String, String)> {
+    let xml = source.read_source(path).ok()?;
+    let mut reader = Reader::from_reader(&xml[..]);
     let mut buffer = Vec::new();
     let mut depth = 0usize;
     let mut root_is_metadata = false;

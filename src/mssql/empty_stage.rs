@@ -16,12 +16,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use super::stage_timing;
 use super::{
     BASE_FREE_MISSING_ROW, BASE_FREE_STAGE, BulkStageRow, GeneratedBlobReport, MetadataBodyFamily,
     SqlAuth, StageSourceObjectsReport, StagedMetadataBodyReport, StagedMetadataObjectReport,
@@ -34,7 +36,7 @@ use super::{
 };
 use crate::cli::MssqlStageSourceObjectsArgs;
 use crate::compiler::families::assets::SourceAssetRegistry;
-use crate::metadata_model::audit::{brace_path_at, descriptor_xmls};
+use crate::metadata_model::audit::{brace_path_at, is_descriptor_xml};
 use crate::metadata_model::root::{
     ConfigurationFacts, MODULE_GROUP_CLASS_ID, configuration_facts, root_row, version_row,
     versions_row,
@@ -45,6 +47,7 @@ use crate::module_blob::{
     parse_simple_metadata_xml_properties,
 };
 use crate::parallel;
+use crate::source_listing::{self, SourceListing};
 
 /// One row of the stage: its Config file name and stored bytes.
 #[derive(Debug, Clone)]
@@ -93,10 +96,20 @@ pub(crate) struct EmptyStageContext {
     /// The managed-application module group the configuration's own rows
     /// are stored under.
     pub module_group: Option<String>,
+    /// The tree's files and folders, listed once (`source_listing::walk`):
+    /// every object's writers answer their existence probes from it.
+    pub listing: Option<std::sync::Arc<SourceListing>>,
 }
 
 impl EmptyStageContext {
-    pub fn new(root: &Path, version: Option<&str>) -> Result<Self> {
+    /// `files` is every descriptor XML of the tree, read (`read_descriptor_xmls`);
+    /// `listing` the tree's list of files, when it has one.
+    pub fn new(
+        root: &Path,
+        version: Option<&str>,
+        files: &[(PathBuf, std::sync::Arc<Vec<u8>>)],
+        listing: Option<std::sync::Arc<SourceListing>>,
+    ) -> Result<Self> {
         // No base rows exist: every base-row read fails naming its row.
         BASE_FREE_STAGE.store(true, Ordering::Relaxed);
         // Nor any always-used constant: track A compiles each constant with
@@ -121,7 +134,7 @@ impl EmptyStageContext {
             version != "2.20" && facts.compatibility < 80500,
             Ordering::Relaxed,
         );
-        let descriptors = DescriptorContext::new(root, &version)?;
+        let descriptors = DescriptorContext::with_files(root, &version, files)?;
         let module_group = module_group_of(&configuration);
         Ok(Self {
             root: root.to_path_buf(),
@@ -129,8 +142,114 @@ impl EmptyStageContext {
             facts,
             descriptors,
             module_group,
+            listing,
         })
     }
+}
+
+/// The descriptor XMLs among the files of the tree's walk
+/// (`source_listing::walk`): `audit::descriptor_xmls(root)`, the same files in
+/// the same (sorted) order. Walking ERP УХ's 140 709 files on one thread took
+/// 25-75 s, and a stage used to walk the tree twice (once for the index, once
+/// for the objects); the walk lists every folder on a task of its own, once,
+/// and its list also answers the existence probes of every object's writers.
+fn descriptor_xmls_of(root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut paths = files
+        .into_iter()
+        .filter(|path| {
+            path.strip_prefix(root)
+                .map(|relative| is_descriptor_xml(&relative.to_string_lossy()))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+/// Where an object goes in the stage's dispatch order: 0 first. Templates,
+/// roles, exchange plans and the configuration hold the stage's longest single
+/// rows (ERP УХ: spreadsheets of 15-27 s, roles of 10-15 s, an exchange plan's
+/// content), and in tree order the heaviest spreadsheets
+/// (`Reports/РегламентированныйОтчетСтатистика…`) came last and ran alone at
+/// the end of the stage.
+fn dispatch_rank(root: &Path, path: &Path) -> u8 {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let heavy = match components.as_slice() {
+        [file] => file == "configuration.xml",
+        [folder, _] => matches!(
+            folder.as_str(),
+            "roles" | "commontemplates" | "exchangeplans"
+        ),
+        [.., folder, _] => folder == "templates",
+        [] => false,
+    };
+    if heavy { 0 } else { 1 }
+}
+
+/// `work` over every path on the file-bound pool, the results in `paths`
+/// order. The paths are dispatched one at a time in `dispatch_rank` order
+/// (tree order within a rank) rather than split into ranges, so a heavy object
+/// starts when its turn comes, not when its range does.
+fn map_heaviest_first<T: Send>(
+    root: &Path,
+    paths: &[PathBuf],
+    work: impl Fn(&Path) -> T + Sync,
+) -> Result<Vec<T>> {
+    let mut order = (0..paths.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| dispatch_rank(root, &paths[index]));
+    let next = AtomicUsize::new(0);
+    let results = paths
+        .iter()
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<Mutex<Option<T>>>>();
+    parallel::install_io_bound(|| {
+        rayon::scope(|scope| {
+            for _ in 0..rayon::current_num_threads() {
+                scope.spawn(|_| {
+                    loop {
+                        let position = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&index) = order.get(position) else {
+                            break;
+                        };
+                        let result = work(&paths[index]);
+                        if let Ok(mut slot) = results[index].lock() {
+                            *slot = Some(result);
+                        }
+                    }
+                });
+            }
+        });
+    })?;
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.into_inner()
+                .ok()
+                .flatten()
+                .ok_or_else(|| anyhow!("no result for {}", paths[index].display()))
+        })
+        .collect()
+}
+
+/// Every descriptor XML of the list, read on the file-bound pool: the index,
+/// the descriptors and the name resolvers of every body writer then read them
+/// from memory. ERP УХ: 56 758 files, 366 MB.
+fn read_descriptor_xmls(paths: &[PathBuf]) -> Result<Vec<(PathBuf, std::sync::Arc<Vec<u8>>)>> {
+    parallel::install_io_bound(|| {
+        paths
+            .par_iter()
+            .map(|path| {
+                fs::read(path)
+                    .with_context(|| format!("failed to read {}", path.display()))
+                    .map(|bytes| (path.clone(), std::sync::Arc::new(bytes)))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?
 }
 
 /// `<xr:ContainedObject>` of the module-group class in `Configuration.xml`.
@@ -149,6 +268,20 @@ fn relative_of(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// The kind a timing line is filed under: a template also names its type.
+fn timing_kind(kind: &str, xml: &[u8]) -> String {
+    if !matches!(kind, "Template" | "CommonTemplate") {
+        return kind.to_string();
+    }
+    let text = String::from_utf8_lossy(xml);
+    let template_type = text
+        .find("<TemplateType>")
+        .map(|at| &text[at + "<TemplateType>".len()..])
+        .and_then(|rest| rest.find("</TemplateType>").map(|end| &rest[..end]))
+        .unwrap_or("?");
+    format!("{kind}/{template_type}")
 }
 
 fn error_text(error: &anyhow::Error) -> String {
@@ -225,6 +358,8 @@ pub(crate) fn prepare_empty_object(
     keep_plain: bool,
 ) -> EmptyStageObject {
     let relative = relative_of(&context.root, path);
+    // The writers' existence probes answer from the tree's list.
+    let _listing = source_listing::install(context.listing.clone());
     let mut object = EmptyStageObject {
         kind: String::new(),
         uuid: String::new(),
@@ -243,7 +378,9 @@ pub(crate) fn prepare_empty_object(
             error,
         });
     };
-    let xml = match fs::read(path) {
+    let read_started = stage_timing::start();
+    // Read once, up front (`read_descriptor_xmls`); from disk only when not.
+    let xml = match context.descriptors.source.read_source(path) {
         Ok(xml) => xml,
         Err(error) => {
             fail(&mut object, "read", error.to_string());
@@ -266,11 +403,20 @@ pub(crate) fn prepare_empty_object(
             return object;
         }
     };
+    let kind = if stage_timing::enabled() {
+        timing_kind(&properties.kind, &xml)
+    } else {
+        String::new()
+    };
+    stage_timing::record(read_started, "xml read and parse", &kind, &relative);
 
     // The descriptor row.
-    match catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
-        .and_then(|plain| Ok((deflate_raw(&plain)?, plain)))
-    {
+    let started = stage_timing::start();
+    let descriptor =
+        catch(|| compile_descriptor(&properties.kind, path, &xml, &context.descriptors))
+            .and_then(|plain| Ok((deflate_raw(&plain)?, plain)));
+    stage_timing::record(started, "descriptor", &kind, &relative);
+    match descriptor {
         Ok((blob, plain)) => object.rows.push(EmptyStageRow {
             file_name: properties.uuid.clone(),
             family: "descriptor".to_string(),
@@ -292,7 +438,10 @@ pub(crate) fn prepare_empty_object(
     if properties.kind == "CommonModule" {
         if let Some(text_path) = source_module_body_path(infer_common_module_text_path(path)) {
             let body_id = format!("{}.0", properties.uuid);
-            match catch(|| pack_module_body_source(&text_path, &body_id, &axes)) {
+            let started = stage_timing::start();
+            let packed = catch(|| pack_module_body_source(&text_path, &body_id, &axes));
+            stage_timing::record(started, "module", &kind, &relative);
+            match packed {
                 Ok(packed) => object.rows.push(EmptyStageRow {
                     file_name: body_id,
                     family: "module".to_string(),
@@ -311,13 +460,16 @@ pub(crate) fn prepare_empty_object(
         }
     } else {
         // Track D: predefined data, flowcharts and aggregates, base-free.
+        let started = stage_timing::start();
         track_d_body_rows(context, path, &xml, &properties, &relative, &mut object);
+        stage_timing::record(started, "model bodies", &kind, &relative);
         for family in MetadataBodyFamily::ALL {
             if family == MetadataBodyFamily::KindBody
                 && crate::metadata_model::bodies_rows::owns_kind_body(&properties.kind, &xml)
             {
                 continue;
             }
+            let started = stage_timing::start();
             let result = catch(|| {
                 prepare_metadata_body_family(
                     family,
@@ -332,6 +484,7 @@ pub(crate) fn prepare_empty_object(
                     &axes,
                 )
             });
+            stage_timing::record(started, family.label(), &kind, &relative);
             match result {
                 Ok(rows) => object
                     .rows
@@ -448,14 +601,30 @@ impl EmptyStage {
 }
 
 pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<EmptyStage> {
-    let context = EmptyStageContext::new(root, version)?;
-    let paths = descriptor_xmls(root);
-    let objects = parallel::install(|| {
-        paths
-            .par_iter()
-            .map(|path| prepare_empty_object(&context, path, false))
-            .collect::<Vec<_>>()
+    stage_timing::reset_from_env();
+    let setup = stage_timing::start();
+    let walked = source_listing::walk(root);
+    let paths = descriptor_xmls_of(root, walked.files);
+    stage_timing::record(setup, "setup: tree walk", "", "");
+    let setup = stage_timing::start();
+    let files = read_descriptor_xmls(&paths)?;
+    stage_timing::record(setup, "setup: descriptor reads", "", "");
+    let setup = stage_timing::start();
+    let context = EmptyStageContext::new(root, version, &files, walked.listing)?;
+    drop(files);
+    stage_timing::record(setup, "setup: context", "", "");
+    let started = std::time::Instant::now();
+    // One task per source XML, each mostly waiting for its files: the
+    // file-bound pool, heaviest first.
+    let objects = map_heaviest_first(root, &paths, |path| {
+        prepare_empty_object(&context, path, false)
     })?;
+    if stage_timing::enabled() {
+        eprintln!(
+            "{}",
+            stage_timing::report(started.elapsed(), parallel::io_bound_worker_count())
+        );
+    }
     let names = objects
         .iter()
         .flat_map(|object| object.rows.iter().map(|row| row.file_name.clone()))
@@ -876,8 +1045,21 @@ pub fn audit_empty_stage(
     version: Option<&str>,
     options: &EmptyStageAuditOptions,
 ) -> Result<EmptyStageAuditReport> {
+    stage_timing::reset_from_env();
+    let setup = stage_timing::start();
     let stored = StoredRows::scan(rows)?;
-    let context = EmptyStageContext::new(root, version)?;
+    stage_timing::record(setup, "setup: stored row list", "", "");
+    let setup = stage_timing::start();
+    let walked = source_listing::walk(root);
+    let paths = descriptor_xmls_of(root, walked.files);
+    stage_timing::record(setup, "setup: tree walk", "", "");
+    let setup = stage_timing::start();
+    let files = read_descriptor_xmls(&paths)?;
+    stage_timing::record(setup, "setup: descriptor reads", "", "");
+    let setup = stage_timing::start();
+    let context = EmptyStageContext::new(root, version, &files, walked.listing)?;
+    drop(files);
+    stage_timing::record(setup, "setup: context", "", "");
     if let Some(dir) = &options.rows_out {
         fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     }
@@ -889,7 +1071,6 @@ pub fn audit_empty_stage(
         }
         Ok(())
     };
-    let paths = descriptor_xmls(root);
 
     // Owner kind of every uuid the tree names.
     let mut kinds: HashMap<String, String> = HashMap::new();
@@ -919,101 +1100,118 @@ pub fn audit_empty_stage(
     let keep_samples = options.diff_dir.is_some();
 
     // Produce and compare object by object, in parallel; keep outcomes only.
-    let per_object = parallel::install(|| {
-        paths
-            .par_iter()
-            .map(
-                |path| -> Result<(
-                    Vec<Measured>,
-                    Vec<String>,
-                    Vec<(String, String, usize, String, String)>,
-                )> {
-                    let object = prepare_empty_object(&context, path, true);
-                    let mut measured = Vec::new();
-                    let mut names = Vec::new();
-                    let mut manifest = Vec::new();
-                    for row in &object.rows {
-                        write_row(row)?;
-                        names.push(row.file_name.clone());
-                        let plain = match &row.plain {
-                            Some(plain) => plain.clone(),
-                            None => inflate_raw(&row.blob).unwrap_or_else(|_| row.blob.clone()),
-                        };
-                        if options.manifest.is_some() {
-                            manifest.push((
-                                row.file_name.clone(),
-                                row.family.clone(),
-                                row.blob.len(),
-                                hex_sha256(&row.blob),
-                                hex_sha256(&plain),
-                            ));
+    let parallel_started = std::time::Instant::now();
+    let per_object = map_heaviest_first(
+        root,
+        &paths,
+        |path| -> Result<(
+            Vec<Measured>,
+            Vec<String>,
+            Vec<(String, String, usize, String, String)>,
+        )> {
+            let object = prepare_empty_object(&context, path, true);
+            let audit_started = stage_timing::start();
+            let mut measured = Vec::new();
+            let mut names = Vec::new();
+            let mut manifest = Vec::new();
+            for row in &object.rows {
+                write_row(row)?;
+                names.push(row.file_name.clone());
+                let plain = match &row.plain {
+                    Some(plain) => plain.clone(),
+                    None => inflate_raw(&row.blob).unwrap_or_else(|_| row.blob.clone()),
+                };
+                if options.manifest.is_some() {
+                    manifest.push((
+                        row.file_name.clone(),
+                        row.family.clone(),
+                        row.blob.len(),
+                        hex_sha256(&row.blob),
+                        hex_sha256(&plain),
+                    ));
+                }
+                let (outcome, benign, offset, brace_path, detail, expected) =
+                    match stored.plain(&row.file_name)? {
+                        None => (Outcome::Extra, None, None, None, String::new(), None),
+                        Some(expected) if expected == plain => {
+                            (Outcome::Identical, None, None, None, String::new(), None)
                         }
-                        let (outcome, benign, offset, brace_path, detail, expected) =
-                            match stored.plain(&row.file_name)? {
-                                None => (Outcome::Extra, None, None, None, String::new(), None),
-                                Some(expected) if expected == plain => {
-                                    (Outcome::Identical, None, None, None, String::new(), None)
-                                }
-                                Some(expected) => {
-                                    let offset = first_difference(&expected, &plain);
-                                    let detail = format!(
-                                        "stored {} | produced {}",
-                                        excerpt(&expected, offset),
-                                        excerpt(&plain, offset)
-                                    );
-                                    (
-                                        Outcome::Different,
-                                        benign_difference(&expected, &plain),
-                                        Some(offset),
-                                        Some(brace_path_at(&expected, offset)),
-                                        detail,
-                                        Some(expected),
-                                    )
-                                }
-                            };
-                        measured.push(Measured {
-                            file_name: row.file_name.clone(),
-                            kind: object.kind.clone(),
-                            family: row.family.clone(),
-                            source: row.source.clone(),
-                            outcome,
-                            benign,
-                            offset,
-                            brace_path,
-                            detail,
-                            expected: if keep_samples { expected } else { None },
-                            actual: if keep_samples && outcome == Outcome::Different {
-                                Some(plain)
-                            } else {
-                                None
-                            },
-                        });
-                    }
-                    for failure in &object.failures {
-                        measured.push(Measured {
-                            file_name: failure.file_name.clone().unwrap_or_default(),
-                            kind: if failure.kind.is_empty() {
-                                "<unparsed>".to_string()
-                            } else {
-                                failure.kind.clone()
-                            },
-                            family: failure.family.clone(),
-                            source: failure.source.clone(),
-                            outcome: Outcome::Failed,
-                            benign: None,
-                            offset: None,
-                            brace_path: None,
-                            detail: failure.error.clone(),
-                            expected: None,
-                            actual: None,
-                        });
-                    }
-                    Ok((measured, names, manifest))
-                },
+                        Some(expected) => {
+                            let offset = first_difference(&expected, &plain);
+                            let detail = format!(
+                                "stored {} | produced {}",
+                                excerpt(&expected, offset),
+                                excerpt(&plain, offset)
+                            );
+                            (
+                                Outcome::Different,
+                                benign_difference(&expected, &plain),
+                                Some(offset),
+                                Some(brace_path_at(&expected, offset)),
+                                detail,
+                                Some(expected),
+                            )
+                        }
+                    };
+                measured.push(Measured {
+                    file_name: row.file_name.clone(),
+                    kind: object.kind.clone(),
+                    family: row.family.clone(),
+                    source: row.source.clone(),
+                    outcome,
+                    benign,
+                    offset,
+                    brace_path,
+                    detail,
+                    expected: if keep_samples { expected } else { None },
+                    actual: if keep_samples && outcome == Outcome::Different {
+                        Some(plain)
+                    } else {
+                        None
+                    },
+                });
+            }
+            stage_timing::record(
+                audit_started,
+                "audit: compare and write",
+                &object.kind,
+                &object.relative,
+            );
+            for failure in &object.failures {
+                measured.push(Measured {
+                    file_name: failure.file_name.clone().unwrap_or_default(),
+                    kind: if failure.kind.is_empty() {
+                        "<unparsed>".to_string()
+                    } else {
+                        failure.kind.clone()
+                    },
+                    family: failure.family.clone(),
+                    source: failure.source.clone(),
+                    outcome: Outcome::Failed,
+                    benign: None,
+                    offset: None,
+                    brace_path: None,
+                    detail: failure.error.clone(),
+                    expected: None,
+                    actual: None,
+                });
+            }
+            Ok((measured, names, manifest))
+        },
+    )?
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    if stage_timing::enabled() {
+        eprintln!(
+            "{}",
+            stage_timing::report(
+                parallel_started.elapsed(),
+                parallel::io_bound_worker_count()
             )
-            .collect::<Result<Vec<_>>>()
-    })??;
+        );
+    }
 
+    let tail_started = std::time::Instant::now();
     let mut measured = Vec::new();
     let mut names = Vec::new();
     let mut manifest = Vec::new();
@@ -1236,6 +1434,12 @@ pub fn audit_empty_stage(
         }
         fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
     }
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: serial tail (service rows, missing rows, report) {:.1} s",
+            tail_started.elapsed().as_secs_f64()
+        );
+    }
     Ok(report)
 }
 
@@ -1348,6 +1552,7 @@ pub(super) fn stage_source_objects_base_free(
     }
     let version = args.source_version.map(|version| version.as_str());
     let stage = prepare_empty_stage(&args.source_root, version)?;
+    let tail_started = std::time::Instant::now();
     let failures = stage.failures().collect::<Vec<_>>();
     // A partial row set is only ever written, never loaded: it lets the
     // bcp file be checked against the audit before every writer is done.
@@ -1408,7 +1613,14 @@ pub(super) fn stage_source_objects_base_free(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let table = bulk_stage_table_name(&args.database);
+    let write_started = std::time::Instant::now();
     write_bulk_stage_rows(&rows_path, &bulk)?;
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: bcp file written in {:.1} s",
+            write_started.elapsed().as_secs_f64()
+        );
+    }
     fs::write(&prepare_path, build_bulk_stage_prepare_sql(&table))
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
     fs::write(
@@ -1475,6 +1687,7 @@ pub(super) fn stage_source_objects_base_free(
         )?;
     }
 
+    let report_started = std::time::Instant::now();
     let versions = stage
         .service
         .iter()
@@ -1521,9 +1734,23 @@ pub(super) fn stage_source_objects_base_free(
             })
         })
         .collect();
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: report built in {:.1} s; after the stage {:.1} s",
+            report_started.elapsed().as_secs_f64(),
+            tail_started.elapsed().as_secs_f64()
+        );
+    }
+    let source_version = Some(stage.context.version.clone());
+    // Freeing the stage -- every row's bytes and the tree's metadata XMLs, some
+    // million allocations -- took 26 s of ERP УХ's stage on the lab
+    // workstation after all the work was done. A thread of its own frees it
+    // while the caller writes its report, and the process's exit does not
+    // wait for it.
+    std::thread::spawn(move || drop(stage));
     Ok(StageSourceObjectsReport {
         database: args.database.clone(),
-        source_version: Some(stage.context.version.clone()),
+        source_version,
         metadata_objects,
         common_modules: Vec::new(),
         scripts: vec![prepare_path, apply_path.clone()],
@@ -1593,6 +1820,39 @@ mod tests {
         );
         let names = versions_names(b"{1,3,\"\",u,\"a\",u,\"root\",u}");
         assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["a", "root"]);
+    }
+
+    #[test]
+    fn parallel_descriptor_walk_matches_the_serial_one() {
+        let root = std::env::temp_dir().join(format!(
+            "ibcmd-rs-descriptor-walk-{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        for file in [
+            "Configuration.xml",
+            "ConfigDumpInfo.xml",
+            "Catalogs/A.xml",
+            "Catalogs/A/Ext/ObjectModule.bsl",
+            "Catalogs/A/Forms/F.xml",
+            "Catalogs/A/Forms/F/Ext/Form.xml",
+            "Catalogs/A/Forms/F/Ext/Form/Items/X.xml",
+            "Catalogs/B.xml",
+            "Subsystems/S.xml",
+            "Subsystems/S/Subsystems/T.xml",
+            "Subsystems/S/Ext/CommandInterface.xml",
+            "Subsystems/S/EXT/Other.xml",
+            "Ext/Top.xml",
+            "Languages/Русский.xml",
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"x").unwrap();
+        }
+        let serial = crate::metadata_model::audit::descriptor_xmls(&root);
+        let parallel = descriptor_xmls_of(&root, source_listing::walk(&root).files);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(serial.len(), 7, "{serial:?}");
+        assert_eq!(parallel, serial);
     }
 
     #[test]

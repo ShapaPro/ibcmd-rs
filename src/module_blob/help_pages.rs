@@ -306,7 +306,9 @@ impl MetadataSourceContext {
             }
             _ => return Err(anyhow!("unsupported reference shape")),
         };
-        let xml = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let xml = self
+            .read_source(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         let properties = parse_simple_metadata_xml_properties(&xml)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         let name = parts.last().copied().unwrap_or_default();
