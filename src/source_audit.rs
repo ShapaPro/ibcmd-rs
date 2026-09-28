@@ -1568,11 +1568,11 @@ pub fn audit_native_form_writer(root: &Path, bodies: &Path) -> Result<NativeForm
                 // Diagnostic: the 8.3.27 reading of a 2.21 form, mirrored
                 // under `IBCMD_RS_WRITE_X20_DIR` by the form's relative path.
                 if let Some(dir) = std::env::var_os("IBCMD_RS_WRITE_X20_DIR")
-                    && crate::mssql_dump::is_v85_form_xml(&form_xml)
+                    && crate::mssql_dump::is_xml_2_21_form(&form_xml)
                     && let Ok(text) = std::str::from_utf8(&form_xml)
                 {
                     let target = Path::new(&dir).join(&relative);
-                    let written = match crate::mssql_dump::down_convert_v85_form_xml(
+                    let written = match crate::mssql_dump::down_convert_xml_2_21_form(
                         text,
                         Some(&source),
                         Some(items_root.as_path()),

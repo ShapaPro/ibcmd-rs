@@ -276,8 +276,8 @@ fn child_objects<'a>(
 /// ERP УХ 8.5 clone (`Version8_3_27`, the same configuration as the 8.3.27
 /// corpus) stores all 13 053 of them the 8.3.27 way, while both trees spell
 /// the objects identically.
-pub fn v85_layout(context: &DescriptorContext) -> bool {
-    if !context.is_v85() {
+pub fn stores_layout_8_5_1(context: &DescriptorContext) -> bool {
+    if !context.is_xml_2_21() {
         return false;
     }
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
@@ -287,13 +287,13 @@ pub fn v85_layout(context: &DescriptorContext) -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *cache
         .entry(context.root.clone())
-        .or_insert_with(|| compatibility_at_least_85(&context.root))
+        .or_insert_with(|| compatibility_at_least_8_5(&context.root))
 }
 
 /// `CompatibilityMode` of the tree's `Configuration.xml` is `Version8_5_x`
 /// or later, or `DontUse` (the platform's own version); `true` when the file
 /// says nothing.
-fn compatibility_at_least_85(root: &std::path::Path) -> bool {
+fn compatibility_at_least_8_5(root: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(root.join("Configuration.xml")) else {
         return true;
     };
@@ -714,7 +714,7 @@ impl PaletteColor {
         })
         .ok_or_else(|| anyhow!("unsupported palette colour {spelled:?}"))?;
         let mut color = literal(&native)?;
-        up_convert_v85_primitives(&mut color);
+        up_convert_primitives_8_5_1(&mut color);
         Ok(Self {
             header: Header::of(object)?,
             color,
@@ -771,7 +771,7 @@ impl StyleItem {
                 let spelled = value.text.trim();
                 let native = format_native_color(Some(spelled), style_item)
                     .ok_or_else(|| anyhow!("unsupported colour {spelled:?}"))?;
-                StyleItemValue::Color(v85_primitive(literal(&native)?, context))
+                StyleItemValue::Color(primitive_8_5_1(literal(&native)?, context))
             }
             "Font" => {
                 let attributes = value
@@ -782,7 +782,7 @@ impl StyleItem {
                     .collect::<BTreeMap<_, _>>();
                 let native = format_native_font(&attributes, style_item)
                     .ok_or_else(|| anyhow!("unsupported font {attributes:?}"))?;
-                StyleItemValue::Font(v85_primitive(literal(&native)?, context))
+                StyleItemValue::Font(primitive_8_5_1(literal(&native)?, context))
             }
             "Border" => {
                 let style = value.child_text("style").map(str::trim);
@@ -850,9 +850,9 @@ impl StyleItem {
 /// A colour or font as 8.5 stores it, from the 8.3.27 spelling the form
 /// writer produces: a colour `{3,<space>,{..}}` becomes `{4,<space>,{..},<space>}`,
 /// a font `{7,...}` becomes `{8,...}`, and the nineteen-member absolute font
-/// also appends `0` (the rule of `form_v85_load::up_convert_primitives`).
-fn v85_primitive(mut value: Brace, context: &DescriptorContext) -> Brace {
-    if !v85_layout(context) {
+/// also appends `0` (the rule of `load_8_5_1::up_convert_primitives`).
+fn primitive_8_5_1(mut value: Brace, context: &DescriptorContext) -> Brace {
+    if !stores_layout_8_5_1(context) {
         return value;
     }
     let Some(members) = value.as_list_mut() else {
@@ -880,13 +880,13 @@ fn v85_primitive(mut value: Brace, context: &DescriptorContext) -> Brace {
 /// recognised by shape: a colour is `{3,<space 0-4>,{<int>}|{0,<uuid>}}`,
 /// a font `{7,<kind>,<mask>,...,1,<scale>}` (kind 3 with no members, kinds
 /// 1 and 2 with a reference list) or the nineteen-member absolute font --
-/// the tests of `form_v85_load::up_convert_primitives`.
-pub fn up_convert_v85_primitives(node: &mut Brace) {
+/// the tests of `load_8_5_1::up_convert_primitives`.
+pub fn up_convert_primitives_8_5_1(node: &mut Brace) {
     let Brace::List(members) = node else {
         return;
     };
     for member in members.iter_mut() {
-        up_convert_v85_primitives(member);
+        up_convert_primitives_8_5_1(member);
     }
     let atom = |index: usize| members.get(index).and_then(Brace::as_atom);
     let is_int = |text: Option<&str>| {
@@ -1732,7 +1732,7 @@ impl FormRecord {
             .flat_map(|list| list.children_named("Value"))
             .map(|value| code(&value.text, USE_PURPOSES, "UsePurposes"))
             .collect::<Result<Vec<_>>>()?;
-        let interface_compatibility_mode = if v85_layout(context) {
+        let interface_compatibility_mode = if stores_layout_8_5_1(context) {
             Some(match p.child_text("UseInInterfaceCompatibilityMode") {
                 Some(value) => code(
                     value,

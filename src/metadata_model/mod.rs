@@ -88,7 +88,7 @@ impl DescriptorContext {
     }
 
     /// 8.5 (`2.21`) rather than 8.3.27 (`2.20`).
-    pub fn is_v85(&self) -> bool {
+    pub fn is_xml_2_21(&self) -> bool {
         self.version != "2.20"
     }
 }

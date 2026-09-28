@@ -1,15 +1,15 @@
 //! Loading a platform 8.5 (dialect 2.21) `Form.xml`: the inverse of
-//! `form_v85` (the down-conversion of a stored 8.5 body) and of
-//! `form_v85_writer` (the 2.21 pass over the 8.3.27 reading).
+//! `layout_8_5_1` (the down-conversion of a stored 8.5 body) and of
+//! `xml_2_21_writer` (the 2.21 pass over the 8.3.27 reading).
 //!
 //! A 2.21 form loads in three steps:
 //!
-//! 1. [`down_convert_v85_form_xml`] takes out of the XML what only the members
+//! 1. [`down_convert_xml_2_21_form`] takes out of the XML what only the members
 //!    8.5 appends can hold, keeping it as facts by item id, and puts back the
 //!    8.3.27 spelling of what 8.5 keeps in the 8.3.27 part of a record -- the
 //!    XML the 8.3.27 form writer reads;
 //! 2. the 8.3.27 native form writer compiles that XML;
-//! 3. [`up_convert_v83_form_body`] bumps every record to its 8.5 revision,
+//! 3. [`up_convert_form_body_8_5_1`] bumps every record to its 8.5 revision,
 //!    appends the members the facts name (their defaults elsewhere), spells
 //!    colours and fonts the 8.5 way and lays the text out as the platform does.
 //!
@@ -46,7 +46,7 @@ const UNSET_COLOR: &str = "{3,4,{0}}";
 const DEFAULT_BORDER: &str = "{3,0,{0},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e}";
 
 /// Whether a `Form.xml` is written in dialect 2.21 (platform 8.5).
-pub(crate) fn is_v85_form_xml(xml: &[u8]) -> bool {
+pub(crate) fn is_xml_2_21_form(xml: &[u8]) -> bool {
     let head = &xml[..xml.len().min(8192)];
     let text = String::from_utf8_lossy(head);
     let Some(at) = text.find("<Form") else {
@@ -58,7 +58,7 @@ pub(crate) fn is_v85_form_xml(xml: &[u8]) -> bool {
 
 /// What a 2.21 `Form.xml` says that only the members 8.5 appends hold.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct V85FormLoadFacts {
+pub(crate) struct FormLoadFactsV8_5_1 {
     /// Root trailer members by index.
     root_tail: BTreeMap<usize, String>,
     /// The root's scale percentage, when not 100.
@@ -295,27 +295,27 @@ fn color_member(value: &str, what: &str, source: Option<&MetadataSourceContext>)
 /// the 8.3.27 one, which has no 8.5 tail to hold a member's absence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoredLayout {
-    V85,
-    V83,
+    V8_5_1,
+    V8_3,
 }
 
 /// Takes out of a 2.21 `Form.xml` what only the members 8.5 appends hold and
 /// returns the XML the 8.3.27 writer reads, with those members as facts.
-pub(crate) fn down_convert_v85_form_xml(
+pub(crate) fn down_convert_xml_2_21_form(
     xml: &str,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
-) -> Result<(String, V85FormLoadFacts)> {
-    down_convert_v85_form_xml_as(xml, source, items_root, StoredLayout::V85)
+) -> Result<(String, FormLoadFactsV8_5_1)> {
+    down_convert_xml_2_21_form_as(xml, source, items_root, StoredLayout::V8_5_1)
 }
 
-fn down_convert_v85_form_xml_as(
+fn down_convert_xml_2_21_form_as(
     xml: &str,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
     layout: StoredLayout,
-) -> Result<(String, V85FormLoadFacts)> {
-    let mut facts = V85FormLoadFacts::default();
+) -> Result<(String, FormLoadFactsV8_5_1)> {
+    let mut facts = FormLoadFactsV8_5_1::default();
     let mut edits = XmlEdits::new_lenient(xml)?;
     let root = edits
         .elements
@@ -479,7 +479,7 @@ fn report_state_of(
     }))
 }
 
-fn load_root(edits: &mut XmlEdits<'_>, root: usize, facts: &mut V85FormLoadFacts) -> Result<()> {
+fn load_root(edits: &mut XmlEdits<'_>, root: usize, facts: &mut FormLoadFactsV8_5_1) -> Result<()> {
     // WindowOpeningMode: 8.5 keeps `LockOwnerWindow` and `LockWholeInterface`
     // in the 8.3.27 slot and leaves an explicit `DontBlock` unset there.
     let mode = peek(edits, root, "WindowOpeningMode")?;
@@ -857,7 +857,7 @@ fn load_table(
             bail!("<Table> writes the 8.3.27 <{old}>{stale} under 2.21");
         }
         let value = match (layout, value.as_deref()) {
-            (StoredLayout::V83, None) => Some("true"),
+            (StoredLayout::V8_3, None) => Some("true"),
             (_, value) => value,
         };
         match (value, old_when_not_true) {
@@ -1066,7 +1066,7 @@ fn load_usual_group(edits: &mut XmlEdits<'_>, element: usize, item: &mut ItemFac
 /// The pictures 8.5 appends to choice-list values, in document order.
 fn load_choice_value_pictures(
     edits: &mut XmlEdits<'_>,
-    facts: &mut V85FormLoadFacts,
+    facts: &mut FormLoadFactsV8_5_1,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
 ) -> Result<()> {
@@ -1222,7 +1222,7 @@ fn is_uuid(text: &str) -> bool {
 }
 
 /// `{3,<space>,{<payload>}}`, an 8.3.27 colour.
-fn is_v83_color(members: &[Node]) -> bool {
+fn is_color_8_3(members: &[Node]) -> bool {
     if members.len() != 3 || leaf(&members[0]) != Some("3") {
         return false;
     }
@@ -1241,7 +1241,7 @@ fn is_v83_color(members: &[Node]) -> bool {
 
 /// `{7,<kind>,<mask>,...,1,<scale>}`, an 8.3.27 font (the 8.5 `{8,...}` is
 /// the same tuple renumbered).
-fn is_v83_font(members: &[Node]) -> bool {
+fn is_font_8_3(members: &[Node]) -> bool {
     if members.len() < 5 || leaf(&members[0]) != Some("7") {
         return false;
     }
@@ -1263,7 +1263,7 @@ fn is_v83_font(members: &[Node]) -> bool {
 
 /// `{7,0,<mask>,...,"<face>",1,<scale>}` of 19 members, an 8.3.27 absolute
 /// font; 8.5 appends one `0`.
-fn is_v83_absolute_font(members: &[Node]) -> bool {
+fn is_absolute_font_8_3(members: &[Node]) -> bool {
     members.len() == 19
         && leaf(&members[0]) == Some("7")
         && leaf(&members[1]) == Some("0")
@@ -1284,13 +1284,13 @@ fn up_convert_primitives(node: &mut Node) {
     for member in members.iter_mut() {
         up_convert_primitives(member);
     }
-    if is_v83_color(members) {
+    if is_color_8_3(members) {
         let space = members[1].clone();
         members[0] = Node::Leaf("4".to_owned());
         members.push(space);
-    } else if is_v83_font(members) {
+    } else if is_font_8_3(members) {
         members[0] = Node::Leaf("8".to_owned());
-    } else if is_v83_absolute_font(members) {
+    } else if is_absolute_font_8_3(members) {
         members[0] = Node::Leaf("8".to_owned());
         members.push(Node::Leaf("0".to_owned()));
     }
@@ -1298,10 +1298,10 @@ fn up_convert_primitives(node: &mut Node) {
 
 /// Rewrites, in place, every 8.3.27 colour and font tuple of a stored text
 /// into the 8.5 spelling, leaving every other byte as written: the inverse of
-/// `form_v85::rewrite_v85_primitives_in_place`. For a body 8.5 stores whole
+/// `layout_8_5_1::rewrite_primitives_8_5_1_in_place`. For a body 8.5 stores whole
 /// (a spreadsheet template), where no 8.3.27-shaped tuple survives
 /// (`F:/ibcmd/lab/v85/tools/primcensus.py`: none in the 9 935 BSP 8.5 rows).
-pub(crate) fn up_convert_v85_primitives_in_place(text: &str) -> String {
+pub(crate) fn up_convert_primitives_8_5_1_in_place(text: &str) -> String {
     const MAX_TUPLE: usize = 512;
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len() + text.len() / 16);
@@ -1334,17 +1334,17 @@ pub(crate) fn up_convert_v85_primitives_in_place(text: &str) -> String {
         {
             let mut node = Node::List(members);
             let converted = match &mut node {
-                Node::List(members) if is_v83_color(members) => {
+                Node::List(members) if is_color_8_3(members) => {
                     let space = members[1].clone();
                     members[0] = Node::Leaf("4".to_owned());
                     members.push(space);
                     true
                 }
-                Node::List(members) if is_v83_font(members) => {
+                Node::List(members) if is_font_8_3(members) => {
                     members[0] = Node::Leaf("8".to_owned());
                     true
                 }
-                Node::List(members) if is_v83_absolute_font(members) => {
+                Node::List(members) if is_absolute_font_8_3(members) => {
                     members[0] = Node::Leaf("8".to_owned());
                     members.push(Node::Leaf("0".to_owned()));
                     true
@@ -1370,7 +1370,7 @@ pub(crate) fn up_convert_v85_primitives_in_place(text: &str) -> String {
 /// and points) becomes `{75,...}` with eight automatic colours appended
 /// (8.5.1.1150 BSP, both Gantt chart templates; the exporter reads nothing
 /// else in those eight).
-pub(crate) fn up_convert_v85_chart_records(text: &str) -> Result<String> {
+pub(crate) fn up_convert_chart_records_8_5_1(text: &str) -> Result<String> {
     const RECORD_LIMIT: usize = 16 * 1024 * 1024;
     let mut out = String::with_capacity(text.len() + 256);
     let mut cursor = 0;
@@ -1495,7 +1495,7 @@ fn generated_search_panel(table: &str, table_id: &str, kind: u8) -> String {
     )
 }
 
-/// The inverse of `form_v85::bag_revision`: (8.3.27 owner revision, item
+/// The inverse of `layout_8_5_1::bag_revision`: (8.3.27 owner revision, item
 /// kind, 8.3.27 bag revision, 8.3.27 bag length) -> (8.5 bag revision, the
 /// defaults of the members 8.5 appends).
 fn up_bag(
@@ -1545,7 +1545,7 @@ fn up_bag(
         ("37", "14", "3", 14) => ("3", vec![]),
         ("37", "15", "3", 13) => ("4", vec![DEFAULT_BORDER]),
         ("37", "17", "1", 16) => ("1", vec![]),
-        // Unmeasured under 8.5 (see `form_v85::bag_revision`): kept as is.
+        // Unmeasured under 8.5 (see `layout_8_5_1::bag_revision`): kept as is.
         ("37", "12", "3", 16) => ("3", vec![]),
         ("37", "20", "1", 14) => ("1", vec![]),
         ("12", "0", "5", 9) => ("5", vec![]),
@@ -1555,12 +1555,15 @@ fn up_bag(
 }
 
 struct UpConversion<'f> {
-    facts: &'f V85FormLoadFacts,
+    facts: &'f FormLoadFactsV8_5_1,
     choice_values: usize,
 }
 
 /// Bumps one form body written in the 8.3.27 layout to what 8.5 stores.
-pub(crate) fn up_convert_v83_form_body(body: &str, facts: &V85FormLoadFacts) -> Result<String> {
+pub(crate) fn up_convert_form_body_8_5_1(
+    body: &str,
+    facts: &FormLoadFactsV8_5_1,
+) -> Result<String> {
     let text = body.trim_start_matches('\u{feff}');
     let mut container = parse_raw(text)?;
     let mut state = UpConversion {
@@ -1624,7 +1627,7 @@ fn up_convert_leaves(node: &mut Node) {
                     *text = crlf_line_breaks(text);
                 }
             } else if let Some(payload) = text.strip_prefix("#base64:") {
-                *text = v85_base64_leaf(payload);
+                *text = base64_leaf_8_5_1(payload);
             }
         }
     }
@@ -1646,7 +1649,7 @@ fn crlf_line_breaks(text: &str) -> String {
 
 /// A base64 leaf as 8.5 stores it; see [`up_convert_leaves`]. A payload that
 /// does not decode is only laid out; one that is not base64 text is kept.
-fn v85_base64_leaf(payload: &str) -> String {
+fn base64_leaf_8_5_1(payload: &str) -> String {
     let compact: String = payload
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
@@ -1679,7 +1682,7 @@ fn v85_base64_leaf(payload: &str) -> String {
     out
 }
 
-fn up_convert_root(root: &mut Node, facts: &V85FormLoadFacts) -> Result<()> {
+fn up_convert_root(root: &mut Node, facts: &FormLoadFactsV8_5_1) -> Result<()> {
     let Node::List(members) = root else {
         bail!("form layout is not a tuple");
     };
@@ -1795,7 +1798,7 @@ impl UpConversion<'_> {
     fn convert_item(&mut self, members: &mut Vec<Node>, id: &str) -> Result<()> {
         let revision = leaf(&members[0]).unwrap_or_default().to_owned();
         let facts = self.facts.items.get(id);
-        let (v85, tail_defaults): (&str, Vec<String>) = match revision.as_str() {
+        let (v8_5_1, tail_defaults): (&str, Vec<String>) = match revision.as_str() {
             "37" => {
                 let name = facts
                     .map(|facts| facts.name.clone())
@@ -1878,7 +1881,7 @@ impl UpConversion<'_> {
                 bail!("form item {id} (kind {kind}) carries no property bag at member {slot}");
             };
             let bag_revision = bag.first().and_then(leaf).unwrap_or_default().to_owned();
-            let (bag_v85, bag_defaults) = up_bag(&revision, &kind, &bag_revision, bag.len())
+            let (bag_v8_5_1, bag_defaults) = up_bag(&revision, &kind, &bag_revision, bag.len())
                 .ok_or_else(|| {
                     anyhow!(
                         "form item {id} (revision {revision}, kind {kind}) carries a property bag {{{bag_revision},...}} of {} members 8.5 does not name",
@@ -1893,7 +1896,7 @@ impl UpConversion<'_> {
                     *member = node_of(value)?;
                 }
             }
-            bag[0] = Node::Leaf(bag_v85.to_owned());
+            bag[0] = Node::Leaf(bag_v8_5_1.to_owned());
             for (index, default) in bag_defaults.iter().enumerate() {
                 let value = facts
                     .and_then(|facts| facts.bag_tail.get(&index))
@@ -1916,7 +1919,7 @@ impl UpConversion<'_> {
                 facts.tag
             );
         }
-        members[0] = Node::Leaf(v85.to_owned());
+        members[0] = Node::Leaf(v8_5_1.to_owned());
         for (index, default) in tail_defaults.iter().enumerate() {
             let value = facts
                 .and_then(|facts| facts.tail.get(&index))
@@ -2097,36 +2100,36 @@ fn command_identity(members: &[Node]) -> Option<String> {
 
 /// A 2.21 `Form.xml` through the 8.3.27 native writer, stored as 8.5 stores
 /// it.
-pub(crate) fn compile_v85_native_form_body(
+pub(crate) fn compile_native_form_body_8_5_1(
     form_xml: &[u8],
     module_text: Option<&[u8]>,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
 ) -> Result<String> {
     let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
-    let (xml20, facts) = down_convert_v85_form_xml(xml, source, items_root)?;
-    let body = crate::module_blob::compile_native_form_body_v83(
+    let (xml20, facts) = down_convert_xml_2_21_form(xml, source, items_root)?;
+    let body = crate::module_blob::compile_native_form_body_8_3(
         xml20.as_bytes(),
         module_text,
         source,
         items_root,
     )?;
-    up_convert_v83_form_body(&body, &facts)
+    up_convert_form_body_8_5_1(&body, &facts)
 }
 
 /// A 2.21 Form.xml stored in the 8.3.27 layout: its 8.3.27 reading through
 /// the 8.3.27 writer, without the 8.5 up-conversion -- what a configuration
 /// kept in an 8.3 compatibility mode stores under 8.5 (every form of the
 /// ERP УХ 8.5 clone).
-pub(crate) fn compile_v85_form_body_in_v83_layout(
+pub(crate) fn compile_xml_2_21_form_body_in_layout_8_3(
     form_xml: &[u8],
     module_text: Option<&[u8]>,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
 ) -> Result<String> {
     let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
-    let (xml20, _) = down_convert_v85_form_xml_as(xml, source, items_root, StoredLayout::V83)?;
-    crate::module_blob::compile_native_form_body_v83(
+    let (xml20, _) = down_convert_xml_2_21_form_as(xml, source, items_root, StoredLayout::V8_3)?;
+    crate::module_blob::compile_native_form_body_8_3(
         xml20.as_bytes(),
         module_text,
         source,
@@ -2139,14 +2142,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unset_table_line_member_is_a_true_slot_only_in_the_83_layout() {
+    fn an_unset_table_line_member_is_a_true_slot_only_in_the_8_3_layout() {
         let form = |members: &str| {
             format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Form xmlns=\"http://v8.1c.ru/8.3/xcf/logform\" version=\"2.21\">\r\n\t<ChildItems>\r\n\t\t<Table name=\"Список\" id=\"1\">\r\n\t\t\t<Representation>List</Representation>\r\n{members}\t\t\t<DataPath>Список</DataPath>\r\n\t\t</Table>\r\n\t</ChildItems>\r\n</Form>"
             )
         };
         let table = |xml: &str, layout| {
-            let (xml20, _) = down_convert_v85_form_xml_as(xml, None, None, layout).unwrap();
+            let (xml20, _) = down_convert_xml_2_21_form_as(xml, None, None, layout).unwrap();
             let start = xml20.find("<Table").unwrap();
             let end = xml20.find("</Table>").unwrap();
             xml20[start..end].to_string()
@@ -2154,30 +2157,30 @@ mod tests {
         // Unset: 8.5 keeps false slots (its tail says unset); the 8.3.27 layout
         // stores true ones, as its export (`upgrade_table`) reads them back.
         let unset = form("");
-        let v85 = table(&unset, StoredLayout::V85);
+        let v8_5_1 = table(&unset, StoredLayout::V8_5_1);
         assert!(
-            v85.contains("<HorizontalLines>false</HorizontalLines>"),
-            "{v85}"
+            v8_5_1.contains("<HorizontalLines>false</HorizontalLines>"),
+            "{v8_5_1}"
         );
         assert!(
-            v85.contains("<VerticalLines>false</VerticalLines>"),
-            "{v85}"
+            v8_5_1.contains("<VerticalLines>false</VerticalLines>"),
+            "{v8_5_1}"
         );
-        assert!(!v85.contains("UseAlternationRowColor"), "{v85}");
-        let v83 = table(&unset, StoredLayout::V83);
+        assert!(!v8_5_1.contains("UseAlternationRowColor"), "{v8_5_1}");
+        let v8_3 = table(&unset, StoredLayout::V8_3);
         assert!(
-            !v83.contains("HorizontalLines") && !v83.contains("VerticalLines"),
-            "{v83}"
+            !v8_3.contains("HorizontalLines") && !v8_3.contains("VerticalLines"),
+            "{v8_3}"
         );
         assert!(
-            v83.contains("<UseAlternationRowColor>true</UseAlternationRowColor>"),
-            "{v83}"
+            v8_3.contains("<UseAlternationRowColor>true</UseAlternationRowColor>"),
+            "{v8_3}"
         );
         // An explicit false reads the same in both.
         let off = form(
             "\t\t\t<HorizontalLinesBWA>false</HorizontalLinesBWA>\r\n\t\t\t<VerticalLinesBWA>false</VerticalLinesBWA>\r\n\t\t\t<UseAlternationRowColorBWA>false</UseAlternationRowColorBWA>\r\n",
         );
-        for layout in [StoredLayout::V85, StoredLayout::V83] {
+        for layout in [StoredLayout::V8_5_1, StoredLayout::V8_3] {
             let read = table(&off, layout);
             assert!(
                 read.contains("<HorizontalLines>false</HorizontalLines>"),
@@ -2201,14 +2204,14 @@ mod tests {
                 for revision in 0..=40 {
                     for len in 0..=80 {
                         let revision = revision.to_string();
-                        if let Some((v83, appended)) =
+                        if let Some((v8_3, appended)) =
                             super::super::layout_8_5_1::bag_revision(owner, &kind, &revision, len)
                         {
-                            let (v85, defaults) = up_bag(owner, &kind, v83, len - appended)
+                            let (v8_5_1, defaults) = up_bag(owner, &kind, v8_3, len - appended)
                                 .unwrap_or_else(|| {
                                     panic!("no inverse for {owner}/{kind}/{revision}/{len}")
                                 });
-                            assert_eq!((v85, defaults.len()), (revision.as_str(), appended));
+                            assert_eq!((v8_5_1, defaults.len()), (revision.as_str(), appended));
                             checked += 1;
                         }
                     }
@@ -2219,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn spells_strings_and_base64_the_85_way() {
+    fn spells_strings_and_base64_the_8_5_1_way() {
         let settings = "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Settings xmlns=\"http://v8.1c.ru/8.1/data-composition-system/settings\" xmlns:dcscor=\"http://v8.1c.ru/8.1/data-composition-system/core\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\"/>";
         let with_pal = settings.replace(
             " xmlns:style=",
@@ -2245,7 +2248,7 @@ mod tests {
         assert!(!lines.last().unwrap().is_empty() || encoded.len() % 64 == 0);
         // A payload of exactly 64 characters keeps the break after it.
         assert_eq!(
-            v85_base64_leaf(&"A".repeat(64)),
+            base64_leaf_8_5_1(&"A".repeat(64)),
             format!("#base64:{}\r\r\n", "A".repeat(64))
         );
     }

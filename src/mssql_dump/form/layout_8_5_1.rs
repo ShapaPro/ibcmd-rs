@@ -25,10 +25,10 @@ use anyhow::{Result, anyhow, bail};
 use crate::module_blob::ParsedFormBodyBlob;
 
 /// Layout revision of a platform 8.5 managed-form root.
-pub(in crate::mssql_dump) const V85_FORM_ROOT_REVISION: &str = "59";
-const V83_FORM_ROOT_REVISION: &str = "50";
+pub(in crate::mssql_dump) const FORM_ROOT_REVISION_8_5_1: &str = "59";
+const FORM_ROOT_REVISION_8_3: &str = "50";
 /// Members the 8.5 root trailer appends after the 8.3.27 trailer.
-const V85_ROOT_TRAILER_APPENDED: usize = 12;
+const ROOT_TRAILER_APPENDED_8_5_1: usize = 12;
 
 const FORM_ITEM_CLASS_UUID: &str = "02023637-7868-4a5f-8576-835a76e0c9ba";
 const FORM_COMMAND_CLASS_UUID: &str = "409b9a53-7f7e-4178-86c1-33176c7c7a7a";
@@ -156,7 +156,7 @@ fn parse_list(text: &str, bytes: &[u8], start: usize) -> Result<(Node, usize)> {
 
 /// What the 8.5 members appended to one form item said.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::mssql_dump) struct FormV85ItemFacts {
+pub(in crate::mssql_dump) struct FormItemFactsV8_5_1 {
     /// The item record's own 8.5 revision.
     pub(in crate::mssql_dump) revision: String,
     /// The members 8.5 appended to the item record, in order.
@@ -176,7 +176,7 @@ pub(in crate::mssql_dump) struct FormV85ItemFacts {
 
 /// Everything an 8.5 body carries beyond its 8.3.27 down-conversion.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::mssql_dump) struct FormV85Facts {
+pub(in crate::mssql_dump) struct FormFactsV8_5_1 {
     /// The 12 members the root trailer appends.
     pub(in crate::mssql_dump) root_tail: Vec<Node>,
     /// The member 8.5 appends to every choice-list value (its picture), in
@@ -186,7 +186,7 @@ pub(in crate::mssql_dump) struct FormV85Facts {
     /// member 20 from the end of the 8.5 root record.
     pub(in crate::mssql_dump) root_scale: Option<String>,
     /// Item facts by form item id.
-    pub(in crate::mssql_dump) items: BTreeMap<String, FormV85ItemFacts>,
+    pub(in crate::mssql_dump) items: BTreeMap<String, FormItemFactsV8_5_1>,
     /// Appended form-command members by command id.
     pub(in crate::mssql_dump) commands: BTreeMap<String, Vec<Node>>,
     /// Palette colour tuples left in their 8.5 shape (no 8.3.27 spelling).
@@ -195,14 +195,14 @@ pub(in crate::mssql_dump) struct FormV85Facts {
     pub(in crate::mssql_dump) unknown_palette_colors: Vec<String>,
 }
 
-pub(in crate::mssql_dump) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool {
+pub(in crate::mssql_dump) fn is_form_body_8_5_1(body: &ParsedFormBodyBlob) -> bool {
     let declares_revision = body
         .layout
         .trim_start()
         .strip_prefix('{')
         .map(|rest| rest.trim_start())
         .is_some_and(|rest| {
-            rest.strip_prefix(V85_FORM_ROOT_REVISION)
+            rest.strip_prefix(FORM_ROOT_REVISION_8_5_1)
                 .is_some_and(|after| after.trim_start().starts_with(','))
         });
     // The revision alone is a number any hand-made record can carry; an 8.5
@@ -210,23 +210,23 @@ pub(in crate::mssql_dump) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool
     // 14 members from the end.
     declares_revision
         && super::super::split_1c_braced_fields(&body.layout, 0).is_some_and(|fields| {
-            fields.len() > V85_ROOT_TRAILER_APPENDED + 2
-                && fields[fields.len() - V85_ROOT_TRAILER_APPENDED - 2]
+            fields.len() > ROOT_TRAILER_APPENDED_8_5_1 + 2
+                && fields[fields.len() - ROOT_TRAILER_APPENDED_8_5_1 - 2]
                     .trim_start()
                     .strip_prefix('{')
                     .is_some_and(|rest| {
                         rest.trim_start()
-                            .strip_prefix(V85_FORM_ROOT_REVISION)
+                            .strip_prefix(FORM_ROOT_REVISION_8_5_1)
                             .is_some_and(|after| after.trim_start().starts_with(','))
                     })
         })
 }
 
 /// Down-converts one 8.5 form body into the 8.3.27 shape the form codec reads.
-pub(in crate::mssql_dump) fn down_convert_v85_form_body(
+pub(in crate::mssql_dump) fn down_convert_form_body_8_5_1(
     body: &ParsedFormBodyBlob,
-) -> Result<(ParsedFormBodyBlob, FormV85Facts)> {
-    let mut facts = FormV85Facts::default();
+) -> Result<(ParsedFormBodyBlob, FormFactsV8_5_1)> {
+    let mut facts = FormFactsV8_5_1::default();
     let mut root = parse_node(&body.layout)?;
     root = convert_primitives(root, &mut facts);
     root = convert_items(root, &mut facts)?;
@@ -240,13 +240,13 @@ pub(in crate::mssql_dump) fn down_convert_v85_form_body(
     let Node::List(mut root_members) = root else {
         bail!("8.5 form layout is not a tuple");
     };
-    if root_members.first().and_then(Node::leaf) != Some(V85_FORM_ROOT_REVISION) {
+    if root_members.first().and_then(Node::leaf) != Some(FORM_ROOT_REVISION_8_5_1) {
         bail!("8.5 form layout does not declare root revision 59");
     }
-    root_members[0] = Node::Leaf(V83_FORM_ROOT_REVISION.to_owned());
+    root_members[0] = Node::Leaf(FORM_ROOT_REVISION_8_3.to_owned());
     let kept = root_members
         .len()
-        .checked_sub(V85_ROOT_TRAILER_APPENDED)
+        .checked_sub(ROOT_TRAILER_APPENDED_8_5_1)
         .ok_or_else(|| anyhow!("8.5 form root is shorter than its appended trailer"))?;
     facts.root_tail = root_members.split_off(kept);
     facts.root_scale = kept
@@ -262,9 +262,9 @@ pub(in crate::mssql_dump) fn down_convert_v85_form_body(
         .ok_or_else(|| anyhow!("8.5 form root trailer is too short"))?;
     match &mut root_members[revision_index] {
         Node::List(members)
-            if members.first().and_then(Node::leaf) == Some(V85_FORM_ROOT_REVISION) =>
+            if members.first().and_then(Node::leaf) == Some(FORM_ROOT_REVISION_8_5_1) =>
         {
-            members[0] = Node::Leaf(V83_FORM_ROOT_REVISION.to_owned());
+            members[0] = Node::Leaf(FORM_ROOT_REVISION_8_3.to_owned());
         }
         _ => bail!("8.5 form root trailer does not carry its `{{59,...}}` revision tuple"),
     }
@@ -309,7 +309,7 @@ fn is_uuid(text: &str) -> bool {
 }
 
 /// `{4,<space>,{<payload>},<kind>}`: the 8.5 colour tuple.
-fn is_v85_color(members: &[Node]) -> bool {
+fn is_color_8_5_1(members: &[Node]) -> bool {
     if members.len() != 4 || members[0].leaf() != Some("4") {
         return false;
     }
@@ -335,7 +335,7 @@ fn is_v85_color(members: &[Node]) -> bool {
 /// `{8,0,<mask>,...,"<face>",1,<scale>,0}`: the 8.5 absolute font, the
 /// 8.3.27 `{7,0,...}` of 19 members plus one appended `0` (all 192 absolute
 /// fonts of the 8.5 BSP spreadsheets).
-fn is_v85_absolute_font(members: &[Node]) -> bool {
+fn is_absolute_font_8_5_1(members: &[Node]) -> bool {
     members.len() == 20
         && members[0].leaf() == Some("8")
         && members[1].leaf() == Some("0")
@@ -348,7 +348,7 @@ fn is_v85_absolute_font(members: &[Node]) -> bool {
 
 /// `{8,<kind>,<mask>,...,1,<scale>}`: the 8.5 font tuple, the 8.3.27 `{7,...}`
 /// member for member.
-fn is_v85_font(members: &[Node]) -> bool {
+fn is_font_8_5_1(members: &[Node]) -> bool {
     if members.len() < 5 || members[0].leaf() != Some("8") {
         return false;
     }
@@ -373,7 +373,7 @@ fn is_v85_font(members: &[Node]) -> bool {
 /// 8.5.1.1150 BSP native tree: every item carrying exactly one palette tuple
 /// and one `pal:` element pairs index and name without exception over the 78
 /// such items. An index the table does not name refuses the body.
-pub(in crate::mssql_dump) fn v85_palette_color_name(index: i64) -> Option<&'static str> {
+pub(in crate::mssql_dump) fn palette_color_name_8_5_1(index: i64) -> Option<&'static str> {
     Some(match index {
         0 => "pal:FirstBrand",
         1 => "pal:SecondBrand",
@@ -391,15 +391,16 @@ pub(in crate::mssql_dump) fn v85_palette_color_name(index: i64) -> Option<&'stat
 }
 
 /// The 2.21 spelling of a palette colour tuple, if `text` is one.
-pub(in crate::mssql_dump) fn v85_palette_color(text: &str) -> Option<&'static str> {
-    v85_palette_color_index(text.trim()).and_then(v85_palette_color_name)
+pub(in crate::mssql_dump) fn palette_color_8_5_1(text: &str) -> Option<&'static str> {
+    palette_color_index_8_5_1(text.trim()).and_then(palette_color_name_8_5_1)
 }
 
 /// Palette colour: space `4` ("automatic" to an 8.3.27 reader) with kind `5`.
-pub(in crate::mssql_dump) fn v85_palette_color_index(text: &str) -> Option<i64> {
+pub(in crate::mssql_dump) fn palette_color_index_8_5_1(text: &str) -> Option<i64> {
     let node = parse_node(text).ok()?;
     let members = node.list()?;
-    if !is_v85_color(members) || members[1].leaf() != Some("4") || members[3].leaf() != Some("5") {
+    if !is_color_8_5_1(members) || members[1].leaf() != Some("4") || members[3].leaf() != Some("5")
+    {
         return None;
     }
     match members[2].list()? {
@@ -453,7 +454,7 @@ fn short_tuple_end(bytes: &[u8], start: usize, limit: usize) -> Option<usize> {
 /// BSP rows carry them by the tens of thousands. Rewriting them therefore
 /// changes nothing an 8.3.27 base stores. A palette colour, which 8.3.27
 /// cannot spell, stays as stored for the readers that name palettes.
-pub(in crate::mssql_dump) fn rewrite_v85_primitives_in_place(
+pub(in crate::mssql_dump) fn rewrite_primitives_8_5_1_in_place(
     text: &str,
 ) -> std::borrow::Cow<'_, str> {
     const MAX_TUPLE: usize = 512;
@@ -475,7 +476,7 @@ pub(in crate::mssql_dump) fn rewrite_v85_primitives_in_place(
             continue;
         };
         let members = node.list().unwrap_or_default();
-        if is_v85_color(members) && members[1].leaf() == members[3].leaf() {
+        if is_color_8_5_1(members) && members[1].leaf() == members[3].leaf() {
             let mut replacement = String::from("{3,");
             replacement.push_str(members[1].leaf().unwrap_or_default());
             replacement.push(',');
@@ -485,12 +486,12 @@ pub(in crate::mssql_dump) fn rewrite_v85_primitives_in_place(
             index = end;
             continue;
         }
-        if is_v85_font(members) {
+        if is_font_8_5_1(members) {
             edits.push((index + 1, index + 2, "7".to_owned()));
             index = end;
             continue;
         }
-        if is_v85_absolute_font(members) {
+        if is_absolute_font_8_5_1(members) {
             let mut converted = members.to_vec();
             converted.truncate(19);
             converted[0] = Node::Leaf("7".to_owned());
@@ -516,8 +517,8 @@ pub(in crate::mssql_dump) fn rewrite_v85_primitives_in_place(
 
 /// Rewrites the 8.5 colour and font tuples of any brace text into their
 /// 8.3.27 spelling. A palette colour, which 8.3.27 cannot spell, is refused.
-pub(in crate::mssql_dump) fn down_convert_v85_primitives_text(text: &str) -> Result<String> {
-    let mut facts = FormV85Facts::default();
+pub(in crate::mssql_dump) fn down_convert_primitives_8_5_1_text(text: &str) -> Result<String> {
+    let mut facts = FormFactsV8_5_1::default();
     let node = convert_primitives(parse_node(text)?, &mut facts);
     if facts.palette_colors != 0 {
         bail!(
@@ -528,7 +529,7 @@ pub(in crate::mssql_dump) fn down_convert_v85_primitives_text(text: &str) -> Res
     Ok(node.to_text())
 }
 
-fn convert_primitives(node: Node, facts: &mut FormV85Facts) -> Node {
+fn convert_primitives(node: Node, facts: &mut FormFactsV8_5_1) -> Node {
     let Node::List(members) = node else {
         return node;
     };
@@ -536,7 +537,7 @@ fn convert_primitives(node: Node, facts: &mut FormV85Facts) -> Node {
         .into_iter()
         .map(|member| convert_primitives(member, facts))
         .collect();
-    if is_v85_color(&members) {
+    if is_color_8_5_1(&members) {
         if members[1].leaf() == members[3].leaf() {
             let mut members = members;
             members.truncate(3);
@@ -550,7 +551,7 @@ fn convert_primitives(node: Node, facts: &mut FormV85Facts) -> Node {
         };
         if members[1].leaf() != Some("4")
             || members[3].leaf() != Some("5")
-            || index.and_then(v85_palette_color_name).is_none()
+            || index.and_then(palette_color_name_8_5_1).is_none()
         {
             facts
                 .unknown_palette_colors
@@ -558,12 +559,12 @@ fn convert_primitives(node: Node, facts: &mut FormV85Facts) -> Node {
         }
         return Node::List(members);
     }
-    if is_v85_font(&members) {
+    if is_font_8_5_1(&members) {
         let mut members = members;
         members[0] = Node::Leaf("7".to_owned());
         return Node::List(members);
     }
-    if is_v85_absolute_font(&members) {
+    if is_absolute_font_8_5_1(&members) {
         let mut members = members;
         members.truncate(19);
         members[0] = Node::Leaf("7".to_owned());
@@ -600,8 +601,8 @@ pub(in crate::mssql_dump) fn item_revision(revision: &str) -> Option<(&'static s
 
 /// The property-bag slot of a record that carries one, before the optional
 /// common prefix shifts it.
-pub(in crate::mssql_dump) fn bag_base_slot(v83_revision: &str) -> Option<usize> {
-    match v83_revision {
+pub(in crate::mssql_dump) fn bag_base_slot(v8_3_revision: &str) -> Option<usize> {
+    match v8_3_revision {
         "22" => Some(20),
         "37" => Some(39),
         "12" => Some(18),
@@ -618,12 +619,12 @@ pub(in crate::mssql_dump) fn bag_base_slot(v83_revision: &str) -> Option<usize> 
 /// `{2,...}` of four. Every (kind, shape) pair of the 8.5 BSP bodies is listed;
 /// each maps onto the one shape the 8.3.27 BSP bodies give that kind.
 pub(in crate::mssql_dump) fn bag_revision(
-    v83_owner: &str,
+    v8_3_owner: &str,
     kind: &str,
     revision: &str,
     len: usize,
 ) -> Option<(&'static str, usize)> {
-    Some(match (v83_owner, kind, revision, len) {
+    Some(match (v8_3_owner, kind, revision, len) {
         // Groups: CommandBar, ColumnGroup, Popup, Pages, Page, UsualGroup,
         // ButtonGroup, ContextMenu, AutoCommandBar.
         ("22", "0", "2", 4) => ("1", 1),
@@ -663,7 +664,7 @@ pub(in crate::mssql_dump) fn bag_revision(
     })
 }
 
-fn convert_items(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
+fn convert_items(node: Node, facts: &mut FormFactsV8_5_1) -> Result<Node> {
     let Node::List(members) = node else {
         return Ok(node);
     };
@@ -675,24 +676,24 @@ fn convert_items(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
         return Ok(Node::List(members));
     };
     let revision = members[0].leaf().unwrap_or_default().to_owned();
-    let (v83, appended) = item_revision(&revision)
+    let (v8_3, appended) = item_revision(&revision)
         .ok_or_else(|| anyhow!("8.5 form item {id} declares unknown record revision {revision}"))?;
     let kept = members
         .len()
         .checked_sub(appended)
         .ok_or_else(|| anyhow!("8.5 form item {id} is shorter than its appended members"))?;
     let tail = members.split_off(kept);
-    members[0] = Node::Leaf(v83.to_owned());
-    let mut item_facts = FormV85ItemFacts {
+    members[0] = Node::Leaf(v8_3.to_owned());
+    let mut item_facts = FormItemFactsV8_5_1 {
         revision,
         tail,
-        ..FormV85ItemFacts::default()
+        ..FormItemFactsV8_5_1::default()
     };
     // The optional common prefix is a tuple ahead of the kind code and shifts
     // every later member, the bag with them.
     item_facts.prefix_offset = usize::from(matches!(members.get(5), Some(Node::List(_))));
     item_facts.record = members.clone();
-    if let Some(base) = bag_base_slot(v83) {
+    if let Some(base) = bag_base_slot(v8_3) {
         let offset = item_facts.prefix_offset;
         let kind = members
             .get(5 + offset)
@@ -709,7 +710,7 @@ fn convert_items(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
             .filter(|lead| is_int(lead))
             .ok_or_else(|| anyhow!("8.5 form item {id} property bag has no revision"))?
             .to_owned();
-        let (bag_v83, bag_appended) = bag_revision(v83, &kind, &bag_lead, bag.len())
+        let (bag_v8_3, bag_appended) = bag_revision(v8_3, &kind, &bag_lead, bag.len())
             .ok_or_else(|| {
                 anyhow!(
                     "8.5 form item {id} (revision {}, kind {kind}) carries unknown property bag {{{bag_lead},...}} with {} members",
@@ -721,7 +722,7 @@ fn convert_items(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
         let bag_kept = bag.len() - bag_appended;
         item_facts.bag_tail = bag.split_off(bag_kept);
         item_facts.bag_revision = Some(bag_lead);
-        bag[0] = Node::Leaf(bag_v83.to_owned());
+        bag[0] = Node::Leaf(bag_v8_3.to_owned());
         item_facts.kind = Some(kind);
     }
     facts.items.insert(id, item_facts);
@@ -730,7 +731,7 @@ fn convert_items(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
 
 /// Form commands: `{11,{<id>,<form command class>},...}` with 21 members, the
 /// 8.3.27 `{9,...}` with 19 plus two appended.
-fn convert_values_and_commands(node: Node, facts: &mut FormV85Facts) -> Result<Node> {
+fn convert_values_and_commands(node: Node, facts: &mut FormFactsV8_5_1) -> Result<Node> {
     let Node::List(members) = node else {
         return Ok(node);
     };

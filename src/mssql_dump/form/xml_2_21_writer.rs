@@ -1,6 +1,6 @@
 //! The 2.21 writer pass for platform 8.5 forms: what the members 8.5 appends
 //! say, applied to the XML the 8.3.27 codec wrote for the down-converted body
-//! (see `form_v85`).
+//! (see `layout_8_5_1`).
 //!
 //! Every rule below is a total function over the 8.5.1.1150 BSP native tree
 //! (`F:/ibcmd/lab/v85/tools/factfind.py`): for every attributable item of the
@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::layout_8_5_1::{FormV85Facts, FormV85ItemFacts, Node};
+use super::layout_8_5_1::{FormFactsV8_5_1, FormItemFactsV8_5_1, Node};
 
 /// One element of a written `Form.xml`, located by byte offsets. The writer
 /// puts every element on its own line, indented with tabs.
@@ -910,8 +910,8 @@ const FACT_RULES: &[FactRule] = &[
 
 fn fact_node<'f>(
     source: FactSource,
-    facts: &'f FormV85Facts,
-    item: Option<&'f FormV85ItemFacts>,
+    facts: &'f FormFactsV8_5_1,
+    item: Option<&'f FormItemFactsV8_5_1>,
     command: Option<&'f [Node]>,
 ) -> Result<Option<&'f Node>> {
     Ok(match source {
@@ -970,7 +970,7 @@ const COMPLEX_SETTINGS_VIEW_MODE_TYPE: &str = "2eb62aaa-e6c1-48b6-a047-435354d5a
 fn apply_complex_settings_view_mode(
     edits: &mut XmlEdits<'_>,
     table: usize,
-    item: &FormV85ItemFacts,
+    item: &FormItemFactsV8_5_1,
 ) -> Result<()> {
     let Some(Node::List(members)) = item.record.get(58 + item.prefix_offset) else {
         return Ok(());
@@ -997,7 +997,7 @@ fn apply_complex_settings_view_mode(
 
 /// The events 8.5 lets a usual group handle, by the identifier its event
 /// record stores (8.5.1.1150 BSP: three `Click` handlers).
-fn v85_group_event_name(id: &str) -> Option<&'static str> {
+fn group_event_name_8_5_1(id: &str) -> Option<&'static str> {
     match id {
         "a3da1388-983a-4d28-87f2-5096d7e3a4ef" => Some("Click"),
         _ => None,
@@ -1032,7 +1032,7 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
         let id = members[1 + 2 * index]
             .as_leaf()
             .ok_or_else(|| anyhow!("<UsualGroup> events: unreadable 8.5 event id"))?;
-        let name = v85_group_event_name(id)
+        let name = group_event_name_8_5_1(id)
             .ok_or_else(|| anyhow!("<UsualGroup> events: unknown 8.5 event {id}"))?;
         let handler = members[2 + 2 * index]
             .as_leaf()
@@ -1058,7 +1058,7 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
 /// match one for one refuses rather than pairing them on a guess.
 fn apply_choice_value_pictures(
     edits: &mut XmlEdits<'_>,
-    facts: &FormV85Facts,
+    facts: &FormFactsV8_5_1,
     object_refs: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let is_empty = |node: &Node| node.to_text().starts_with("{4,0,{0},");
@@ -1134,8 +1134,8 @@ pub(in crate::mssql_dump) fn element_name(edits: &XmlEdits<'_>, element: usize) 
 fn apply_rules(
     edits: &mut XmlEdits<'_>,
     element: usize,
-    facts: &FormV85Facts,
-    item: Option<&FormV85ItemFacts>,
+    facts: &FormFactsV8_5_1,
+    item: Option<&FormItemFactsV8_5_1>,
     command: Option<&[Node]>,
     object_refs: &std::collections::BTreeMap<String, String>,
     assets: &mut Vec<super::super::FormItemAsset>,
@@ -1292,7 +1292,7 @@ fn add_simple(edits: &mut XmlEdits<'_>, parent: usize, tag: &str, value: &str) -
 /// element against the 8.3.27 property it follows
 /// (`F:/ibcmd/lab/v85/tools/upg.py`). A value outside a rule's evidence
 /// refuses the form rather than guessing a spelling.
-pub(in crate::mssql_dump) fn apply_v85_upgrade_defaults(xml: String) -> Result<String> {
+pub(in crate::mssql_dump) fn apply_xml_2_21_upgrade_defaults(xml: String) -> Result<String> {
     let mut edits = XmlEdits::new(&xml)?;
     for index in 0..edits.elements.len() {
         let tag = edits.elements[index].tag.clone();
@@ -1460,9 +1460,9 @@ fn upgrade_field(edits: &mut XmlEdits<'_>, field: usize, tag: &str) -> Result<()
 
 /// Applies to a written 8.5 `Form.xml` what the appended members say, and
 /// returns the inline pictures those members carry (files beside the form).
-pub(in crate::mssql_dump) fn apply_v85_form_facts(
+pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
     xml: String,
-    facts: &FormV85Facts,
+    facts: &FormFactsV8_5_1,
     object_refs: &std::collections::BTreeMap<String, String>,
 ) -> Result<(String, Vec<super::super::FormItemAsset>)> {
     let mut assets = Vec::new();

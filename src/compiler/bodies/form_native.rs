@@ -91,9 +91,9 @@ pub(crate) fn format_native_color(
         return Some(format!("{{3,2,{{{code}}}}}"));
     }
     // `pal:<name>`, a platform 8.5 palette colour: space 4 with kind 5, the
-    // index the 2.21 exporter names (`form_v85::v85_palette_color_name`).
+    // index the 2.21 exporter names (`layout_8_5_1::palette_color_name_8_5_1`).
     if let Some(name) = value.strip_prefix("pal:") {
-        let index = V85_PALETTE_COLORS
+        let index = PALETTE_COLORS_8_5_1
             .iter()
             .find_map(|(candidate, index)| (*candidate == name).then_some(*index))?;
         return Some(format!("{{4,4,{{{index}}},5}}"));
@@ -115,7 +115,7 @@ pub(crate) fn format_native_color(
 }
 
 /// The platform 8.5 palette, by the index a colour tuple stores.
-pub(crate) const V85_PALETTE_COLORS: &[(&str, u8)] = &[
+pub(crate) const PALETTE_COLORS_8_5_1: &[(&str, u8)] = &[
     ("FirstBrand", 0),
     ("SecondBrand", 1),
     ("Red", 2),

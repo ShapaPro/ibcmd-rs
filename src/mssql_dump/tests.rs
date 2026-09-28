@@ -8474,13 +8474,13 @@ fn extracts_form_scaling_mode_when_root_child_item_is_pages() {
 /// The `{59,...}` roots above are platform 8.5 roots: 8.5 keeps every member
 /// of the 8.3.27 root where 8.3.27 puts it, relabels the root and its trailer
 /// tuple `59` and appends twelve members to the trailer. The source export
-/// reads such a body through its 8.3.27 down-conversion (`form_v85`), and so
+/// reads such a body through its 8.3.27 down-conversion (`layout_8_5_1`), and so
 /// does `extract_form_body_xml`; read straight, a `59` root has no trailer the
 /// 8.3.27 codec accepts and every trailer property goes missing. These two
 /// bodies are the platform's own (8.5.1.1150, BSP 3.2), and the native 8.5
 /// export writes each asserted property at the form root.
 #[test]
-fn reads_platform_85_form_roots_through_their_down_conversion() {
+fn reads_platform_8_5_1_form_roots_through_their_down_conversion() {
     let save_window = extract_form_body_xml(
         include_bytes!(
             "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-8.5.1-down-conversion/raw/1415ba25-2477-4d93-b248-95235d5086ed.deflate"

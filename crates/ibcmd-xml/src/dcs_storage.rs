@@ -917,12 +917,12 @@ impl Writer<'_> {
         // on the inline settings; the 8.5 writer declares it on the stored
         // root too, between `dcscor` and `style` (all 132 settings documents
         // of the 8.5.1.1150 BSP schema templates).
-        let v85 = settings
+        let xml_2_21 = settings
             .declarations()
             .iter()
             .any(|(prefix, uri)| prefix == "pal" && uri == PALETTE);
         let mut namespaces = SETTINGS_NAMESPACES.to_vec();
-        if v85 {
+        if xml_2_21 {
             namespaces.insert(2, ("pal", PALETTE));
         }
         let mut out = String::from(DOCUMENT_HEAD);
@@ -1147,11 +1147,11 @@ impl Writer<'_> {
             // A `Settings` object re-declares its writer's namespace set; a
             // platform 8.5 source (the palette namespace declared on the
             // element) has the palette between `dcscor` and `style`.
-            let v85 = own_source
+            let xml_2_21 = own_source
                 .iter()
                 .any(|(prefix, bound)| prefix == "pal" && bound == PALETTE);
             let mut namespaces = SETTINGS_NAMESPACES[1..].to_vec();
-            if v85 {
+            if xml_2_21 {
                 namespaces.insert(1, ("pal", PALETTE));
             }
             for (prefix, settings_uri) in &namespaces {

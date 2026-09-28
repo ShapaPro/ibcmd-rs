@@ -37,7 +37,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::DescriptorContext;
 use super::brace::{Brace, NIL_UUID, parse_row};
-use super::common::{crlf_strings, up_convert_v85_primitives, v85_layout};
+use super::common::{crlf_strings, stores_layout_8_5_1, up_convert_primitives_8_5_1};
 use super::types::{design_time_ref, object_uuid};
 use super::xml::{Element, parse_element_tree};
 use crate::brace_list;
@@ -111,8 +111,8 @@ fn scheme_row(
     let pictures = path.with_extension("").join("Items");
     let mut row = Flowchart::new(&schema, context, owner, pictures)?.to_brace()?;
     crlf_strings(&mut row);
-    if v85_layout(context) {
-        up_convert_v85_primitives(&mut row);
+    if stores_layout_8_5_1(context) {
+        up_convert_primitives_8_5_1(&mut row);
     }
     Ok(Some(row))
 }
