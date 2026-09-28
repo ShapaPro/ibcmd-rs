@@ -1117,6 +1117,33 @@ pub struct MetadataSourceContext {
     preloaded: PreloadedSourceFiles,
 }
 
+/// A source file's bytes: shared with the preloaded store, or read for the
+/// caller.
+pub(crate) enum SourceBytes {
+    Shared(Arc<Vec<u8>>),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for SourceBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Shared(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+impl SourceBytes {
+    pub(crate) fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Shared(bytes) => bytes.as_ref().clone(),
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
 /// Source files read into memory, by path: shared, and printed as a count.
 #[derive(Clone, Default)]
 pub(crate) struct PreloadedSourceFiles(pub(crate) Arc<HashMap<PathBuf, Arc<Vec<u8>>>>);
@@ -1162,11 +1189,13 @@ impl MetadataSourceContext {
         }
     }
 
-    /// The bytes of a source file: from memory when preloaded, else read.
-    pub(crate) fn read_source(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+    /// The bytes of a source file: shared from memory when preloaded, else
+    /// read. (The resolvers ask for ERP УХ's metadata XMLs some 150 000 times;
+    /// a copy each time cost a large-block allocation each.)
+    pub(crate) fn read_source(&self, path: &Path) -> std::io::Result<SourceBytes> {
         match self.preloaded.0.get(path) {
-            Some(bytes) => Ok(bytes.as_ref().clone()),
-            None => fs::read(path),
+            Some(bytes) => Ok(SourceBytes::Shared(bytes.clone())),
+            None => fs::read(path).map(SourceBytes::Owned),
         }
     }
 
@@ -1430,7 +1459,7 @@ impl MetadataSourceContext {
             .join(format!("{register}.xml"));
         let xml = self.read_source(&path)
             .with_context(|| format!("failed to read InformationRegister XML {}", path.display()))?;
-        let mut reader = Reader::from_reader(xml.as_slice());
+        let mut reader = Reader::from_reader(&xml[..]);
         let mut buffer = Vec::new();
         let mut path_stack = Vec::<String>::new();
         let mut dimensions = Vec::new();
@@ -1603,7 +1632,7 @@ impl MetadataSourceContext {
         let text = self
                 .read_source(&path)
                 .and_then(|bytes| {
-                    String::from_utf8(bytes).map_err(|_| {
+                    String::from_utf8(bytes.into_vec()).map_err(|_| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "stream did not contain valid UTF-8",

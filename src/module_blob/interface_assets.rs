@@ -679,7 +679,7 @@ fn read_metadata_file_header(
     path: &Path,
 ) -> Option<(String, String)> {
     let xml = source.read_source(path).ok()?;
-    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut reader = Reader::from_reader(&xml[..]);
     let mut buffer = Vec::new();
     let mut depth = 0usize;
     let mut root_is_metadata = false;
