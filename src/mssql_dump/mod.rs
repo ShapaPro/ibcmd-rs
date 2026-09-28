@@ -36203,7 +36203,8 @@ fn brace_jump_value<'a>(
         .find(|table| at >= table.base && at < table.base + table.len)?;
     let offset = at - table.base;
     let end = table.ends[offset] as usize;
-    (end != 0 && end - offset <= rest.len()).then_some((table, offset, end - offset))
+    // `then`, not `then_some`: with `end == 0` the subtraction must not run.
+    (end != 0 && end - offset <= rest.len()).then(|| (table, offset, end - offset))
 }
 
 /// [`split_1c_braced_fields_bounded`] through the registered table: the
@@ -36337,7 +36338,8 @@ fn brace_jump_end(rest: &str) -> Option<usize> {
             .find(|table| at >= table.base && at < table.base + table.len)?;
         let offset = at - table.base;
         let end = table.ends[offset] as usize;
-        (end != 0 && end - offset <= rest.len()).then_some(end - offset)
+        // `then`, not `then_some`: with `end == 0` the subtraction must not run.
+        (end != 0 && end - offset <= rest.len()).then(|| end - offset)
     })
 }
 
