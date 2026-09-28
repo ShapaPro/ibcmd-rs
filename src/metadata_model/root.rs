@@ -710,7 +710,7 @@ fn properties_tuple(
     let functionalities = mobile_functionalities(p)?;
     let permissions = permissions_of(&functionalities);
     let compatibility = Brace::num(compatibility as i64);
-    let (interface_83, interface_85) = interface_compatibility(p, shape)?;
+    let (interface_8_3, interface_8_5_1) = interface_compatibility(p, shape)?;
     let nil = Brace::nil_uuid;
     let pair = || brace_list![Brace::num(0), Brace::num(0)];
 
@@ -786,7 +786,7 @@ fn properties_tuple(
         // 37
         nil(),
         // 38
-        interface_83,
+        interface_8_3,
         // 39
         roles_list(&roles),
         // 40
@@ -836,7 +836,7 @@ fn properties_tuple(
             // one 8.5 corpus shows (checked above); 62 is the 8.5 code of
             // the interface compatibility mode.
             fields.push(Brace::num(0));
-            fields.push(interface_85);
+            fields.push(interface_8_5_1);
             fields.push(Brace::num(0));
             fields.push(localized(p.child("Caption")));
             fields.push(localized(p.child("ShortCaption")));
@@ -1209,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_colours_bring_the_85_feature() {
+    fn palette_colours_bring_the_8_5_1_feature() {
         let xml = |children: &str| {
             format!(
                 "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\"><Configuration uuid=\"66193438-ABC5-410b-a1f1-a204102d1a62\"><Properties><Name>Б</Name><CompatibilityMode>Version8_5_1</CompatibilityMode></Properties><ChildObjects>{children}</ChildObjects></Configuration></MetaDataObject>"
@@ -1242,20 +1242,20 @@ mod tests {
             "\u{feff}{\r\n{216,0,\r\n{80324,0}\r\n}\r\n}".as_bytes()
         );
         // БСП 8.5's stored row: its two palette colours bring the feature.
-        let v85 = ConfigurationFacts {
+        let facts_8_5_1 = ConfigurationFacts {
             compatibility: 80501,
             shape: ConfigurationShape::V76,
             features: vec![PALETTE_COLOR_FEATURE],
             ..facts.clone()
         };
         assert_eq!(
-            version_row(&v85).unwrap(),
+            version_row(&facts_8_5_1).unwrap(),
             "\u{feff}{\r\n{217,0,\r\n{80501,1,\r\n{2dd2d9e1-40c8-430b-a433-a81ec6856ab0}\r\n}\r\n}\r\n}"
                 .as_bytes()
         );
         let bare = ConfigurationFacts {
             features: Vec::new(),
-            ..v85.clone()
+            ..facts_8_5_1.clone()
         };
         assert_eq!(
             version_row(&bare).unwrap(),
@@ -1263,7 +1263,7 @@ mod tests {
         );
         let unmeasured = ConfigurationFacts {
             compatibility: 80502,
-            ..v85
+            ..facts_8_5_1
         };
         assert!(version_row(&unmeasured).is_err());
         let mut counter = 0;

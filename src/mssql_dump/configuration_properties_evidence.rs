@@ -160,7 +160,7 @@ pub(crate) fn parse_configuration_properties_evidenced_default_block(
 /// prints `Version8_5EnableTaxi`, where 8.3.27 prints the same digit as
 /// `Taxi`: the edition that reads the tuple decides the spelling. No other
 /// digit has been seen under 8.5, so every other one refuses.
-fn v85_interface_compatibility_mode_xml(digit: u8) -> Option<&'static str> {
+fn interface_compatibility_mode_xml_8_5_1(digit: u8) -> Option<&'static str> {
     match digit {
         b'3' => Some("Version8_5EnableTaxi"),
         // The platform keeps the modes it had: 8.5 lists `Version8_2` and
@@ -172,11 +172,11 @@ fn v85_interface_compatibility_mode_xml(digit: u8) -> Option<&'static str> {
 }
 
 /// As `parse_configuration_properties_evidenced_default_block`, read by the
-/// platform edition that wrote the tuple (`v85`: the 8.5 `{76,...}` tuple,
+/// platform edition that wrote the tuple (`tuple_8_5_1`: the 8.5 `{76,...}` tuple,
 /// normalized to the 61-field shape).
 pub(crate) fn parse_configuration_properties_evidenced_default_block_on(
     fields: &[&str],
-    v85: bool,
+    tuple_8_5_1: bool,
 ) -> Result<ConfigurationPropertiesEvidencedFields, ConfigurationPropertiesEvidenceError> {
     let policy = ibcmd_schema::configuration_properties_evidenced_default_block_policy();
     let reference = &*EVIDENCED_DEFAULT_REFERENCE_FIELDS;
@@ -215,8 +215,8 @@ pub(crate) fn parse_configuration_properties_evidenced_default_block_on(
         policy.interface_compatibility_mode_tuple_field(),
         "InterfaceCompatibilityMode",
         |digit| {
-            if v85 {
-                v85_interface_compatibility_mode_xml(digit)
+            if tuple_8_5_1 {
+                interface_compatibility_mode_xml_8_5_1(digit)
             } else {
                 policy.interface_compatibility_mode_xml(digit)
             }

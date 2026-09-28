@@ -86,7 +86,7 @@ pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
     if let Some(value) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
         return value;
     }
-    let default = if context.is_v85() {
+    let default = if context.is_xml_2_21() {
         Compat(8, 5, 1)
     } else {
         Compat(8, 3, 27)
@@ -202,7 +202,7 @@ pub(crate) enum Slot {
     /// A slot only compatibility 8.3.27 and later stores.
     Modern(&'static Slot),
     /// A slot only compatibility 8.5.1 and later stores.
-    Since851(&'static Slot),
+    Since8_5_1(&'static Slot),
 }
 
 /// A record wrapper that changed with compatibility 8.3.27.
@@ -264,7 +264,7 @@ impl<'a> Obj<'a> {
     }
 
     /// Compatibility 8.5.1 or later.
-    pub fn v851(&self) -> bool {
+    pub fn since_8_5_1(&self) -> bool {
         self.compat >= Compat(8, 5, 1)
     }
 
@@ -536,8 +536,8 @@ impl<'a> Obj<'a> {
     /// Appends the values of one slot.
     fn encode(&self, slot: &Slot, out: &mut Vec<Brace>) -> Result<()> {
         let value = match *slot {
-            Slot::Tag(old, modern, v851) => num(if self.v851() {
-                v851
+            Slot::Tag(old, modern, since_8_5_1) => num(if self.since_8_5_1() {
+                since_8_5_1
             } else if self.modern() {
                 modern
             } else {
@@ -574,8 +574,8 @@ impl<'a> Obj<'a> {
                 }
                 return Ok(());
             }
-            Slot::Since851(inner) => {
-                if self.v851() {
+            Slot::Since8_5_1(inner) => {
+                if self.since_8_5_1() {
                     self.encode(inner, out)?;
                 }
                 return Ok(());
@@ -929,7 +929,7 @@ impl<'a> Obj<'a> {
             .map(|value| {
                 let properties = child_properties(value)?;
                 let uuid = element_uuid(value)?;
-                let record = if self.v851() {
+                let record = if self.since_8_5_1() {
                     brace_list![
                         num(1),
                         md_base(&uuid, properties),

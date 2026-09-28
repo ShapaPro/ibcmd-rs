@@ -168,7 +168,7 @@ pub struct ExportContext {
 }
 
 impl ExportContext {
-    pub fn is_v85(&self) -> bool {
+    pub fn is_xml_2_21(&self) -> bool {
         self.version != "2.20"
     }
 }

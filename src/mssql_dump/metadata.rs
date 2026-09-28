@@ -101,7 +101,7 @@ pub(super) fn metadata_text_row_audit_from_text(
     // confidence without changing those successful callers.
     // An 8.5 metadata text spells its colour and font tuples one revision
     // later; every reader below knows the 8.3.27 spelling.
-    let text = match super::form_v85::rewrite_v85_primitives_in_place(&text) {
+    let text = match super::form::layout_8_5_1::rewrite_primitives_8_5_1_in_place(&text) {
         std::borrow::Cow::Borrowed(_) => text,
         std::borrow::Cow::Owned(rewritten) => rewritten,
     };
@@ -234,7 +234,8 @@ pub(super) fn metadata_source_for_object_fields(
             && fields.len() == 3
             && fields.get(2).is_some_and(|field| {
                 let field = field.trim();
-                field.starts_with("{3,") || super::form_v85::v85_palette_color(field).is_some()
+                field.starts_with("{3,")
+                    || super::form::layout_8_5_1::palette_color_8_5_1(field).is_some()
             }) =>
         {
             Some(("PaletteColor", "PaletteColors"))

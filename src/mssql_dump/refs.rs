@@ -3518,7 +3518,7 @@ fn parse_configuration_reference_text_with_identity(text: &str) -> Option<(Strin
 
 /// The configuration properties platform 8.5 adds, in the element order its
 /// `Configuration.xml` writes them.
-const V85_CONFIGURATION_AUXILIARY_FORMS: [&str; 8] = [
+const CONFIGURATION_AUXILIARY_FORMS_8_5_1: [&str; 8] = [
     "AuxiliaryReportForm",
     "AuxiliaryReportVariantForm",
     "AuxiliaryReportSettingsForm",
@@ -3532,7 +3532,7 @@ const V85_CONFIGURATION_AUXILIARY_FORMS: [&str; 8] = [
 /// What 8.5 writes for the properties it adds to a configuration: read from
 /// the members an 8.5 `{76,...}` tuple appends, or the platform's defaults for
 /// a configuration still in the 8.3.27 `{68,...}` tuple.
-struct V85ConfigurationProperties {
+struct ConfigurationPropertiesV8_5_1 {
     auxiliary_forms: Vec<Option<String>>,
     interface_variant: &'static str,
     theme: &'static str,
@@ -3542,18 +3542,18 @@ struct V85ConfigurationProperties {
     migration_mode: &'static str,
 }
 
-fn v85_configuration_properties(
+fn configuration_properties_8_5_1(
     text: &str,
     object_refs: &BTreeMap<String, String>,
-) -> Option<V85ConfigurationProperties> {
-    let v85_tuple = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
-    if !v85_tuple {
+) -> Option<ConfigurationPropertiesV8_5_1> {
+    let tuple_8_5_1 = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
+    if !tuple_8_5_1 {
         // 8.5.1.1150 ERP УХ, whose configuration is still in the 8.3.27
         // tuple: every added form empty, the navigation-left main window, the
         // automatic theme, data opened in dialogs, no captions, no 8.5
         // interface migration.
-        return Some(V85ConfigurationProperties {
-            auxiliary_forms: vec![None; V85_CONFIGURATION_AUXILIARY_FORMS.len()],
+        return Some(ConfigurationPropertiesV8_5_1 {
+            auxiliary_forms: vec![None; CONFIGURATION_AUXILIARY_FORMS_8_5_1.len()],
             interface_variant: "NavigationLeft",
             theme: "Auto",
             windows_open_variant: "OpenDataInDialogs",
@@ -3584,7 +3584,7 @@ fn v85_configuration_properties(
             auxiliary_forms.push(Some(object_refs.get(&uuid)?.clone()));
         }
     }
-    Some(V85ConfigurationProperties {
+    Some(ConfigurationPropertiesV8_5_1 {
         auxiliary_forms,
         interface_variant,
         theme,
@@ -3598,9 +3598,9 @@ fn v85_configuration_properties(
 /// Inserts the 8.5 properties after the elements they follow in 2.21. A
 /// neighbour the record did not let the writer spell (a partial record) takes
 /// its 8.5 followers with it; a complete configuration record writes all five.
-fn insert_v85_configuration_properties_xml(
+fn insert_configuration_properties_8_5_1_xml(
     xml: &mut String,
-    properties: &V85ConfigurationProperties,
+    properties: &ConfigurationPropertiesV8_5_1,
 ) -> Option<()> {
     fn after_element(xml: &str, name: &str) -> Option<usize> {
         let empty = format!("\t\t\t<{name}/>\r\n");
@@ -3613,7 +3613,7 @@ fn insert_v85_configuration_properties_xml(
     }
     let mut inserts = Vec::new();
     let mut forms = String::new();
-    for (name, value) in V85_CONFIGURATION_AUXILIARY_FORMS
+    for (name, value) in CONFIGURATION_AUXILIARY_FORMS_8_5_1
         .iter()
         .zip(&properties.auxiliary_forms)
     {
@@ -3694,10 +3694,10 @@ pub(super) fn extract_configuration_source_xml(
         // an 8.5 writer reads a `{76,...}` tuple's `3` as `Version8_5EnableTaxi`
         // (BSP 3.2.1.356) and a `{68,...}` tuple's `2` as 8.3.27 does
         // (`TaxiEnableVersion8_2`, ERP УХ).
-        let v85_tuple = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
+        let tuple_8_5_1 = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
         match super::configuration_properties_evidence::parse_configuration_properties_evidenced_default_block_on(
             property_fields,
-            v85_tuple && source_version == InfobaseConfigSourceVersion::V2_21,
+            tuple_8_5_1 && source_version == InfobaseConfigSourceVersion::V2_21,
         ) {
             Ok(fields) => properties.configuration_properties_evidenced_default_block = Some(fields),
             Err(
@@ -3787,8 +3787,8 @@ pub(super) fn extract_configuration_source_xml(
         .unwrap_or_default();
     let mut xml = format_configuration_source_xml(&header, &properties, source_version);
     if source_version == InfobaseConfigSourceVersion::V2_21 {
-        let v85 = v85_configuration_properties(text, object_refs)?;
-        insert_v85_configuration_properties_xml(&mut xml, &v85)?;
+        let properties_8_5_1 = configuration_properties_8_5_1(text, object_refs)?;
+        insert_configuration_properties_8_5_1_xml(&mut xml, &properties_8_5_1)?;
     }
     if let Some(root_layout) = &root_layout {
         insert_configuration_internal_info_xml(&mut xml, &root_layout.contained_objects).ok()?;
@@ -3855,7 +3855,7 @@ pub(super) fn parse_configuration_properties_from_text(
     // `Version8_3_27`, while 8.5 prints it as `Version8_5_1` (8.5.1.1150 BSP
     // 3.2.1.356, both properties).
     let ceiling = if source_version == InfobaseConfigSourceVersion::V2_21 {
-        V85_PACKED_PLATFORM_VERSION
+        PACKED_PLATFORM_VERSION_8_5_1
     } else {
         MAX_EVIDENCED_PACKED_PLATFORM_VERSION
     };
@@ -3872,14 +3872,14 @@ pub(super) fn parse_configuration_properties_from_text(
     // stores `80327` in field 26 and 8.5.1.1150 writes `Version8_5_1` for
     // `ConfigurationExtensionCompatibilityMode` beside `Version8_3_27` for
     // `CompatibilityMode`.
-    let v85_tuple = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
+    let tuple_8_5_1 = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
     let configuration_extension_compatibility_mode = if source_version
         == InfobaseConfigSourceVersion::V2_21
-        && !v85_tuple
+        && !tuple_8_5_1
         && (is_native_68_shape || is_normalized_67_shape)
     {
         configuration_compatibility_mode_xml_under(
-            &V85_PACKED_PLATFORM_VERSION.to_string(),
+            &PACKED_PLATFORM_VERSION_8_5_1.to_string(),
             ceiling,
         )
     } else if is_native_68_shape {
@@ -4994,7 +4994,7 @@ const MAX_EVIDENCED_PACKED_PLATFORM_VERSION: u32 = 80327;
 
 /// Platform 8.5.1, the edition that writes the `{76,...}` configuration
 /// tuple and reads it back.
-const V85_PACKED_PLATFORM_VERSION: u32 = 80501;
+const PACKED_PLATFORM_VERSION_8_5_1: u32 = 80501;
 
 pub(super) fn configuration_compatibility_mode_xml(value: &str) -> Option<String> {
     configuration_compatibility_mode_xml_under(value, MAX_EVIDENCED_PACKED_PLATFORM_VERSION)

@@ -888,7 +888,7 @@ static REPORT: Layout = Layout {
         Localized("ExtendedPresentation"),
         Localized("Explanation"),
         Reference("AuxiliarySettingsForm"),
-        Since851(&Reference("AuxiliaryVariantForm")),
+        Since8_5_1(&Reference("AuxiliaryVariantForm")),
     ],
     collections: &[
         (TEMPLATES, Coll::Templates),

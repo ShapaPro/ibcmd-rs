@@ -9036,7 +9036,7 @@ fn format_native_form_body(
 /// in the 8.3.27 layouts, as every form and spreadsheet of the ERP УХ 8.5
 /// clone (`Version8_3_27`) is. The layouts follow `CompatibilityMode`, not
 /// the XML dialect; a load onto a database leaves this off.
-pub(crate) static V85_TREE_IN_V83_LAYOUT: std::sync::atomic::AtomicBool =
+pub(crate) static XML_2_21_TREE_IN_LAYOUT_8_3: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 pub fn compile_native_form_body(
@@ -9048,29 +9048,29 @@ pub fn compile_native_form_body(
     // A 2.21 Form.xml is a platform 8.5 form: it is compiled through its
     // 8.3.27 reading and stored in the 8.5 layout -- or in the 8.3.27 one,
     // for a configuration kept in an 8.3 compatibility mode.
-    if crate::mssql_dump::is_v85_form_xml(form_xml)
-        && V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+    if crate::mssql_dump::is_xml_2_21_form(form_xml)
+        && XML_2_21_TREE_IN_LAYOUT_8_3.load(std::sync::atomic::Ordering::Relaxed)
     {
-        return crate::mssql_dump::compile_v85_form_body_in_v83_layout(
+        return crate::mssql_dump::compile_xml_2_21_form_body_in_layout_8_3(
             form_xml,
             module_text,
             source,
             items_root,
         );
     }
-    if crate::mssql_dump::is_v85_form_xml(form_xml) {
-        return crate::mssql_dump::compile_v85_native_form_body(
+    if crate::mssql_dump::is_xml_2_21_form(form_xml) {
+        return crate::mssql_dump::compile_native_form_body_8_5_1(
             form_xml,
             module_text,
             source,
             items_root,
         );
     }
-    compile_native_form_body_v83(form_xml, module_text, source, items_root)
+    compile_native_form_body_8_3(form_xml, module_text, source, items_root)
 }
 
 /// The 8.3.27 (dialect 2.20) native form writer.
-pub(crate) fn compile_native_form_body_v83(
+pub(crate) fn compile_native_form_body_8_3(
     form_xml: &[u8],
     module_text: Option<&[u8]>,
     source: Option<&MetadataSourceContext>,
@@ -9619,11 +9619,11 @@ fn form_body_base_free_blockers_with_resolver(
                 .to_string(),
         ]);
     }
-    if crate::mssql_dump::is_v85_form_xml(form_xml) {
+    if crate::mssql_dump::is_xml_2_21_form(form_xml) {
         let xml = std::str::from_utf8(form_xml).context("2.21 Form.xml is not valid UTF-8")?;
         // Read without a configuration: what needs one (a style colour, a
         // common picture) is a blocker of this model, not an error.
-        let xml20 = match crate::mssql_dump::down_convert_v85_form_xml(xml, None, None) {
+        let xml20 = match crate::mssql_dump::down_convert_xml_2_21_form(xml, None, None) {
             Ok((xml20, _)) => xml20,
             Err(error) => {
                 return Ok(vec![format!(

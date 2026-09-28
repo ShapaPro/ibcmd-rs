@@ -349,8 +349,8 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     let parsed = read_row(row)?;
     let t = parsed.tuple;
     let shape = parsed.shape;
-    let v85 = context.is_v85();
-    if shape == ConfigurationShape::V76 && !v85 {
+    let xml_2_21 = context.is_xml_2_21();
+    if shape == ConfigurationShape::V76 && !xml_2_21 {
         bail!("8.3.27 does not read a configuration kept in compatibility 8.5");
     }
 
@@ -420,14 +420,14 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
             "Configuration fields 26 and 43 hold {compat_26} and {compat_43}; no corpus shows which one the platform prints"
         );
     }
-    let ceiling = if v85 { 80501 } else { 80327 };
+    let ceiling = if xml_2_21 { 80501 } else { 80327 };
     if compat_26 > ceiling {
         bail!("compatibility {compat_26} is newer than the platform the tree is written for");
     }
     let compatibility = version_text(compat_26);
     // The extension compatibility the platform prints: its own edition for
     // a tuple older than the one it writes, the stored value otherwise.
-    let extension_compatibility = match (v85, shape) {
+    let extension_compatibility = match (xml_2_21, shape) {
         (false, ConfigurationShape::V67) => "Version8_3_27".to_string(),
         (false, _) => compatibility.clone(),
         (true, ConfigurationShape::V76) => compatibility.clone(),
@@ -691,7 +691,7 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     ] {
         push(el(name));
     }
-    if v85 {
+    if xml_2_21 {
         for name in [
             "AuxiliaryReportForm",
             "AuxiliaryReportVariantForm",
@@ -713,8 +713,8 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     // A tuple older than 8.5 read by 8.5 gets the defaults 8.5 gives such a
     // configuration (ERP УХ); the 8.5 tuple keeps the one set its corpus
     // shows (БСП), checked above.
-    let v85_tuple = shape == ConfigurationShape::V76;
-    if v85 {
+    let tuple_8_5_1 = shape == ConfigurationShape::V76;
+    if xml_2_21 {
         push(leaf(
             "MainClientApplicationWindowInterfaceVariant",
             "NavigationLeft",
@@ -722,10 +722,10 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
         push(leaf("ClientApplicationTheme", "Auto"));
     }
     push(leaf("MainClientApplicationWindowMode", "Normal"));
-    if v85 {
+    if xml_2_21 {
         push(leaf(
             "ClientApplicationWindowsOpenVariant",
-            if v85_tuple {
+            if tuple_8_5_1 {
                 "OpenDataInTabs"
             } else {
                 "OpenDataInDialogs"
@@ -733,8 +733,8 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
         ));
     }
     push(el("DefaultInterface"));
-    if v85 {
-        if v85_tuple {
+    if xml_2_21 {
+        if tuple_8_5_1 {
             push(localized_element("Caption", item(t, 64)?)?);
             push(localized_element("ShortCaption", item(t, 65)?)?);
         } else {
@@ -767,10 +767,10 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
         code(t, 41, &modes)?,
     ));
     push(leaf("InterfaceCompatibilityMode", interface_compatibility));
-    if v85 {
+    if xml_2_21 {
         push(leaf(
             "Version85InterfaceMigrationMode",
-            if v85_tuple { "Use" } else { "DontUse" },
+            if tuple_8_5_1 { "Use" } else { "DontUse" },
         ));
     }
     push(leaf("DatabaseTablespacesUseMode", "DontUse"));
