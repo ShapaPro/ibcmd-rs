@@ -37,7 +37,6 @@ pub mod probe;
 pub mod profile;
 pub mod profile_registry;
 pub(crate) mod runtime_evidence_schema;
-#[cfg(windows)]
 pub mod source;
 pub mod source_audit;
 pub(crate) mod source_listing;
