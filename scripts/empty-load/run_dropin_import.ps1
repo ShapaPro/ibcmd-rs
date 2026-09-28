@@ -87,7 +87,8 @@ ALTER DATABASE [$db] SET RECOVERY SIMPLE;
     [void](Step 'config_rows_empty' { & $sqlcmd -S localhost -E -C -b -f 65001 -d $db -Q "SET NOCOUNT ON; SELECT COUNT_BIG(*) AS config_rows FROM dbo.Config; SELECT TOP 20 FileName, DataSize FROM dbo.Config ORDER BY FileName" })
     $report = Join-Path $run 'ours_import.json'
     [void](Step 'ours_import' { Invoke-Ours (@('infobase', 'config', 'import') + $na + @("--report=$report", $c.Ref)) })
-    $apply = Step 'native_apply' { & $ibcmd infobase config apply @na --force --dynamic=disable } -AllowFailure
+    # Step prints its log line and returns the exit code: keep the code only.
+    $apply = @(Step 'native_apply' { & $ibcmd infobase config apply @na --force --dynamic=disable } -AllowFailure)[-1]
     if ($apply -ne 0) {
         # BSP 8.3.27 on SQL Server 2025: the first apply of a fresh database ends
         # at "Принятие изменений" with SDBL "быстрой вставки"; natively too.

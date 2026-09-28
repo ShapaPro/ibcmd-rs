@@ -278,8 +278,11 @@ compiler per metadata class.
       lists, so ERP УХ matches on that file too (`f44ac6b0`, #334; see
       `evidence/empty-database-load-20260928.md`). Offline cycle: ERP УХ
       8.3.27 and 8.5 `ConfigDumpInfo.xml` identical to the reference once
-      configVersion is blanked, БСП unchanged. A real ERP УХ load has not
-      been re-run with them.
+      configVersion is blanked, БСП unchanged. Real loads on 2026-09-29
+      (0.3 verification, `evidence/release-0.3-verification-20260929.md`):
+      ERP УХ 8.3.27 and 8.5 into empty bases, native apply and export —
+      140 708 / 140 709, `ConfigDumpInfo.xml` identical once configVersion is
+      blanked (249 143 entries).
 
 ## The tool that turned out to matter
 
