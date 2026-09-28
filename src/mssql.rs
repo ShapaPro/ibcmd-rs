@@ -3404,6 +3404,57 @@ pub fn stage_source_common_module_objects(
     stage_common_module_objects(&stage_args)
 }
 
+/// What `infobase config import` reads of its target before it stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportTargetState {
+    /// Rows in the target's Config.
+    pub config_rows: i64,
+    /// Whether one of them is the descriptor row of the tree's configuration
+    /// (named by its uuid). Without it the target holds nothing the stage
+    /// could patch -- an empty infobase keeps no Config row at all (8.5) or
+    /// an empty configuration of its own (8.3.27) -- and every row is
+    /// compiled from the tree instead (`--base-free`).
+    pub holds_configuration: bool,
+}
+
+pub fn import_target_state(
+    args: &MssqlStageSourceObjectsArgs,
+    configuration_uuid: &str,
+) -> Result<ImportTargetState> {
+    #[derive(Deserialize)]
+    struct Counts {
+        config_rows: i64,
+        configuration_rows: i64,
+    }
+    let sql_password = resolve_sqlcmd_password(
+        args.sql_user.as_deref(),
+        args.sql_pwd.as_deref(),
+        &args.sql_pwd_env,
+    );
+    let sql_auth = SqlAuth {
+        user: args.sql_user.as_deref(),
+        password: sql_password.as_deref(),
+    };
+    let sql = format!(
+        "SET NOCOUNT ON; USE {db}; SELECT COUNT_BIG(*) AS config_rows, COUNT_BIG(CASE WHEN FileName = N'{uuid}' THEN 1 END) AS configuration_rows FROM dbo.Config FOR JSON PATH;",
+        db = quote_ident(&args.database),
+        uuid = quote_string(configuration_uuid),
+    );
+    let stdout = run_sql_capture_with_auth(&args.sqlcmd, &args.server, sql_auth, &sql)
+        .with_context(|| format!("failed to read the Config table of {}", args.database))?;
+    let json = extract_json_array(&stdout, "import_target_state")?;
+    let counts: Vec<Counts> =
+        serde_json::from_str(&json).context("failed to parse the Config row counts")?;
+    let counts = counts
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("the Config row count query returned no row"))?;
+    Ok(ImportTargetState {
+        config_rows: counts.config_rows,
+        holds_configuration: counts.configuration_rows > 0,
+    })
+}
+
 pub fn stage_source_objects(
     args: &MssqlStageSourceObjectsArgs,
 ) -> Result<StageSourceObjectsReport> {

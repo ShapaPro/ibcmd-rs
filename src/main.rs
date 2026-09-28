@@ -3,8 +3,6 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use ibcmd_rs::cli::{Cli, Commands};
-#[cfg(feature = "platform-oracle")]
-use ibcmd_rs::cli::{InfobaseCommands, InfobaseConfigCommands};
 use ibcmd_rs::plan::SourceDiffSignatureOptions;
 
 /// mimalloc instead of the Windows process heap: the export's workers allocate
@@ -64,27 +62,24 @@ fn run() -> Result<()> {
                 std::process::exit(2);
             }
         },
-        #[cfg(feature = "platform-oracle")]
-        Commands::Infobase(args) => match args.command {
-            InfobaseCommands::Config(config_args) => match config_args.command {
-                InfobaseConfigCommands::Export(args) => {
-                    let report = ibcmd_rs::infobase::export_config(&args)?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                InfobaseConfigCommands::Import(args) => {
-                    let report = ibcmd_rs::infobase::import_config(&args)?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                InfobaseConfigCommands::Roundtrip(args) => {
-                    let report = ibcmd_rs::infobase::roundtrip_config(&args)?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                InfobaseConfigCommands::Sweep(args) => {
-                    let report = ibcmd_rs::infobase::sweep_config(&args)?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-            },
-        },
+        // The platform ibcmd's modes: its syntax, its messages, exit 0 or 1.
+        Commands::Infobase(args) => std::process::exit(ibcmd_rs::dropin::run_infobase(&args.args)),
+        Commands::Help(args) => std::process::exit(ibcmd_rs::dropin::run_help(&args.args)),
+        Commands::Server(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("server")),
+        Commands::Eventlog(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("eventlog")),
+        Commands::Config(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("config")),
+        Commands::Extension(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("extension")),
+        Commands::MobileApp(_) => {
+            std::process::exit(ibcmd_rs::dropin::run_other_mode("mobile-app"))
+        }
+        Commands::MobileClient(_) => {
+            std::process::exit(ibcmd_rs::dropin::run_other_mode("mobile-client"))
+        }
+        Commands::Session(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("session")),
+        Commands::Lock(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("lock")),
+        Commands::BinaryDataStorage(_) => {
+            std::process::exit(ibcmd_rs::dropin::run_other_mode("binary-data-storage"))
+        }
         #[cfg(feature = "platform-oracle")]
         Commands::Probe(args) => {
             let report = ibcmd_rs::probe::probe_environment(args);

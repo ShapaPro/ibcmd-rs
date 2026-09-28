@@ -1,0 +1,582 @@
+//! Drop-in `ibcmd`: the platform ibcmd's command line, so that scripts
+//! written for it run against ibcmd-rs renamed to `ibcmd`.
+//!
+//! - `infobase config export` and `infobase config import` are served
+//!   (`crate::infobase`), for Microsoft SQL Server infobases;
+//! - every other native mode, command and option is recognized and refused
+//!   by name with exit code 1 (`Команда `infobase config apply` не
+//!   поддерживается в этой версии ibcmd-rs (планируется в следующих)`);
+//!   the platform is never launched in its place.
+//!
+//! Output follows the platform's: `[INFO] ...` lines on stdout when an
+//! operation starts and when it succeeds, `[ERROR] ...` lines on stderr when
+//! it fails, a bare line on stderr for a refused command line (the list of
+//! commands for an incomplete one goes to stdout, as natively). The JSON
+//! report is written only to `--report <file>`. Exit codes: 0 success,
+//! 1 failure (the platform uses 2 for a malformed command line and 255 for
+//! a failed operation; any script testing for "not 0" reads both alike).
+
+pub mod help;
+pub mod parse;
+
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::cli::{InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode};
+use crate::infobase::OutputDirectoryNotEmpty;
+pub use parse::{Common, ExportRequest, ImportRequest, Invocation, Refusal};
+
+const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
+
+/// The name the program was started as (`ibcmd` once renamed), for the
+/// usage lines of the help.
+pub fn program_name() -> String {
+    std::env::args_os()
+        .next()
+        .and_then(|path| {
+            Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "ibcmd".to_string())
+}
+
+/// `ibcmd infobase ...`: returns the exit code.
+pub fn run_infobase(args: &[OsString]) -> i32 {
+    #[cfg(feature = "platform-oracle")]
+    if let Some(code) = oracle::run(args) {
+        return finish(code);
+    }
+    let code = match parse::parse_infobase(args) {
+        Ok(Invocation::Help) => {
+            print!("{}", help::infobase_help(&program_name()));
+            0
+        }
+        Ok(Invocation::Version) => {
+            println!("ibcmd-rs {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        Ok(Invocation::Export(request)) => run_export(request),
+        Ok(Invocation::Import(request)) => run_import(request),
+        Err(refusal) => {
+            print_refusal(&refusal, &program_name());
+            1
+        }
+    };
+    finish(code)
+}
+
+/// `ibcmd server ...` and the platform's other modes: refused.
+pub fn run_other_mode(mode: &str) -> i32 {
+    eprintln!("{}", unsupported_mode_message(mode));
+    finish(1)
+}
+
+/// `ibcmd help [MODE]`: the platform's help mode for its modes, this
+/// program's own help for its research commands.
+pub fn run_help(args: &[OsString]) -> i32 {
+    let program = program_name();
+    let Some(first) = args.first() else {
+        print!("{}", help::overview(&program));
+        return finish(0);
+    };
+    let name = first.to_string_lossy().into_owned();
+    if name == "infobase" {
+        print!("{}", help::infobase_help(&program));
+        return finish(0);
+    }
+    if parse::OTHER_MODES.iter().any(|(mode, _)| *mode == name) {
+        return run_other_mode(&name);
+    }
+    use clap::Parser;
+    match crate::cli::Cli::try_parse_from([program.as_str(), name.as_str(), "--help"]) {
+        Err(error) if !matches!(error.kind(), clap::error::ErrorKind::InvalidSubcommand) => {
+            let _ = error.print();
+            finish(0)
+        }
+        _ => {
+            eprintln!(
+                "Неизвестный режим: {name}. Список режимов: {program} help; команды ibcmd-rs: {program} --help"
+            );
+            finish(1)
+        }
+    }
+}
+
+pub fn unsupported_mode_message(mode: &str) -> String {
+    format!("Режим `{mode}` {PLANNED}")
+}
+
+/// The message of a refused command line, and whether it goes to stdout
+/// (the platform prints the list of an incomplete command there).
+pub fn refusal_message(refusal: &Refusal, program: &str) -> (String, bool) {
+    let message = match refusal {
+        Refusal::Parse(argument) => format!("Ошибка разбора параметра: {argument}"),
+        Refusal::MissingValue(name) => format!("Не указано значение параметра: {name}"),
+        Refusal::Incomplete { path } => return (incomplete_message(path, program), true),
+        Refusal::UnsupportedCommand(command) => format!("Команда `{command}` {PLANNED}"),
+        Refusal::UnsupportedOption { option, command } => {
+            format!("Параметр `{option}` команды `{command}` {PLANNED}")
+        }
+        Refusal::UnsupportedServer(option) => {
+            format!("Параметр `{option}` (работа через автономный сервер) {PLANNED}")
+        }
+        Refusal::UnsupportedDbms(dbms) => format!(
+            "СУБД `{dbms}` не поддерживается в этой версии ibcmd-rs: поддерживается только MSSQLServer"
+        ),
+        Refusal::UnknownDbms(dbms) => format!("Указанный тип СУБД не поддерживается: '{dbms}'"),
+        Refusal::FileInfobase => {
+            "Файловые информационные базы не поддерживаются в этой версии ibcmd-rs: \
+укажите --dbms=MSSQLServer, --db-server и --db-name"
+                .to_string()
+        }
+        Refusal::ImportArchive(path) => format!(
+            "Импорт конфигурации из архива ({}) {PLANNED}",
+            path.display()
+        ),
+        Refusal::InvalidValue { option, value } => {
+            format!("Недопустимое значение параметра {option}: {value}")
+        }
+    };
+    (message, false)
+}
+
+fn print_refusal(refusal: &Refusal, program: &str) {
+    match refusal_message(refusal, program) {
+        (message, true) => println!("{message}"),
+        (message, false) => eprintln!("{message}"),
+    }
+}
+
+/// `Указана неполная команда, возможно Вы имели ввиду:` and the commands
+/// under the one given, as the platform lists them.
+fn incomplete_message(path: &[&str], program: &str) -> String {
+    let node = parse::node_at(path).unwrap_or(&parse::INFOBASE);
+    let prefix = std::iter::once(program)
+        .chain(std::iter::once("infobase"))
+        .chain(path.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let width = node
+        .children
+        .iter()
+        .map(|child| child.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 4;
+    let mut out = String::from("Указана неполная команда, возможно Вы имели ввиду:\n");
+    for (index, child) in node.children.iter().enumerate() {
+        let lead = if index == 0 {
+            prefix.clone()
+        } else {
+            " ".repeat(prefix.chars().count())
+        };
+        let padding = width - child.name.chars().count();
+        out.push_str(&format!(
+            "\n\t{lead} {}{}- {}",
+            child.name,
+            " ".repeat(padding),
+            child.summary
+        ));
+    }
+    out
+}
+
+fn finish(code: i32) -> i32 {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    code
+}
+
+/// `-W`: the database password is the first line of STDIN.
+fn read_requested_password(common: &mut Common) -> Result<(), String> {
+    if !common.request_db_pwd {
+        return Ok(());
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| format!("не удалось прочитать пароль из STDIN: {error}"))?;
+    common.db_pwd = Some(line.trim_end_matches(['\r', '\n']).to_string());
+    Ok(())
+}
+
+/// Where an import leaves its scripts and its bulk rows file: `--temp`
+/// (relative to `--data`), else `<--data>/temp`, where the platform keeps
+/// its own temporary files, else the system's temporary directory.
+pub fn scratch_dir(common: &Common) -> PathBuf {
+    match (&common.temp, &common.data) {
+        (Some(temp), Some(data)) if temp.is_relative() => data.join(temp),
+        (Some(temp), _) => temp.clone(),
+        (None, Some(data)) => data.join("temp"),
+        (None, None) => std::env::temp_dir(),
+    }
+    .join("ibcmd-rs")
+}
+
+fn file_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
+    let common = &request.common;
+    InfobaseConfigExportArgs {
+        settings: common.settings.clone(),
+        native_config: common.native_config.clone(),
+        format: None,
+        source_version: common.source_version,
+        dbms: common.dbms.clone(),
+        db_server: common.db_server.clone(),
+        db_name: common.db_name.clone(),
+        db_user: common.db_user.clone(),
+        db_pwd: common.db_pwd.clone(),
+        db_pwd_env: common
+            .db_pwd_env
+            .clone()
+            .unwrap_or_else(|| "IBCMD_DB_PSW".to_string()),
+        user: common.user.clone(),
+        password: common.password.clone(),
+        password_env: "IBCMD_USER_PSW".to_string(),
+        sqlcmd: common
+            .sqlcmd
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("sqlcmd")),
+        overwrite: false,
+        count_files: common.report.is_some(),
+        output_dir: PathBuf::from(&request.path),
+    }
+}
+
+pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
+    let common = &request.common;
+    let script = scratch_dir(common).join(format!(
+        "{}_import.sql",
+        file_part(common.db_name.as_deref().unwrap_or("import"))
+    ));
+    InfobaseConfigImportArgs {
+        settings: common.settings.clone(),
+        native_config: common.native_config.clone(),
+        format: None,
+        source_version: common.source_version,
+        dbms: common.dbms.clone(),
+        db_server: common.db_server.clone(),
+        db_name: common.db_name.clone(),
+        db_user: common.db_user.clone(),
+        db_pwd: common.db_pwd.clone(),
+        db_pwd_env: common
+            .db_pwd_env
+            .clone()
+            .unwrap_or_else(|| "IBCMD_DB_PSW".to_string()),
+        user: common.user.clone(),
+        password: common.password.clone(),
+        password_env: "IBCMD_USER_PSW".to_string(),
+        sqlcmd: common
+            .sqlcmd
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("sqlcmd")),
+        // An import replaces the saved configuration, as the platform's does.
+        replace_config_save: true,
+        allow_non_lab: true,
+        batch_size: None,
+        path_prefix: Vec::new(),
+        script_output: Some(script),
+        stage_mode: if request.base_free {
+            InfobaseImportStageMode::BaseFree
+        } else {
+            InfobaseImportStageMode::Auto
+        },
+        source_dir: PathBuf::from(&request.path),
+    }
+}
+
+/// The failure a `--report` file records.
+#[derive(Serialize)]
+struct FailureReport<'a> {
+    operation: &'a str,
+    ok: bool,
+    error: String,
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let json = serde_json::to_string_pretty(value)?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(path, json)
+        .with_context(|| format!("failed to write the report {}", path.display()))
+}
+
+/// One operation with the platform's messages around it.
+struct Operation {
+    /// `infobase config export`, for the report.
+    command: &'static str,
+    /// `Экспорт конфигурации в XML`.
+    title: &'static str,
+}
+
+impl Operation {
+    fn start(&self) {
+        println!("[INFO] {}...", self.title);
+        let _ = std::io::stdout().flush();
+    }
+
+    fn succeed(&self, report: Option<&Path>, value: &impl Serialize) -> i32 {
+        if let Some(path) = report
+            && let Err(error) = write_json(path, value)
+        {
+            return self.fail_with(&format!("{error:#}"), None);
+        }
+        println!("[INFO] {} успешно завершен", self.title);
+        0
+    }
+
+    fn fail_with(&self, message: &str, report: Option<&Path>) -> i32 {
+        for line in message.lines() {
+            eprintln!("[ERROR] {line}");
+        }
+        eprintln!("[ERROR] {} завершен с ошибкой", self.title);
+        self.record_failure(message, report);
+        1
+    }
+
+    fn record_failure(&self, message: &str, report: Option<&Path>) {
+        if let Some(path) = report {
+            let failure = FailureReport {
+                operation: self.command,
+                ok: false,
+                error: message.to_string(),
+            };
+            if let Err(error) = write_json(path, &failure) {
+                eprintln!("[ERROR] {error:#}");
+            }
+        }
+    }
+}
+
+const EXPORT: Operation = Operation {
+    command: "infobase config export",
+    title: "Экспорт конфигурации в XML",
+};
+
+const IMPORT: Operation = Operation {
+    command: "infobase config import",
+    title: "Импорт конфигурации из XML",
+};
+
+fn run_export(mut request: ExportRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        EXPORT.start();
+        return EXPORT.fail_with(&message, report.as_deref());
+    }
+    if let Some(threads) = request.threads {
+        crate::parallel::request_workers(threads);
+    }
+    let args = export_args(&request);
+    EXPORT.start();
+    match crate::infobase::export_config(&args) {
+        Ok(value) => EXPORT.succeed(report.as_deref(), &value),
+        Err(error) if error.downcast_ref::<OutputDirectoryNotEmpty>().is_some() => {
+            let message = format!(
+                "Операция невозможна, при выполнении экспорта конфигурации в XML обнаружены ошибки: Каталог {} не пуст.",
+                Path::new(&request.path).display()
+            );
+            eprintln!("[ERROR] {message}");
+            EXPORT.record_failure(&message, report.as_deref());
+            1
+        }
+        Err(error) => EXPORT.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+fn run_import(mut request: ImportRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        IMPORT.start();
+        return IMPORT.fail_with(&message, report.as_deref());
+    }
+    let args = import_args(&request);
+    IMPORT.start();
+    match crate::infobase::import_config(&args) {
+        Ok(value) => IMPORT.succeed(report.as_deref(), &value),
+        Err(error) => IMPORT.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+/// `ibcmd-rs infobase config roundtrip|sweep`: research commands that run
+/// the installed platform, only in `platform-oracle` builds.
+#[cfg(feature = "platform-oracle")]
+mod oracle {
+    use std::ffi::OsString;
+
+    use clap::Parser;
+
+    use crate::cli::{InfobaseOracleCli, InfobaseOracleCommands};
+
+    pub(super) fn run(args: &[OsString]) -> Option<i32> {
+        let [config, command, ..] = args else {
+            return None;
+        };
+        if config != "config" || !(command == "roundtrip" || command == "sweep") {
+            return None;
+        }
+        let cli = match InfobaseOracleCli::try_parse_from(
+            std::iter::once(OsString::from("ibcmd-rs infobase config"))
+                .chain(args[1..].iter().cloned()),
+        ) {
+            Ok(cli) => cli,
+            Err(error) => {
+                let _ = error.print();
+                return Some(error.exit_code());
+            }
+        };
+        let rendered = match cli.command {
+            InfobaseOracleCommands::Roundtrip(args) => {
+                crate::infobase_oracle::roundtrip_config(&args)
+                    .and_then(|report| Ok(serde_json::to_string_pretty(&report)?))
+            }
+            InfobaseOracleCommands::Sweep(args) => crate::infobase_oracle::sweep_config(&args)
+                .and_then(|report| Ok(serde_json::to_string_pretty(&report)?)),
+        };
+        Some(match rendered {
+            Ok(json) => {
+                println!("{json}");
+                0
+            }
+            Err(error) => {
+                eprintln!("Error: {error:?}");
+                1
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn common() -> Common {
+        Common {
+            db_name: Some("base".to_string()),
+            ..Common::default()
+        }
+    }
+
+    #[test]
+    fn the_import_scratch_follows_the_data_and_temp_directories() {
+        let mut common = common();
+        assert_eq!(scratch_dir(&common), std::env::temp_dir().join("ibcmd-rs"));
+        common.data = Some(PathBuf::from(r"F:\run\ibdata"));
+        assert_eq!(
+            scratch_dir(&common),
+            PathBuf::from(r"F:\run\ibdata")
+                .join("temp")
+                .join("ibcmd-rs")
+        );
+        common.temp = Some(PathBuf::from("scratch"));
+        assert_eq!(
+            scratch_dir(&common),
+            PathBuf::from(r"F:\run\ibdata")
+                .join("scratch")
+                .join("ibcmd-rs")
+        );
+        let absolute = std::env::temp_dir().join("elsewhere");
+        common.temp = Some(absolute.clone());
+        assert_eq!(scratch_dir(&common), absolute.join("ibcmd-rs"));
+    }
+
+    #[test]
+    fn requests_become_the_library_arguments() {
+        let export = ExportRequest {
+            common: Common {
+                dbms: Some("MSSQLServer".to_string()),
+                db_server: Some("sql01".to_string()),
+                report: Some(PathBuf::from("r.json")),
+                ..common()
+            },
+            threads: Some(4),
+            path: OsString::from("out"),
+        };
+        let args = export_args(&export);
+        assert_eq!(args.db_server.as_deref(), Some("sql01"));
+        assert_eq!(args.db_pwd_env, "IBCMD_DB_PSW");
+        assert_eq!(args.sqlcmd, PathBuf::from("sqlcmd"));
+        assert!(!args.overwrite);
+        assert!(args.count_files);
+        assert_eq!(args.output_dir, PathBuf::from("out"));
+
+        let import = ImportRequest {
+            common: Common {
+                data: Some(PathBuf::from(r"F:\run\ibdata")),
+                ..common()
+            },
+            base_free: false,
+            path: OsString::from("tree"),
+        };
+        let args = import_args(&import);
+        assert!(args.replace_config_save && args.allow_non_lab);
+        assert_eq!(args.stage_mode, InfobaseImportStageMode::Auto);
+        assert_eq!(
+            args.script_output,
+            Some(
+                PathBuf::from(r"F:\run\ibdata")
+                    .join("temp")
+                    .join("ibcmd-rs")
+                    .join("base_import.sql")
+            )
+        );
+        let args = import_args(&ImportRequest {
+            base_free: true,
+            ..import
+        });
+        assert_eq!(args.stage_mode, InfobaseImportStageMode::BaseFree);
+    }
+
+    #[test]
+    fn refusals_speak_russian_and_name_what_is_refused() {
+        let (message, stdout) = refusal_message(
+            &Refusal::UnsupportedCommand("infobase config apply".to_string()),
+            "ibcmd",
+        );
+        assert_eq!(
+            message,
+            "Команда `infobase config apply` не поддерживается в этой версии ibcmd-rs (планируется в следующих)"
+        );
+        assert!(!stdout);
+        assert_eq!(
+            unsupported_mode_message("server"),
+            "Режим `server` не поддерживается в этой версии ibcmd-rs (планируется в следующих)"
+        );
+        let (message, stdout) = refusal_message(
+            &Refusal::Incomplete {
+                path: vec!["config"],
+            },
+            "ibcmd",
+        );
+        assert!(stdout);
+        assert!(message.starts_with("Указана неполная команда, возможно Вы имели ввиду:"));
+        assert!(message.contains("\tibcmd infobase config load"));
+        assert!(message.contains("export"));
+        assert!(message.contains("- Импорт конфигурации из XML"));
+        let (message, _) = refusal_message(&Refusal::Parse("--bogus".to_string()), "ibcmd");
+        assert_eq!(message, "Ошибка разбора параметра: --bogus");
+    }
+}

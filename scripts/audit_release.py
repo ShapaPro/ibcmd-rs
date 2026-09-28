@@ -14,7 +14,12 @@ import tempfile
 import zipfile
 
 
-ORACLE_COMMANDS = {"infobase", "probe", "profile-run", "dump-sources"}
+# Commands that locate or run an installed platform: never in a release.
+# `infobase` is released: `config export|import` read and write SQL Server
+# directly and every other native command is refused by name, never run.
+ORACLE_COMMANDS = {"probe", "profile-run", "dump-sources"}
+# `infobase config` research commands that run the platform's own ibcmd.
+ORACLE_INFOBASE_COMMANDS = ("roundtrip", "sweep")
 FORBIDDEN_BINARY_MARKERS = (
     b"ibcmd.exe",
     b"1cv8.exe",
@@ -65,6 +70,7 @@ def audit_binary(binary: pathlib.Path) -> None:
             capture_output=True,
             text=True,
         )
+        audit_infobase_mode(binary, environment)
     listed = set()
     in_commands = False
     for line in result.stdout.splitlines():
@@ -79,9 +85,38 @@ def audit_binary(binary: pathlib.Path) -> None:
     exposed = ORACLE_COMMANDS & listed
     if exposed:
         raise SystemExit(f"default release exposes platform-oracle commands: {sorted(exposed)}")
-    required = {"convert", "cf", "compatibility"}
+    required = {"convert", "cf", "compatibility", "infobase"}
     if not required <= listed:
         raise SystemExit(f"default release is missing standalone commands: {sorted(required - listed)}")
+
+
+def audit_infobase_mode(binary: pathlib.Path, environment: dict) -> None:
+    """The released `infobase` mode serves `config export|import` and refuses
+    every other native command by name (exit code 1) without launching
+    anything: run here with an empty PATH, where no platform could be found."""
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(binary), "infobase", *args],
+            env=environment,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+
+    help_run = run("--help")
+    if help_run.returncode != 0 or "export" not in help_run.stdout or "import" not in help_run.stdout:
+        raise SystemExit("release `infobase --help` does not describe config export/import")
+    for command in ORACLE_INFOBASE_COMMANDS:
+        if command in help_run.stdout:
+            raise SystemExit(f"release `infobase --help` names the platform-oracle command {command}")
+        refused = run("config", command, "--db-name=audit")
+        if refused.returncode != 1 or "Указана неполная команда" not in refused.stdout:
+            raise SystemExit(f"release `infobase config {command}` is not refused as unknown")
+    refused = run("config", "apply", "--dbms=MSSQLServer", "--db-name=audit", "--force")
+    if refused.returncode != 1 or "не поддерживается в этой версии ibcmd-rs" not in refused.stderr:
+        raise SystemExit("release `infobase config apply` is not refused by name with exit code 1")
 
 
 def audit_sbom(sbom_path: pathlib.Path) -> dict:
