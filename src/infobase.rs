@@ -383,7 +383,10 @@ pub(crate) fn resolve_connection(request: ConnectionRequest<'_>) -> Result<Conne
         .unwrap_or_else(|| "localhost".to_string());
     let db_name =
         first_value(request.db_name, settings_value(&settings, "dbms-base")).ok_or_else(|| {
-            anyhow!("не указано имя базы данных: передайте --db-name (--database-name)")
+            anyhow!(
+                "не указано имя базы данных: передайте --dbms=MSSQLServer, --db-server и --db-name \
+                 (файловые информационные базы не поддерживаются в этой версии ibcmd-rs)"
+            )
         })?;
     let db_user = first_value(request.db_user, settings_value(&settings, "dbms-user"));
     let (db_pwd, password_source) = match db_user {

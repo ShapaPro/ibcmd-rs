@@ -213,9 +213,10 @@ fn unsupported_options_and_malformed_lines_are_refused() {
         &["infobase", "config", "export", "--dbms=Foo", out.arg()],
         "Указанный тип СУБД не поддерживается: 'Foo'",
     );
+    // no database at all: the platform would open a file infobase
     assert_refused(
         &["infobase", "config", "export", out.arg()],
-        "Файловые информационные базы не поддерживаются",
+        "файловые информационные базы не поддерживаются",
     );
     assert_refused(
         &[

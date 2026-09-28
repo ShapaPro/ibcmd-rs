@@ -649,11 +649,10 @@ fn common(scan: &Scan) -> Result<Common, Refusal> {
         }
         None => None,
     };
-    // Without --dbms the platform opens a file infobase; a database name
-    // (here or in a settings file) says which server database is meant.
-    if dbms.is_none() && !scan.has(Opt::DbName) && !scan.has(Opt::Settings) {
-        return Err(Refusal::FileInfobase);
-    }
+    // Without --dbms the platform opens a file infobase. Here a server
+    // database may still come from the settings (a settings file, `--config`,
+    // the environment), so a missing one is the connection's to report
+    // (`infobase::resolve_connection`), not the parser's.
     let source_version = match scan.value(Opt::SourceVersion) {
         None => None,
         Some(value) => Some(
@@ -989,11 +988,12 @@ mod tests {
             parse(&["config", "export", "--dbms=Foo", "o"]),
             Err(Refusal::UnknownDbms("Foo".to_string()))
         );
-        // no --dbms and no database: the platform's file infobase
-        assert_eq!(
+        // no --dbms and no database: left to the connection, which may find
+        // one in the settings (and says so when it does not)
+        assert!(matches!(
             parse(&["config", "export", "o"]),
-            Err(Refusal::FileInfobase)
-        );
+            Ok(Invocation::Export(_))
+        ));
         assert_eq!(
             parse(&["config", "export", "--db-path=C:\\ib", "o"]),
             Err(Refusal::FileInfobase)
@@ -1075,8 +1075,9 @@ mod tests {
                     matches!(result, Err(Refusal::Incomplete { .. })),
                     "{path:?}: {result:?}"
                 ),
+                // served: without its path it asks for one
                 NodeKind::Export | NodeKind::Import => assert!(
-                    matches!(result, Err(Refusal::FileInfobase)),
+                    matches!(result, Err(Refusal::MissingValue(_))),
                     "{path:?}: {result:?}"
                 ),
             }
