@@ -6,14 +6,17 @@
 # Pavel allowed writes to new ibcmd_rs_03_* databases on 2026-09-28
 # ("Да, одноразовые ibcmd_rs_03_* (Recommended)"). Nothing is dropped.
 #
-# usage: pwsh -File run_dropin_import.ps1 -Corpus bsp8327 -Tag t1 -Exe <our ibcmd.exe> [-Step all|reimport] [-Date yyyyMMdd]
+# usage: pwsh -File run_dropin_import.ps1 -Corpus bsp8327 -Tag t1 -Exe <our ibcmd.exe> [-Step all|reimport] [-Date yyyyMMdd] [-NoSqlTools]
 param(
     [Parameter(Mandatory = $true)][ValidateSet('bsp8327', 'bsp85', 'uha8327', 'uha85')][string]$Corpus,
     [string]$Tag = 't1',
     [Parameter(Mandatory = $true)][string]$Exe,
     [ValidateSet('all', 'reimport')][string]$Step = 'all',
     # the date in the database name (a reimport on a later day names the first run's)
-    [string]$Date = (Get-Date -Format 'yyyyMMdd')
+    [string]$Date = (Get-Date -Format 'yyyyMMdd'),
+    # run ours with no sqlcmd.exe or bcp.exe on PATH: the built-in SQL client
+    # alone (0.3, #329); the harness's own sqlcmd calls keep the full PATH
+    [switch]$NoSqlTools
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -59,6 +62,17 @@ function Step([string]$name, [scriptblock]$block, [switch]$AllowFailure) {
 
 $na = @('--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$db", "--data=$data")
 
+# Our exe, with -NoSqlTools on a PATH without the folders of sqlcmd.exe and bcp.exe.
+function Invoke-Ours([string[]]$arguments) {
+    if (-not $NoSqlTools) { & $Exe @arguments; return }
+    $saved = $env:PATH
+    $env:PATH = ($saved -split ';' | Where-Object {
+            $_ -and -not (Test-Path -LiteralPath (Join-Path $_ 'sqlcmd.exe')) -and
+            -not (Test-Path -LiteralPath (Join-Path $_ 'bcp.exe'))
+        }) -join ';'
+    try { & $Exe @arguments } finally { $env:PATH = $saved }
+}
+
 if ($Step -eq 'all') {
     $create = @"
 CREATE DATABASE [$db]
@@ -72,7 +86,7 @@ ALTER DATABASE [$db] SET RECOVERY SIMPLE;
     [void](Step 'native_create_empty' { & $ibcmd infobase create @na --locale=ru_RU })
     [void](Step 'config_rows_empty' { & $sqlcmd -S localhost -E -C -b -f 65001 -d $db -Q "SET NOCOUNT ON; SELECT COUNT_BIG(*) AS config_rows FROM dbo.Config; SELECT TOP 20 FileName, DataSize FROM dbo.Config ORDER BY FileName" })
     $report = Join-Path $run 'ours_import.json'
-    [void](Step 'ours_import' { & $Exe infobase config import @na "--report=$report" $c.Ref })
+    [void](Step 'ours_import' { Invoke-Ours (@('infobase', 'config', 'import') + $na + @("--report=$report", $c.Ref)) })
     $apply = Step 'native_apply' { & $ibcmd infobase config apply @na --force --dynamic=disable } -AllowFailure
     if ($apply -ne 0) {
         # BSP 8.3.27 on SQL Server 2025: the first apply of a fresh database ends
@@ -85,7 +99,7 @@ ALTER DATABASE [$db] SET RECOVERY SIMPLE;
 } else {
     # A second import into the now loaded infobase: the patch path.
     $report = Join-Path $run 'ours_reimport.json'
-    [void](Step 'ours_reimport' { & $Exe infobase config import @na "--report=$report" $c.Ref })
+    [void](Step 'ours_reimport' { Invoke-Ours (@('infobase', 'config', 'import') + $na + @("--report=$report", $c.Ref)) })
     [void](Step 'native_reapply' { & $ibcmd infobase config apply @na --force --dynamic=disable } -AllowFailure)
     $out = Join-Path $run 'export_reimport'
     [void](Step 'native_reexport' { & $ibcmd infobase config export @na $out })
