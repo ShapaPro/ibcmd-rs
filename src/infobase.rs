@@ -294,7 +294,10 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         operation: "infobase config import",
         backend: "mssql-configsave-stage",
         format: format_name(config.format),
-        source_version: report.source_version.clone(),
+        source_version: report
+            .source_version
+            .clone()
+            .or_else(|| crate::metadata_model::export::tree_version(&stage_args.source_root)),
         dbms: config.dbms,
         db_server: config.db_server,
         db_name: config.db_name,

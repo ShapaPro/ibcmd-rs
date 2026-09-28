@@ -1,3 +1,4 @@
+#![cfg(feature = "platform-oracle")]
 //! Research-only infobase orchestration with installed-platform oracle calls:
 //! `infobase config roundtrip` and `infobase config sweep` export a
 //! database, stage the tree into a clone, run the platform's own `config
