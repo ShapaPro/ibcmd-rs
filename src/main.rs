@@ -7,6 +7,12 @@ use ibcmd_rs::cli::{Cli, Commands};
 use ibcmd_rs::cli::{InfobaseCommands, InfobaseConfigCommands};
 use ibcmd_rs::plan::SourceDiffSignatureOptions;
 
+/// mimalloc instead of the Windows process heap: the export's workers allocate
+/// millions of short-lived strings and vectors, and on the process heap they
+/// spent their time waiting on each other for it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The commands walk deeply nested sources (form item trees, brace bodies) on
 /// the calling thread, whose default stack on Windows is 1 MiB; they run on a
 /// thread with room for the deepest of them instead.
