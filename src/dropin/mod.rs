@@ -231,6 +231,13 @@ fn file_part(value: &str) -> String {
         .collect()
 }
 
+/// The platform spells a named instance `server/instance` (the example of
+/// its own help); SQL Server's tools read `server\instance`. A server name
+/// holds no `/` otherwise, and `lpc:` and the like pass as they are.
+pub fn sql_server_name(value: &str) -> String {
+    value.replace('/', "\\")
+}
+
 pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
     let common = &request.common;
     InfobaseConfigExportArgs {
@@ -239,7 +246,7 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         format: None,
         source_version: common.source_version,
         dbms: common.dbms.clone(),
-        db_server: common.db_server.clone(),
+        db_server: common.db_server.as_deref().map(sql_server_name),
         db_name: common.db_name.clone(),
         db_user: common.db_user.clone(),
         db_pwd: common.db_pwd.clone(),
@@ -272,7 +279,7 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         format: None,
         source_version: common.source_version,
         dbms: common.dbms.clone(),
-        db_server: common.db_server.clone(),
+        db_server: common.db_server.as_deref().map(sql_server_name),
         db_name: common.db_name.clone(),
         db_user: common.db_user.clone(),
         db_pwd: common.db_pwd.clone(),
@@ -522,6 +529,8 @@ mod tests {
         };
         let args = export_args(&export);
         assert_eq!(args.db_server.as_deref(), Some("sql01"));
+        assert_eq!(sql_server_name("sql01/inst"), r"sql01\inst");
+        assert_eq!(sql_server_name(r"lpc:sql01\inst"), r"lpc:sql01\inst");
         assert_eq!(args.db_pwd_env, "IBCMD_DB_PSW");
         assert_eq!(args.sqlcmd, PathBuf::from("sqlcmd"));
         assert!(!args.overwrite);
