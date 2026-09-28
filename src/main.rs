@@ -7,6 +7,12 @@ use ibcmd_rs::cli::{Cli, Commands};
 use ibcmd_rs::cli::{InfobaseCommands, InfobaseConfigCommands};
 use ibcmd_rs::plan::SourceDiffSignatureOptions;
 
+/// Large blocks come from a heap per thread instead of the one process heap
+/// every worker waited on (`ibcmd_rs::sharded_heap`).
+#[cfg(windows)]
+#[global_allocator]
+static ALLOCATOR: ibcmd_rs::sharded_heap::ShardedHeap = ibcmd_rs::sharded_heap::ShardedHeap;
+
 /// The commands walk deeply nested sources (form item trees, brace bodies) on
 /// the calling thread, whose default stack on Windows is 1 MiB; they run on a
 /// thread with room for the deepest of them instead.
