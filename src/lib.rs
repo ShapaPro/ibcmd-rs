@@ -31,6 +31,7 @@ pub mod mssql_worker_switch;
 pub mod mxl_line_provenance;
 pub mod parallel;
 pub mod plan;
+pub mod platform;
 #[cfg(feature = "platform-oracle")]
 pub mod probe;
 #[cfg(feature = "platform-oracle")]

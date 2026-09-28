@@ -129,9 +129,13 @@ impl EmptyStageContext {
         };
         let facts = configuration_facts(&configuration)?;
         // Body layouts follow CompatibilityMode, not the XML dialect: a 2.21
-        // tree of an 8.3-compatible configuration stores 8.3.27 bodies.
+        // tree of an 8.3-compatible configuration stores 8.3 bodies, the
+        // layout the registry's `FormLayout::stored` gives it.
+        let platform = crate::platform::of_xml_dialect(&version);
         crate::module_blob::XML_2_21_TREE_IN_LAYOUT_8_3.store(
-            version != "2.20" && facts.compatibility < 80500,
+            platform.xml_version() == crate::cli::InfobaseConfigSourceVersion::V2_21
+                && platform.form_layout().stored(facts.compatibility)
+                    == crate::platform::FormLayout::V8_3,
             Ordering::Relaxed,
         );
         let descriptors = DescriptorContext::with_files(root, &version, files)?;

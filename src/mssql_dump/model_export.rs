@@ -118,13 +118,15 @@ impl ModelPlan {
             parse_configuration_properties_from_text(&row.text, &BTreeMap::new(), source_version)
                 .and_then(|properties| properties.compatibility_mode)
         });
+        // A row that names no compatibility runs in the platform's own: the
+        // release the registry maps the XML format to.
         let compat = compatibility_mode
             .as_deref()
             .and_then(Compat::parse)
-            .unwrap_or(if source_version == InfobaseConfigSourceVersion::V2_21 {
-                Compat(8, 5, 1)
-            } else {
-                Compat(8, 3, 27)
+            .unwrap_or_else(|| {
+                let [major, minor, patch] =
+                    crate::platform::of_xml_dialect(source_version.as_str()).release();
+                Compat(major, minor, patch)
             });
         let kinds = root
             .and_then(|row| raw_by_name.get(row.file_name.as_str()))

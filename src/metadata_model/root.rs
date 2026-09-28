@@ -37,8 +37,9 @@ pub fn compile(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Br
     }
 }
 
-/// The stored shape of the Configuration `<Properties>` tuple.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The stored shape of the Configuration `<Properties>` tuple, ordered from
+/// the oldest shape to the newest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigurationShape {
     /// `{67,...}`: 60 fields.
     V67,
@@ -80,21 +81,6 @@ pub struct ConfigurationFacts {
     pub features: Vec<&'static str>,
 }
 
-/// The platform's feature "palette colors" (since 8.5.1). The platform keeps
-/// a registry of features an older platform cannot use -- backend.dll
-/// 8.5.1.1150 builds it from thirteen (uuid, packed version) pairs, twelve of
-/// them 8.3.9 .. 8.3.26 and this one 8.5.1 -- and, on save, lists in
-/// `version` those the configuration's objects report using (its
-/// `RestrictedCompatibilityUsedFeatures`). A platform that does not know a
-/// listed uuid refuses the configuration ("Для использования этой
-/// конфигурации требуется более новая версия платформы"). Every PaletteColor
-/// object reports this one, unconditionally (the palette colour class's
-/// feature method is the only code that names it). The 8.3 features are
-/// reported by other objects (web service operation parameters, templates,
-/// ...) under conditions not worked out; no measured configuration (БСП
-/// 8.3.24 and 8.5, ERP УХ 8.3.27) lists one.
-const PALETTE_COLOR_FEATURE: &str = "2dd2d9e1-40c8-430b-a433-a81ec6856ab0";
-
 /// Reads `Configuration.xml` for the service rows.
 pub fn configuration_facts(xml: &[u8]) -> Result<ConfigurationFacts> {
     let doc = MetadataXml::parse(xml)?;
@@ -110,12 +96,30 @@ pub fn configuration_facts(xml: &[u8]) -> Result<ConfigurationFacts> {
         .child("Properties")
         .ok_or_else(|| anyhow!("<Configuration> has no <Properties>"))?;
     let compatibility = compatibility_of(properties)?;
-    let features = object
+    // The platform's feature "palette colors" (since 8.5.1; its uuid comes
+    // from the platform registry). The platform keeps a registry of features
+    // an older platform cannot use -- backend.dll 8.5.1.1150 builds it from
+    // thirteen (uuid, packed version) pairs, twelve of them 8.3.9 .. 8.3.26
+    // and this one 8.5.1 -- and, on save, lists in `version` those the
+    // configuration's objects report using (its
+    // `RestrictedCompatibilityUsedFeatures`). A platform that does not know a
+    // listed uuid refuses the configuration ("Для использования этой
+    // конфигурации требуется более новая версия платформы"). Every
+    // PaletteColor object reports this one, unconditionally (the palette
+    // colour class's feature method is the only code that names it). The 8.3
+    // features are reported by other objects (web service operation
+    // parameters, templates, ...) under conditions not worked out; no
+    // measured configuration (БСП 8.3.24 and 8.5, ERP УХ 8.3.27) lists one.
+    let uses_palette_colors = object
         .child("ChildObjects")
-        .is_some_and(|children| children.children_named("PaletteColor").next().is_some())
-        .then_some(PALETTE_COLOR_FEATURE)
-        .into_iter()
-        .collect();
+        .is_some_and(|children| children.children_named("PaletteColor").next().is_some());
+    let features = if uses_palette_colors {
+        vec![crate::platform::feature_uuid(
+            crate::platform::FEATURE_PALETTE_COLORS,
+        )?]
+    } else {
+        Vec::new()
+    };
     Ok(ConfigurationFacts {
         uuid,
         compatibility,
@@ -1219,7 +1223,7 @@ mod tests {
             xml("<Language>Русский</Language><PaletteColor>Фон</PaletteColor>").as_bytes(),
         )
         .unwrap();
-        assert_eq!(with.features, vec![PALETTE_COLOR_FEATURE]);
+        assert_eq!(with.features, vec!["2dd2d9e1-40c8-430b-a433-a81ec6856ab0"]);
         assert_eq!(with.uuid, "66193438-abc5-410b-a1f1-a204102d1a62");
         let without = configuration_facts(xml("<Language>Русский</Language>").as_bytes()).unwrap();
         assert!(without.features.is_empty());
@@ -1245,7 +1249,7 @@ mod tests {
         let facts_8_5_1 = ConfigurationFacts {
             compatibility: 80501,
             shape: ConfigurationShape::V76,
-            features: vec![PALETTE_COLOR_FEATURE],
+            features: vec!["2dd2d9e1-40c8-430b-a433-a81ec6856ab0"],
             ..facts.clone()
         };
         assert_eq!(

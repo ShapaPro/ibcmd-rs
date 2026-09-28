@@ -65,8 +65,8 @@ impl Compat {
 }
 
 /// The compatibility mode of the tree's `Configuration.xml`, read once per
-/// state of the file. `DontUse` (or no file) means the platform the XML
-/// dialect names.
+/// state of the file. `DontUse` (or no file) means the platform's own: the
+/// release the registry maps the XML dialect to.
 pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
     type Key = (PathBuf, Option<std::time::SystemTime>, u64);
     static CACHE: OnceLock<Mutex<HashMap<Key, Compat>>> = OnceLock::new();
@@ -86,11 +86,8 @@ pub(crate) fn compatibility(context: &DescriptorContext) -> Compat {
     if let Some(value) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
         return value;
     }
-    let default = if context.is_xml_2_21() {
-        Compat(8, 5, 1)
-    } else {
-        Compat(8, 3, 27)
-    };
+    let [major, minor, patch] = context.platform().release();
+    let default = Compat(major, minor, patch);
     let value = std::fs::read(&path)
         .ok()
         .and_then(|bytes| MetadataXml::parse(&bytes).ok())

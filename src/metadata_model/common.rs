@@ -267,8 +267,9 @@ fn child_objects<'a>(
         .flat_map(move |children| children.children_named(name))
 }
 
-/// Whether descriptors take their 8.5 layout (form record 14, `{4,...}`
-/// colours, `{8,...}` fonts): a 2.21 tree whose configuration's
+/// Whether descriptors take the layout 8.5.1 introduced (form record 14,
+/// `{4,...}` colours, `{8,...}` fonts): the tree's platform stores that
+/// layout (the registry's `form_layout()`) and its configuration's
 /// `CompatibilityMode` is 8.5 or later.
 ///
 /// Both 8.5 corpora agree with it and with nothing simpler: the BSP 8.5
@@ -277,7 +278,7 @@ fn child_objects<'a>(
 /// corpus) stores all 13 053 of them the 8.3.27 way, while both trees spell
 /// the objects identically.
 pub fn stores_layout_8_5_1(context: &DescriptorContext) -> bool {
-    if !context.is_xml_2_21() {
+    if context.platform().form_layout() < crate::platform::FormLayout::V8_5_1 {
         return false;
     }
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();

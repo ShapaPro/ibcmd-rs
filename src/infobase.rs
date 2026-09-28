@@ -1363,20 +1363,26 @@ fn resolve_legacy_adapter(
     settings: &Option<Value>,
     cli_source_version: Option<InfobaseConfigSourceVersion>,
 ) -> Result<MssqlLegacyAdapter> {
+    let platform_build = settings_platform_build(settings)?;
+    // An explicit XML selection wins; otherwise the platform names its XML
+    // format through the platform registry (8.3.x -> 2.20, 8.5.x -> 2.21,
+    // known builds only), and without either the dialect is 2.20.
     let xml_dialect = match cli_source_version {
         Some(selector) => selector.version_axes().xml_dialect().clone(),
-        None => settings_xml_dialect(settings)?.unwrap_or_else(|| {
-            XmlDialect::parse(InfobaseConfigSourceVersion::V2_20.as_str())
-                .expect("default legacy XML dialect is valid")
-        }),
+        None => match settings_xml_dialect(settings)? {
+            Some(dialect) => dialect,
+            None => {
+                let selector = match &platform_build {
+                    Some(build) => crate::platform::parse(&build.to_string())
+                        .with_context(|| format!("platform-version `{build}` in settings"))?
+                        .xml_version(),
+                    None => InfobaseConfigSourceVersion::V2_20,
+                };
+                selector.version_axes().xml_dialect().clone()
+            }
+        },
     };
-    let version_axes = LegacyVersionAxes::new(
-        xml_dialect,
-        settings_platform_build(settings)?,
-        None,
-        None,
-        None,
-    );
+    let version_axes = LegacyVersionAxes::new(xml_dialect, platform_build, None, None, None);
     let legacy_adapter = MssqlLegacyAdapter::new(version_axes)?;
     if legacy_adapter.legacy_selector().is_none() {
         bail!(
@@ -1617,24 +1623,64 @@ mod tests {
     }
 
     #[test]
-    fn settings_version_axes_are_separate_and_fail_closed() {
+    fn settings_platform_maps_to_its_xml_format_and_fails_closed() {
         let default = resolve_legacy_adapter(&None, None).unwrap();
         assert_eq!(default.xml_dialect().to_string(), "2.20");
         assert_eq!(default.version_axes().platform_build(), None);
 
-        let platform_only = Some(serde_json::json!({
+        // The explicit mapping of the platform registry: 8.3.x -> 2.20,
+        // 8.5.x -> 2.21.
+        for (build, xml) in [("8.5.1.1150", "2.21"), ("8.3.27.2214", "2.20")] {
+            let platform_only = Some(serde_json::json!({
+                "ibcmd-rs": { "platform-version": build }
+            }));
+            let resolved = resolve_legacy_adapter(&platform_only, None).unwrap();
+            assert_eq!(resolved.xml_dialect().to_string(), xml, "{build}");
+            assert_eq!(
+                resolved
+                    .version_axes()
+                    .platform_build()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some(build)
+            );
+        }
+
+        // An explicit XML selection, in the settings or on the command line,
+        // still wins over the platform's own format.
+        let both = Some(serde_json::json!({
+            "ibcmd-rs": { "platform-version": "8.5.1.1150", "xml-version": "2.20" }
+        }));
+        assert_eq!(
+            resolve_legacy_adapter(&both, None)
+                .unwrap()
+                .xml_dialect()
+                .to_string(),
+            "2.20"
+        );
+        let platform_85 = Some(serde_json::json!({
             "ibcmd-rs": { "platform-version": "8.5.1.1150" }
         }));
-        let resolved = resolve_legacy_adapter(&platform_only, None).unwrap();
-        assert_eq!(resolved.xml_dialect().to_string(), "2.20");
         assert_eq!(
-            resolved
-                .version_axes()
-                .platform_build()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("8.5.1.1150")
+            resolve_legacy_adapter(&platform_85, Some(InfobaseConfigSourceVersion::V2_20))
+                .unwrap()
+                .xml_dialect()
+                .to_string(),
+            "2.20"
         );
+
+        // Only builds the registry knows map; nothing is mapped to the
+        // nearest version.
+        for (build, expected) in [
+            ("8.3.24.1819", "is not supported"),
+            ("8.4.2.1", "unknown platform build"),
+        ] {
+            let unknown = Some(serde_json::json!({
+                "ibcmd-rs": { "platform-version": build }
+            }));
+            let error = format!("{:#}", resolve_legacy_adapter(&unknown, None).unwrap_err());
+            assert!(error.contains(expected), "{build}: {error}");
+        }
 
         for dialect in ["2.17", "2.99"] {
             let settings = Some(serde_json::json!({

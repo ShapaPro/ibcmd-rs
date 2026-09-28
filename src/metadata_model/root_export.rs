@@ -350,8 +350,19 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     let t = parsed.tuple;
     let shape = parsed.shape;
     let xml_2_21 = context.is_xml_2_21();
-    if shape == ConfigurationShape::V76 && !xml_2_21 {
-        bail!("8.3.27 does not read a configuration kept in compatibility 8.5");
+    // The platform the tree is written for reads the tuple shapes up to the
+    // one it writes itself.
+    let platform = context.platform();
+    let own_shape = ConfigurationShape::for_compatibility(platform.compatibility_packed());
+    if shape > own_shape {
+        bail!(
+            "{platform} does not read a configuration kept in compatibility {}",
+            if shape == ConfigurationShape::V76 {
+                "8.5"
+            } else {
+                "newer than its own"
+            }
+        );
     }
 
     // The constants `root.rs` writes.
@@ -420,18 +431,18 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
             "Configuration fields 26 and 43 hold {compat_26} and {compat_43}; no corpus shows which one the platform prints"
         );
     }
-    let ceiling = if xml_2_21 { 80501 } else { 80327 };
-    if compat_26 > ceiling {
-        bail!("compatibility {compat_26} is newer than the platform the tree is written for");
+    if compat_26 > platform.compatibility_packed() {
+        bail!(
+            "compatibility {compat_26} is newer than the platform the tree is written for ({platform})"
+        );
     }
     let compatibility = version_text(compat_26);
     // The extension compatibility the platform prints: its own edition for
     // a tuple older than the one it writes, the stored value otherwise.
-    let extension_compatibility = match (xml_2_21, shape) {
-        (false, ConfigurationShape::V67) => "Version8_3_27".to_string(),
-        (false, _) => compatibility.clone(),
-        (true, ConfigurationShape::V76) => compatibility.clone(),
-        (true, _) => "Version8_5_1".to_string(),
+    let extension_compatibility = if shape < own_shape {
+        platform.compatibility_mode()
+    } else {
+        compatibility.clone()
     };
 
     // Default roles; field 12 keeps the first of them.
