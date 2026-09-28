@@ -4889,7 +4889,12 @@ fn dump_table_rows_streamed(
     let mut metadata_extraction_diagnostics = BTreeMap::new();
     let mut versions_blob = None;
     let file_name_batches = build_dump_file_name_batches(&headers, &file_names);
-    for chunk in file_name_batches {
+    // Each batch is read while the one before it is being converted: the
+    // read waits on SQL Server, the conversion keeps the worker pool busy, and
+    // the journal of requests stays on this thread.
+    let mut fetch_batch = |chunk: &Vec<String>,
+                           timings: &mut MssqlDumpTimingReport|
+     -> Result<Vec<BinaryConfigRow>> {
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
         let fetch_cpu = process_cpu_ms();
@@ -4907,7 +4912,7 @@ fn dump_table_rows_streamed(
         })?;
         let elapsed = elapsed_ms(fetch_started);
         timings.fetch_rows_ms += elapsed;
-        cpu_add(&mut timings, "fetch_rows", fetch_cpu);
+        cpu_add(timings, "fetch_rows", fetch_cpu);
         timings.fetch_rows_bcp_ms += elapsed;
         timings.fetch_row_batches += 1;
         timings.fetch_row_batch_max_rows = timings.fetch_row_batch_max_rows.max(rows.len() as u64);
@@ -4925,33 +4930,57 @@ fn dump_table_rows_streamed(
                 }
             }
         }
-        let process_started = Instant::now();
-        let process_cpu = process_cpu_ms();
-        // Plain parallel map: dispatching the largest rows first started every
-        // big spreadsheet of a chunk at once and made each 3-4x slower.
-        let dumped_rows = parallel::install(|| {
-            rows.par_iter()
-                .map(|row| dump_table_binary_row(&context, row))
-                .collect::<Vec<_>>()
-        })?;
-        timings.process_rows_wall_ms += elapsed_ms(process_started);
-        cpu_add(&mut timings, "process_rows", process_cpu);
-        for dumped in dumped_rows {
-            let dumped = dumped?;
-            binary_bytes += dumped.binary_bytes;
-            inflated_rows += dumped.inflated_rows;
-            module_text_rows += dumped.module_text_rows;
-            metadata_xml_rows += dumped.metadata_xml_rows;
-            source_asset_rows += dumped.source_asset_rows;
-            source_asset_completeness.merge(&dumped.source_assets);
-            if let Some(diagnostic) = dumped.metadata_xml_diagnostic {
-                metadata_extraction_diagnostics
-                    .insert(dumped.manifest.file_name.clone(), diagnostic);
+        Ok(rows)
+    };
+    std::thread::scope(|scope| -> Result<()> {
+        let mut next = match file_name_batches.first() {
+            Some(chunk) => Some(fetch_batch(chunk, &mut timings)?),
+            None => None,
+        };
+        let mut index = 0usize;
+        while let Some(rows) = next.take() {
+            index += 1;
+            let context = &context;
+            let converting = scope.spawn(move || {
+                let process_started = Instant::now();
+                let process_cpu = process_cpu_ms();
+                // Plain parallel map: dispatching the largest rows first started
+                // every big spreadsheet of a chunk at once and made each 3-4x
+                // slower.
+                let dumped_rows = parallel::install(|| {
+                    rows.par_iter()
+                        .map(|row| dump_table_binary_row(context, row))
+                        .collect::<Vec<_>>()
+                });
+                (dumped_rows, elapsed_ms(process_started), process_cpu)
+            });
+            let fetched = file_name_batches
+                .get(index)
+                .map(|chunk| fetch_batch(chunk, &mut timings));
+            let (dumped_rows, process_wall_ms, process_cpu) = converting
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            timings.process_rows_wall_ms += process_wall_ms;
+            cpu_add(&mut timings, "process_rows", process_cpu);
+            for dumped in dumped_rows? {
+                let dumped = dumped?;
+                binary_bytes += dumped.binary_bytes;
+                inflated_rows += dumped.inflated_rows;
+                module_text_rows += dumped.module_text_rows;
+                metadata_xml_rows += dumped.metadata_xml_rows;
+                source_asset_rows += dumped.source_asset_rows;
+                source_asset_completeness.merge(&dumped.source_assets);
+                if let Some(diagnostic) = dumped.metadata_xml_diagnostic {
+                    metadata_extraction_diagnostics
+                        .insert(dumped.manifest.file_name.clone(), diagnostic);
+                }
+                timings.add_assign(&dumped.timings);
+                manifests.push(dumped.manifest);
             }
-            timings.add_assign(&dumped.timings);
-            manifests.push(dumped.manifest);
+            next = fetched.transpose()?;
         }
-    }
+        Ok(())
+    })?;
     for (source_row_id, reason) in &source_asset_discovery_misses {
         source_asset_completeness.record_affected_reason(source_asset_audit_entry(
             table,

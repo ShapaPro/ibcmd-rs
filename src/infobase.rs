@@ -1710,7 +1710,7 @@ mod tests {
             user: None,
             password: None,
             password_env: "IBCMD_USER_PSW".to_string(),
-            sqlcmd: PathBuf::from("sqlcmd"),
+            sqlcmd: None,
             replace_config_save: true,
             allow_non_lab: true,
             batch_size: Some(250),
