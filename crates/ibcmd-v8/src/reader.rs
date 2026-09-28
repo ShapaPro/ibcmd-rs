@@ -453,9 +453,10 @@ impl ClaimIndex {
         // A malformed candidate may span multiple existing ranges. Preserve the
         // former linear check's observable error by reporting the earliest claim.
         if let Some(claimed) = successor
-            && claimed.order < conflict.order {
-                conflict = claimed;
-            }
+            && claimed.order < conflict.order
+        {
+            conflict = claimed;
+        }
         for claimed in successors {
             if claimed.order < conflict.order {
                 conflict = claimed;
