@@ -30,6 +30,8 @@ ibcmd-cf = { path = "crates/ibcmd-cf" }
 ibcmd-schema = { path = "crates/ibcmd-schema" }
 ibcmd-v8 = { path = "crates/ibcmd-v8" }
 ibcmd-xml = { path = "crates/ibcmd-xml" }
+# The process allocator, installed in main.rs.
+mimalloc = "0.1.52"
 quick-xml = "0.38"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
