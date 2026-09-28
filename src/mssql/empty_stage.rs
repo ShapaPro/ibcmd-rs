@@ -47,6 +47,7 @@ use crate::module_blob::{
     parse_simple_metadata_xml_properties,
 };
 use crate::parallel;
+use crate::source_listing::{self, SourceListing};
 
 /// One row of the stage: its Config file name and stored bytes.
 #[derive(Debug, Clone)]
@@ -95,14 +96,19 @@ pub(crate) struct EmptyStageContext {
     /// The managed-application module group the configuration's own rows
     /// are stored under.
     pub module_group: Option<String>,
+    /// The tree's files and folders, listed once (`source_listing::walk`):
+    /// every object's writers answer their existence probes from it.
+    pub listing: Option<std::sync::Arc<SourceListing>>,
 }
 
 impl EmptyStageContext {
-    /// `files` is every descriptor XML of the tree, read (`read_descriptor_xmls`).
+    /// `files` is every descriptor XML of the tree, read (`read_descriptor_xmls`);
+    /// `listing` the tree's list of files, when it has one.
     pub fn new(
         root: &Path,
         version: Option<&str>,
         files: &[(PathBuf, std::sync::Arc<Vec<u8>>)],
+        listing: Option<std::sync::Arc<SourceListing>>,
     ) -> Result<Self> {
         // No base rows exist: every base-row read fails naming its row.
         BASE_FREE_STAGE.store(true, Ordering::Relaxed);
@@ -136,50 +142,18 @@ impl EmptyStageContext {
             facts,
             descriptors,
             module_group,
+            listing,
         })
     }
 }
 
-/// `audit::descriptor_xmls(root)` walked in parallel: the same files in the
-/// same (sorted) order. Walking ERP УХ's 140 709 files on one thread took
+/// The descriptor XMLs among the files of the tree's walk
+/// (`source_listing::walk`): `audit::descriptor_xmls(root)`, the same files in
+/// the same (sorted) order. Walking ERP УХ's 140 709 files on one thread took
 /// 25-75 s, and a stage used to walk the tree twice (once for the index, once
-/// for the objects). Here every directory is listed on a task of its own, and
-/// no `Ext` folder is entered: `is_descriptor_xml` refuses every path with an
-/// `ext` component, and they hold 72 874 of ERP УХ's 130 638 folders.
-fn descriptor_xmls_parallel(root: &Path) -> Vec<PathBuf> {
-    fn files_under(dir: &Path) -> Vec<PathBuf> {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut files = Vec::new();
-        let mut dirs = Vec::new();
-        for entry in entries.flatten() {
-            // Not followed: a link is neither a file nor a directory here,
-            // as it is not to `WalkDir`.
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                if !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("ext")
-                {
-                    dirs.push(entry.path());
-                }
-            } else if kind.is_file() {
-                files.push(entry.path());
-            }
-        }
-        files.extend(
-            dirs.par_iter()
-                .flat_map_iter(|dir| files_under(dir))
-                .collect::<Vec<_>>(),
-        );
-        files
-    }
-    let files =
-        parallel::install_io_bound(|| files_under(root)).unwrap_or_else(|_| files_under(root));
+/// for the objects); the walk lists every folder on a task of its own, once,
+/// and its list also answers the existence probes of every object's writers.
+fn descriptor_xmls_of(root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut paths = files
         .into_iter()
         .filter(|path| {
@@ -384,6 +358,8 @@ pub(crate) fn prepare_empty_object(
     keep_plain: bool,
 ) -> EmptyStageObject {
     let relative = relative_of(&context.root, path);
+    // The writers' existence probes answer from the tree's list.
+    let _listing = source_listing::install(context.listing.clone());
     let mut object = EmptyStageObject {
         kind: String::new(),
         uuid: String::new(),
@@ -627,13 +603,14 @@ impl EmptyStage {
 pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<EmptyStage> {
     stage_timing::reset_from_env();
     let setup = stage_timing::start();
-    let paths = descriptor_xmls_parallel(root);
-    stage_timing::record(setup, "setup: descriptor list", "", "");
+    let walked = source_listing::walk(root);
+    let paths = descriptor_xmls_of(root, walked.files);
+    stage_timing::record(setup, "setup: tree walk", "", "");
     let setup = stage_timing::start();
     let files = read_descriptor_xmls(&paths)?;
     stage_timing::record(setup, "setup: descriptor reads", "", "");
     let setup = stage_timing::start();
-    let context = EmptyStageContext::new(root, version, &files)?;
+    let context = EmptyStageContext::new(root, version, &files, walked.listing)?;
     drop(files);
     stage_timing::record(setup, "setup: context", "", "");
     let started = std::time::Instant::now();
@@ -1073,13 +1050,14 @@ pub fn audit_empty_stage(
     let stored = StoredRows::scan(rows)?;
     stage_timing::record(setup, "setup: stored row list", "", "");
     let setup = stage_timing::start();
-    let paths = descriptor_xmls_parallel(root);
-    stage_timing::record(setup, "setup: descriptor list", "", "");
+    let walked = source_listing::walk(root);
+    let paths = descriptor_xmls_of(root, walked.files);
+    stage_timing::record(setup, "setup: tree walk", "", "");
     let setup = stage_timing::start();
     let files = read_descriptor_xmls(&paths)?;
     stage_timing::record(setup, "setup: descriptor reads", "", "");
     let setup = stage_timing::start();
-    let context = EmptyStageContext::new(root, version, &files)?;
+    let context = EmptyStageContext::new(root, version, &files, walked.listing)?;
     drop(files);
     stage_timing::record(setup, "setup: context", "", "");
     if let Some(dir) = &options.rows_out {
@@ -1871,7 +1849,7 @@ mod tests {
             fs::write(&path, b"x").unwrap();
         }
         let serial = crate::metadata_model::audit::descriptor_xmls(&root);
-        let parallel = descriptor_xmls_parallel(&root);
+        let parallel = descriptor_xmls_of(&root, source_listing::walk(&root).files);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(serial.len(), 7, "{serial:?}");
         assert_eq!(parallel, serial);

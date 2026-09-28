@@ -70,6 +70,7 @@ use crate::mssql_main_activation::{
 };
 use crate::parallel;
 use crate::source::{scan_sources, scan_sources_with_prefixes};
+use crate::source_listing;
 use crate::source_audit::{
     SourceLoadCoverageAuditReport, audit_source_load_coverage_from_manifest,
 };
@@ -2520,11 +2521,11 @@ fn optional_module_body_bootstrap_row(
 }
 
 fn source_module_body_path(bsl_path: PathBuf) -> Option<PathBuf> {
-    if bsl_path.exists() {
+    if source_listing::exists(&bsl_path) {
         return Some(bsl_path);
     }
     let bin_path = module_binary_body_path(&bsl_path);
-    bin_path.exists().then_some(bin_path)
+    source_listing::exists(&bin_path).then_some(bin_path)
 }
 
 fn module_binary_body_path(bsl_path: &Path) -> PathBuf {
@@ -4618,7 +4619,7 @@ fn prepare_additional_indexes_body_row(
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_additional_indexes_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let (body_id, mapping) = match additional_indexes_body_suffix(&properties.kind) {
@@ -4685,7 +4686,7 @@ fn prepare_style_body_row(
     source: Option<&MetadataSourceContext>,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_style_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let source = source.ok_or_else(|| {
@@ -4715,7 +4716,7 @@ fn prepare_scheduled_job_body_row(
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_scheduled_job_schedule_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -4743,7 +4744,7 @@ fn prepare_ws_reference_body_row(
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     use crate::v8_container::{V8Element, build_v8_container, make_v8_element_header};
     let body_path = infer_ws_reference_definition_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let definition = fs::read(&body_path)
@@ -4764,7 +4765,7 @@ fn prepare_ws_reference_body_row(
         .with_context(|| format!("failed to list {}", ext.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path != &body_path)
+        .filter(|path| source_listing::is_file(path) && path != &body_path)
         .collect::<Vec<_>>();
     imports.sort();
     for path in imports {
@@ -4801,7 +4802,7 @@ fn prepare_raw_deflated_body_row(
     label: &str,
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -4913,7 +4914,7 @@ fn prepare_raw_template_body_row(
     kind: TemplateKind,
     source: Option<&MetadataSourceContext>,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -4962,7 +4963,7 @@ fn prepare_spreadsheet_template_body_row(
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     ensure_template_axes(axes)?;
     let body_path = infer_spreadsheet_template_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -5067,7 +5068,7 @@ pub(crate) fn html_template_source_row(
     source: Option<&MetadataSourceContext>,
 ) -> Result<Option<HelpSourceRow>> {
     let body_path = infer_html_template_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(None);
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -5099,7 +5100,7 @@ fn prepare_binary_template_body_row(
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     ensure_template_axes(axes)?;
     let body_path = infer_binary_template_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -5132,7 +5133,7 @@ fn prepare_common_picture_body_row(
     properties: &SimpleMetadataXmlProperties,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_common_picture_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -5610,7 +5611,7 @@ fn prepare_exchange_plan_content_body_row(
     source: Option<&MetadataSourceContext>,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_exchange_plan_content_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let source = source.ok_or_else(|| {
@@ -5654,7 +5655,7 @@ fn prepare_predefined_data_body_row(
         return Ok(Vec::new());
     };
     let body_path = infer_predefined_data_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.{}", properties.uuid, suffix);
@@ -5684,7 +5685,7 @@ fn prepare_business_process_flowchart_body_row(
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_business_process_flowchart_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.7", properties.uuid);
@@ -5731,11 +5732,11 @@ fn prepare_form_body_row(
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let form_path = infer_form_body_path(xml_path);
     let module_path = infer_form_module_body_path(xml_path);
-    if !form_path.exists() && !module_path.exists() {
+    if !source_listing::exists(&form_path) && !source_listing::exists(&module_path) {
         // An ordinary form's body is `Ext/Form.bin`, the stored row
         // inflated (ERP УХ: all 9, byte for byte), staged deflated again.
         let ordinary = form_path.with_extension("bin");
-        if ordinary.is_file() {
+        if source_listing::is_file(&ordinary) {
             let bytes = fs::read(&ordinary)
                 .with_context(|| format!("failed to read {}", ordinary.display()))?;
             let blob = crate::module_blob::deflate_raw(&bytes)?;
@@ -5752,13 +5753,13 @@ fn prepare_form_body_row(
         return Err(anyhow!("unsupported Form body: {reason}"));
     }
     let body_id = format!("{}.0", properties.uuid);
-    let form_xml = if form_path.exists() {
+    let form_xml = if source_listing::exists(&form_path) {
         fs::read(&form_path)
             .with_context(|| format!("failed to read Form XML {}", form_path.display()))?
     } else {
         Vec::new()
     };
-    let module_text = if module_path.exists() {
+    let module_text = if source_listing::exists(&module_path) {
         Some(
             fs::read(&module_path)
                 .with_context(|| format!("failed to read Form module {}", module_path.display()))?,
@@ -5798,7 +5799,7 @@ fn prepare_form_body_row(
             blob_sha256: packed.output_sha256,
         }]);
     }
-    if !form_xml.is_empty() && !form_item_assets_root.exists() {
+    if !form_xml.is_empty() && !source_listing::exists(&form_item_assets_root) {
         if let Some(packed) = native() {
             return Ok(vec![PreparedMetadataBodyStage {
                 body_id,
@@ -5862,7 +5863,7 @@ fn prepare_form_body_row(
         bail!("{BASE_FREE_MISSING_ROW} {body_id}: the native form writer refuses it: {refusal}");
     }
     let reason = form_body_base_free_blocker_reason(&form_path, &module_path)?;
-    let provenance = if form_path.exists() {
+    let provenance = if source_listing::exists(&form_path) {
         &form_path
     } else {
         &module_path
@@ -5870,7 +5871,7 @@ fn prepare_form_body_row(
     let required = classify_required_base(axes, &body_id, provenance, &reason, "Form body")?;
     let base_body =
         fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
-    if !form_item_assets_root.exists() {
+    if !source_listing::exists(&form_item_assets_root) {
         let native_form_matches = if form_xml.is_empty() {
             true
         } else {
@@ -5887,7 +5888,7 @@ fn prepare_form_body_row(
         if native_form_matches && native_module_matches {
             return Ok(vec![PreparedMetadataBodyStage {
                 body_id,
-                path: if form_path.exists() {
+                path: if source_listing::exists(&form_path) {
                     form_path
                 } else {
                     module_path
@@ -5915,7 +5916,7 @@ fn prepare_form_body_row(
     .with_context(|| format!("failed to pack Form body {}", form_path.display()))?;
     Ok(vec![PreparedMetadataBodyStage {
         body_id,
-        path: if form_path.exists() {
+        path: if source_listing::exists(&form_path) {
             form_path
         } else {
             module_path
@@ -5936,7 +5937,7 @@ fn prepare_role_rights_body_row(
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let body_path = infer_role_rights_body_path(xml_path);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.0", properties.uuid);
@@ -5999,7 +6000,7 @@ fn prepare_command_interface_body_row(
         return Ok(Vec::new());
     };
     let body_path = infer_command_interface_body_path(xml_path, &properties.kind);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(Vec::new());
     }
     let body_id = format!("{}.{}", properties.uuid, suffix);
@@ -6082,7 +6083,7 @@ pub(crate) fn object_help_source_row(
     source: Option<&MetadataSourceContext>,
 ) -> Result<Option<HelpSourceRow>> {
     let body_path = infer_object_help_body_path(xml_path, &properties.kind);
-    if !body_path.exists() {
+    if !source_listing::exists(&body_path) {
         return Ok(None);
     }
     let body_id = object_help_body_id(xml_path, properties);
@@ -6144,7 +6145,7 @@ fn read_help_source_parts(
     }
     let mut files = Vec::<(String, Vec<u8>)>::new();
     let files_dir = help_dir.join("_files");
-    if files_dir.exists() {
+    if source_listing::exists(&files_dir) {
         for entry in fs::read_dir(&files_dir)
             .with_context(|| format!("failed to read {label} files dir {}", files_dir.display()))?
         {
@@ -6357,7 +6358,7 @@ fn nested_command_module_sources(
         return Ok(Vec::new());
     }
     let commands_dir = xml_path.with_extension("").join("Commands");
-    if !commands_dir.exists() {
+    if !source_listing::exists(&commands_dir) {
         return Ok(Vec::new());
     }
     let command_ids = parse_nested_command_ids_by_name(xml)?;

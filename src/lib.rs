@@ -41,6 +41,7 @@ pub(crate) mod runtime_evidence_schema;
 pub mod sharded_heap;
 pub mod source;
 pub mod source_audit;
+pub(crate) mod source_listing;
 pub mod source_oracle;
 pub mod storage_map;
 pub mod templates;
