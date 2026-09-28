@@ -42,6 +42,21 @@ itself. After the workflow exists on the default branch, the branch protection
 rule or repository ruleset must require the four check names above and reject
 force-push bypasses for ordinary contributors.
 
+## Milestone check before tagging
+
+Mandatory for every release. Before the `v*` tag is created, go through the
+GitHub milestone of that release (`gh issue list --repo Untru/ibcmd-rs
+--milestone "<X.Y — title>" --state all`):
+
+- every issue in the milestone is verified as actually done and is closed
+  with a comment naming the evidence (commit, measurement, test);
+- an issue that is not done is either finished first or moved to a later
+  milestone with the reason in a comment;
+- every status is up to date, and older issues that this release resolves are
+  closed the same way.
+
+A release is not tagged while its milestone holds an open or stale issue.
+
 ## Release gate
 
 `Standalone Release` runs for `v*` tags and by explicit manual dispatch. A
