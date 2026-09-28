@@ -991,6 +991,7 @@ mod moxel;
 mod mxl_ir;
 pub mod offline_context;
 mod offline_rows;
+mod output_writer;
 mod refs;
 mod role_rights;
 pub(crate) use role_rights::{
@@ -1100,6 +1101,7 @@ use form_ref_index::FormObjectRefIndex;
 use forms::*;
 use metadata::*;
 use moxel::*;
+use output_writer::OutputWriter;
 use refs::*;
 use role_rights::*;
 use selected::*;
@@ -2794,6 +2796,8 @@ struct DumpRowContext<'a> {
     /// `--model-export`: descriptors of the modelled kinds go through it.
     model_export: Option<&'a model_export::ModelExport>,
     output_dir: &'a Path,
+    /// Every file of the row goes through it.
+    output: &'a OutputWriter,
     table: &'a str,
     source_version: InfobaseConfigSourceVersion,
     write_binary_rows: bool,
@@ -3471,7 +3475,11 @@ fn dump_table_rows_with_options_mode(
         }
     }
 
+    // A row's own write error stays that row's: this path can go on past a
+    // failed row, so its files are written on the row's thread.
+    let output = OutputWriter::inline().with_existing_folder(output_dir);
     let context = DumpRowContext {
+        output: &output,
         model_export: None,
         type_set_leaves: &type_set_leaves,
         output_dir,
@@ -3649,6 +3657,7 @@ fn dump_table_rows_with_options_mode(
         // and the `Fail` partial-inventory policy).
         if let Some(versions_blob) = versions_blob {
             write_config_dump_info(
+                &output,
                 output_dir,
                 source_version,
                 &versions_blob,
@@ -4949,7 +4958,11 @@ fn dump_table_rows_streamed(
         });
     }
 
+    // The files go to writer threads of their own, so a worker converting a
+    // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`).
+    let output = OutputWriter::from_env().with_existing_folder(output_dir);
     let context = DumpRowContext {
+        output: &output,
         model_export: model.as_ref(),
         type_set_leaves: &type_set_leaves,
         output_dir,
@@ -5136,6 +5149,7 @@ fn dump_table_rows_streamed(
             }
         }
         write_config_dump_info(
+            &output,
             output_dir,
             source_version,
             versions_blob
@@ -5179,6 +5193,11 @@ fn dump_table_rows_streamed(
     } else {
         RootMetadataInventoryReport::default()
     };
+    // Every queued file lands before the table is reported; a failed write
+    // fails the export here.
+    drop(context);
+    let written = output.finish()?;
+    timings.add_output_write(&written);
     Ok(DumpedTable {
         rows: manifests,
         failed_rows: Vec::new(),
@@ -5802,7 +5821,9 @@ fn dump_table_row_bytes(
         let binary_path = context
             .output_dir
             .join(binary_relative.as_ref().expect("binary path is present"));
-        fs::write(&binary_path, &bytes)
+        context
+            .output
+            .write(&binary_path, bytes)
             .with_context(|| format!("failed to write {}", binary_path.display()))?;
         timings.binary_write_cpu_ms += elapsed_ms(started);
     }
@@ -5815,7 +5836,9 @@ fn dump_table_row_bytes(
                 let relative = PathBuf::from(format!("{}_inflated", context.table))
                     .join(format!("{safe_name}.txt"));
                 let path = context.output_dir.join(&relative);
-                fs::write(&path, inflated)
+                context
+                    .output
+                    .write(&path, inflated)
                     .with_context(|| format!("failed to write {}", path.display()))?;
                 inflated_rows = 1;
                 timings.inflate_cpu_ms += elapsed_ms(started);
@@ -5908,11 +5931,13 @@ fn dump_table_row_bytes(
                     Some(relative) => {
                         let path = context.output_dir.join(&relative);
                         if let Some(parent) = path.parent() {
-                            fs::create_dir_all(parent).with_context(|| {
+                            context.output.create_dir_all(parent).with_context(|| {
                                 format!("failed to create {}", parent.display())
                             })?;
                         }
-                        fs::write(&path, text)
+                        context
+                            .output
+                            .write(&path, text)
                             .with_context(|| format!("failed to write {}", path.display()))?;
                         module_text_rows = 1;
                         timings.module_text_cpu_ms += elapsed_ms(started);
@@ -6040,10 +6065,14 @@ fn dump_table_row_bytes(
             Ok(extracted) => {
                 let path = context.output_dir.join(&extracted.relative_path);
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)
+                    context
+                        .output
+                        .create_dir_all(parent)
                         .with_context(|| format!("failed to create {}", parent.display()))?;
                 }
-                write_source_xml_file(&path, extracted.xml, context.source_version)?;
+                context
+                    .output
+                    .write_xml(&path, extracted.xml, context.source_version)?;
                 metadata_xml_rows = 1;
                 timings.metadata_xml_cpu_ms += elapsed_ms(started);
                 if model_row {
