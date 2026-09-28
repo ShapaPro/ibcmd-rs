@@ -318,10 +318,32 @@ pub fn configuration_objects(row: &Brace) -> Result<Vec<(String, String)>> {
 /// owner's row lists it by uuid, and the index names the owners first.
 /// Owned forms and templates need no arm: their full name is the owner's
 /// and their own name, and they carry no child objects or generated types.
-#[allow(clippy::match_single_binding)]
 pub fn owned_object_names(kind: &str, row: &Brace, owner: &str) -> Result<ObjectNames> {
-    let _ = (row, owner);
     match kind {
+        "Recalculation" => super::registers::export::owned_names(kind, row, owner),
+        // A nested subsystem names itself like a top-level one; the owner
+        // goes in front.
+        "Subsystem" => {
+            let mut names = super::common::forms_export::names(kind, row)?;
+            let short = names
+                .full_name
+                .strip_prefix("Subsystem.")
+                .ok_or_else(|| anyhow!("{} is not a subsystem", names.full_name))?
+                .to_string();
+            names.full_name = format!("{owner}.Subsystem.{short}");
+            Ok(names)
+        }
+        // An owned form or template: its own header, under its owner.
+        "Form" | "Template" => {
+            let head = names::own_header(row)
+                .ok_or_else(|| anyhow!("no header in the {kind} row"))?;
+            Ok(ObjectNames {
+                full_name: format!("{owner}.{kind}.{}", head.1),
+                uuid: head.0,
+                children: Vec::new(),
+                types: Vec::new(),
+            })
+        }
         other => bail!("not yet: no owned-row names for {other}"),
     }
 }

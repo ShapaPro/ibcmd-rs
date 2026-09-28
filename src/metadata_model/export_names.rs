@@ -126,6 +126,20 @@ impl NameIndex {
         self.types.contains_key(type_id)
     }
 
+    /// Every (uuid, full name).
+    pub fn name_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.names
+            .iter()
+            .map(|(uuid, name)| (uuid.as_str(), name.as_str()))
+    }
+
+    /// Every (type id, generated type name).
+    pub fn type_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.types
+            .iter()
+            .map(|(id, name)| (id.as_str(), name.as_str()))
+    }
+
     /// (names, generated types, predefined items).
     pub fn sizes(&self) -> (usize, usize, usize) {
         (
@@ -260,6 +274,27 @@ fn collect_root_kinds(
     for member in members {
         collect_root_kinds(member, classes, out);
     }
+}
+
+// ---------------------------------------------------------------------------
+// A row's own header.
+
+/// The object's own md header in a descriptor row, as (uuid, name): the
+/// first `{3,{<n>,0,<uuid>},"<name>",<synonym>,"<comment>",...}` of nine
+/// members, in document order (the object's header precedes its children's).
+pub fn own_header(row: &Brace) -> Option<(String, String)> {
+    let members = row.as_list()?;
+    if members.len() == 9
+        && members.first().and_then(Brace::as_atom) == Some("3")
+        && let Some(identity) = members.get(1).and_then(Brace::as_list)
+        && identity.len() == 3
+        && identity.get(1).and_then(Brace::as_atom) == Some("0")
+        && let Some(uuid) = identity.get(2).and_then(Brace::as_atom)
+        && let Some(name) = members.get(2).and_then(Brace::as_str)
+    {
+        return Some((uuid.to_ascii_lowercase(), name.to_string()));
+    }
+    members.iter().find_map(own_header)
 }
 
 // ---------------------------------------------------------------------------
@@ -655,9 +690,32 @@ mod tests {
             owned,
             vec![
                 ("Form", "dddddddd-0000-0000-0000-000000000001".to_string()),
-                ("Template", "eeeeeeee-0000-0000-0000-000000000001".to_string()),
-                ("Template", "eeeeeeee-0000-0000-0000-000000000002".to_string()),
+                (
+                    "Template",
+                    "eeeeeeee-0000-0000-0000-000000000001".to_string()
+                ),
+                (
+                    "Template",
+                    "eeeeeeee-0000-0000-0000-000000000002".to_string()
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn an_owned_row_names_itself_from_its_first_header() {
+        let text = concat!(
+            "{1,{0,{13,{3,{1,0,aaaaaaaa-0000-0000-0000-000000000001},\"Форма\",{0},\"\",0,0,",
+            "00000000-0000-0000-0000-000000000000,0},0,{1,{3,{1,0,bbbbbbbb-0000-0000-0000-000000000001},",
+            "\"Вложенная\",{0},\"\",0,0,00000000-0000-0000-0000-000000000000,0}}}}}"
+        );
+        let row = parse_row(text.as_bytes()).unwrap();
+        assert_eq!(
+            own_header(&row),
+            Some((
+                "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
+                "Форма".to_string()
+            ))
         );
     }
 
@@ -665,9 +723,20 @@ mod tests {
     fn predefined_items_are_kept_per_owner() {
         let mut index = NameIndex::default();
         index.insert_predefined("Catalog.A", "11111111-1111-1111-1111-111111111111", "Один");
-        index.insert_predefined("Catalog.B", "11111111-1111-1111-1111-111111111111", "Другой");
-        index.insert_predefined("Catalog.C", "22222222-2222-2222-2222-222222222222", "Третий");
-        assert_eq!(index.predefined("11111111-1111-1111-1111-111111111111"), None);
+        index.insert_predefined(
+            "Catalog.B",
+            "11111111-1111-1111-1111-111111111111",
+            "Другой",
+        );
+        index.insert_predefined(
+            "Catalog.C",
+            "22222222-2222-2222-2222-222222222222",
+            "Третий",
+        );
+        assert_eq!(
+            index.predefined("11111111-1111-1111-1111-111111111111"),
+            None
+        );
         assert_eq!(
             index.predefined_in("Catalog.B", "11111111-1111-1111-1111-111111111111"),
             Some("Другой")

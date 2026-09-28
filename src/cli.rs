@@ -1388,10 +1388,14 @@ pub struct MssqlDumpConfigArgs {
     /// server or database is contacted.
     #[arg(long)]
     pub rows_dir: Option<PathBuf>,
-    /// Write the descriptors of the kinds the metadata model decodes through
-    /// the model (also `IBCMD_RS_MODEL_EXPORT=1`).
-    #[arg(long, hide = true)]
+    /// Write every descriptor through the metadata model (the default for a
+    /// full export; kept for scripts that pass it).
+    #[arg(long, hide = true, conflicts_with = "legacy_export")]
     pub model_export: bool,
+    /// Write the descriptors through the legacy converters instead of the
+    /// metadata model (also `IBCMD_RS_LEGACY_EXPORT=1`).
+    #[arg(long)]
+    pub legacy_export: bool,
     /// Output directory for dumped rows and manifest.json.
     #[arg(short, long)]
     pub output_dir: PathBuf,

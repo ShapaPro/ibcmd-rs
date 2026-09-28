@@ -2189,7 +2189,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             args.extract_metadata_xml,
             source_version,
             args.collect_all_source_asset_diagnostics,
-            model_export::requested(args.model_export),
+            model_export::requested(args.model_export, args.legacy_export),
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -3766,6 +3766,7 @@ fn dump_table_rows_streamed(
         ..MssqlDumpTimingReport::default()
     };
     let prepare_started = Instant::now();
+    let prepare_cpu = process_cpu_ms();
     let mut file_names = headers
         .iter()
         .map(|row| row.file_name.clone())
@@ -3783,6 +3784,7 @@ fn dump_table_rows_streamed(
         .cloned()
         .collect::<BTreeSet<_>>();
     let metadata_fetch_started = Instant::now();
+    let metadata_fetch_cpu = process_cpu_ms();
     let mut metadata_fetch_used_bcp = false;
     let needs_source_layout_refs = !write_binary_rows;
     let mut metadata_rows = if extract_metadata_xml
@@ -3813,6 +3815,7 @@ fn dump_table_rows_streamed(
     };
     let elapsed = elapsed_ms(metadata_fetch_started);
     timings.prepare_metadata_fetch_ms += elapsed;
+    cpu_add(&mut timings, "prepare.metadata_fetch", metadata_fetch_cpu);
     if metadata_fetch_used_bcp {
         timings.prepare_metadata_fetch_bcp_ms += elapsed;
     }
@@ -4238,6 +4241,7 @@ fn dump_table_rows_streamed(
     // modelled kinds read are left out. The index needs the whole row set;
     // a run that fetched part of it stays legacy.
     let plan_started = Instant::now();
+    let plan_cpu = process_cpu_ms();
     let model_plan = (model_export && extract_metadata_xml && broad_metadata_indexes).then(|| {
         model_export::ModelPlan::new(&metadata_rows, &index_metadata_texts, source_version)
     });
@@ -4271,12 +4275,15 @@ fn dump_table_rows_streamed(
         );
     }
     timings.prepare_model_index_ms += elapsed_ms(plan_started);
+    cpu_add(&mut timings, "prepare.model_plan", plan_cpu);
     let reference_indexes_started = Instant::now();
+    let reference_indexes_cpu = process_cpu_ms();
     let metadata_texts_by_file_name = index_metadata_texts
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let recalculation_refs = if extract_metadata_xml && !skip_recalculation_refs {
         build_calculation_recalculation_reference_index(&index_metadata_texts)
     } else {
@@ -4288,15 +4295,10 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_recalculation_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.recalculation_refs", index_part_cpu);
 
     let index_part_started = Instant::now();
-    let module_text_paths = if extract_module_text {
-        module_body_paths_from_texts(&write_index_rows, &index_metadata_texts)
-    } else {
-        BTreeMap::new()
-    };
-    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
-    let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let source_reference_needs = selected_configuration_index_needs
         .or(selected_metadata_index_needs)
         .unwrap_or_else(SourceReferenceIndexNeeds::full);
@@ -4309,7 +4311,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_command_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.command_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let metadata_refs = Arc::new(
         if extract_metadata_xml
             && (source_reference_needs.metadata_refs || build_selected_local_refs)
@@ -4320,7 +4324,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_metadata_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.metadata_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let MetadataTypeIndexes {
         references: type_index,
         reference_collisions: type_index_collisions,
@@ -4335,7 +4341,9 @@ fn dump_table_rows_streamed(
     let moxel_generated_types =
         build_moxel_generated_type_index(&type_index, &type_index_collisions);
     timings.prepare_type_index_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.type_index", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let form_refs = if (extract_metadata_xml
         && (source_reference_needs.form_refs
             || source_reference_needs.object_refs
@@ -4347,7 +4355,29 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_form_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.form_refs", index_part_cpu);
+    // The module paths read the complete form index when the export built
+    // it above, instead of building it again.
+    let form_refs_complete = (extract_metadata_xml
+        && (source_reference_needs.form_refs
+            || source_reference_needs.object_refs
+            || build_selected_local_refs))
+        || needs_standalone_refs;
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    let module_text_paths = if extract_module_text {
+        module_body_paths_from_texts_with_forms(
+            &write_index_rows,
+            &index_metadata_texts,
+            form_refs_complete.then_some(&form_refs),
+        )
+    } else {
+        BTreeMap::new()
+    };
+    timings.prepare_module_paths_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.module_paths", index_part_cpu);
+    let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let template_refs = if (extract_metadata_xml
         && (source_reference_needs.template_refs || build_selected_local_refs))
         || needs_standalone_refs
@@ -4357,7 +4387,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_template_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.template_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let subsystem_refs = if (extract_metadata_xml
         && (source_reference_needs.subsystem_refs || build_selected_local_refs))
         || needs_standalone_refs
@@ -4367,14 +4399,25 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_subsystem_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.subsystem_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    // Each row's nested children read once, for the object references here
+    // and the standalone content references below.
+    let child_references = std::cell::OnceCell::new();
+    let row_children = || {
+        child_references.get_or_init(|| child_references_by_row(&index_metadata_texts))
+    };
+    let detail_started = PartClock::start();
     let MetadataObjectReferenceIndexes {
         references: object_refs,
         resolutions: object_ref_resolutions,
     } = if (extract_metadata_xml || needs_source_layout_refs)
         && (source_reference_needs.object_refs || build_selected_local_refs)
     {
-        build_metadata_object_reference_indexes_from_texts(&index_metadata_texts)
+        let children = row_children();
+        detail_ms(&mut timings, "object_refs.children", detail_started);
+        build_metadata_object_reference_indexes_with_children(&index_metadata_texts, children)
     } else if needs_standalone_refs {
         MetadataObjectReferenceIndexes::from_legacy(
             &build_standalone_object_reference_index_from_texts(
@@ -4388,6 +4431,8 @@ fn dump_table_rows_streamed(
     } else {
         MetadataObjectReferenceIndexes::default()
     };
+    detail_ms(&mut timings, "object_refs.index", detail_started);
+    let detail_started = PartClock::start();
     let configuration_root_object_refs = if extract_metadata_xml {
         build_configuration_root_object_reference_index_from_texts(
             &index_metadata_texts,
@@ -4398,7 +4443,9 @@ fn dump_table_rows_streamed(
     };
     let role_rights_object_refs =
         build_role_rights_object_reference_index(&object_refs, &form_refs);
+    detail_ms(&mut timings, "object_refs.root_and_role_copies", detail_started);
     timings.prepare_object_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.object_refs", index_part_cpu);
     let metadata_order = if (extract_metadata_xml || needs_source_layout_refs)
         && source_reference_needs.metadata_order
     {
@@ -4407,14 +4454,18 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let field_refs = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_reference_index_from_texts(&index_metadata_texts)
     } else {
         BTreeMap::new()
     };
     timings.prepare_field_names_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_names", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let field_type_refs = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_metadata_field_type_reference_index_from_texts(&index_metadata_texts, &type_index)
@@ -4423,7 +4474,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_field_types_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_types", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     // One index, two readers -- see the sibling construction site.
     let type_set_leaves = if extract_metadata_xml {
         build_metadata_type_set_leaf_index_from_texts(&index_metadata_texts, &type_index)
@@ -4431,7 +4484,9 @@ fn dump_table_rows_streamed(
         MetadataTypeSetLeafIndex::new()
     };
     timings.prepare_type_set_leaves_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.type_set_leaves", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let information_register_field_refs =
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_field_reference_index_from_texts(
@@ -4443,7 +4498,9 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         };
     timings.prepare_register_fields_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.register_fields", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let information_register_master_dimensions = Arc::new(
         if extract_metadata_xml && source_reference_needs.field_refs {
             build_information_register_master_dimension_index_from_texts(
@@ -4458,7 +4515,9 @@ fn dump_table_rows_streamed(
         },
     );
     timings.prepare_master_dimensions_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.master_dimensions", field_part_cpu);
     let field_part_started = Instant::now();
+    let field_part_cpu = process_cpu_ms();
     let metadata_field_declarations = if extract_metadata_xml && source_reference_needs.field_refs {
         build_metadata_field_declaration_index_from_texts(
             &index_metadata_texts,
@@ -4470,8 +4529,11 @@ fn dump_table_rows_streamed(
         MetadataFieldDeclarationIndex::default()
     };
     timings.prepare_field_declarations_ms += elapsed_ms(field_part_started);
+    cpu_add(&mut timings, "prepare.field_refs.field_declarations", field_part_cpu);
     timings.prepare_field_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.field_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let functional_option_refs =
         if extract_metadata_xml
             && source_reference_needs.functional_option_refs
@@ -4488,8 +4550,11 @@ fn dump_table_rows_streamed(
             BTreeMap::new()
         };
     timings.prepare_functional_option_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.functional_option_refs", index_part_cpu);
     let source_asset_metadata_texts = &index_metadata_texts;
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
+    let detail_started = PartClock::start();
     let mut source_assets = source_asset_paths_with_indexes(
         &write_index_rows,
         source_asset_metadata_texts,
@@ -4502,6 +4567,8 @@ fn dump_table_rows_streamed(
         &template_refs,
         &subsystem_refs,
     );
+    detail_ms(&mut timings, "source_assets.paths", detail_started);
+    let detail_started = PartClock::start();
     // The index rows are headers here, so the parent-configuration list the
     // vendor `.cf` files are named from is fetched on its own.
     let parent_list_ids = source_assets::parent_configuration_list_ids(&source_assets)
@@ -4532,8 +4599,12 @@ fn dump_table_rows_streamed(
             &index_file_names,
         );
     }
+    detail_ms(&mut timings, "source_assets.parent_configurations", detail_started);
+    let detail_started = PartClock::start();
     let source_asset_diagnostics =
         build_form_owner_resolution_diagnostics_from_texts(source_asset_metadata_texts);
+    detail_ms(&mut timings, "source_assets.form_owner_diagnostics", detail_started);
+    let detail_started = PartClock::start();
     let write_rows_by_file_name = write_index_rows
         .iter()
         .map(|row| (row.file_name.as_str(), row))
@@ -4551,8 +4622,11 @@ fn dump_table_rows_streamed(
         &form_refs,
         &template_refs,
     );
+    detail_ms(&mut timings, "source_assets.discovery_misses", detail_started);
     timings.prepare_source_assets_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.source_assets", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let help_refs = if extract_metadata_xml
         && (source_reference_needs.help_refs || build_selected_local_refs)
     {
@@ -4561,7 +4635,9 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_help_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.help_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let standalone_refs = if (needs_standalone_refs
         || (extract_metadata_xml && source_reference_needs.standalone_refs))
         && source_assets
@@ -4569,12 +4645,13 @@ fn dump_table_rows_streamed(
             .any(|asset| matches!(asset.kind, SourceAssetKind::StandaloneContent))
     {
         if extract_metadata_xml {
-            build_standalone_content_references(
+            build_standalone_content_references_with_children(
                 &index_metadata_texts,
                 &configuration_root_object_refs,
                 &form_refs,
                 &template_refs,
                 &subsystem_refs,
+                row_children(),
             )
         } else {
             build_standalone_content_references_for_uuids(
@@ -4600,7 +4677,9 @@ fn dump_table_rows_streamed(
         refs
     };
     timings.prepare_standalone_refs_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.standalone_refs", index_part_cpu);
     let index_part_started = Instant::now();
+    let index_part_cpu = process_cpu_ms();
     let body_owners = if (extract_metadata_xml
         && (source_reference_needs.body_owners || build_selected_local_refs))
         || needs_source_layout_refs
@@ -4610,6 +4689,7 @@ fn dump_table_rows_streamed(
         BTreeMap::new()
     };
     timings.prepare_body_owners_ms += elapsed_ms(index_part_started);
+    cpu_add(&mut timings, "prepare.body_owners", index_part_cpu);
     let needs_predefined_item_refs =
         predefined_data_needs_item_references(&file_names, &body_owners);
     let (predefined_item_refs, all_predefined_rows) = if needs_predefined_item_refs {
@@ -4807,11 +4887,13 @@ fn dump_table_rows_streamed(
         }
     }
     timings.prepare_reference_indexes_ms += elapsed_ms(reference_indexes_started);
+    cpu_add(&mut timings, "prepare.reference_indexes", reference_indexes_cpu);
     // `--model-export`: the descriptors of the modelled kinds are decoded
     // from their rows; names come from an index of the whole row set, so a
     // run that fetched only part of it keeps the legacy converters.
     let model = if let Some(plan) = model_plan {
         let started = Instant::now();
+        let model_cpu = process_cpu_ms();
         let predefined_names = plan.predefined_body_file_names();
         let predefined_rows = if predefined_names.is_empty() {
             Vec::new()
@@ -4827,25 +4909,45 @@ fn dump_table_rows_streamed(
                 &predefined_names,
             )?
         };
+        // The legacy indexes fill in only while some kind's rows cannot
+        // name themselves yet.
+        let legacy = model_export::LegacyNames {
+            object_refs: &object_refs,
+            type_index: &type_index,
+            form_refs: &form_refs,
+            template_refs: &template_refs,
+        };
+        let complete = plan.names_from_rows_alone(&index_metadata_texts);
         let model = model_export::ModelExport::build(
             plan,
             &metadata_rows,
             &index_metadata_texts,
             &predefined_rows,
-            &model_export::LegacyNames {
-                object_refs: &object_refs,
-                type_index: &type_index,
-                form_refs: &form_refs,
-                template_refs: &template_refs,
-            },
+            (!complete).then_some(&legacy),
         )?;
         timings.prepare_model_index_ms += elapsed_ms(started);
+        cpu_add(&mut timings, "prepare.model_index", model_cpu);
         model.log_summary(elapsed_ms(started));
         Some(model)
     } else {
         None
     };
     timings.prepare_indexes_ms = elapsed_ms(prepare_started);
+    cpu_add(&mut timings, "prepare", prepare_cpu);
+    if profile_indexes_only() {
+        return Ok(DumpedTable {
+            rows: Vec::new(),
+            failed_rows: Vec::new(),
+            binary_bytes: 0,
+            inflated_rows: 0,
+            module_text_rows: 0,
+            metadata_xml_rows: 0,
+            source_asset_rows: 0,
+            source_assets: SourceAssetCompletenessReport::default(),
+            metadata_root_inventory: RootMetadataInventoryReport::default(),
+            timings,
+        });
+    }
 
     let context = DumpRowContext {
         model_export: model.as_ref(),
@@ -4910,6 +5012,7 @@ fn dump_table_rows_streamed(
     for chunk in file_name_batches {
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
+        let fetch_cpu = process_cpu_ms();
         let rows = fetch_binary_rows_bcp(
             sqlcmd,
             bcp,
@@ -4928,6 +5031,7 @@ fn dump_table_rows_streamed(
         })?;
         let elapsed = elapsed_ms(fetch_started);
         timings.fetch_rows_ms += elapsed;
+        cpu_add(&mut timings, "fetch_rows", fetch_cpu);
         timings.fetch_rows_bcp_ms += elapsed;
         timings.fetch_row_batches += 1;
         timings.fetch_row_batch_max_rows = timings.fetch_row_batch_max_rows.max(rows.len() as u64);
@@ -4946,6 +5050,7 @@ fn dump_table_rows_streamed(
             }
         }
         let process_started = Instant::now();
+        let process_cpu = process_cpu_ms();
         // Plain parallel map: dispatching the largest rows first started every
         // big spreadsheet of a chunk at once and made each 3-4x slower.
         let dumped_rows = parallel::install(|| {
@@ -4954,6 +5059,7 @@ fn dump_table_rows_streamed(
                 .collect::<Vec<_>>()
         })?;
         timings.process_rows_wall_ms += elapsed_ms(process_started);
+        cpu_add(&mut timings, "process_rows", process_cpu);
         for dumped in dumped_rows {
             let dumped = dumped?;
             binary_bytes += dumped.binary_bytes;
@@ -5099,6 +5205,78 @@ fn form_body_override(file_name: &str) -> Option<String> {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// CPU time the whole process has used so far (all threads), in ms.
+#[cfg(windows)]
+fn process_cpu_ms() -> u64 {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo handle of the current process and four writable
+    // FILETIMEs are all GetProcessTimes asks for.
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return 0;
+    }
+    let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    // 100-nanosecond ticks.
+    (ticks(kernel) + ticks(user)) / 10_000
+}
+
+#[cfg(not(windows))]
+fn process_cpu_ms() -> u64 {
+    0
+}
+
+/// A phase's start: wall clock and the process CPU used so far.
+#[derive(Clone, Copy)]
+struct PartClock {
+    wall: Instant,
+    cpu: u64,
+}
+
+impl PartClock {
+    fn start() -> Self {
+        Self {
+            wall: Instant::now(),
+            cpu: process_cpu_ms(),
+        }
+    }
+}
+
+/// Adds the process CPU used since `cpu_started` to the named phase.
+fn cpu_add(timings: &mut MssqlDumpTimingReport, name: &str, cpu_started: u64) {
+    *timings.cpu_ms.entry(name.to_string()).or_default() +=
+        process_cpu_ms().saturating_sub(cpu_started);
+}
+
+/// Adds the wall time and the CPU since `started` to the named part of the
+/// index phase.
+fn detail_ms(timings: &mut MssqlDumpTimingReport, name: &str, started: PartClock) {
+    *timings
+        .prepare_detail_ms
+        .entry(name.to_string())
+        .or_default() += elapsed_ms(started.wall);
+    cpu_add(timings, &format!("prepare.{name}"), started.cpu);
+}
+
+/// `IBCMD_RS_PROFILE_INDEXES_ONLY=1`: stop a streamed export after its index
+/// phase (lab profiling of that phase; no rows are written).
+fn profile_indexes_only() -> bool {
+    std::env::var("IBCMD_RS_PROFILE_INDEXES_ONLY").is_ok_and(|value| value.trim() == "1")
 }
 
 fn micros(started: Instant) -> u64 {
@@ -7973,21 +8151,41 @@ fn module_body_paths_from_texts(
     rows: &[ConfigRow],
     metadata_texts: &[MetadataTextRow],
 ) -> BTreeMap<String, PathBuf> {
+    module_body_paths_from_texts_with_forms(rows, metadata_texts, None)
+}
+
+/// [`module_body_paths_from_texts`], reading `form_refs` when the caller
+/// already built the complete form index of these texts.
+fn module_body_paths_from_texts_with_forms(
+    rows: &[ConfigRow],
+    metadata_texts: &[MetadataTextRow],
+    form_refs: Option<&BTreeMap<String, FormSourceReference>>,
+) -> BTreeMap<String, PathBuf> {
     let file_names = rows
         .iter()
         .map(|row| row.file_name.as_str())
         .collect::<BTreeSet<_>>();
     let mut paths = configuration_module_body_paths(&file_names);
 
-    for row in metadata_texts {
-        let Some(entries) = parse_module_body_source_paths_from_metadata_text(row, &file_names)
-        else {
-            continue;
-        };
+    // Read in parallel, added in row order.
+    let per_row = |row: &MetadataTextRow| {
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
+        parse_module_body_source_paths_from_metadata_text(row, &file_names)
+    };
+    let found = parallel::install(|| metadata_texts.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| metadata_texts.iter().map(per_row).collect());
+    for entries in found.into_iter().flatten() {
         paths.extend(entries);
     }
-    let form_refs = build_complete_form_source_reference_index(metadata_texts);
-    paths.extend(form_module_body_paths(&form_refs, &file_names));
+    let built;
+    let form_refs = match form_refs {
+        Some(form_refs) => form_refs,
+        None => {
+            built = build_complete_form_source_reference_index(metadata_texts);
+            &built
+        }
+    };
+    paths.extend(form_module_body_paths(form_refs, &file_names));
 
     paths
 }
@@ -10531,14 +10729,20 @@ fn build_metadata_type_indexes_from_texts(rows: &[MetadataTextRow]) -> MetadataT
             },
         );
     }
-    for row in rows {
-        let entries = recalculation_refs
+    // Each row's generated types read in parallel, merged in row order (which
+    // type id a collision keeps depends on it).
+    let per_row = |row: &MetadataTextRow| {
+        recalculation_refs
             .get(&row.file_name)
             .and_then(|recalculation_ref| {
                 parse_indexed_recalculation_generated_types_from_text(row, recalculation_ref)
             })
             .or_else(|| parse_indexed_generated_types_from_text(row))
-            .or_else(|| parse_indexed_generated_types_from_source_xml_text(&row.text));
+            .or_else(|| parse_indexed_generated_types_from_source_xml_text(&row.text))
+    };
+    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    for entries in found {
         let Some(entries) = entries else { continue };
         for entry in entries {
             let type_id = entry.type_id.to_ascii_lowercase();
@@ -35717,6 +35921,60 @@ struct BraceJumps {
     /// For each offset that opens a value (`{`) or a string (`"`) outside
     /// any string, the offset just past its end; 0 elsewhere.
     ends: Vec<u32>,
+    /// Where each uuid's header marker first stands in the text, built on
+    /// first use (see [`registered_header_marker`]).
+    header_markers: std::cell::OnceCell<HeaderMarkers>,
+}
+
+/// The first offset of `{1,0,<uuid>},` and of `{0,0,<uuid>},` in a text, by
+/// the 36 characters between (whatever they are).
+#[derive(Default)]
+struct HeaderMarkers {
+    modern: HashMap<String, usize>,
+    legacy: HashMap<String, usize>,
+}
+
+fn header_markers(text: &str) -> HeaderMarkers {
+    let mut markers = HeaderMarkers::default();
+    for (prefix, map) in [("{1,0,", &mut markers.modern), ("{0,0,", &mut markers.legacy)] {
+        // The prefix cannot overlap itself, so every occurrence is found.
+        for (start, _) in text.match_indices(prefix) {
+            let uuid_start = start + prefix.len();
+            let Some(uuid) = text.get(uuid_start..uuid_start + 36) else {
+                continue;
+            };
+            if text.get(uuid_start + 36..uuid_start + 38) == Some("},") {
+                map.entry(uuid.to_string()).or_insert(start);
+            }
+        }
+    }
+    markers
+}
+
+/// For a registered text (the whole text, not a part of it): the offset just
+/// past `{1,0,<uuid>},`'s first occurrence, else past `{0,0,<uuid>},`'s --
+/// what searching the text for each marker in turn finds. `None` when no
+/// table knows the text; `Some(None)` when it holds neither marker.
+fn registered_header_marker(text: &str, uuid: &str) -> Option<Option<usize>> {
+    if uuid.len() != 36 {
+        return None;
+    }
+    let base = text.as_ptr() as usize;
+    BRACE_JUMPS.with(|tables| {
+        let tables = tables.borrow();
+        let table = tables
+            .iter()
+            .find(|table| table.base == base && table.len == text.len())?;
+        let markers = table.header_markers.get_or_init(|| header_markers(text));
+        let marker_len = "{1,0,".len() + 36 + "},".len();
+        Some(
+            markers
+                .modern
+                .get(uuid)
+                .or_else(|| markers.legacy.get(uuid))
+                .map(|start| start + marker_len),
+        )
+    })
 }
 
 thread_local! {
@@ -35794,6 +36052,7 @@ fn build_brace_jumps(text: &str) -> BraceJumps {
         base: text.as_ptr() as usize,
         len: bytes.len(),
         ends,
+        header_markers: std::cell::OnceCell::new(),
     }
 }
 

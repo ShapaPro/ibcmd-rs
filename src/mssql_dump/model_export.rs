@@ -1,6 +1,7 @@
-//! `mssql-dump-config --model-export` (or `IBCMD_RS_MODEL_EXPORT=1`): the
-//! descriptor rows of every kind the metadata model decodes go row -> model
-//! -> XML through `metadata_model::export` instead of the legacy converters.
+//! A full `mssql-dump-config` writes the descriptor rows of every kind the
+//! metadata model decodes row -> model -> XML through `metadata_model::export`
+//! instead of the legacy converters; `--legacy-export` (or
+//! `IBCMD_RS_LEGACY_EXPORT=1`) keeps the legacy converters.
 //!
 //! Two steps. A [`ModelPlan`], from the rows alone and before any legacy
 //! index: the root row's lists give every top-level object's kind, the
@@ -24,12 +25,22 @@ use crate::metadata_model::export::{
 use crate::metadata_model::index::ConfigIndex;
 use crate::metadata_model::objects::parts::Compat;
 
-/// The environment switch, for callers without the command-line flag.
+/// The environment switches, for callers without the command-line flags:
+/// `IBCMD_RS_LEGACY_EXPORT=1` (or `IBCMD_RS_MODEL_EXPORT=0`) opts out.
 pub(super) const MODEL_EXPORT_ENV: &str = "IBCMD_RS_MODEL_EXPORT";
+pub(super) const LEGACY_EXPORT_ENV: &str = "IBCMD_RS_LEGACY_EXPORT";
 
-/// `--model-export`, or `IBCMD_RS_MODEL_EXPORT=1`.
-pub(super) fn requested(flag: bool) -> bool {
-    flag || std::env::var(MODEL_EXPORT_ENV).is_ok_and(|value| value.trim() == "1")
+/// Whether a full export writes its descriptors through the model: yes,
+/// unless `--legacy-export`, `IBCMD_RS_LEGACY_EXPORT=1` or
+/// `IBCMD_RS_MODEL_EXPORT=0` asks for the legacy converters.
+/// (`--model-export` is the default spelled out.)
+pub(super) fn requested(model_flag: bool, legacy_flag: bool) -> bool {
+    let env_is = |name: &str, value: &str| std::env::var(name).is_ok_and(|set| set.trim() == value);
+    if legacy_flag || env_is(LEGACY_EXPORT_ENV, "1") || env_is(MODEL_EXPORT_ENV, "0") {
+        return false;
+    }
+    let _ = model_flag;
+    true
 }
 
 /// `IBCMD_RS_MODEL_EXPORT_SHADOW=1`: the legacy converter also runs on the
@@ -202,6 +213,19 @@ impl ModelPlan {
                 .all(|row| self.kind_of(&row.file_name).is_some())
     }
 
+    /// Whether the rows alone name everything: every top-level kind has
+    /// `object_names`, every owned kind `owned_object_names`, and the plan
+    /// places every descriptor row. Then the index takes nothing from the
+    /// legacy indexes.
+    pub(super) fn names_from_rows_alone(&self, texts: &[MetadataTextRow]) -> bool {
+        self.kinds.values().all(|kind| has_names(kind))
+            && self.owned.iter().all(|(_, kind, _)| has_owned_names(kind))
+            && texts
+                .iter()
+                .filter(|row| !row.file_name.contains('.') && row.header.is_some())
+                .all(|row| self.kind_of(&row.file_name).is_some())
+    }
+
     /// The descriptor rows the legacy converters still write, by kind (`?`
     /// for a row neither the root's nor an owner's lists name).
     pub(super) fn legacy_descriptor_kinds(
@@ -267,6 +291,9 @@ pub(super) struct ModelIndexReport {
     pub(super) legacy_types: usize,
     pub(super) predefined_bodies: usize,
     pub(super) compatibility_mode: Option<String>,
+    /// The legacy indexes were consulted (some kind's rows cannot name
+    /// themselves yet).
+    pub(super) used_legacy_indexes: bool,
 }
 
 pub(super) struct ModelExport {
@@ -282,7 +309,7 @@ impl ModelExport {
         metadata_rows: &[ConfigRow],
         texts: &[MetadataTextRow],
         predefined_rows: &[ConfigRow],
-        legacy: &LegacyNames<'_>,
+        legacy: Option<&LegacyNames<'_>>,
     ) -> Result<Self> {
         let raw_by_name = metadata_rows
             .iter()
@@ -404,37 +431,39 @@ impl ModelExport {
             index.set_name(uuid, &format!("{owner_name}.{kind}.{}", header.name));
             report.owned_names += 1;
         }
-        // What the owners' lists did not name, from the legacy path indexes.
-        for (uuid, form_ref) in legacy.form_refs {
-            if let Some(name) = form_source_reference_name(form_ref)
-                && index.insert_name(uuid, &name)
-            {
-                report.legacy_owned_names += 1;
-            }
-        }
-        for (uuid, template_ref) in legacy.template_refs {
-            if let Some(name) = template_source_reference_name(template_ref)
-                && index.insert_name(uuid, &name)
-            {
-                report.legacy_owned_names += 1;
-            }
-        }
-
-        // What else the kinds without `object_names` name (their children,
-        // a recalculation's dimensions, generated types): the legacy object
+        // While some kind's rows cannot name themselves: what the owners'
+        // lists did not name from the legacy path indexes, and the children
+        // and generated types of those kinds from the legacy object
         // references and type index.
-        for (uuid, name) in legacy.object_refs {
-            if root_kind(name) == "Configuration" {
-                continue;
+        if let Some(legacy) = legacy {
+            report.used_legacy_indexes = true;
+            for (uuid, form_ref) in legacy.form_refs {
+                if let Some(name) = form_source_reference_name(form_ref)
+                    && index.insert_name(uuid, &name)
+                {
+                    report.legacy_owned_names += 1;
+                }
             }
-            if index.insert_name(uuid, name) {
-                report.legacy_names += 1;
+            for (uuid, template_ref) in legacy.template_refs {
+                if let Some(name) = template_source_reference_name(template_ref)
+                    && index.insert_name(uuid, &name)
+                {
+                    report.legacy_owned_names += 1;
+                }
             }
-        }
-        for (type_id, name) in legacy.type_index {
-            let name = name.strip_prefix("cfg:").unwrap_or(name);
-            if index.insert_type(type_id, name) {
-                report.legacy_types += 1;
+            for (uuid, name) in legacy.object_refs {
+                if root_kind(name) == "Configuration" {
+                    continue;
+                }
+                if index.insert_name(uuid, name) {
+                    report.legacy_names += 1;
+                }
+            }
+            for (type_id, name) in legacy.type_index {
+                let name = name.strip_prefix("cfg:").unwrap_or(name);
+                if index.insert_type(type_id, name) {
+                    report.legacy_types += 1;
+                }
             }
         }
 
@@ -535,12 +564,17 @@ impl ModelExport {
         eprintln!(
             "model export: name index of {} names, {} types, {} predefined items in {elapsed_ms} ms; \
              object_names read {rows} rows ({failed} failed) of {} kinds, {} owned objects named \
-             through their owner; the legacy indexes gave {} names and {} types",
+             through their owner; the legacy indexes {} ({} names, {} types)",
             report.names,
             report.types,
             report.predefined,
             report.rows_by_kind.len(),
             report.owned_names,
+            if report.used_legacy_indexes {
+                "consulted"
+            } else {
+                "not consulted"
+            },
             report.legacy_names + report.legacy_owned_names,
             report.legacy_types,
         );
@@ -619,6 +653,10 @@ pub struct NameIndexAudit {
     pub fetch_ms: u64,
     pub legacy_ms: u64,
     pub model_ms: u64,
+    /// The legacy object references and type index against the row-built
+    /// index: whether the body writers could read the latter instead.
+    pub object_refs: LegacyMapComparison,
+    pub type_index: LegacyMapComparison,
 }
 
 /// Builds the index from a folder of stored rows the way the export does and
@@ -653,17 +691,19 @@ pub fn audit_name_index(
         "Config",
         &plan.predefined_body_file_names(),
     )?;
+    let legacy = LegacyNames {
+        object_refs: &object_refs,
+        type_index: &type_index,
+        form_refs: &form_refs,
+        template_refs: &template_refs,
+    };
+    let complete = plan.names_from_rows_alone(&texts);
     let model = ModelExport::build(
         plan,
         &metadata_rows,
         &texts,
         &predefined_rows,
-        &LegacyNames {
-            object_refs: &object_refs,
-            type_index: &type_index,
-            form_refs: &form_refs,
-            template_refs: &template_refs,
-        },
+        (!complete).then_some(&legacy),
     )?;
     let model_ms = elapsed_ms(model_started);
     let build_rows_ms = elapsed_ms(started);
@@ -672,6 +712,26 @@ pub fn audit_name_index(
     let expected = NameIndex::from_config_index(&config_index);
     let build_tree_ms = elapsed_ms(started);
     let comparison = compare(&expected, model.names(), max_samples);
+    let object_refs_comparison = compare_legacy_map(
+        "object refs",
+        &object_refs,
+        model.names().name_entries(),
+        max_samples,
+    );
+    let type_index_comparison = compare_legacy_map(
+        "type index",
+        &type_index
+            .iter()
+            .map(|(id, name)| {
+                (
+                    id.clone(),
+                    name.strip_prefix("cfg:").unwrap_or(name).to_string(),
+                )
+            })
+            .collect(),
+        model.names().type_entries(),
+        max_samples,
+    );
     Ok(NameIndexAudit {
         tree_compatibility_mode: config_index.compatibility_mode.clone(),
         rows_compatibility_mode: model.report.compatibility_mode.clone(),
@@ -683,5 +743,130 @@ pub fn audit_name_index(
         fetch_ms,
         legacy_ms,
         model_ms,
+        object_refs: object_refs_comparison,
+        type_index: type_index_comparison,
     })
+}
+
+/// How a legacy uuid -> name map relates to the row-built index: the keys
+/// both hold with the same or another name, and what each holds alone, by
+/// the kind the name starts with and its second-to-last segment
+/// (`Catalog/Attribute`).
+#[derive(Debug, Default, Serialize)]
+pub struct LegacyMapComparison {
+    pub legacy: usize,
+    pub index: usize,
+    pub equal: usize,
+    pub different: BTreeMap<String, usize>,
+    pub legacy_only: BTreeMap<String, usize>,
+    pub index_only: BTreeMap<String, usize>,
+    pub samples: Vec<String>,
+}
+
+fn name_shape(name: &str) -> String {
+    let parts = name.split('.').collect::<Vec<_>>();
+    match parts.len() {
+        0 | 1 => name.to_string(),
+        2 => parts[0].to_string(),
+        n => format!("{}/{}", parts[0], parts[n - 2]),
+    }
+}
+
+fn compare_legacy_map<'a>(
+    what: &str,
+    legacy: &BTreeMap<String, String>,
+    index: impl Iterator<Item = (&'a str, &'a str)>,
+    max_samples: usize,
+) -> LegacyMapComparison {
+    let index = index.collect::<HashMap<_, _>>();
+    let mut out = LegacyMapComparison {
+        legacy: legacy.len(),
+        index: index.len(),
+        ..LegacyMapComparison::default()
+    };
+    let sample = |text: String, samples: &mut Vec<String>| {
+        if samples.len() < max_samples * 8 {
+            samples.push(format!("{what}: {text}"));
+        }
+    };
+    for (uuid, name) in legacy {
+        match index.get(uuid.as_str()) {
+            Some(found) if *found == name.as_str() => out.equal += 1,
+            Some(found) => {
+                *out.different.entry(name_shape(name)).or_default() += 1;
+                sample(
+                    format!("{uuid}: legacy {name}, index {found}"),
+                    &mut out.samples,
+                );
+            }
+            None => {
+                *out.legacy_only.entry(name_shape(name)).or_default() += 1;
+                sample(format!("{uuid}: legacy only {name}"), &mut out.samples);
+            }
+        }
+    }
+    for (uuid, name) in &index {
+        if !legacy.contains_key(*uuid) {
+            *out.index_only.entry(name_shape(name)).or_default() += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A registered text answers a header search from its marker table
+    /// exactly as the plain search does: the first `{1,0,..}` marker, else
+    /// the first `{0,0,..}` one, and nothing for a uuid it does not hold.
+    #[test]
+    fn a_registered_text_finds_the_same_headers() {
+        let first = "11111111-1111-1111-1111-111111111111";
+        let second = "22222222-2222-2222-2222-222222222222";
+        let third = "33333333-3333-3333-3333-333333333333";
+        let mut text = String::from("{1,{3,");
+        // Padding past the registration threshold.
+        text.push_str(&"{\"#\",0},".repeat(700));
+        text.push_str(&format!(
+            "{{0,0,{first}}},\"Старое\",{{0}},\"\",{{1,0,{first}}},\"Имя\",{{1,\"ru\",\"Синоним\"}},\"Комментарий\",\
+             {{1,0,{second}}},\"Второе\",{{0}},\"\",{{0,0,{third}}},\"Третье\",{{0}},\"x\",{{1,0,{second}}},\"Дубль\",{{0}},\"\"}}}}"
+        ));
+        assert!(text.len() >= BRACE_JUMPS_MIN_TEXT);
+        let plain = [first, second, third, "44444444-4444-4444-4444-444444444444"]
+            .map(|uuid| parse_metadata_header_from_text(&text, uuid));
+        let _registered = register_brace_jumps([text.as_str()]);
+        let jumped = [first, second, third, "44444444-4444-4444-4444-444444444444"]
+            .map(|uuid| parse_metadata_header_from_text(&text, uuid));
+        assert_eq!(plain, jumped);
+        assert_eq!(
+            jumped[0].as_ref().map(|header| header.name.as_str()),
+            Some("Имя")
+        );
+        assert_eq!(
+            jumped[1].as_ref().map(|header| header.name.as_str()),
+            Some("Второе")
+        );
+        assert_eq!(
+            jumped[2].as_ref().map(|header| header.comment.as_str()),
+            Some("x")
+        );
+        assert_eq!(jumped[3], None);
+    }
+
+    #[test]
+    fn kinds_go_to_their_folders() {
+        for (kind, folder) in [
+            ("Catalog", "Catalogs"),
+            ("ChartOfAccounts", "ChartsOfAccounts"),
+            ("BusinessProcess", "BusinessProcesses"),
+            ("FilterCriterion", "FilterCriteria"),
+            ("Form", "Forms"),
+            ("Recalculation", "Recalculations"),
+            ("Subsystem", "Subsystems"),
+        ] {
+            assert_eq!(kind_folder(kind).as_deref(), Some(folder), "{kind}");
+        }
+        assert_eq!(kind_folder("Configuration"), None);
+    }
 }

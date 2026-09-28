@@ -11,17 +11,18 @@ pub(super) fn build_metadata_command_reference_index(
 pub(super) fn build_metadata_command_reference_index_from_texts(
     rows: &[MetadataTextRow],
 ) -> BTreeMap<String, MetadataCommandReference> {
-    let mut index = BTreeMap::new();
-    for row in rows {
+    // Read in parallel, inserted in row order.
+    let per_row = |row: &MetadataTextRow| {
         let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
-            continue;
+            return None;
         };
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
         let use_standard_commands =
             metadata_use_standard_commands(kind, &row.text, header).unwrap_or(true);
         let based_on_declared = metadata_based_on_declared(kind, &row.text, header);
         let owners_declared = metadata_owners_declared(kind, &row.text, header);
         let recorder_subordinate = metadata_recorder_subordinate(kind, &row.text, header);
-        index.insert(
+        Some((
             row.file_name.clone(),
             MetadataCommandReference {
                 kind: kind.to_string(),
@@ -31,7 +32,13 @@ pub(super) fn build_metadata_command_reference_index_from_texts(
                 owners_declared,
                 recorder_subordinate,
             },
-        );
+        ))
+    };
+    let found = parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect());
+    let mut index = BTreeMap::new();
+    for (file_name, reference) in found.into_iter().flatten() {
+        index.insert(file_name, reference);
     }
     index
 }
@@ -586,9 +593,9 @@ fn field_declarations_of_row(
     // Each child's type is read from the values enclosing its header, so the
     // record's nesting is read once for all of its children.
     let _brace_jumps = register_brace_jumps([row.text.as_str()]);
-    for (header, marker_start) in
-        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-    {
+    let nested = nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true);
+    for (header, marker_start) in &nested {
+        let marker_start = *marker_start;
         let Some(reference) = object_refs.get(&header.uuid) else {
             continue;
         };
@@ -651,9 +658,8 @@ fn field_declarations_of_row(
     };
     let owner_reference = format!("{kind}.{}", header.name);
     let child_prefix = format!("{owner_reference}.");
-    for (child, marker_start) in
-        nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-    {
+    for (child, marker_start) in &nested {
+        let marker_start = *marker_start;
         let Some(reference) = object_refs.get(&child.uuid) else {
             continue;
         };
@@ -877,22 +883,136 @@ pub(super) fn build_metadata_object_reference_index_from_texts(
     build_metadata_object_reference_indexes_from_texts(rows).references
 }
 
+/// Where a reference builder puts what it finds: the index itself, or the
+/// list of its insertions a row records to apply later in row order.
+pub(super) trait ReferenceSink {
+    fn insert(&mut self, uuid: String, reference: String);
+}
+
+impl ReferenceSink for MetadataObjectReferenceIndexes {
+    fn insert(&mut self, uuid: String, reference: String) {
+        MetadataObjectReferenceIndexes::insert(self, uuid, reference);
+    }
+}
+
+/// One row's insertions into [`MetadataObjectReferenceIndexes`], in order:
+/// (`or_insert` rather than `insert`, uuid, reference).
+#[derive(Default)]
+struct ReferenceOps(Vec<(bool, String, String)>);
+
+impl ReferenceOps {
+    fn or_insert(&mut self, uuid: String, reference: String) {
+        self.0.push((true, uuid, reference));
+    }
+}
+
+impl ReferenceSink for ReferenceOps {
+    fn insert(&mut self, uuid: String, reference: String) {
+        self.0.push((false, uuid, reference));
+    }
+}
+
+/// A row's nested children, each with its marker offset and the reference
+/// [`standalone_child_reference`] gives it without form or template
+/// references (what the object reference index reads). The standalone
+/// content references read the same children with those references laid
+/// over: `standalone_child_reference` consults them first and nothing after.
+pub(super) type RowChildReferences = Vec<(MetadataHeader, usize, Option<String>)>;
+
+/// [`RowChildReferences`] of every row with a kind and a header, read in
+/// parallel; `None` for the others. One reading for both indexes.
+pub(super) fn child_references_by_row(
+    rows: &[MetadataTextRow],
+) -> Vec<Option<RowChildReferences>> {
+    let per_row = |row: &MetadataTextRow| {
+        let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
+            return None;
+        };
+        let empty_form_refs = BTreeMap::new();
+        let empty_template_refs = BTreeMap::new();
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
+        Some(
+            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
+                .into_iter()
+                .map(|(child, marker_start)| {
+                    let base = standalone_child_reference(
+                        kind,
+                        &header.name,
+                        &header.uuid,
+                        &row.text,
+                        marker_start,
+                        &child,
+                        &empty_form_refs,
+                        &empty_template_refs,
+                    );
+                    (child, marker_start, base)
+                })
+                .collect(),
+        )
+    };
+    parallel::install(|| rows.par_iter().map(per_row).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(per_row).collect())
+}
+
 pub(super) fn build_metadata_object_reference_indexes_from_texts(
     rows: &[MetadataTextRow],
 ) -> MetadataObjectReferenceIndexes {
+    build_metadata_object_reference_indexes_with_children(rows, &child_references_by_row(rows))
+}
+
+/// [`build_metadata_object_reference_indexes_from_texts`] over children
+/// already read ([`child_references_by_row`] of the same rows).
+pub(super) fn build_metadata_object_reference_indexes_with_children(
+    rows: &[MetadataTextRow],
+    children: &[Option<RowChildReferences>],
+) -> MetadataObjectReferenceIndexes {
     let mut index = MetadataObjectReferenceIndexes::default();
-    let empty_form_refs = BTreeMap::new();
-    let empty_template_refs = BTreeMap::new();
     let subsystem_refs = build_subsystem_source_reference_index_from_texts(rows);
     let recalculation_refs = build_calculation_recalculation_reference_index(rows);
-    for row in rows {
+    // Each row's references are read on their own, in parallel, and applied
+    // in row order: the index (and which uuids it saw twice) comes out
+    // exactly as the sequential walk made it.
+    let per_row = |(row, children): (&MetadataTextRow, &Option<RowChildReferences>)| {
+        object_references_of_row(row, &subsystem_refs, children.as_ref())
+    };
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(children.par_iter())
+            .map(per_row)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(children.iter()).map(per_row).collect());
+    for ops in found {
+        for (or_insert, uuid, reference) in ops.0 {
+            if or_insert {
+                index.or_insert(uuid, reference);
+            } else {
+                index.insert(uuid, reference);
+            }
+        }
+    }
+    for (uuid, recalculation) in &recalculation_refs {
+        index.insert(uuid.clone(), recalculation.object_reference());
+    }
+    insert_recalculation_dimension_refs(&mut index, rows, &recalculation_refs);
+    index
+}
+
+fn object_references_of_row(
+    row: &MetadataTextRow,
+    subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
+    children: Option<&RowChildReferences>,
+) -> ReferenceOps {
+    let mut index = ReferenceOps::default();
+    {
         if let Some(name) = parse_configuration_reference_text_for_row(&row.text, &row.file_name) {
             index.insert(row.file_name.clone(), format!("Configuration.{name}"));
-            continue;
+            return index;
         }
         let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
-            continue;
+            return index;
         };
+        let _brace_jumps = register_brace_jumps([row.text.as_str()]);
         let reference = if kind == "Subsystem" {
             subsystem_refs
                 .get(&header.uuid)
@@ -916,20 +1036,9 @@ pub(super) fn build_metadata_object_reference_indexes_from_texts(
                 format!("{}.{}.Command.{}", kind, header.name, command.name),
             );
         }
-        for (child, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-        {
-            if let Some(reference) = standalone_child_reference(
-                kind,
-                &header.name,
-                &header.uuid,
-                &row.text,
-                marker_start,
-                &child,
-                &empty_form_refs,
-                &empty_template_refs,
-            ) {
-                index.or_insert(child.uuid, reference);
+        for (child, _, reference) in children.into_iter().flatten() {
+            if let Some(reference) = reference {
+                index.or_insert(child.uuid.clone(), reference.clone());
             }
         }
         if kind == "WebService" {
@@ -953,10 +1062,6 @@ pub(super) fn build_metadata_object_reference_indexes_from_texts(
             insert_http_service_child_role_refs(&mut index, &row.text, &header.uuid, &header.name);
         }
     }
-    for (uuid, recalculation) in &recalculation_refs {
-        index.insert(uuid.clone(), recalculation.object_reference());
-    }
-    insert_recalculation_dimension_refs(&mut index, rows, &recalculation_refs);
     index
 }
 
@@ -1049,7 +1154,7 @@ pub(super) fn build_calculation_recalculation_reference_index(
 }
 
 fn insert_web_service_parameter_refs(
-    index: &mut MetadataObjectReferenceIndexes,
+    index: &mut impl ReferenceSink,
     text: &str,
     owner_uuid: &str,
     owner_name: &str,
@@ -1234,7 +1339,7 @@ pub(super) fn parse_configuration_header_uuid(text: &str) -> Option<String> {
 }
 
 pub(super) fn insert_http_service_child_role_refs(
-    index: &mut MetadataObjectReferenceIndexes,
+    index: &mut impl ReferenceSink,
     text: &str,
     owner_uuid: &str,
     owner_name: &str,
@@ -1261,6 +1366,26 @@ pub(super) fn build_standalone_content_references(
     template_refs: &BTreeMap<String, TemplateSourceReference>,
     subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
 ) -> StandaloneContentReferences {
+    build_standalone_content_references_with_children(
+        rows,
+        object_refs,
+        form_refs,
+        template_refs,
+        subsystem_refs,
+        &child_references_by_row(rows),
+    )
+}
+
+/// [`build_standalone_content_references`] over children already read
+/// ([`child_references_by_row`] of the same rows).
+pub(super) fn build_standalone_content_references_with_children(
+    rows: &[MetadataTextRow],
+    object_refs: &BTreeMap<String, String>,
+    form_refs: &BTreeMap<String, FormSourceReference>,
+    template_refs: &BTreeMap<String, TemplateSourceReference>,
+    subsystem_refs: &BTreeMap<String, SubsystemSourceReference>,
+    row_children: &[Option<RowChildReferences>],
+) -> StandaloneContentReferences {
     let mut standalone_object_refs = object_refs.clone();
     for (uuid, form_ref) in form_refs {
         if let Some(reference) = form_source_reference_name(form_ref) {
@@ -1278,40 +1403,61 @@ pub(super) fn build_standalone_content_references(
         }
     }
 
-    for row in rows {
-        let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
-            continue;
-        };
+    // Each row read on its own, in parallel: its children's references, and
+    // the form and template references its uuid-like values name. Applied in
+    // row order, the second only where nothing named the uuid yet -- exactly
+    // the sequential walk.
+    let per_row = |(row, row_children): (&MetadataTextRow, &Option<RowChildReferences>)| {
+        let row_children = row_children.as_ref()?;
+        // `standalone_child_reference` with these form and template
+        // references: theirs first, else the reading without them.
         let mut seen = BTreeSet::new();
-        for (child, marker_start) in
-            nested_headers_with_offsets_from_text(&row.text, &row.file_name, |_| true)
-        {
-            if let Some(reference) = standalone_child_reference(
-                kind,
-                &header.name,
-                &header.uuid,
-                &row.text,
-                marker_start,
-                &child,
-                form_refs,
-                template_refs,
-            ) && seen.insert(child.uuid.clone())
+        let mut children = Vec::new();
+        for (child, _, base) in row_children {
+            let reference = form_refs
+                .get(&child.uuid)
+                .and_then(form_source_reference_name)
+                .or_else(|| {
+                    template_refs
+                        .get(&child.uuid)
+                        .and_then(template_source_reference_name)
+                })
+                .or_else(|| base.clone());
+            if let Some(reference) = reference
+                && seen.insert(child.uuid.clone())
             {
-                standalone_object_refs.insert(child.uuid, reference);
+                children.push((child.uuid.clone(), reference));
             }
         }
+        let mut named = Vec::new();
         for uuid in uuid_like_values(&row.text) {
-            if standalone_object_refs.contains_key(&uuid) {
-                continue;
-            }
             if let Some(reference) = form_refs.get(&uuid).and_then(form_source_reference_name) {
-                standalone_object_refs.insert(uuid, reference);
+                named.push((uuid, reference));
             } else if let Some(reference) = template_refs
                 .get(&uuid)
                 .and_then(template_source_reference_name)
             {
-                standalone_object_refs.insert(uuid, reference);
+                named.push((uuid, reference));
             }
+        }
+        Some((children, named))
+    };
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(row_children.par_iter())
+            .map(per_row)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(row_children.iter()).map(per_row).collect());
+    for (children, named) in found.into_iter().flatten() {
+        for (uuid, reference) in children {
+            standalone_object_refs.insert(uuid, reference);
+        }
+        for (uuid, reference) in named {
+            if standalone_object_refs.contains_key(&uuid) {
+                continue;
+            }
+            standalone_object_refs.insert(uuid, reference);
         }
     }
 
@@ -2797,37 +2943,48 @@ pub(super) fn build_form_source_reference_index(
 pub(super) fn build_form_source_reference_index_from_texts(
     rows: &[MetadataTextRow],
 ) -> BTreeMap<String, FormSourceReference> {
-    let mut forms = Vec::<MetadataHeader>::new();
-    let mut owner_paths_by_ref = BTreeMap::<String, BTreeSet<PathBuf>>::new();
-
-    for row in rows {
-        if is_form_metadata_text(&row.text, &row.file_name) {
-            if let Some(header) = row.header.as_ref() {
-                forms.push(header.clone());
-            }
-        }
-    }
+    // Which rows are forms, in parallel; the forms in row order.
+    let is_form = |row: &MetadataTextRow| is_form_metadata_text(&row.text, &row.file_name);
+    let form_flags = parallel::install(|| rows.par_iter().map(is_form).collect::<Vec<_>>())
+        .unwrap_or_else(|_| rows.iter().map(is_form).collect());
+    let forms = rows
+        .iter()
+        .zip(&form_flags)
+        .filter(|(_, is_form)| **is_form)
+        .filter_map(|(row, _)| row.header.clone())
+        .collect::<Vec<MetadataHeader>>();
     let form_uuids = forms
         .iter()
         .map(|form| form.uuid.clone())
         .collect::<BTreeSet<_>>();
 
-    for row in rows {
-        if is_form_metadata_text(&row.text, &row.file_name) {
-            continue;
+    // Each owner's form uuids, in parallel; each form's owners form a set, so
+    // the order they are added in does not matter.
+    let owned = |(row, is_form): (&MetadataTextRow, &bool)| {
+        if *is_form {
+            return None;
         }
         let (Some(kind), Some(folder), Some(header)) =
             (row.kind.as_deref(), row.folder, row.header.as_ref())
         else {
-            continue;
+            return None;
         };
         if !metadata_kind_can_own_forms(kind) {
-            continue;
+            return None;
         }
         let owner_path = PathBuf::from(folder).join(sanitize_source_path_segment(&header.name));
-        let Some(references) = owned_form_uuid_values_matching(&row.text, &form_uuids) else {
-            continue;
-        };
+        let references = owned_form_uuid_values_matching(&row.text, &form_uuids)?;
+        Some((owner_path, references))
+    };
+    let found = parallel::install(|| {
+        rows.par_iter()
+            .zip(form_flags.par_iter())
+            .map(owned)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| rows.iter().zip(form_flags.iter()).map(owned).collect());
+    let mut owner_paths_by_ref = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    for (owner_path, references) in found.into_iter().flatten() {
         for reference in references {
             owner_paths_by_ref
                 .entry(reference)
@@ -2963,34 +3120,66 @@ pub(super) fn build_template_source_reference_index(
     build_template_source_reference_index_from_texts(rows, &metadata_texts)
 }
 
-pub(super) fn build_template_source_reference_index_from_texts(
+pub(super) fn build_template_source_reference_index_from_texts<'a>(
     rows: &[ConfigRow],
-    metadata_texts: &[MetadataTextRow],
+    metadata_texts: &'a [MetadataTextRow],
 ) -> BTreeMap<String, TemplateSourceReference> {
     let rows_by_file_name = rows
         .iter()
         .map(|row| (row.file_name.as_str(), row))
         .collect::<BTreeMap<_, _>>();
-    let mut templates = Vec::<MetadataHeader>::new();
-    let mut owner_paths_by_ref = BTreeMap::<String, Vec<PathBuf>>::new();
-
-    for row in metadata_texts {
+    // Which rows are templates and which can own one, in parallel; then only
+    // the uuid-like values that name a template are kept for the owners (the
+    // index below asks for nothing else), in row order.
+    enum TemplateRow<'a> {
+        Template(MetadataHeader),
+        Owner(&'a MetadataTextRow, PathBuf),
+    }
+    let classify = |row: &'a MetadataTextRow| -> Option<TemplateRow<'a>> {
         if is_template_metadata_text(&row.text, &row.file_name) {
-            if let Some(header) = row.header.as_ref() {
-                templates.push(header.clone());
-            }
-            continue;
+            return row.header.clone().map(TemplateRow::Template);
         }
         let (Some(kind), Some(folder), Some(header)) =
             (row.kind.as_deref(), row.folder, row.header.as_ref())
         else {
-            continue;
+            return None;
         };
         if !metadata_kind_can_own_templates(kind) {
-            continue;
+            return None;
         }
         let owner_path = PathBuf::from(folder).join(sanitize_source_path_segment(&header.name));
-        for reference in uuid_like_values(&row.text) {
+        Some(TemplateRow::Owner(row, owner_path))
+    };
+    let classified = parallel::install(|| {
+        metadata_texts
+            .par_iter()
+            .map(classify)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_else(|_| metadata_texts.iter().map(classify).collect());
+    let mut templates = Vec::<MetadataHeader>::new();
+    let mut owners = Vec::new();
+    for row in classified.into_iter().flatten() {
+        match row {
+            TemplateRow::Template(header) => templates.push(header),
+            TemplateRow::Owner(row, owner_path) => owners.push((row, owner_path)),
+        }
+    }
+    let template_uuids = templates
+        .iter()
+        .map(|template| template.uuid.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let named = |(row, _): &(&MetadataTextRow, PathBuf)| {
+        uuid_like_values(&row.text)
+            .into_iter()
+            .filter(|reference| template_uuids.contains(reference.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let owner_refs = parallel::install(|| owners.par_iter().map(named).collect::<Vec<_>>())
+        .unwrap_or_else(|_| owners.iter().map(named).collect());
+    let mut owner_paths_by_ref = BTreeMap::<String, Vec<PathBuf>>::new();
+    for ((_, owner_path), references) in owners.iter().zip(owner_refs) {
+        for reference in references {
             owner_paths_by_ref
                 .entry(reference)
                 .or_default()
@@ -3275,9 +3464,11 @@ pub(super) fn form_help_asset_paths(
         let row_prefix = format!("{form_uuid}.");
         let mut form_dir = form_ref.relative_path.clone();
         form_dir.set_extension("");
+        // The form's rows sort together right after the prefix: a range read
+        // instead of a scan of every file name for each form.
         for body_id in file_names
-            .iter()
-            .filter(|file_name| file_name.starts_with(&row_prefix))
+            .range(row_prefix.as_str()..)
+            .take_while(|file_name| file_name.starts_with(&row_prefix))
         {
             let module_body_id = format!("{form_uuid}.0");
             if *body_id == module_body_id.as_str() {

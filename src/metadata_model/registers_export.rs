@@ -1156,6 +1156,45 @@ fn document_numerator(row: &Brace) -> Result<Element> {
 // ---------------------------------------------------------------------------
 // Names.
 
+/// What a recalculation's row contributes to a name index, under its
+/// register's full name `owner` (`CalculationRegister.X`): the recalculation,
+/// its dimensions and its generated types
+/// (`Recalculation<category>.<register>.<recalculation>`).
+pub(crate) fn owned_names(kind: &str, row: &Brace, owner: &str) -> Result<ObjectNames> {
+    if kind != "Recalculation" {
+        bail!("{kind} is not an owned register kind");
+    }
+    let register = owner
+        .strip_prefix("CalculationRegister.")
+        .filter(|name| !name.contains('.'))
+        .ok_or_else(|| anyhow!("a recalculation's owner is a calculation register, not {owner}"))?;
+    let parsed = Row::new(row)?;
+    let head = wrapped_header(parsed.slot(7)?)?;
+    let full_name = format!("{owner}.Recalculation.{}", head.name);
+    let mut out = ObjectNames {
+        uuid: head.uuid.clone(),
+        full_name: full_name.clone(),
+        children: Vec::new(),
+        types: Vec::new(),
+    };
+    for (category, position) in [("Record", 1), ("Manager", 3), ("RecordSet", 5)] {
+        out.types.push(GeneratedTypeName {
+            name: format!("Recalculation{category}.{register}.{}", head.name),
+            category: category.to_string(),
+            type_id: atom(parsed.slot(position)?)?.to_string(),
+            value_id: atom(parsed.slot(position + 1)?)?.to_string(),
+        });
+    }
+    for record in parsed.records(RECALCULATION_DIMENSIONS)? {
+        let dimension = header(item(record, 1)?)?;
+        out.children.push((
+            format!("{full_name}.Dimension.{}", dimension.name),
+            dimension.uuid,
+        ));
+    }
+    Ok(out)
+}
+
 /// What a register-family row contributes to a name index: the object, its
 /// dimensions, resources, attributes, columns and commands, its generated
 /// types. A recalculation's full name and type names start with its
