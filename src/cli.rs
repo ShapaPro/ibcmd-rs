@@ -136,13 +136,17 @@ pub enum Commands {
     MssqlAuditSourceParity(MssqlAuditSourceParityArgs),
     /// Clone a SQL Server database with backup/restore.
     MssqlClone(MssqlCloneArgs),
-    /// Export ConfigSave/Params storage tables to a native BCP bundle.
+    /// Export ConfigSave/Params storage tables to a native BCP bundle (lab;
+    /// runs bcp.exe, which must be installed).
     MssqlStorageExport(MssqlStorageExportArgs),
-    /// Import a native BCP storage bundle into an empty SQL Server infobase.
+    /// Import a native BCP storage bundle into an empty SQL Server infobase
+    /// (lab; runs bcp.exe, which must be installed).
     MssqlStorageImport(MssqlStorageImportArgs),
-    /// Export staged ConfigSave rows as a native BCP delta bundle.
+    /// Export staged ConfigSave rows as a native BCP delta bundle (lab; runs
+    /// bcp.exe, which must be installed).
     MssqlDeltaExport(MssqlDeltaExportArgs),
-    /// Import staged ConfigSave rows into an existing SQL Server infobase.
+    /// Import staged ConfigSave rows into an existing SQL Server infobase
+    /// (lab; runs bcp.exe, which must be installed).
     MssqlDeltaImport(MssqlDeltaImportArgs),
     /// Build a 1C common-module body blob from BSL text.
     ModuleBlobPack(ModuleBlobPackArgs),
@@ -1370,7 +1374,8 @@ pub struct MssqlDumpConfigArgs {
     /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
     #[arg(long)]
     pub bcp_executable: Option<PathBuf>,
-    /// Durable atomic JSON journal for nested sqlcmd and bcp subprocesses.
+    /// Durable atomic JSON journal of the SQL requests (the built-in client's,
+    /// or the sqlcmd and bcp runs of --sqlcmd): query digests, never the text.
     #[arg(long)]
     pub runtime_journal: Option<PathBuf>,
     /// SQL Server name.
@@ -1961,7 +1966,8 @@ pub struct MssqlCloneArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStorageExportArgs {
-    /// SQL Server name passed to sqlcmd and bcp -S.
+    /// SQL Server name (bcp -S; statistics through the built-in client or
+    /// --sqlcmd).
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Source database name.
@@ -1990,7 +1996,8 @@ pub struct MssqlStorageExportArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStorageImportArgs {
-    /// SQL Server name passed to sqlcmd and bcp -S.
+    /// SQL Server name (bcp -S; statistics through the built-in client or
+    /// --sqlcmd).
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2022,7 +2029,8 @@ pub struct MssqlStorageImportArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlDeltaExportArgs {
-    /// SQL Server name passed to sqlcmd and bcp -S.
+    /// SQL Server name (bcp -S; statistics through the built-in client or
+    /// --sqlcmd).
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Source database name with pending rows in ConfigSave.
@@ -2051,7 +2059,8 @@ pub struct MssqlDeltaExportArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlDeltaImportArgs {
-    /// SQL Server name passed to sqlcmd and bcp -S.
+    /// SQL Server name (bcp -S; statistics through the built-in client or
+    /// --sqlcmd).
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.

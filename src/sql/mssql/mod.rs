@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 
 pub use address::{DEFAULT_PORT, ServerAddress};
 pub use script::{ScriptBatch, split_batches};
-pub use tds::{TdsConnection, TdsPool, sql_row, sql_value};
+pub use tds::{REQUEST_FAILED, TdsConnection, TdsPool, sql_row, sql_value};
 
 use super::{Dbms, ScriptVariables, SqlClient, SqlParam, SqlRow, SqlTarget};
 

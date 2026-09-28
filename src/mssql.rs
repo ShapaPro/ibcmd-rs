@@ -2562,7 +2562,10 @@ fn classify_source_parity_error(message: &str) -> (String, Option<String>) {
             Some(file_name.trim().to_string()),
         );
     }
-    if message.starts_with("sqlcmd failed:") {
+    if message.starts_with("sqlcmd failed:")
+        || message.starts_with(crate::sql::mssql::REQUEST_FAILED)
+        || message.starts_with("failed to connect to SQL Server")
+    {
         return ("sql_error".to_string(), None);
     }
     if message.contains("does not contain JSON array")

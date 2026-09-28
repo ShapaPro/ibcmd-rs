@@ -175,12 +175,13 @@ impl TdsConnection {
         let Self {
             runtime, client, ..
         } = self;
-        runtime.block_on(async {
-            let mut stream = client.simple_query(sql).await?;
-            while stream.try_next().await?.is_some() {}
-            Ok::<_, tiberius::error::Error>(())
-        })?;
-        Ok(())
+        runtime
+            .block_on(async {
+                let mut stream = client.simple_query(sql).await?;
+                while stream.try_next().await?.is_some() {}
+                Ok::<_, tiberius::error::Error>(())
+            })
+            .map_err(request_error)
     }
 
     /// Runs a query through `sp_executesql` and hands every row to `row`,
@@ -201,8 +202,8 @@ impl TdsConnection {
             for param in params {
                 bind(&mut query, *param);
             }
-            let mut stream = query.query(client).await?;
-            while let Some(item) = stream.try_next().await? {
+            let mut stream = query.query(client).await.map_err(request_error)?;
+            while let Some(item) = stream.try_next().await.map_err(request_error)? {
                 if let QueryItem::Row(value) = item {
                     row(value)?;
                 }
@@ -219,16 +220,26 @@ impl TdsConnection {
         let Self {
             runtime, client, ..
         } = self;
-        let result = runtime.block_on(async {
-            let mut query = Query::new(Cow::Borrowed(sql));
-            for param in params {
-                bind(&mut query, *param);
-            }
-            query.execute(client).await
-        })?;
+        let result = runtime
+            .block_on(async {
+                let mut query = Query::new(Cow::Borrowed(sql));
+                for param in params {
+                    bind(&mut query, *param);
+                }
+                query.execute(client).await
+            })
+            .map_err(request_error)?;
         self.restore_database(sql)?;
         Ok(result.total())
     }
+}
+
+/// The prefix of every error the server or the connection reports for a
+/// request (a query, a statement, a batch).
+pub const REQUEST_FAILED: &str = "SQL Server request failed";
+
+fn request_error(error: tiberius::error::Error) -> anyhow::Error {
+    anyhow::Error::new(error).context(REQUEST_FAILED)
 }
 
 /// Whether a text may contain a `USE` statement: the word `use` (any case)

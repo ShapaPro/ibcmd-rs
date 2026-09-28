@@ -320,13 +320,21 @@ fn journal_client_request<T>(
     query: &str,
     work: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    let entry = start_client_request(sql, query)?;
+    let result = work();
+    finish_client_request(entry, result.is_ok())?;
+    result
+}
+
+/// Enters one request of the built-in client in this thread's journal.
+fn start_client_request(sql: &SqlExec, query: &str) -> Result<usize> {
     let mut arguments = vec!["-S".to_owned(), sql.server().to_owned()];
     match sql.user() {
         Some(user) => arguments.extend(["-U".to_owned(), user.to_owned()]),
         None => arguments.push("-E".to_owned()),
     }
     arguments.extend(["-Q".to_owned(), query_marker(query)]);
-    let journal_index = start_subprocess_call(SanitizedSubprocessCall {
+    start_subprocess_call(SanitizedSubprocessCall {
         executable: CLIENT_JOURNAL_EXECUTABLE.to_owned(),
         arguments,
         started_unix_ms: unix_time_ms(),
@@ -335,17 +343,16 @@ fn journal_client_request<T>(
         exit_code: None,
         timed_out: false,
         exception: None,
-    })?;
-    let result = work();
+    })
+}
+
+fn finish_client_request(entry: usize, passed: bool) -> Result<()> {
     complete_subprocess_call(
-        journal_index,
-        if result.is_ok() { "passed" } else { "failed" },
+        entry,
+        if passed { "passed" } else { "failed" },
         None,
-        result
-            .is_err()
-            .then(|| "the built-in SQL client request failed".to_owned()),
-    )?;
-    result
+        (!passed).then(|| "the built-in SQL client request failed".to_owned()),
+    )
 }
 
 /// `FileName, PartNo, DataSize, BinaryData` rows of a query, as stored.
@@ -460,9 +467,90 @@ pub(super) fn fetch_binary_rows(
         }
     }
 
+    if use_range_filter
+        && let SqlBackend::Client(client) = sql.backend()
+        && client.max_connections() > 1
+        && selected_file_names.len() >= 2 * client.max_connections()
+    {
+        return fetch_binary_rows_sliced(sql, client, database, table, selected_file_names);
+    }
     let query =
         build_fetch_binary_rows_query(database, table, selected_file_names, use_range_filter);
     fetch_binary_rows_query(sql, database, table, &query)
+}
+
+/// A range-filtered batch, read in slices on several connections at once:
+/// the batch's file names cut into contiguous runs, each slice from its
+/// first name up to (not including) the next slice's first, the last one up
+/// to the batch's last name. The slices partition the batch's range in the
+/// column's own collation, so they return exactly the parts the single range
+/// query returns; the parts of one file name all fall in one slice, in
+/// order, and are assembled together.
+fn fetch_binary_rows_sliced(
+    sql: &SqlExec,
+    client: &dyn SqlClient,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+) -> Result<Vec<BinaryConfigRow>> {
+    let names = selected_file_names.iter().collect::<Vec<_>>();
+    let per_slice = names.len().div_ceil(client.max_connections().max(1));
+    let lows = names
+        .chunks(per_slice)
+        .map(|chunk| chunk[0].as_str())
+        .collect::<Vec<_>>();
+    let last = names.last().map_or("", |name| name.as_str());
+    let storage = qualified_storage_table(database, table);
+    let queries = lows
+        .iter()
+        .enumerate()
+        .map(|(index, low)| {
+            let high = match lows.get(index + 1) {
+                Some(next) => format!("FileName < N'{}'", quote_string(next)),
+                None => format!("FileName <= N'{}'", quote_string(last)),
+            };
+            format!(
+                "SELECT FileName, PartNo, DataSize, BinaryData\n\
+                 FROM {storage}\n\
+                 WHERE FileName >= N'{}' AND {high}\n\
+                 ORDER BY FileName, PartNo",
+                quote_string(low)
+            )
+        })
+        .collect::<Vec<_>>();
+    // The journal lives on this thread: each slice is entered before the
+    // reads start and completed after they end.
+    let entries = queries
+        .iter()
+        .map(|query| start_client_request(sql, query))
+        .collect::<Result<Vec<_>>>()?;
+    let results = std::thread::scope(|scope| {
+        let readers = queries
+            .iter()
+            .map(|query| scope.spawn(move || read_row_parts(client, query)))
+            .collect::<Vec<_>>();
+        readers
+            .into_iter()
+            .map(|reader| {
+                reader
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    for (entry, result) in entries.into_iter().zip(&results) {
+        finish_client_request(entry, result.is_ok())?;
+    }
+    let mut parts = Vec::new();
+    for result in results {
+        parts.append(
+            &mut result
+                .with_context(|| format!("failed to read the rows of {database}.{table}"))?,
+        );
+    }
+    assemble_binary_config_rows(parts)
+        .map(|rows| apply_row_overrides(table, rows))
+        .with_context(|| format!("failed to assemble the rows of {database}.{table}"))
 }
 
 pub(super) fn fetch_binary_rows_query(
