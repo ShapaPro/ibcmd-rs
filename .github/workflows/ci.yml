@@ -74,6 +74,12 @@ jobs:
       - name: Test XML dialect corpus
         run: cargo test --locked -p ibcmd-rs --test xml_profiles
 
+      # The root library's unit tests (the converters and the load/export
+      # engines) have only been measured on Windows so far.
+      - name: Test the root library
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p ibcmd-rs --lib --no-default-features
+
   legacy-windows:
     name: Legacy Root (Windows)
     runs-on: windows-latest
