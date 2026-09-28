@@ -33,7 +33,7 @@ use anyhow::{Context, Result, anyhow};
 use crate::cli::InfobaseConfigSourceVersion;
 
 /// Writer threads when `IBCMD_RS_OUTPUT_WRITERS` does not say.
-const DEFAULT_WRITERS: usize = 4;
+const DEFAULT_WRITERS: usize = 8;
 /// Bytes queued and not yet written, at most (`IBCMD_RS_OUTPUT_WRITE_BUDGET_MB`).
 const DEFAULT_BUDGET_BYTES: usize = 256 << 20;
 /// Files queued and not yet written, at most.
@@ -106,6 +106,9 @@ pub(crate) struct OutputWriteStats {
     pub(crate) threads: u64,
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+    /// Folders the writers created, and the time that took (summed).
+    pub(crate) folders: u64,
+    pub(crate) folder_ms: u64,
     /// Time the writer threads spent writing (summed over them).
     pub(crate) busy_ms: u64,
     /// Time the converting workers waited for room in the queue.
@@ -131,6 +134,8 @@ struct Shared {
     folders: Mutex<HashSet<PathBuf>>,
     files: AtomicU64,
     bytes: AtomicU64,
+    folder_count: AtomicU64,
+    folder_ns: AtomicU64,
     busy_ns: AtomicU64,
     wait_ns: AtomicU64,
 }
@@ -157,11 +162,18 @@ impl Shared {
     }
 
     /// Creates `folder` unless it is known to exist.
+    ///
+    /// Only the missing levels are created, top-down from the nearest folder
+    /// known to exist: `create_dir_all` asks for the deepest one first and
+    /// climbs back up on every miss, about twice the folder operations for a
+    /// new path -- and nearly every file of an export opens a folder of its
+    /// own (`Ext/`, `Ext/Form/`). Without a known ancestor it is
+    /// `create_dir_all`.
     fn ensure_folder(&self, folder: &Path) -> Result<()> {
         if folder.as_os_str().is_empty() {
             return Ok(());
         }
-        {
+        let missing = {
             let folders = self
                 .folders
                 .lock()
@@ -169,13 +181,54 @@ impl Shared {
             if folders.contains(folder) {
                 return Ok(());
             }
+            let mut missing = vec![folder];
+            let mut known = false;
+            while let Some(parent) = missing.last().and_then(|last| last.parent()) {
+                if parent.as_os_str().is_empty() {
+                    break;
+                }
+                if folders.contains(parent) {
+                    known = true;
+                    break;
+                }
+                missing.push(parent);
+            }
+            known.then_some(missing)
+        };
+        let started = Instant::now();
+        match missing {
+            Some(missing) => {
+                for level in missing.iter().rev() {
+                    match fs::create_dir(level) {
+                        Ok(()) => {}
+                        // Another writer made it, or it was there all along.
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::AlreadyExists
+                                && level.is_dir() => {}
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("failed to create {}", level.display()));
+                        }
+                    }
+                }
+            }
+            None => fs::create_dir_all(folder)
+                .with_context(|| format!("failed to create {}", folder.display()))?,
         }
-        fs::create_dir_all(folder)
-            .with_context(|| format!("failed to create {}", folder.display()))?;
-        self.folders
+        self.folder_ns
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.folder_count.fetch_add(1, Ordering::Relaxed);
+        let mut folders = self
+            .folders
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(folder.to_path_buf());
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut level = Some(folder);
+        while let Some(current) = level {
+            if current.as_os_str().is_empty() || !folders.insert(current.to_path_buf()) {
+                break;
+            }
+            level = current.parent();
+        }
         Ok(())
     }
 
@@ -258,6 +311,20 @@ impl OutputWriter {
         Self::new(threads, budget)
     }
 
+    /// `folder` exists already (the export's output folder): folders below it
+    /// are created level by level from it.
+    pub(crate) fn with_existing_folder(self, folder: &Path) -> Self {
+        if !folder.is_dir() {
+            return self;
+        }
+        self.shared
+            .folders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(folder.to_path_buf());
+        self
+    }
+
     /// Writes on the calling thread: every call is the write itself.
     pub(crate) fn inline() -> Self {
         Self::new(0, DEFAULT_BUDGET_BYTES)
@@ -274,6 +341,8 @@ impl OutputWriter {
             folders: Mutex::new(HashSet::new()),
             files: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            folder_count: AtomicU64::new(0),
+            folder_ns: AtomicU64::new(0),
             busy_ns: AtomicU64::new(0),
             wait_ns: AtomicU64::new(0),
         });
@@ -405,6 +474,8 @@ impl OutputWriter {
             threads: self.threads as u64,
             files: self.shared.files.load(Ordering::Relaxed),
             bytes: self.shared.bytes.load(Ordering::Relaxed),
+            folders: self.shared.folder_count.load(Ordering::Relaxed),
+            folder_ms: self.shared.folder_ns.load(Ordering::Relaxed) / 1_000_000,
             busy_ms: self.shared.busy_ns.load(Ordering::Relaxed) / 1_000_000,
             wait_ms: self.shared.wait_ns.load(Ordering::Relaxed) / 1_000_000,
             drain_ms,
@@ -451,8 +522,19 @@ mod tests {
         let root = scratch("files");
         for threads in [0, 1, 3] {
             let out = root.join(format!("t{threads}"));
+            fs::create_dir_all(&out).unwrap();
             // A budget smaller than one file: each still goes through, alone.
-            let writer = OutputWriter::new(threads, 10);
+            let writer = OutputWriter::new(threads, 10).with_existing_folder(&out);
+            // Deep new folders, created level by level from the known one.
+            for index in 0..20 {
+                let path = out
+                    .join(format!("deep{}", index % 3))
+                    .join("a")
+                    .join(format!("b{index}"))
+                    .join("Ext")
+                    .join("Form.xml");
+                writer.write(path, format!("deep {index}")).unwrap();
+            }
             for index in 0..200 {
                 let path = out
                     .join(format!("d{}", index % 7))
@@ -472,7 +554,16 @@ mod tests {
                 .write(out.join("same.txt"), b"second".as_slice())
                 .unwrap();
             let stats = writer.finish().unwrap();
-            assert_eq!(stats.files, 202);
+            assert_eq!(stats.files, 222);
+            for index in 0..20 {
+                let path = out
+                    .join(format!("deep{}", index % 3))
+                    .join("a")
+                    .join(format!("b{index}"))
+                    .join("Ext")
+                    .join("Form.xml");
+                assert_eq!(fs::read_to_string(path).unwrap(), format!("deep {index}"));
+            }
             for index in 0..200 {
                 let path = out
                     .join(format!("d{}", index % 7))
@@ -529,6 +620,8 @@ impl super::MssqlDumpTimingReport {
         self.output_write_threads = self.output_write_threads.max(stats.threads);
         self.output_write_files += stats.files;
         self.output_write_bytes += stats.bytes;
+        self.output_write_folders += stats.folders;
+        self.output_write_folder_ms += stats.folder_ms;
         self.output_write_busy_ms += stats.busy_ms;
         self.output_write_wait_ms += stats.wait_ms;
         self.output_write_drain_ms += stats.drain_ms;

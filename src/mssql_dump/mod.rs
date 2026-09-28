@@ -3477,7 +3477,7 @@ fn dump_table_rows_with_options_mode(
 
     // A row's own write error stays that row's: this path can go on past a
     // failed row, so its files are written on the row's thread.
-    let output = OutputWriter::inline();
+    let output = OutputWriter::inline().with_existing_folder(output_dir);
     let context = DumpRowContext {
         output: &output,
         model_export: None,
@@ -4858,7 +4858,7 @@ fn dump_table_rows_streamed(
 
     // The files go to writer threads of their own, so a worker converting a
     // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`).
-    let output = OutputWriter::from_env();
+    let output = OutputWriter::from_env().with_existing_folder(output_dir);
     let context = DumpRowContext {
         output: &output,
         model_export: model.as_ref(),

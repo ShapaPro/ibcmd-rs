@@ -101,6 +101,9 @@ pub struct MssqlDumpTimingReport {
     pub output_write_threads: u64,
     pub output_write_files: u64,
     pub output_write_bytes: u64,
+    /// Folders the writers created, and the time that took.
+    pub output_write_folders: u64,
+    pub output_write_folder_ms: u64,
     /// Time the writer threads spent writing, summed over them.
     pub output_write_busy_ms: u64,
     /// Time the converting workers waited for room in the write queue.
@@ -474,6 +477,8 @@ impl MssqlDumpTimingReport {
         self.output_write_threads = self.output_write_threads.max(other.output_write_threads);
         self.output_write_files += other.output_write_files;
         self.output_write_bytes += other.output_write_bytes;
+        self.output_write_folders += other.output_write_folders;
+        self.output_write_folder_ms += other.output_write_folder_ms;
         self.output_write_busy_ms += other.output_write_busy_ms;
         self.output_write_wait_ms += other.output_write_wait_ms;
         self.output_write_drain_ms += other.output_write_drain_ms;
