@@ -98,6 +98,9 @@ pub enum Commands {
     SourceThreeWayOracle(SourceThreeWayOracleArgs),
     /// Print the current compatibility matrix for implemented operations.
     Compatibility(CompatibilityArgs),
+    /// Show the settings a command takes when its flags do not say (ibcmd-rs.toml,
+    /// the environment, native --config) and where each value came from.
+    Settings(SettingsArgs),
     /// Run an external command, measure it, and capture stdout/stderr.
     #[cfg(feature = "platform-oracle")]
     ProfileRun(ProfileRunArgs),
@@ -1358,6 +1361,37 @@ pub struct CompatibilityArgs {
     /// Optional JSON output file. Prints to stdout when omitted.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SettingsArgs {
+    #[command(subcommand)]
+    pub command: SettingsCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommands {
+    /// Print the effective settings for a database and where each came from.
+    Show(SettingsShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SettingsShowArgs {
+    /// The SQL Server of the database to show the settings for.
+    #[arg(long)]
+    pub db_server: Option<String>,
+    /// The database to show the settings for (its [[database]] entry).
+    #[arg(long)]
+    pub db_name: Option<String>,
+    /// Native ibcmd's config file (the YAML `ibcmd server config init` writes).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Show what --platform would give instead of the settings.
+    #[arg(long, value_name = "VERSION")]
+    pub platform: Option<String>,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(feature = "platform-oracle")]

@@ -98,6 +98,21 @@ fn identity_of(node: &Brace) -> Result<String> {
     Ok(atom(item(items, 2)?)?.to_ascii_lowercase())
 }
 
+/// The stored shape of a Configuration row's properties tuple: `{76,...}`
+/// for a configuration kept in compatibility 8.5 or later.
+pub(crate) fn stored_shape(row: &Brace) -> Result<ConfigurationShape> {
+    Ok(read_row(row)?.shape)
+}
+
+/// The configuration uuid the `root` row names: `{2,<uuid>,...}`.
+pub(crate) fn root_configuration_uuid(row: &Brace) -> Result<String> {
+    let items = list(row)?;
+    if atom(item(items, 0)?)? != "2" {
+        bail!("the root row does not open with 2");
+    }
+    Ok(atom(item(items, 1)?)?.to_ascii_lowercase())
+}
+
 fn read_row(row: &Brace) -> Result<RootRow<'_>> {
     let items = list(row)?;
     if atom(item(items, 0)?)? != "2" {

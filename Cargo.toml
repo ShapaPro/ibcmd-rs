@@ -38,8 +38,13 @@ serde_json = "1.0"
 sha1 = "0.10"
 sha2 = "0.10"
 rayon = "1.10"
+# ibcmd-rs.toml, the settings files (src/settings.rs): reading only.
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
 uuid = { version = "1.19", features = ["v4"] }
 walkdir = "2.5"
+# The database section of native ibcmd's YAML config (`--config`), read by
+# src/settings.rs; the maintained successor of serde_yaml.
+yaml_serde = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

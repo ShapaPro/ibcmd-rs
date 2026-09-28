@@ -587,6 +587,52 @@ impl ModelExport {
 }
 
 // ---------------------------------------------------------------------------
+// The platform an export is for.
+
+/// Whether the configuration of `mssql-dump-config`'s source -- the database,
+/// or the `--rows-dir` folder -- is kept in compatibility 8.5 or later: its
+/// Configuration row stores the `{76,...}` tuple. Such a configuration can
+/// only be 8.5.1's (the settings' export rule); an older one says nothing
+/// about the platform, since 8.5 runs 8.3.27-compatible configurations too.
+/// Reads the `root` row and the Configuration row it names, nothing else.
+pub fn configuration_compatibility_8_5_or_later(args: &MssqlDumpConfigArgs) -> Result<bool> {
+    let _offline = args
+        .rows_dir
+        .as_deref()
+        .map(offline_rows::activate)
+        .transpose()?;
+    let password = sql_password(
+        args.sql_user.as_deref(),
+        args.sql_pwd.as_deref(),
+        &args.sql_pwd_env,
+    );
+    let read = |name: &str| -> Result<crate::metadata_model::brace::Brace> {
+        let names = BTreeSet::from([name.to_string()]);
+        let rows = fetch_binary_rows_bcp(
+            &args.sqlcmd,
+            &args.bcp_executable,
+            &args.server,
+            args.sql_user.as_deref(),
+            password.as_deref(),
+            &args.database,
+            MssqlConfigurationTableRole::Current.sql_name(),
+            &names,
+            false,
+        )?;
+        let row = rows
+            .into_iter()
+            .find(|row| row.file_name == name)
+            .ok_or_else(|| anyhow!("the Config table has no `{name}` row"))?;
+        let text = inflate_raw_deflate(&row.binary)
+            .with_context(|| format!("failed to inflate the `{name}` row"))?;
+        parse_row(&text).with_context(|| format!("failed to parse the `{name}` row"))
+    };
+    let uuid = crate::metadata_model::root::export::root_configuration_uuid(&read("root")?)?;
+    let shape = crate::metadata_model::root::export::stored_shape(&read(&uuid)?)?;
+    Ok(shape == crate::metadata_model::root::ConfigurationShape::V76)
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostics.
 
 /// A row of a modelled kind the model could not write: said once per row on

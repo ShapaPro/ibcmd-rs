@@ -38,6 +38,7 @@ pub mod probe;
 pub mod profile;
 pub mod profile_registry;
 pub(crate) mod runtime_evidence_schema;
+pub mod settings;
 pub mod source;
 pub mod source_audit;
 pub(crate) mod source_listing;

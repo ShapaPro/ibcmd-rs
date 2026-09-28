@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use ibcmd_rs::cli::{Cli, Commands};
 #[cfg(feature = "platform-oracle")]
 use ibcmd_rs::cli::{InfobaseCommands, InfobaseConfigCommands};
@@ -29,7 +29,15 @@ fn main() -> Result<()> {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    // Parsed through the matches, which the settings of the database commands
+    // read to tell a given flag from its default.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let subcommand = matches
+        .subcommand()
+        .map(|(_, matches)| matches.clone())
+        .unwrap_or_default();
+    let subcommand: &ArgMatches = &subcommand;
 
     match cli.command {
         Commands::Convert(args) => {
@@ -553,6 +561,22 @@ fn run() -> Result<()> {
                 }))?
             );
         }
+        Commands::Settings(args) => match args.command {
+            ibcmd_rs::cli::SettingsCommands::Show(args) => {
+                let settings = ibcmd_rs::settings::Settings::load(args.config.as_deref())?;
+                let report = ibcmd_rs::settings::show::settings_report(
+                    &settings,
+                    args.platform.as_deref(),
+                    args.db_server.as_deref(),
+                    args.db_name.as_deref(),
+                )?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", ibcmd_rs::settings::show::render(&report));
+                }
+            }
+        },
         Commands::Compatibility(args) => {
             let report = ibcmd_rs::compatibility::current_compatibility_report()?;
             if let Some(output) = args.output {
@@ -572,7 +596,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::MssqlDumpConfig(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_dump_config(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql_dump::dump_config(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -591,12 +615,12 @@ fn run() -> Result<()> {
             }
         }
         Commands::MssqlDumpExtension(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_dump_extension(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql_extension_export::dump_extensions(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::MssqlLoadExtension(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_load_extension(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql_extension_load::load_extensions(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -660,7 +684,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::MssqlApplySourceChange(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_apply_source_change(&mut args, subcommand)?;
             if args.watch {
                 ibcmd_rs::mssql_apply::watch_source_changes(&args)?;
             } else {
@@ -669,7 +693,7 @@ fn run() -> Result<()> {
             }
         }
         Commands::MssqlAuditSourceParity(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_audit_source_parity(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql::audit_source_parity(&args)?;
             if let Some(output) = args.output {
                 let json = serde_json::to_string_pretty(&report)?;
@@ -739,7 +763,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::MssqlStageSourceObjects(mut args) => {
-            args.apply_platform_flag();
+            ibcmd_rs::settings::commands::prepare_stage_source_objects(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql::stage_source_objects(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
