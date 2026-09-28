@@ -254,8 +254,28 @@ Each done in its own branch and merged into `fix/8-3-27-parity`:
       the БСП 8.5 real cycle stands for the final build
 
 Metadata descriptor rows (3 902 in БСП) are still patched onto the target's
-existing rows; a load into an empty database needs a descriptor compiler per
-metadata class and is not part of this cycle.
+existing rows in this cycle; a load into an empty database needs a descriptor
+compiler per metadata class.
+
+## Load into an empty database (branch `feat/metadata-model`)
+
+- [x] Base-free descriptor compiler for every metadata class, and a
+      `--base-free` stage that reads nothing from the target.
+- [x] Real runs into fresh empty databases, applied by native
+      `config apply` and exported by native `config export`
+      (`scripts/empty-load/run_empty.ps1`, details in
+      `evidence/empty-database-load-20260928.md`):
+      БСП 8.3.27 **12 197 / 12 198**, БСП 8.5 **12 336 / 12 337**,
+      ERP УХ 8.3.27 **140 708 / 140 709**, ERP УХ 8.5 **140 708 / 140 709**.
+      Only `ConfigDumpInfo.xml` differs. For БСП, only its configVersion
+      values differ. For ERP УХ, 145 entries are also missing: 132 empty Help
+      rows, 11 item-less Predefined rows, 1 Aggregates row and
+      1 CommandInterface row.
+- [x] 8.5 `version` row lists the configuration's platform features
+      (palette colours `2dd2d9e1-...` for БСП 8.5), `e3695b8e`.
+- [x] 2.21 table line members at compatibility 8.3.27, `540a5601`.
+- [ ] Write the empty stub rows the source tree's `ConfigDumpInfo.xml`
+      lists, so ERP УХ matches on that file too.
 
 ## The tool that turned out to matter
 
