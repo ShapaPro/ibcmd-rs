@@ -72,6 +72,20 @@ pub fn aggregates_row(
     let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let document = parse_element_tree(&bytes)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    aggregates_tree(owner, Some(&document)).map(Some)
+}
+
+/// The `<uuid>.3` row of a register whose aggregates were all deleted: the
+/// table's columns (the register's dimensions) and no row. A configuration
+/// keeps such a row (its `ConfigDumpInfo.xml` lists it) while the export
+/// writes no `Aggregates.xml` for it, so a load writes it from that list.
+/// ERP УХ's one (`ОперацииБюджетов`) also names the columns and keeps the
+/// dimensions of an older register; the source records neither.
+pub fn emptied_aggregates_row(owner: &Element) -> Result<Brace> {
+    aggregates_tree(owner, None)
+}
+
+fn aggregates_tree(owner: &Element, document: Option<&Element>) -> Result<Brace> {
     let register = owner
         .path(&["Properties", "Name"])
         .map(|name| name.text.clone())
@@ -116,7 +130,10 @@ pub fn aggregates_row(
     }
 
     let mut rows = Vec::new();
-    for aggregate in document.children_named("Aggregate") {
+    for aggregate in document
+        .into_iter()
+        .flat_map(|document| document.children_named("Aggregate"))
+    {
         let id = aggregate
             .attr("id")
             .ok_or_else(|| anyhow!("<Aggregate> without id"))?;
@@ -158,8 +175,5 @@ pub fn aggregates_row(
         }
         rows.push(Row::new(values));
     }
-    Ok(Some(brace_list![
-        Brace::num(0),
-        value_table(&columns, &rows)
-    ]))
+    Ok(brace_list![Brace::num(0), value_table(&columns, &rows)])
 }

@@ -2,7 +2,12 @@
 
 use std::{fs, path::PathBuf, process::Command};
 
-const ORACLE_COMMANDS: &[&str] = &["infobase", "probe", "profile-run", "dump-sources"];
+/// Commands that locate or run an installed platform: never in a release.
+/// `infobase` is released: its `config export|import` read and write SQL
+/// Server directly and every other native command is refused, never run.
+const ORACLE_COMMANDS: &[&str] = &["probe", "profile-run", "dump-sources"];
+/// `infobase config` research commands that run the platform's own ibcmd.
+const ORACLE_INFOBASE_COMMANDS: &[&str] = &["roundtrip", "sweep"];
 const FORBIDDEN_BINARY_MARKERS: &[&[u8]] = &[
     b"ibcmd.exe",
     b"1cv8.exe",
@@ -17,13 +22,17 @@ const FORBIDDEN_BINARY_MARKERS: &[&[u8]] = &[
     b"OSGi",
 ];
 
-#[test]
-fn default_cli_has_no_platform_oracle_commands() {
-    let output = Command::new(env!("CARGO_BIN_EXE_ibcmd-rs"))
-        .arg("--help")
+fn run(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ibcmd-rs"))
+        .args(args)
         .env("PATH", "")
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn default_cli_has_no_platform_oracle_commands() {
+    let output = run(&["--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
 
@@ -40,6 +49,41 @@ fn default_cli_has_no_platform_oracle_commands() {
     assert!(help.contains("convert"));
     assert!(help.contains("cf"));
     assert!(help.contains("compatibility"));
+    assert!(help.contains("infobase"));
+}
+
+#[test]
+fn released_infobase_mode_refuses_rather_than_runs_the_platform() {
+    let output = run(&["infobase", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("export"));
+    assert!(help.contains("import"));
+    for command in ORACLE_INFOBASE_COMMANDS {
+        assert!(!help.contains(command), "help names `{command}`:\n{help}");
+        // not a command of the release: an incomplete `config`
+        let output = run(&["infobase", "config", command, "--db-name=x"]);
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("Указана неполная команда"), "{stdout}");
+    }
+    // What the platform would do is refused by name, with no PATH to find
+    // it on and nothing launched.
+    let output = run(&[
+        "infobase",
+        "config",
+        "apply",
+        "--dbms=MSSQLServer",
+        "--db-server=localhost",
+        "--db-name=ibcmd_rs_boundary",
+        "--force",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("не поддерживается в этой версии ibcmd-rs"),
+        "{stderr}"
+    );
 }
 
 #[test]

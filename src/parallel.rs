@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rayon::ThreadPoolBuilder;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // The default pool is at most 16 workers: the export's heavy rows are memory
 // bound, and on a 24-thread workstation 24 workers made ERP УХ's export slower
@@ -22,12 +23,24 @@ const MAX_IO_BOUND_WORKERS: usize = 128;
 static THREAD_POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
 static MEMORY_BOUND_THREAD_POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
 static IO_BOUND_THREAD_POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
+/// Workers a command asked for (`infobase config export --threads`), ahead
+/// of `IBCMD_RS_WORKERS`; 0 when none was asked.
+static REQUESTED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Sizes the worker pool from a command's own option; takes effect only
+/// before the pool's first use.
+pub fn request_workers(count: usize) {
+    REQUESTED_WORKERS.store(count, Ordering::Relaxed);
+}
 
 pub fn bounded_worker_count() -> usize {
+    let requested = REQUESTED_WORKERS.load(Ordering::Relaxed);
     bounded_worker_count_from(
-        std::env::var("IBCMD_RS_WORKERS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok()),
+        (requested > 0).then_some(requested).or_else(|| {
+            std::env::var("IBCMD_RS_WORKERS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        }),
         std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(1),

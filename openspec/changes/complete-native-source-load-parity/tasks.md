@@ -274,8 +274,12 @@ compiler per metadata class.
 - [x] 8.5 `version` row lists the configuration's platform features
       (palette colours `2dd2d9e1-...` for БСП 8.5), `e3695b8e`.
 - [x] 2.21 table line members at compatibility 8.3.27, `540a5601`.
-- [ ] Write the empty stub rows the source tree's `ConfigDumpInfo.xml`
-      lists, so ERP УХ matches on that file too.
+- [x] Write the empty stub rows the source tree's `ConfigDumpInfo.xml`
+      lists, so ERP УХ matches on that file too (`f44ac6b0`, #334; see
+      `evidence/empty-database-load-20260928.md`). Offline cycle: ERP УХ
+      8.3.27 and 8.5 `ConfigDumpInfo.xml` identical to the reference once
+      configVersion is blanked, БСП unchanged. A real ERP УХ load has not
+      been re-run with them.
 
 ## The tool that turned out to matter
 

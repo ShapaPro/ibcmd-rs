@@ -5,13 +5,15 @@ pub mod compatibility;
 pub mod compiler;
 pub mod conversion;
 pub mod dcs_template_audit;
+pub mod dropin;
 #[cfg(feature = "platform-oracle")]
 pub mod dump_sources;
 pub mod form_matrix;
 pub mod form_provenance;
 pub(crate) mod form_schema;
-#[cfg(feature = "platform-oracle")]
 pub mod infobase;
+#[cfg(feature = "platform-oracle")]
+pub mod infobase_oracle;
 pub mod legacy_version;
 pub mod metadata_model;
 pub(crate) mod metadata_owner_graph;

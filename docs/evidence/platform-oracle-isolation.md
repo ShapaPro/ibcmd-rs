@@ -12,8 +12,14 @@ The following CLI commands and their implementation modules are gated by
 - `probe` and `src/probe.rs`, which search for installed 1C executables;
 - `profile-run` and `src/profile.rs`, which start an arbitrary profiled process;
 - `dump-sources` and `src/dump_sources.rs`, which execute `ibcmd`;
-- `infobase` and `src/infobase.rs`, whose roundtrip/sweep workflows use the
-  installed platform as an oracle.
+- `infobase config roundtrip` and `infobase config sweep` and
+  `src/infobase_oracle.rs`, which use the installed platform's own `config
+  check` and `config apply` as an oracle.
+
+Since release 0.3 the `infobase` mode itself is released (`src/dropin/`,
+`src/infobase.rs`): `config export` and `config import` read and write SQL
+Server directly, and every other command of the platform's ibcmd is refused
+by name with exit code 1, never run in its place.
 
 The default feature set remains empty. Pure profile models, XCF/CF codecs,
 conversion, compatibility reporting, and the process-free
@@ -28,9 +34,12 @@ does not silently restore the code to a default build.
 ## Release-shaped audit
 
 `tests/platform_oracle_boundary.rs` runs the default binary with an empty
-`PATH`. It requires `convert`, `cf`, and `compatibility`, rejects every oracle
-subcommand in top-level help, and scans the built executable for known 1C,
-EDT/JAR, JNI, and OSGi payload/path markers.
+`PATH`. It requires `convert`, `cf`, `compatibility` and `infobase`, rejects
+every oracle subcommand in top-level help, checks that `infobase` neither
+lists nor accepts `config roundtrip|sweep` and refuses `config apply` by name
+(exit code 1) instead of running the platform, and scans the built executable
+for known 1C, EDT/JAR, JNI, and OSGi payload/path markers (`ibcmd.exe` among
+them). `scripts/audit_release.py` makes the same checks on the release binary.
 
 The portable Windows/Linux CI lane now compiles all root targets with
 `--no-default-features` and runs that boundary test. The Windows legacy lane

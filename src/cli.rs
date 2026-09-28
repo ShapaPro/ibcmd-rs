@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -10,6 +11,7 @@ use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 #[command(name = "ibcmd-rs")]
 #[command(about = "Research-first replacement path for loading 1C configuration sources")]
 #[command(version)]
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -21,9 +23,34 @@ pub enum Commands {
     Convert(ConvertArgs),
     /// Inspect, verify, export, or overlay CF without an installed 1C platform.
     Cf(CfArgs),
-    /// ibcmd-compatible infobase commands.
-    #[cfg(feature = "platform-oracle")]
-    Infobase(InfobaseArgs),
+    /// Drop-in `ibcmd infobase`: `config export` and `config import` in the
+    /// platform ibcmd's syntax, against Microsoft SQL Server; other commands
+    /// are refused. `infobase --help` prints its help (in Russian).
+    #[command(disable_help_flag = true)]
+    Infobase(NativeModeArgs),
+    /// The platform ibcmd's other modes, refused with a clear message.
+    #[command(hide = true, disable_help_flag = true)]
+    Server(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    Eventlog(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    Config(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    Extension(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    MobileApp(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    MobileClient(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    Session(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    Lock(NativeModeArgs),
+    #[command(hide = true, disable_help_flag = true)]
+    BinaryDataStorage(NativeModeArgs),
+    /// `help [MODE]`: the platform ibcmd's help mode (Russian) for its
+    /// modes, this program's help for its own commands.
+    #[command(hide = true, disable_help_flag = true)]
+    Help(NativeModeArgs),
     /// Locate installed 1C command-line tools and print environment details.
     #[cfg(feature = "platform-oracle")]
     Probe(ProbeArgs),
@@ -524,41 +551,15 @@ pub struct CfBootstrapArgs {
     pub reserved: u32,
 }
 
-#[cfg(feature = "platform-oracle")]
+/// Raw arguments of one of the platform ibcmd's modes (`infobase`, `server`,
+/// ...): `crate::dropin` parses them the way the platform's ibcmd does.
 #[derive(Debug, Args)]
-pub struct InfobaseArgs {
-    #[command(subcommand)]
-    pub command: InfobaseCommands,
+pub struct NativeModeArgs {
+    /// Commands, options and arguments in the platform ibcmd's syntax.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+    pub args: Vec<OsString>,
 }
 
-#[cfg(feature = "platform-oracle")]
-#[derive(Debug, Subcommand)]
-pub enum InfobaseCommands {
-    /// Configuration export/import commands.
-    Config(InfobaseConfigArgs),
-}
-
-#[cfg(feature = "platform-oracle")]
-#[derive(Debug, Args)]
-pub struct InfobaseConfigArgs {
-    #[command(subcommand)]
-    pub command: InfobaseConfigCommands,
-}
-
-#[cfg(feature = "platform-oracle")]
-#[derive(Debug, Subcommand)]
-pub enum InfobaseConfigCommands {
-    /// Export infobase configuration to source files.
-    Export(InfobaseConfigExportArgs),
-    /// Import source files into infobase configuration staging.
-    Import(InfobaseConfigImportArgs),
-    /// Clone, direct-export, direct-import, apply, direct-export and diff one MSSQL infobase roundtrip.
-    Roundtrip(InfobaseConfigRoundtripArgs),
-    /// Run a representative family-by-family scoped MSSQL roundtrip sweep and emit a compact JSON report.
-    Sweep(InfobaseConfigSweepArgs),
-}
-
-#[cfg(feature = "platform-oracle")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InfobaseConfigFormat {
     /// Hierarchical 1C XML source tree compatible with ibcmd config export/import.
@@ -566,114 +567,130 @@ pub enum InfobaseConfigFormat {
     Xml,
 }
 
-#[cfg(feature = "platform-oracle")]
-#[derive(Debug, Args)]
+/// How `infobase config import` stages the tree into ConfigSave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InfobaseImportStageMode {
+    /// Compile every row from the tree when the target holds none of the
+    /// tree's configuration (an empty infobase), else patch the target's
+    /// own rows.
+    #[default]
+    Auto,
+    /// Patch the target's own rows: it holds the configuration.
+    Patch,
+    /// Compile every row from the tree (`--base-free`).
+    BaseFree,
+}
+
+/// `infobase config export`: what the drop-in command line (`crate::dropin`)
+/// or the research round trip asks for.
+#[derive(Debug, Clone)]
 pub struct InfobaseConfigExportArgs {
     /// Optional JSON settings file. Supports autumn-properties.json/vRunner DB keys and ibcmd-rs format keys.
-    #[arg(long)]
     pub settings: Option<PathBuf>,
+    /// The platform ibcmd's configuration file (`--config`/`-c`), kept for
+    /// the settings layer.
+    pub native_config: Option<PathBuf>,
     /// Source format. Can also be set in settings as format/config-format.
-    #[arg(long)]
     pub format: Option<InfobaseConfigFormat>,
     /// Source XML version. 2.20 matches 1C 8.3.27, 2.21 matches 1C 8.5.1. Can also be set in settings.
-    #[arg(long, value_enum)]
     pub source_version: Option<InfobaseConfigSourceVersion>,
-    /// DBMS type. Currently MSSQLServer is supported by the direct exporter.
-    #[arg(long)]
+    /// DBMS type. Only MSSQLServer is supported by the direct exporter.
     pub dbms: Option<String>,
     /// Database server.
-    #[arg(long)]
     pub db_server: Option<String>,
     /// Database name.
-    #[arg(long)]
     pub db_name: Option<String>,
     /// Database user for SQL authentication.
-    #[arg(long)]
     pub db_user: Option<String>,
-    /// Database password. Prefer --db-pwd-env for shell history.
-    #[arg(long)]
+    /// Database password.
     pub db_pwd: Option<String>,
     /// Environment variable containing the database password.
-    #[arg(long, default_value = "IBCMD_DB_PSW")]
     pub db_pwd_env: String,
     /// Infobase user name. Accepted for ibcmd CLI compatibility; direct SQL export does not use it.
-    #[arg(long, short = 'u')]
     pub user: Option<String>,
-    /// Infobase user password. Prefer --password-env for shell history.
-    #[arg(long, short = 'P')]
+    /// Infobase user password.
     pub password: Option<String>,
     /// Environment variable containing the infobase user password.
-    #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
     /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
     pub sqlcmd: PathBuf,
-    /// Replace files under the output directory.
-    #[arg(long, alias = "force")]
+    /// Clear a non-empty output directory first (the research round trip).
+    /// The drop-in export refuses one, as the platform's own export does.
     pub overwrite: bool,
+    /// Count the exported files for the report (walks the whole tree).
+    pub count_files: bool,
     /// Output directory for hierarchical XML sources.
     pub output_dir: PathBuf,
 }
 
-#[cfg(feature = "platform-oracle")]
-#[derive(Debug, Args)]
+/// `infobase config import`: what the drop-in command line (`crate::dropin`)
+/// or the research round trip asks for.
+#[derive(Debug, Clone)]
 pub struct InfobaseConfigImportArgs {
     /// Optional JSON settings file. Supports autumn-properties.json/vRunner DB keys and ibcmd-rs format keys.
-    #[arg(long)]
     pub settings: Option<PathBuf>,
+    /// The platform ibcmd's configuration file (`--config`/`-c`), kept for
+    /// the settings layer.
+    pub native_config: Option<PathBuf>,
     /// Source format. Can also be set in settings as format/config-format.
-    #[arg(long)]
     pub format: Option<InfobaseConfigFormat>,
-    /// Source XML version. Accepted for CLI/settings symmetry with export.
-    #[arg(long, value_enum)]
+    /// Source XML version; when neither this nor the settings give one, the
+    /// tree's own (`Configuration.xml`) is read.
     pub source_version: Option<InfobaseConfigSourceVersion>,
-    /// DBMS type. Currently MSSQLServer is supported by the direct importer.
-    #[arg(long)]
+    /// DBMS type. Only MSSQLServer is supported by the direct importer.
     pub dbms: Option<String>,
     /// Database server.
-    #[arg(long)]
     pub db_server: Option<String>,
     /// Database name.
-    #[arg(long)]
     pub db_name: Option<String>,
     /// Database user for SQL authentication.
-    #[arg(long)]
     pub db_user: Option<String>,
-    /// Database password. Prefer --db-pwd-env for shell history.
-    #[arg(long)]
+    /// Database password.
     pub db_pwd: Option<String>,
     /// Environment variable containing the database password.
-    #[arg(long, default_value = "IBCMD_DB_PSW")]
     pub db_pwd_env: String,
     /// Infobase user name. Accepted for ibcmd CLI compatibility; direct SQL import does not use it.
-    #[arg(long, short = 'u')]
     pub user: Option<String>,
-    /// Infobase user password. Prefer --password-env for shell history.
-    #[arg(long, short = 'P')]
+    /// Infobase user password.
     pub password: Option<String>,
     /// Environment variable containing the infobase user password.
-    #[arg(long, default_value = "IBCMD_USER_PSW")]
     pub password_env: String,
     /// sqlcmd executable path.
-    #[arg(long, default_value = "sqlcmd")]
     pub sqlcmd: PathBuf,
-    /// Replace existing ConfigSave rows before staging import rows.
-    #[arg(long, alias = "force")]
+    /// Replace existing ConfigSave rows before staging import rows (an
+    /// import always does, as the platform's own does).
     pub replace_config_save: bool,
     /// Required confirmation for non-lab destructive runs.
-    #[arg(long)]
     pub allow_non_lab: bool,
     /// Optional maximum number of staged XML objects per SQL batch.
-    #[arg(long)]
     pub batch_size: Option<usize>,
     /// Optional source path prefix to import. Can be repeated.
-    #[arg(long)]
     pub path_prefix: Vec<String>,
-    /// Optional path for generated SQL script. Defaults to C:\temp\ibcmd-rs.
-    #[arg(long)]
+    /// Optional path for the generated SQL scripts (and the bulk rows file).
     pub script_output: Option<PathBuf>,
+    /// Patch the target's rows, compile every row, or decide by the target.
+    pub stage_mode: InfobaseImportStageMode,
     /// Root directory with hierarchical XML sources.
     pub source_dir: PathBuf,
+}
+
+/// Research commands under `infobase config` that run the installed
+/// platform: `ibcmd-rs infobase config roundtrip|sweep ...`.
+#[cfg(feature = "platform-oracle")]
+#[derive(Debug, Parser)]
+#[command(name = "ibcmd-rs infobase config")]
+pub struct InfobaseOracleCli {
+    #[command(subcommand)]
+    pub command: InfobaseOracleCommands,
+}
+
+#[cfg(feature = "platform-oracle")]
+#[derive(Debug, Subcommand)]
+pub enum InfobaseOracleCommands {
+    /// Clone, direct-export, direct-import, apply, direct-export and diff one MSSQL infobase roundtrip.
+    Roundtrip(InfobaseConfigRoundtripArgs),
+    /// Run a representative family-by-family scoped MSSQL roundtrip sweep and emit a compact JSON report.
+    Sweep(InfobaseConfigSweepArgs),
 }
 
 #[cfg(feature = "platform-oracle")]
@@ -4673,114 +4690,9 @@ mod tests {
 
     #[cfg(feature = "platform-oracle")]
     #[test]
-    fn parses_infobase_config_export_command() {
-        let cli = Cli::parse_from([
-            "ibcmd-rs",
-            "infobase",
-            "config",
-            "export",
-            "--db-server=localhost",
-            "--db-name=servicedesk",
-            "--db-user=test-sql-user",
-            "--db-pwd=dummy-value-for-parser-test",
-            "--user=ws",
-            "--password=dummy-infobase-value-for-parser-test",
-            "--format=ibcmd-xml",
-            "--source-version=2.21",
-            "--force",
-            r"C:\repo\src\cf",
-        ]);
-
-        match cli.command {
-            Commands::Infobase(args) => match args.command {
-                InfobaseCommands::Config(config) => match config.command {
-                    InfobaseConfigCommands::Export(args) => {
-                        assert_eq!(args.db_server.as_deref(), Some("localhost"));
-                        assert_eq!(args.db_name.as_deref(), Some("servicedesk"));
-                        assert_eq!(args.db_user.as_deref(), Some("test-sql-user"));
-                        assert_eq!(args.db_pwd.as_deref(), Some("dummy-value-for-parser-test"));
-                        assert_eq!(args.user.as_deref(), Some("ws"));
-                        assert_eq!(
-                            args.password.as_deref(),
-                            Some("dummy-infobase-value-for-parser-test")
-                        );
-                        assert_eq!(args.format, Some(InfobaseConfigFormat::Xml));
-                        assert_eq!(
-                            args.source_version,
-                            Some(InfobaseConfigSourceVersion::V2_21)
-                        );
-                        assert!(args.overwrite);
-                        assert_eq!(args.output_dir, PathBuf::from(r"C:\repo\src\cf"));
-                    }
-                    other => panic!("unexpected config command: {other:?}"),
-                },
-            },
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "platform-oracle")]
-    #[test]
-    fn parses_infobase_config_import_command() {
-        let cli = Cli::parse_from([
-            "ibcmd-rs",
-            "infobase",
-            "config",
-            "import",
-            "--settings",
-            r"C:\repo\autumn-properties.json",
-            "--format=xml",
-            "--source-version=8.3.27",
-            "--replace-config-save",
-            "--allow-non-lab",
-            "--batch-size=3",
-            "-u",
-            "ws",
-            "-P",
-            "dummy-infobase-value-for-parser-test",
-            "--path-prefix",
-            "CommonModules",
-            r"C:\repo\src\cf",
-        ]);
-
-        match cli.command {
-            Commands::Infobase(args) => match args.command {
-                InfobaseCommands::Config(config) => match config.command {
-                    InfobaseConfigCommands::Import(args) => {
-                        assert_eq!(
-                            args.settings,
-                            Some(PathBuf::from(r"C:\repo\autumn-properties.json"))
-                        );
-                        assert_eq!(args.format, Some(InfobaseConfigFormat::Xml));
-                        assert_eq!(
-                            args.source_version,
-                            Some(InfobaseConfigSourceVersion::V2_20)
-                        );
-                        assert!(args.replace_config_save);
-                        assert!(args.allow_non_lab);
-                        assert_eq!(args.batch_size, Some(3));
-                        assert_eq!(args.user.as_deref(), Some("ws"));
-                        assert_eq!(
-                            args.password.as_deref(),
-                            Some("dummy-infobase-value-for-parser-test")
-                        );
-                        assert_eq!(args.path_prefix, vec!["CommonModules"]);
-                        assert_eq!(args.source_dir, PathBuf::from(r"C:\repo\src\cf"));
-                    }
-                    other => panic!("unexpected config command: {other:?}"),
-                },
-            },
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "platform-oracle")]
-    #[test]
     fn parses_infobase_config_roundtrip_command() {
-        let cli = Cli::parse_from([
-            "ibcmd-rs",
-            "infobase",
-            "config",
+        let cli = InfobaseOracleCli::parse_from([
+            "ibcmd-rs infobase config",
             "roundtrip",
             "--db-server",
             "localhost",
@@ -4809,37 +4721,32 @@ mod tests {
         ]);
 
         match cli.command {
-            Commands::Infobase(args) => match args.command {
-                InfobaseCommands::Config(config) => match config.command {
-                    InfobaseConfigCommands::Roundtrip(args) => {
-                        assert_eq!(args.db_server.as_deref(), Some("localhost"));
-                        assert_eq!(args.db_name.as_deref(), Some("ut_ibcmd"));
-                        assert_eq!(args.db_user.as_deref(), Some("sa"));
-                        assert_eq!(
-                            args.db_pwd.as_deref(),
-                            Some("dummy-sql-value-for-parser-test")
-                        );
-                        assert_eq!(
-                            args.ibcmd,
-                            Some(PathBuf::from(
-                                r"C:\Program Files\1cv8\8.3.27.1989\bin\ibcmd.exe"
-                            ))
-                        );
-                        assert_eq!(args.target_db.as_deref(), Some("ut_ibcmd_roundtrip_test"));
-                        assert_eq!(args.work_dir, PathBuf::from(r"E:\ibcmd_lab\roundtrip"));
-                        assert_eq!(
-                            args.source_dir,
-                            Some(PathBuf::from(r"E:\ibcmd_lab\roundtrip\baseline"))
-                        );
-                        assert!(args.allow_non_lab);
-                        assert_eq!(args.batch_size, Some(25));
-                        assert_eq!(args.path_prefix, vec!["Catalogs/Валюты"]);
-                        assert_eq!(args.timeout_sec, 900);
-                        assert!(args.overwrite);
-                    }
-                    other => panic!("unexpected config command: {other:?}"),
-                },
-            },
+            InfobaseOracleCommands::Roundtrip(args) => {
+                assert_eq!(args.db_server.as_deref(), Some("localhost"));
+                assert_eq!(args.db_name.as_deref(), Some("ut_ibcmd"));
+                assert_eq!(args.db_user.as_deref(), Some("sa"));
+                assert_eq!(
+                    args.db_pwd.as_deref(),
+                    Some("dummy-sql-value-for-parser-test")
+                );
+                assert_eq!(
+                    args.ibcmd,
+                    Some(PathBuf::from(
+                        r"C:\Program Files\1cv8\8.3.27.1989\bin\ibcmd.exe"
+                    ))
+                );
+                assert_eq!(args.target_db.as_deref(), Some("ut_ibcmd_roundtrip_test"));
+                assert_eq!(args.work_dir, PathBuf::from(r"E:\ibcmd_lab\roundtrip"));
+                assert_eq!(
+                    args.source_dir,
+                    Some(PathBuf::from(r"E:\ibcmd_lab\roundtrip\baseline"))
+                );
+                assert!(args.allow_non_lab);
+                assert_eq!(args.batch_size, Some(25));
+                assert_eq!(args.path_prefix, vec!["Catalogs/Валюты"]);
+                assert_eq!(args.timeout_sec, 900);
+                assert!(args.overwrite);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -4847,10 +4754,8 @@ mod tests {
     #[cfg(feature = "platform-oracle")]
     #[test]
     fn parses_infobase_config_sweep_command() {
-        let cli = Cli::parse_from([
-            "ibcmd-rs",
-            "infobase",
-            "config",
+        let cli = InfobaseOracleCli::parse_from([
+            "ibcmd-rs infobase config",
             "sweep",
             "--db-server",
             "localhost",
@@ -4889,42 +4794,37 @@ mod tests {
         ]);
 
         match cli.command {
-            Commands::Infobase(args) => match args.command {
-                InfobaseCommands::Config(config) => match config.command {
-                    InfobaseConfigCommands::Sweep(args) => {
-                        assert_eq!(args.db_server.as_deref(), Some("localhost"));
-                        assert_eq!(args.db_name.as_deref(), Some("ut_ibcmd"));
-                        assert_eq!(args.db_user.as_deref(), Some("sa"));
-                        assert_eq!(
-                            args.db_pwd.as_deref(),
-                            Some("dummy-sql-value-for-parser-test")
-                        );
-                        assert_eq!(
-                            args.ibcmd,
-                            Some(PathBuf::from(
-                                r"C:\Program Files\1cv8\8.3.27.1989\bin\ibcmd.exe"
-                            ))
-                        );
-                        assert_eq!(args.work_dir, PathBuf::from(r"E:\ibcmd_lab\roundtrip"));
-                        assert_eq!(
-                            args.source_dir,
-                            Some(PathBuf::from(r"E:\ibcmd_lab\roundtrip\baseline"))
-                        );
-                        assert!(args.allow_non_lab);
-                        assert_eq!(args.batch_size, Some(25));
-                        assert_eq!(args.family, vec!["Catalogs", "Documents"]);
-                        assert_eq!(args.candidate_offset, 1);
-                        assert_eq!(args.candidates_per_family, 2);
-                        assert_eq!(args.max_prefixes, Some(3));
-                        assert_eq!(args.path_prefix, vec!["Catalogs/Валюты"]);
-                        assert!(args.stop_on_first_non_ok);
-                        assert!(args.drop_target_db_after_run);
-                        assert_eq!(args.timeout_sec, 900);
-                        assert!(args.overwrite);
-                    }
-                    other => panic!("unexpected config command: {other:?}"),
-                },
-            },
+            InfobaseOracleCommands::Sweep(args) => {
+                assert_eq!(args.db_server.as_deref(), Some("localhost"));
+                assert_eq!(args.db_name.as_deref(), Some("ut_ibcmd"));
+                assert_eq!(args.db_user.as_deref(), Some("sa"));
+                assert_eq!(
+                    args.db_pwd.as_deref(),
+                    Some("dummy-sql-value-for-parser-test")
+                );
+                assert_eq!(
+                    args.ibcmd,
+                    Some(PathBuf::from(
+                        r"C:\Program Files\1cv8\8.3.27.1989\bin\ibcmd.exe"
+                    ))
+                );
+                assert_eq!(args.work_dir, PathBuf::from(r"E:\ibcmd_lab\roundtrip"));
+                assert_eq!(
+                    args.source_dir,
+                    Some(PathBuf::from(r"E:\ibcmd_lab\roundtrip\baseline"))
+                );
+                assert!(args.allow_non_lab);
+                assert_eq!(args.batch_size, Some(25));
+                assert_eq!(args.family, vec!["Catalogs", "Documents"]);
+                assert_eq!(args.candidate_offset, 1);
+                assert_eq!(args.candidates_per_family, 2);
+                assert_eq!(args.max_prefixes, Some(3));
+                assert_eq!(args.path_prefix, vec!["Catalogs/Валюты"]);
+                assert!(args.stop_on_first_non_ok);
+                assert!(args.drop_target_db_after_run);
+                assert_eq!(args.timeout_sec, 900);
+                assert!(args.overwrite);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

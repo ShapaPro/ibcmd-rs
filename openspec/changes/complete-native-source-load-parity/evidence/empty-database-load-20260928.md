@@ -86,3 +86,55 @@ Native apply spends most of its УХ time in "Принятие изменени�
   as false put `...BWA>false` into 7 258 exported forms. Fixed in `540a5601`.
 - **An empty 8.5 infobase has no Config rows at all** before the first
   apply; the stage writes ConfigSave all the same.
+
+## The content-free rows (2026-09-28, #334, `f44ac6b0`)
+
+The 145 ERP УХ entries were rows the source database keeps for parts whose
+content was deleted in the Designer (the same 145 on 8.3.27 and 8.5):
+
+| Part | Rows | Stored text |
+|---|---|---|
+| Help (`.0` of an object, `.1` of a form) | 132 | `{5,0,0}` (10 bytes with the BOM) |
+| CommandInterface of a subsystem (`.1`) | 1 | `{7,0,0,0,0,0,0}` (18 bytes) |
+| Predefined (10 catalogs `.1c`, 1 chart of characteristic types `.7`) | 11 | the value tree with its root alone |
+| Aggregates (`.3`) | 1 | the value table with no row |
+
+The export writes no file for any of them, so the tree has nothing to
+compile them from; only its `ConfigDumpInfo.xml` lists them. The base-free
+stage now writes every listed row of these four parts that nothing else
+produced, for an object the tree holds (`empty_stage::stub_rows`,
+`bodies_rows::stub_row_text`); a catalog's emptied root carries the six
+values an edited tree stores, as 10 of the 11 stored rows do.
+
+Offline cycle (`scripts/empty-load/ve.sh`, the rows of the stage exported by
+our exporter):
+
+| Corpus | Rows staged | Files identical | `ConfigDumpInfo.xml`, configVersion blanked |
+|---|---|---|---|
+| ERP УХ 8.3.27 | 118 170 (118 025 + 145) | 140 708 / 140 709 | identical (249 143 entries each) |
+| ERP УХ 8.5 | 118 170 | 140 708 / 140 709 | identical (249 143 entries each) |
+| БСП 8.3.27 | 9 838 (no row added) | 12 197 / 12 198 | identical (15 713 entries) |
+| БСП 8.5 | 9 935 (no row added) | 12 336 / 12 337 | identical (15 605 entries) |
+
+Of the 145 rows, 133 are plain-identical to the stored ones; 12 differ only
+in history the source does not keep: the next row index of an emptied tree
+(`-1,13` stored, `-1,0` written), column lengths of a catalog before its
+properties changed, a register's old dimensions and column titles. A real
+ERP УХ load has not been re-run with them (its apply takes about four
+hours).
+
+## Through the drop-in command line (0.3, 2026-09-28)
+
+The platform's own command lines, with our executable (`f44ac6b0`)
+renamed `ibcmd.exe` (`scripts/empty-load/run_dropin_import.ps1`): a fresh
+`ibcmd_rs_03_bsp8327_import_20260928_t1`, native `infobase create`, then
+our `ibcmd infobase config import
+--dbms=MSSQLServer --db-server=localhost --db-name=... --data=... <tree>`:
+the target's Config was empty (an empty 8.3.27 infobase has no Config rows
+either), so the import staged base-free by itself, 9 838 rows in 9 s.
+Native `config apply` (890 s, then the SDBL retry above, "не требуется")
+and native `config export`: 12 197 / 12 198, `ConfigDumpInfo.xml` identical
+once configVersion is blanked. A second import into the now loaded
+infobase took the patch path by itself (the target holds the
+configuration; 9 517 rows, 14 s); native apply (104 s, a new generation,
+no structure change) and export: the same 12 197 / 12 198.

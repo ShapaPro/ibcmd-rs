@@ -13,7 +13,7 @@
 //! `mssql-stage-source-objects --base-free`, which loads it into ConfigSave
 //! with SQL that does not read Config at all.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -37,6 +37,7 @@ use super::{
 use crate::cli::MssqlStageSourceObjectsArgs;
 use crate::compiler::families::assets::SourceAssetRegistry;
 use crate::metadata_model::audit::{brace_path_at, is_descriptor_xml};
+use crate::metadata_model::bodies_rows::{StubPart, stub_row_text};
 use crate::metadata_model::root::{
     ConfigurationFacts, MODULE_GROUP_CLASS_ID, configuration_facts, root_row, version_row,
     versions_row,
@@ -578,10 +579,12 @@ pub(crate) fn service_rows(
     Ok(rows)
 }
 
-/// The whole stage, in tree order, service rows last.
+/// The whole stage, in tree order, then the content-free rows
+/// `ConfigDumpInfo.xml` lists, service rows last.
 pub(crate) struct EmptyStage {
     pub context: EmptyStageContext,
     pub objects: Vec<EmptyStageObject>,
+    pub stubs: StubRows,
     pub service: Vec<EmptyStageRow>,
 }
 
@@ -590,12 +593,14 @@ impl EmptyStage {
         self.objects
             .iter()
             .flat_map(|object| object.failures.iter())
+            .chain(self.stubs.failures.iter())
     }
 
     pub fn rows(&self) -> impl Iterator<Item = &EmptyStageRow> {
         self.objects
             .iter()
             .flat_map(|object| object.rows.iter())
+            .chain(self.stubs.rows.iter())
             .chain(self.service.iter())
     }
 }
@@ -625,14 +630,23 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
             stage_timing::report(started.elapsed(), parallel::io_bound_worker_count())
         );
     }
+    let stubs = stub_rows(
+        &context,
+        &objects
+            .iter()
+            .flat_map(|object| object.rows.iter().map(|row| row.file_name.as_str()))
+            .collect(),
+    )?;
     let names = objects
         .iter()
         .flat_map(|object| object.rows.iter().map(|row| row.file_name.clone()))
+        .chain(stubs.rows.iter().map(|row| row.file_name.clone()))
         .collect::<Vec<_>>();
     let service = service_rows(&context, &names)?;
     Ok(EmptyStage {
         context,
         objects,
+        stubs,
         service,
     })
 }
@@ -1221,6 +1235,34 @@ pub fn audit_empty_stage(
         manifest.extend(object_manifest);
     }
 
+    // The content-free rows ConfigDumpInfo.xml lists, once every object's
+    // own rows are known.
+    let stubs = stub_rows(&context, &names.iter().map(String::as_str).collect())?;
+    for row in &stubs.rows {
+        write_row(row)?;
+        names.push(row.file_name.clone());
+        let (item, digest) = measure_stub(&stored, row, keep_samples)?;
+        if options.manifest.is_some() {
+            manifest.push(digest);
+        }
+        measured.push(item);
+    }
+    for failure in &stubs.failures {
+        measured.push(Measured {
+            file_name: failure.file_name.clone().unwrap_or_default(),
+            kind: failure.kind.clone(),
+            family: failure.family.clone(),
+            source: failure.source.clone(),
+            outcome: Outcome::Failed,
+            benign: None,
+            offset: None,
+            brace_path: None,
+            detail: failure.error.clone(),
+            expected: None,
+            actual: None,
+        });
+    }
+
     // Service rows: root and version compared byte for byte (masking their
     // uuids once hid a generated uuid in 8.5's version row, which apply
     // refused), versions by its names.
@@ -1794,6 +1836,177 @@ fn build_base_free_bulk_stage_apply_sql(database: &str, table: &str, staged_rows
     )
 }
 
+// ---------------------------------------------------------------------------
+// Content-free rows the tree's ConfigDumpInfo.xml lists.
+// ---------------------------------------------------------------------------
+
+/// Rows a stored configuration keeps for parts whose content was deleted in
+/// the Designer -- an emptied help, command interface, predefined data or
+/// aggregates. The export writes no file for them, so the tree holds nothing
+/// to compile them from, but its `ConfigDumpInfo.xml` still lists them, and
+/// the platform's export of a database without them lists them no more (ERP
+/// УХ: 145 such rows, 132 helps, 11 predefined, 1 aggregates, 1 command
+/// interface). They are written from that list, their bytes modelled on the
+/// stored rows (`bodies_rows::stub_row_text`).
+#[derive(Debug, Default)]
+pub(crate) struct StubRows {
+    pub rows: Vec<EmptyStageRow>,
+    pub failures: Vec<EmptyStageFailure>,
+}
+
+/// The entries of `ConfigDumpInfo.xml` that may name a content-free row:
+/// top-level entries (they carry a configVersion; the nested ones are
+/// children inside their parent's descriptor) of a part `StubPart` knows.
+/// A tree without the file has none.
+fn dump_info_stub_candidates(root: &Path) -> Result<Vec<(String, String, StubPart)>> {
+    use quick_xml::events::Event;
+    let path = root.join("ConfigDumpInfo.xml");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+    let mut buffer = Vec::new();
+    let mut out = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        match event {
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"Metadata" =>
+            {
+                let (mut name, mut id, mut versioned) = (None, None, false);
+                for attribute in element.attributes().flatten() {
+                    let value = || String::from_utf8_lossy(&attribute.value).into_owned();
+                    match attribute.key.local_name().as_ref() {
+                        b"name" => name = Some(value()),
+                        b"id" => id = Some(value().to_ascii_lowercase()),
+                        b"configVersion" => versioned = true,
+                        _ => {}
+                    }
+                }
+                if let (true, Some(name), Some(id)) = (versioned, name, id)
+                    && let Some(part) = StubPart::of_dump_info_name(&name)
+                {
+                    out.push((name, id, part));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(out)
+}
+
+/// The content-free rows `ConfigDumpInfo.xml` lists and nothing produced
+/// (`produced`: every object's own rows). An entry is written only for an
+/// object the tree holds, in the row its part takes for the object's kind:
+/// a list older than the tree names nothing else.
+pub(crate) fn stub_rows(context: &EmptyStageContext, produced: &HashSet<&str>) -> Result<StubRows> {
+    let mut stubs = StubRows::default();
+    let index = &context.descriptors.index;
+    for (name, id, part) in dump_info_stub_candidates(&context.root)? {
+        if produced.contains(id.as_str()) {
+            continue;
+        }
+        let Some((owner, suffix)) = id.split_once('.') else {
+            continue;
+        };
+        let Some(entry) = index
+            .objects_by_uuid
+            .get(owner)
+            .and_then(|full_name| index.objects.get(full_name))
+        else {
+            continue;
+        };
+        let source = relative_of(&context.root, &entry.path);
+        let text = context
+            .descriptors
+            .source
+            .read_source(&entry.path)
+            .map_err(anyhow::Error::from)
+            .and_then(|xml| stub_row_text(part, &entry.kind, suffix, &xml, &context.descriptors))
+            .and_then(|text| text.map(|text| Ok((deflate_raw(&text)?, text))).transpose());
+        match text {
+            Ok(Some((blob, plain))) => stubs.rows.push(EmptyStageRow {
+                file_name: id,
+                family: "stub".to_string(),
+                source,
+                blob,
+                plain: Some(plain),
+            }),
+            Ok(None) => {}
+            Err(error) => stubs.failures.push(EmptyStageFailure {
+                file_name: Some(id),
+                kind: entry.kind.clone(),
+                family: "stub".to_string(),
+                source,
+                error: format!("{name}: {}", error_text(&error)),
+            }),
+        }
+    }
+    Ok(stubs)
+}
+
+/// A stub row against the stored one, as the audit measures every row;
+/// with its manifest line.
+fn measure_stub(
+    stored: &StoredRows,
+    row: &EmptyStageRow,
+    keep_samples: bool,
+) -> Result<(Measured, (String, String, usize, String, String))> {
+    let plain = row
+        .plain
+        .clone()
+        .unwrap_or_else(|| inflate_raw(&row.blob).unwrap_or_else(|_| row.blob.clone()));
+    let digest = (
+        row.file_name.clone(),
+        row.family.clone(),
+        row.blob.len(),
+        hex_sha256(&row.blob),
+        hex_sha256(&plain),
+    );
+    let mut item = Measured {
+        file_name: row.file_name.clone(),
+        kind: "stub".to_string(),
+        family: row.family.clone(),
+        source: row.source.clone(),
+        outcome: Outcome::Extra,
+        benign: None,
+        offset: None,
+        brace_path: None,
+        detail: String::new(),
+        expected: None,
+        actual: None,
+    };
+    match stored.plain(&row.file_name)? {
+        None => {}
+        Some(expected) if expected == plain => item.outcome = Outcome::Identical,
+        Some(expected) => {
+            let offset = first_difference(&expected, &plain);
+            item.outcome = Outcome::Different;
+            item.benign = benign_difference(&expected, &plain);
+            item.offset = Some(offset);
+            item.brace_path = Some(brace_path_at(&expected, offset));
+            item.detail = format!(
+                "stored {} | produced {}",
+                excerpt(&expected, offset),
+                excerpt(&plain, offset)
+            );
+            if keep_samples {
+                item.expected = Some(expected);
+                item.actual = Some(plain);
+            }
+        }
+    }
+    Ok((item, digest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1853,6 +2066,58 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(serial.len(), 7, "{serial:?}");
         assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn stub_candidates_are_the_listed_rows_of_the_four_parts() {
+        let root = std::env::temp_dir().join(format!(
+            "ibcmd-rs-dump-info-stubs-{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(dump_info_stub_candidates(&root).unwrap().is_empty());
+        fs::write(
+            root.join("ConfigDumpInfo.xml"),
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <ConfigDumpInfo xmlns=\"http://v8.1c.ru/8.3/xcf/dumpinfo\" format=\"Hierarchical\" version=\"2.20\">\n\
+             \t<ConfigVersions>\n\
+             \t\t<Metadata name=\"Catalog.A\" id=\"aaaaaaaa-0000-4000-8000-000000000001\" configVersion=\"01\">\n\
+             \t\t\t<Metadata name=\"Catalog.A.Attribute.Help\" id=\"bbbbbbbb-0000-4000-8000-000000000001\"/>\n\
+             \t\t</Metadata>\n\
+             \t\t<Metadata name=\"Catalog.A.Help\" id=\"AAAAAAAA-0000-4000-8000-000000000001.0\" configVersion=\"02\"/>\n\
+             \t\t<Metadata name=\"Catalog.A.Predefined\" id=\"aaaaaaaa-0000-4000-8000-000000000001.1c\" configVersion=\"03\"/>\n\
+             \t\t<Metadata name=\"Catalog.A.Form.F\" id=\"cccccccc-0000-4000-8000-000000000001\" configVersion=\"04\"/>\n\
+             \t\t<Metadata name=\"Catalog.A.Form.F.Form\" id=\"cccccccc-0000-4000-8000-000000000001.0\" configVersion=\"05\"/>\n\
+             \t\t<Metadata name=\"AccumulationRegister.R.Aggregates\" id=\"dddddddd-0000-4000-8000-000000000001.3\" configVersion=\"06\"/>\n\
+             \t\t<Metadata name=\"Subsystem.S.CommandInterface\" id=\"eeeeeeee-0000-4000-8000-000000000001.1\" configVersion=\"07\"/>\n\
+             \t</ConfigVersions>\n\
+             </ConfigDumpInfo>\n",
+        )
+        .unwrap();
+        let found = dump_info_stub_candidates(&root).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let found = found
+            .iter()
+            .map(|(_, id, part)| (id.as_str(), *part))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![
+                ("aaaaaaaa-0000-4000-8000-000000000001.0", StubPart::Help),
+                (
+                    "aaaaaaaa-0000-4000-8000-000000000001.1c",
+                    StubPart::Predefined
+                ),
+                (
+                    "dddddddd-0000-4000-8000-000000000001.3",
+                    StubPart::Aggregates
+                ),
+                (
+                    "eeeeeeee-0000-4000-8000-000000000001.1",
+                    StubPart::CommandInterface
+                ),
+            ]
+        );
     }
 
     #[test]

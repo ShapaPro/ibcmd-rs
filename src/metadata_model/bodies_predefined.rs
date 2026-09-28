@@ -72,16 +72,46 @@ pub fn predefined_row(
     let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let document = parse_element_tree(&bytes)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    let items = document.children_named("Item").collect::<Vec<_>>();
+    predefined_tree(kind, owner, &items, false, context)
+}
+
+/// The row of an owner whose predefined items were all deleted: the tree
+/// with its root alone. A configuration that had items keeps this row (its
+/// `ConfigDumpInfo.xml` lists it) while the export writes no
+/// `Predefined.xml` for it, so a load writes it from that list. A catalog's
+/// root then carries the six values an edited tree stores -- the empty code
+/// and description too -- as 10 of the 11 such rows of ERP УХ do (the
+/// eleventh was never edited: four values). The next row index the platform
+/// keeps (`-1,<n>` after the rows) counts the deleted items, which the
+/// source does not record; the writer gives the fresh tree's 0.
+pub fn emptied_predefined_row(
+    kind: &str,
+    owner: &Element,
+    context: &DescriptorContext,
+) -> Result<Option<Brace>> {
+    if predefined_suffix(kind).is_none() {
+        return Ok(None);
+    }
+    predefined_tree(kind, owner, &[], true, context)
+}
+
+fn predefined_tree(
+    kind: &str,
+    owner: &Element,
+    items: &[&Element],
+    emptied: bool,
+    context: &DescriptorContext,
+) -> Result<Option<Brace>> {
     let properties = owner
         .child("Properties")
         .ok_or_else(|| anyhow!("{kind} has no <Properties>"))?;
     let owner_name = properties.child_text("Name").unwrap_or_default();
-    let items = document.children_named("Item").collect::<Vec<_>>();
     let row = match kind {
-        "Catalog" => catalog_row(properties, &items)?,
-        "ChartOfCharacteristicTypes" => characteristic_row(properties, &items, context)?,
-        "ChartOfAccounts" => account_row(owner, owner_name, &items, context)?,
-        "ChartOfCalculationTypes" => calculation_row(properties, owner_name, &items, context)?,
+        "Catalog" => catalog_row(properties, items, emptied)?,
+        "ChartOfCharacteristicTypes" => characteristic_row(properties, items, context)?,
+        "ChartOfAccounts" => account_row(owner, owner_name, items, context)?,
+        "ChartOfCalculationTypes" => calculation_row(properties, owner_name, items, context)?,
         _ => return Ok(None),
     };
     Ok(Some(row))
@@ -237,8 +267,9 @@ fn string_pattern(length: i64) -> Brace {
 /// 56 of the 77 with a code length. The other roots also store an empty
 /// description (and a fixed code padded with spaces): every tree whose
 /// items were reordered or deleted in the Designer stores six values, so
-/// six is what an edit leaves, not what a load writes.
-fn catalog_row(properties: &Element, items: &[&Element]) -> Result<Brace> {
+/// six is what an edit leaves, not what a load writes; an `emptied` tree
+/// (every item deleted, see `emptied_predefined_row`) writes the six.
+fn catalog_row(properties: &Element, items: &[&Element], emptied: bool) -> Result<Brace> {
     let code = CodeType::of(properties)?;
     let columns = vec![
         Column::new(0, "", ref_pattern(), 0),
@@ -260,7 +291,10 @@ fn catalog_row(properties: &Element, items: &[&Element]) -> Result<Brace> {
         nil_ref(),
         string_value("Элементы"),
     ];
-    if code.length() == 0 {
+    if emptied {
+        root_values.push(code.empty());
+        root_values.push(string_value(""));
+    } else if code.length() == 0 {
         root_values.push(code.empty());
     }
     let mut root = Row::new(root_values);
