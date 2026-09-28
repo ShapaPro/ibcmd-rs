@@ -1039,6 +1039,7 @@ mod tests {
             dry_run: false,
             allow_non_lab: true,
             sqlcmd_trust_cert: true,
+            platform: None,
             source_version: crate::cli::InfobaseConfigSourceVersion::V2_20,
         };
         let error = load_extensions(&args).expect_err("8.5 write must fail closed");

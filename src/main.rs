@@ -5,6 +5,7 @@ use clap::Parser;
 use ibcmd_rs::cli::{Cli, Commands};
 #[cfg(feature = "platform-oracle")]
 use ibcmd_rs::cli::{InfobaseCommands, InfobaseConfigCommands};
+use ibcmd_rs::commands::platform::PlatformFlag;
 use ibcmd_rs::plan::SourceDiffSignatureOptions;
 
 /// mimalloc instead of the Windows process heap: the export's workers allocate
@@ -205,7 +206,8 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
-        Commands::AuditHelpWriter(args) => {
+        Commands::AuditHelpWriter(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::source_audit::audit_help_writer(
                 &args.root,
                 &args.inflated,
@@ -247,7 +249,8 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
-        Commands::AuditInterfaceWriter(args) => {
+        Commands::AuditInterfaceWriter(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::source_audit::audit_interface_writer(
                 &args.root,
                 &args.inflated,
@@ -289,7 +292,8 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
-        Commands::AuditEmptyStage(args) => {
+        Commands::AuditEmptyStage(mut args) => {
+            args.apply_platform_flag();
             let options = ibcmd_rs::mssql::EmptyStageAuditOptions {
                 max_samples: args.max_samples,
                 diff_dir: args.diff_dir,
@@ -307,7 +311,8 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
-        Commands::AuditMetadataExport(args) => {
+        Commands::AuditMetadataExport(mut args) => {
+            args.apply_platform_flag();
             use ibcmd_rs::metadata_model::export::{audit, tree_version};
             let options = audit::ExportAuditOptions {
                 kinds: args.kinds,
@@ -325,7 +330,8 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
-        Commands::AuditNameIndex(args) => {
+        Commands::AuditNameIndex(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql_dump::model_export::audit_name_index(
                 &args.root,
                 &args.rows,
@@ -370,7 +376,8 @@ fn run() -> Result<()> {
                 std::fs::write(&output, serde_json::to_string_pretty(&report)?)?;
             }
         }
-        Commands::AuditMetadataCompiler(args) => {
+        Commands::AuditMetadataCompiler(mut args) => {
+            args.apply_platform_flag();
             use ibcmd_rs::metadata_model::audit;
             let options = audit::DescriptorAuditOptions {
                 kinds: args.kinds,
@@ -564,7 +571,8 @@ fn run() -> Result<()> {
             let report = ibcmd_rs::dump_sources::dump_sources(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Commands::MssqlDumpConfig(args) => {
+        Commands::MssqlDumpConfig(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql_dump::dump_config(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -582,11 +590,13 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Commands::MssqlDumpExtension(args) => {
+        Commands::MssqlDumpExtension(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql_extension_export::dump_extensions(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Commands::MssqlLoadExtension(args) => {
+        Commands::MssqlLoadExtension(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql_extension_load::load_extensions(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -649,7 +659,8 @@ fn run() -> Result<()> {
             let report = ibcmd_rs::mssql::activate_staged_main(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Commands::MssqlApplySourceChange(args) => {
+        Commands::MssqlApplySourceChange(mut args) => {
+            args.apply_platform_flag();
             if args.watch {
                 ibcmd_rs::mssql_apply::watch_source_changes(&args)?;
             } else {
@@ -657,7 +668,8 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
-        Commands::MssqlAuditSourceParity(args) => {
+        Commands::MssqlAuditSourceParity(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql::audit_source_parity(&args)?;
             if let Some(output) = args.output {
                 let json = serde_json::to_string_pretty(&report)?;
@@ -726,7 +738,8 @@ fn run() -> Result<()> {
             let report = ibcmd_rs::mssql::stage_source_common_module_objects(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Commands::MssqlStageSourceObjects(args) => {
+        Commands::MssqlStageSourceObjects(mut args) => {
+            args.apply_platform_flag();
             let report = ibcmd_rs::mssql::stage_source_objects(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }

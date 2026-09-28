@@ -233,6 +233,7 @@ fn export_config_report(
         no_binary_rows: true,
         write_binary_rows: false,
         write_manifest: false,
+        platform: None,
         source_version,
     };
     let dump = crate::mssql_dump::dump_config(&dump_args)?;
@@ -846,6 +847,7 @@ fn build_import_stage_args(
         replace_config_save: args.replace_config_save,
         allow_non_lab: args.allow_non_lab,
         batch_size: args.batch_size,
+        platform: None,
         source_version: Some(config.legacy_source_version()?),
         path_prefix: args.path_prefix.clone(),
         script_output: args.script_output.clone(),

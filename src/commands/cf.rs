@@ -40,6 +40,7 @@ use crate::{
         CfArgs, CfBootstrapArgs, CfCommands, CfCompression, CfExportArgs, CfExtractArgs,
         CfInspectArgs, CfOverlayArgs, CfRevision, CfVerifyArgs,
     },
+    commands::platform::PlatformFlag,
     compiler::{
         CompileAxes, CompileRequest, PrepackedSource, SourcePayload,
         bootstrap::{BootstrapCompileError, compile_bootstrap_source_tree},
@@ -358,9 +359,18 @@ pub fn run(args: CfArgs) -> Result<CfCommandReport, CfCommandError> {
         CfCommands::Inspect(args) => execute(inspect_options(args)).map(CfCommandReport::Archive),
         CfCommands::Verify(args) => execute(verify_options(args)).map(CfCommandReport::Archive),
         CfCommands::Extract(args) => extract(args),
-        CfCommands::Export(args) => export(args),
-        CfCommands::Overlay(args) => overlay(args),
-        CfCommands::Bootstrap(args) => bootstrap(args),
+        CfCommands::Export(mut args) => {
+            args.apply_platform_flag();
+            export(args)
+        }
+        CfCommands::Overlay(mut args) => {
+            args.apply_platform_flag();
+            overlay(args)
+        }
+        CfCommands::Bootstrap(mut args) => {
+            args.apply_platform_flag();
+            bootstrap(args)
+        }
     }
 }
 
@@ -1994,6 +2004,7 @@ mod tests {
         let args = || CfBootstrapArgs {
             source_dir: source.clone(),
             output: output.clone(),
+            platform: None,
             source_version: crate::legacy_version::InfobaseConfigSourceVersion::V2_20,
             target_profile: "platform-8.3.27.1989".to_owned(),
             profile_dir: None,
