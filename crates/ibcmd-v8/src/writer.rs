@@ -296,7 +296,9 @@ fn validate_element_header(header: &[u8], index: usize) -> Result<(), WriterErro
         });
     }
     let units = name
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|unit| *unit != 0)
         .collect::<Vec<_>>();
@@ -905,7 +907,9 @@ fn validate_format16_element_header(
         });
     }
     let units = name
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|unit| *unit != 0)
         .collect::<Vec<_>>();

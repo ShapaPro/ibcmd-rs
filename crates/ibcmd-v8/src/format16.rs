@@ -283,7 +283,7 @@ pub(crate) fn parse_at(bytes: &[u8], base_offset: usize) -> Result<Container, Fo
     }
 
     let mut elements = Vec::with_capacity(toc.len() / ELEMENT_ADDRESS_SIZE);
-    for (index, raw_address) in toc.chunks_exact(ELEMENT_ADDRESS_SIZE).enumerate() {
+    for (index, raw_address) in toc.as_chunks::<ELEMENT_ADDRESS_SIZE>().0.iter().enumerate() {
         let address = read_element_address(raw_address, index)?;
         let header_address = match address.header_address {
             SENTINEL => return Err(Format16Error::AbsentHeaderAddress { index }),
@@ -376,7 +376,9 @@ fn element_name(header: &[u8], index: usize) -> Result<String, Format16Error> {
         });
     }
     let units = name_region
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|unit| *unit != 0)
         .collect::<Vec<_>>();

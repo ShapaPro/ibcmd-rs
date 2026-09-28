@@ -844,7 +844,9 @@ fn element_name(header: &[u8], index: usize) -> Result<String, ReaderError> {
         });
     }
     let units = name
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|unit| *unit != 0)
         .collect::<Vec<_>>();

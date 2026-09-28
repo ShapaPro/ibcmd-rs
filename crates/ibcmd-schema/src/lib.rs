@@ -1795,7 +1795,7 @@ where
         return None;
     }
     let mut items = Vec::with_capacity(count);
-    for pair in fields[2..].chunks_exact(2) {
+    for pair in fields[2..].as_chunks::<2>().0 {
         let name = exact_1c_string(pair[0])?;
         let (presentation, value) =
             parse_form_choice_parameter_value(pair[1], &mut resolve_design_time_ref)?;
