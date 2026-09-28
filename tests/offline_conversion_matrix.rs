@@ -499,11 +499,13 @@ fn accepted_roadmap_and_readme_report_full_completion() {
         "the release gate cannot pass while an accepted leaf task is open"
     );
 
-    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    // The roadmap's completion report moved with the previous README into
+    // docs/HISTORY.md when 0.2.0 replaced the README with a short guide.
+    let history = fs::read_to_string(root.join("docs/HISTORY.md")).unwrap();
     assert!(
-        readme.contains(
+        history.contains(
             "<!-- offline-converter-progress: completed=56 total=56 updated=2026-07-23 -->"
         )
     );
-    assert!(readme.contains("| **Overall** | **56/56** | **100%** |"));
+    assert!(history.contains("| **Overall** | **56/56** | **100%** |"));
 }
