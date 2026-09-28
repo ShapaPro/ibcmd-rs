@@ -3321,18 +3321,22 @@ pub fn stage_source_objects(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql = stage_sql(
-        args.sqlcmd.as_deref(),
-        args.bcp_executable.as_deref(),
-        &args.server,
-        args.sql_user.as_deref(),
-        sql_password.as_deref(),
-        &args.sql_pwd_env,
-    )?;
-    // `--script-only` with the base rows in files reaches no database at all.
-    if args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some() {
+    // `--script-only` with the base rows in files reaches no database at all
+    // (and needs no login).
+    let offline = args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some();
+    let sql = if offline {
         OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+        SqlExec::detached("an offline --script-only stage reaches no database")
+    } else {
+        stage_sql(
+            args.sqlcmd.as_deref(),
+            args.bcp_executable.as_deref(),
+            &args.server,
+            args.sql_user.as_deref(),
+            sql_password.as_deref(),
+            &args.sql_pwd_env,
+        )?
+    };
     install_always_used_constants_source(&sql, &args.database, Some(&args.source_root));
     // A bulk stage reads the base rows it patches in one pass (in slices on
     // several connections; one bcp query with --sqlcmd) instead of one query

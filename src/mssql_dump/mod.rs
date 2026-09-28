@@ -2130,15 +2130,20 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
-        sqlcmd: args.sqlcmd.as_deref(),
-        bcp: args.bcp_executable.as_deref(),
-        server: &args.server,
-        user: args.sql_user.as_deref(),
-        password: password.as_deref(),
-        password_env: &args.sql_pwd_env,
-        trust_server_certificate: true,
-    })?;
+    // `--rows-dir` answers every read from its folder; no login is needed.
+    let sql = if args.rows_dir.is_some() {
+        crate::sql::SqlExec::detached("--rows-dir reads every row from its folder")
+    } else {
+        crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
+            sqlcmd: args.sqlcmd.as_deref(),
+            bcp: args.bcp_executable.as_deref(),
+            server: &args.server,
+            user: args.sql_user.as_deref(),
+            password: password.as_deref(),
+            password_env: &args.sql_pwd_env,
+            trust_server_certificate: true,
+        })?
+    };
 
     let mut reports = Vec::new();
     let mut manifest_tables = Vec::new();

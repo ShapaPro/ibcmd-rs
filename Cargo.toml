@@ -51,7 +51,7 @@ walkdir = "2.5"
 [target.'cfg(windows)'.dependencies]
 # Integrated (Windows) logins to SQL Server through SSPI.
 tiberius = { version = "0.13", default-features = false, features = ["winauth"] }
-windows-sys ={ version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 # Fast rebuilds while iterating on a compiler against the lab corpora:
 # `cargo build --profile iter` -> target/iter/ibcmd-rs.exe.

@@ -17,8 +17,12 @@
 //! (`mssql-storage-*`, `mssql-delta-*`) keep bcp.exe for their native-format
 //! files either way.
 //!
-//! The SQL text the commands send is SQL Server's dialect today (see the
-//! report of the 0.3 SQL track for where).
+//! The statements the commands build are still T-SQL: the row reads and the
+//! `FOR JSON` statistics (`mssql.rs`, `mssql_dump/fetch.rs`,
+//! `mssql_dump/cas.rs`), the staging, extension and activation scripts
+//! (`tempdb` tables, `THROW`, `SYSUTCDATETIME()`, `sys.*` views) and the
+//! registry and profile probes. A second DBMS needs its own statements there
+//! as well as its own client.
 
 pub mod mssql;
 mod value;

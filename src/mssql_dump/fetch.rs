@@ -493,31 +493,11 @@ fn fetch_binary_rows_sliced(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<BinaryConfigRow>> {
-    let names = selected_file_names.iter().collect::<Vec<_>>();
-    let per_slice = names.len().div_ceil(client.max_connections().max(1));
-    let lows = names
-        .chunks(per_slice)
-        .map(|chunk| chunk[0].as_str())
-        .collect::<Vec<_>>();
-    let last = names.last().map_or("", |name| name.as_str());
-    let storage = qualified_storage_table(database, table);
-    let queries = lows
-        .iter()
-        .enumerate()
-        .map(|(index, low)| {
-            let high = match lows.get(index + 1) {
-                Some(next) => format!("FileName < N'{}'", quote_string(next)),
-                None => format!("FileName <= N'{}'", quote_string(last)),
-            };
-            format!(
-                "SELECT FileName, PartNo, DataSize, BinaryData\n\
-                 FROM {storage}\n\
-                 WHERE FileName >= N'{}' AND {high}\n\
-                 ORDER BY FileName, PartNo",
-                quote_string(low)
-            )
-        })
-        .collect::<Vec<_>>();
+    let queries = sliced_range_queries(
+        &qualified_storage_table(database, table),
+        selected_file_names,
+        client.max_connections(),
+    );
     // The journal lives on this thread: each slice is entered before the
     // reads start and completed after they end.
     let entries = queries
@@ -551,6 +531,41 @@ fn fetch_binary_rows_sliced(
     assemble_binary_config_rows(parts)
         .map(|rows| apply_row_overrides(table, rows))
         .with_context(|| format!("failed to assemble the rows of {database}.{table}"))
+}
+
+/// The range queries of a sliced batch read: at most `slices` contiguous runs
+/// of the (sorted) file names, each from its first name up to, not
+/// including, the next run's first, the last up to the last name.
+fn sliced_range_queries(
+    storage: &str,
+    file_names: &BTreeSet<String>,
+    slices: usize,
+) -> Vec<String> {
+    let names = file_names.iter().collect::<Vec<_>>();
+    let Some(last) = names.last() else {
+        return Vec::new();
+    };
+    let per_slice = names.len().div_ceil(slices.max(1));
+    let lows = names
+        .chunks(per_slice)
+        .map(|chunk| chunk[0].as_str())
+        .collect::<Vec<_>>();
+    lows.iter()
+        .enumerate()
+        .map(|(index, low)| {
+            let high = match lows.get(index + 1) {
+                Some(next) => format!("FileName < N'{}'", quote_string(next)),
+                None => format!("FileName <= N'{}'", quote_string(last)),
+            };
+            format!(
+                "SELECT FileName, PartNo, DataSize, BinaryData\n\
+                 FROM {storage}\n\
+                 WHERE FileName >= N'{}' AND {high}\n\
+                 ORDER BY FileName, PartNo",
+                quote_string(low)
+            )
+        })
+        .collect()
 }
 
 pub(super) fn fetch_binary_rows_query(
@@ -1937,7 +1952,7 @@ mod tests {
         build_fetch_metadata_owner_rows_bcp_query, build_fetch_row_headers_sql,
         complete_subprocess_call, fetch_binary_rows_query, journal_client_request,
         password_source_marker, query_marker, redact_password_value, run_sql_capture_tsv,
-        slice_queries, split_selected_file_names_for_bcp_query,
+        slice_queries, sliced_range_queries, split_selected_file_names_for_bcp_query,
         split_selected_file_names_for_owner_rows_query,
         split_selected_file_names_for_row_headers_query, start_subprocess_call,
     };
@@ -2172,6 +2187,30 @@ mod tests {
         assert!(!serialized.contains("top-secret-value"));
         assert!(serialized.contains("<query-sha256:"));
         let _ = fs::remove_file(journal_path);
+    }
+
+    #[test]
+    fn batch_slices_run_from_one_first_name_to_the_next() {
+        let names = ["a", "b", "c", "d", "e"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let queries = sliced_range_queries("[db].dbo.[Config]", &names, 2);
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].contains("WHERE FileName >= N'a' AND FileName < N'd'"));
+        assert!(queries[1].contains("WHERE FileName >= N'd' AND FileName <= N'e'"));
+        assert!(
+            queries
+                .iter()
+                .all(|query| query.ends_with("ORDER BY FileName, PartNo"))
+        );
+        // More slices than names: one slice a name, still gap-free.
+        let queries = sliced_range_queries("t", &names, 8);
+        assert_eq!(queries.len(), 5);
+        assert!(queries[4].contains("FileName >= N'e' AND FileName <= N'e'"));
+        let quoted = BTreeSet::from(["it's".to_owned()]);
+        assert!(sliced_range_queries("t", &quoted, 4)[0].contains("N'it''s'"));
+        assert!(sliced_range_queries("t", &BTreeSet::new(), 4).is_empty());
     }
 
     #[test]
