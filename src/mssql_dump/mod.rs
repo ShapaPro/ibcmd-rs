@@ -968,13 +968,10 @@ mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
 mod fetch;
+mod form;
 mod form_body;
 mod form_ref_index;
-mod form_v85;
-mod form_v85_load;
-mod form_v85_order;
-mod form_v85_writer;
-pub(crate) use form_v85_load::{
+pub(crate) use form::load_8_5_1::{
     compile_v85_form_body_in_v83_layout, compile_v85_native_form_body, down_convert_v85_form_xml,
     is_v85_form_xml, up_convert_v85_chart_records, up_convert_v85_primitives_in_place,
 };
@@ -6647,7 +6644,8 @@ fn parse_business_process_flowchart_blob(
     // An 8.5 flowchart differs from its 8.3.27 spelling only in its colour and
     // font tuples (BSP `BusinessProcesses/Задание`, member for member).
     let text = if source_version == InfobaseConfigSourceVersion::V2_21 {
-        form_v85::down_convert_v85_primitives_text(text.trim_start_matches('\u{feff}')).ok()?
+        form::layout_8_5_1::down_convert_v85_primitives_text(text.trim_start_matches('\u{feff}'))
+            .ok()?
     } else {
         text
     };
@@ -12192,7 +12190,7 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
     } else if kind == "PaletteColor" {
         let color = metadata_object_fields(text)
             .and_then(|fields| fields.get(2).map(|field| field.trim().to_string()))?;
-        let color = form_v85::v85_palette_color(&color)
+        let color = form::layout_8_5_1::v85_palette_color(&color)
             .map(ToOwned::to_owned)
             .or_else(|| form_body::parse_form_control_color(&color, object_refs))?;
         format_palette_color_source_xml(&header, &color, source_version).into_bytes()
@@ -31201,7 +31199,7 @@ fn enum_value_color_xml(color: &str) -> Option<String> {
     if color == "{3,4,{0}}" {
         return Some("auto".to_string());
     }
-    if let Some(name) = form_v85::v85_palette_color(color) {
+    if let Some(name) = form::layout_8_5_1::v85_palette_color(color) {
         return Some(name.to_string());
     }
     form_body::parse_form_control_color(color, &BTreeMap::new())
@@ -35265,7 +35263,7 @@ fn parse_style_color_value(value: &str) -> Option<String> {
         return None;
     }
     // An 8.5 style item may name a palette colour (8.5.1.1150 BSP: 7 items).
-    if let Some(name) = form_v85::v85_palette_color(fields.get(3)?) {
+    if let Some(name) = form::layout_8_5_1::v85_palette_color(fields.get(3)?) {
         return Some(name.to_owned());
     }
     let color_fields = split_1c_braced_fields(fields.get(3)?, 0)?;

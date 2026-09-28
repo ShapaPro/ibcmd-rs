@@ -2433,21 +2433,22 @@ fn write_source_asset_inner(
             // what its appended members say is applied to the written XML.
             let v85_converted;
             let mut v85_facts = None;
-            let body = if super::form_v85::is_v85_form_body(body) {
-                let (converted, facts) = super::form_v85::down_convert_v85_form_body(body)
-                    .map_err(|error| {
-                        anyhow::Error::new(SourceAssetRefusal::new(
-                            "source.form.v85.layout",
-                            MetadataSourceFailureClass::Unsupported,
-                            format!("{error:#}"),
-                        ))
-                    })
-                    .with_context(|| {
-                        format!(
-                            "failed to down-convert 8.5 form body of source asset {}",
-                            asset.primary_path.display()
-                        )
-                    })?;
+            let body = if super::form::layout_8_5_1::is_v85_form_body(body) {
+                let (converted, facts) =
+                    super::form::layout_8_5_1::down_convert_v85_form_body(body)
+                        .map_err(|error| {
+                            anyhow::Error::new(SourceAssetRefusal::new(
+                                "source.form.v85.layout",
+                                MetadataSourceFailureClass::Unsupported,
+                                format!("{error:#}"),
+                            ))
+                        })
+                        .with_context(|| {
+                            format!(
+                                "failed to down-convert 8.5 form body of source asset {}",
+                                asset.primary_path.display()
+                            )
+                        })?;
                 v85_converted = converted;
                 v85_facts = Some(facts);
                 &v85_converted
@@ -2494,7 +2495,7 @@ fn write_source_asset_inner(
                         std::env::var("IBCMD_RS_V85_FORM_PASS").is_ok_and(|value| value == "off");
                     let (xml, v85_item_assets) = match &v85_facts {
                         _ if v85_pass_off => (xml, Vec::new()),
-                        Some(facts) => super::form_v85_writer::apply_v85_form_facts(
+                        Some(facts) => super::form::xml_2_21_writer::apply_v85_form_facts(
                             xml,
                             facts,
                             context.object_refs,
@@ -2513,7 +2514,7 @@ fn write_source_asset_inner(
                                 )
                             })?,
                         None if context.source_version == InfobaseConfigSourceVersion::V2_21 => (
-                            super::form_v85_writer::apply_v85_upgrade_defaults(xml)
+                            super::form::xml_2_21_writer::apply_v85_upgrade_defaults(xml)
                                 .map_err(|error| {
                                     anyhow::Error::new(SourceAssetRefusal::new(
                                         "source.form.v85.upgrade",

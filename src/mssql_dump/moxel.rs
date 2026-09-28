@@ -1993,7 +1993,7 @@ pub(crate) fn try_extract_moxel_spreadsheet_xml_with_generated_types(
         MxlDiagnostic::decoder("mxl.decoder.binary-container", error.to_string())
     })?;
     // An 8.5 spreadsheet spells its colour and font tuples one revision later.
-    let text = super::form_v85::rewrite_v85_primitives_in_place(body.native_body_text());
+    let text = super::form::layout_8_5_1::rewrite_v85_primitives_in_place(body.native_body_text());
     let _scope = SplitCacheScope::new(&text);
     let decoded = decode_moxel_spreadsheet_ir(&text, object_refs, generated_types, None)?;
     write_moxel_spreadsheet_xml(&decoded)

@@ -8483,7 +8483,7 @@ fn extracts_form_scaling_mode_when_root_child_item_is_pages() {
 fn reads_platform_85_form_roots_through_their_down_conversion() {
     let save_window = extract_form_body_xml(
         include_bytes!(
-            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-v85-down-conversion/raw/1415ba25-2477-4d93-b248-95235d5086ed.deflate"
+            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-8.5.1-down-conversion/raw/1415ba25-2477-4d93-b248-95235d5086ed.deflate"
         ),
         &BTreeMap::new(),
     )
@@ -8496,7 +8496,7 @@ fn reads_platform_85_form_roots_through_their_down_conversion() {
 
     let long_operation = extract_form_body_xml(
         include_bytes!(
-            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-v85-down-conversion/raw/13797e94-aac4-40ef-a64b-a2fba16959b6.deflate"
+            "../../tests/fixtures/native-evidence/8.5.1.1150/form-root-8.5.1-down-conversion/raw/13797e94-aac4-40ef-a64b-a2fba16959b6.deflate"
         ),
         &BTreeMap::new(),
     )

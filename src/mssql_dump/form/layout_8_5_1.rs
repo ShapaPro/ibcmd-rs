@@ -25,7 +25,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::module_blob::ParsedFormBodyBlob;
 
 /// Layout revision of a platform 8.5 managed-form root.
-pub(super) const V85_FORM_ROOT_REVISION: &str = "59";
+pub(in crate::mssql_dump) const V85_FORM_ROOT_REVISION: &str = "59";
 const V83_FORM_ROOT_REVISION: &str = "50";
 /// Members the 8.5 root trailer appends after the 8.3.27 trailer.
 const V85_ROOT_TRAILER_APPENDED: usize = 12;
@@ -37,13 +37,13 @@ const FORM_CHOICE_LIST_VALUE_UUID: &str = "0e704aa2-07bd-48b9-8223-a0212c4d5fc2"
 /// A parsed brace tuple. Leaves keep their exact text (quoted strings with
 /// their quotes, base64 payloads with their own line breaks).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Node {
+pub(in crate::mssql_dump) enum Node {
     Leaf(String),
     List(Vec<Node>),
 }
 
 impl Node {
-    pub(super) fn as_leaf(&self) -> Option<&str> {
+    pub(in crate::mssql_dump) fn as_leaf(&self) -> Option<&str> {
         self.leaf()
     }
 
@@ -61,7 +61,7 @@ impl Node {
         }
     }
 
-    pub(super) fn to_text(&self) -> String {
+    pub(in crate::mssql_dump) fn to_text(&self) -> String {
         let mut out = String::new();
         self.emit(&mut out);
         out
@@ -85,7 +85,7 @@ impl Node {
 }
 
 /// Parses one brace tuple that starts at the first `{` of `text`.
-pub(super) fn parse_node(text: &str) -> Result<Node> {
+pub(in crate::mssql_dump) fn parse_node(text: &str) -> Result<Node> {
     let start = text
         .find('{')
         .ok_or_else(|| anyhow!("8.5 form body tuple has no opening brace"))?;
@@ -156,46 +156,46 @@ fn parse_list(text: &str, bytes: &[u8], start: usize) -> Result<(Node, usize)> {
 
 /// What the 8.5 members appended to one form item said.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct FormV85ItemFacts {
+pub(in crate::mssql_dump) struct FormV85ItemFacts {
     /// The item record's own 8.5 revision.
-    pub(super) revision: String,
+    pub(in crate::mssql_dump) revision: String,
     /// The members 8.5 appended to the item record, in order.
-    pub(super) tail: Vec<Node>,
+    pub(in crate::mssql_dump) tail: Vec<Node>,
     /// Every member of the 8.5 record ahead of the appended ones, and how
     /// far the optional common prefix shifts them.
-    pub(super) record: Vec<Node>,
-    pub(super) prefix_offset: usize,
+    pub(in crate::mssql_dump) record: Vec<Node>,
+    pub(in crate::mssql_dump) prefix_offset: usize,
     /// The item's kind code (group, field or decoration kind).
-    pub(super) kind: Option<String>,
+    pub(in crate::mssql_dump) kind: Option<String>,
     /// The item's property bag: its 8.5 revision, every 8.5 member, and the
     /// members 8.5 appended.
-    pub(super) bag_revision: Option<String>,
-    pub(super) bag: Vec<Node>,
-    pub(super) bag_tail: Vec<Node>,
+    pub(in crate::mssql_dump) bag_revision: Option<String>,
+    pub(in crate::mssql_dump) bag: Vec<Node>,
+    pub(in crate::mssql_dump) bag_tail: Vec<Node>,
 }
 
 /// Everything an 8.5 body carries beyond its 8.3.27 down-conversion.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct FormV85Facts {
+pub(in crate::mssql_dump) struct FormV85Facts {
     /// The 12 members the root trailer appends.
-    pub(super) root_tail: Vec<Node>,
+    pub(in crate::mssql_dump) root_tail: Vec<Node>,
     /// The member 8.5 appends to every choice-list value (its picture), in
     /// document order.
-    pub(super) choice_value_pictures: Vec<Node>,
+    pub(in crate::mssql_dump) choice_value_pictures: Vec<Node>,
     /// The root's scale percentage (`100` unless the form sets one), the
     /// member 20 from the end of the 8.5 root record.
-    pub(super) root_scale: Option<String>,
+    pub(in crate::mssql_dump) root_scale: Option<String>,
     /// Item facts by form item id.
-    pub(super) items: BTreeMap<String, FormV85ItemFacts>,
+    pub(in crate::mssql_dump) items: BTreeMap<String, FormV85ItemFacts>,
     /// Appended form-command members by command id.
-    pub(super) commands: BTreeMap<String, Vec<Node>>,
+    pub(in crate::mssql_dump) commands: BTreeMap<String, Vec<Node>>,
     /// Palette colour tuples left in their 8.5 shape (no 8.3.27 spelling).
-    pub(super) palette_colors: usize,
+    pub(in crate::mssql_dump) palette_colors: usize,
     /// Colour tuples of a kind or palette index nothing names.
-    pub(super) unknown_palette_colors: Vec<String>,
+    pub(in crate::mssql_dump) unknown_palette_colors: Vec<String>,
 }
 
-pub(super) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool {
+pub(in crate::mssql_dump) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool {
     let declares_revision = body
         .layout
         .trim_start()
@@ -209,7 +209,7 @@ pub(super) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool {
     // root also ends in its trailer, whose own `{59,...}` revision tuple sits
     // 14 members from the end.
     declares_revision
-        && super::split_1c_braced_fields(&body.layout, 0).is_some_and(|fields| {
+        && super::super::split_1c_braced_fields(&body.layout, 0).is_some_and(|fields| {
             fields.len() > V85_ROOT_TRAILER_APPENDED + 2
                 && fields[fields.len() - V85_ROOT_TRAILER_APPENDED - 2]
                     .trim_start()
@@ -223,7 +223,7 @@ pub(super) fn is_v85_form_body(body: &ParsedFormBodyBlob) -> bool {
 }
 
 /// Down-converts one 8.5 form body into the 8.3.27 shape the form codec reads.
-pub(super) fn down_convert_v85_form_body(
+pub(in crate::mssql_dump) fn down_convert_v85_form_body(
     body: &ParsedFormBodyBlob,
 ) -> Result<(ParsedFormBodyBlob, FormV85Facts)> {
     let mut facts = FormV85Facts::default();
@@ -373,7 +373,7 @@ fn is_v85_font(members: &[Node]) -> bool {
 /// 8.5.1.1150 BSP native tree: every item carrying exactly one palette tuple
 /// and one `pal:` element pairs index and name without exception over the 78
 /// such items. An index the table does not name refuses the body.
-pub(super) fn v85_palette_color_name(index: i64) -> Option<&'static str> {
+pub(in crate::mssql_dump) fn v85_palette_color_name(index: i64) -> Option<&'static str> {
     Some(match index {
         0 => "pal:FirstBrand",
         1 => "pal:SecondBrand",
@@ -391,12 +391,12 @@ pub(super) fn v85_palette_color_name(index: i64) -> Option<&'static str> {
 }
 
 /// The 2.21 spelling of a palette colour tuple, if `text` is one.
-pub(super) fn v85_palette_color(text: &str) -> Option<&'static str> {
+pub(in crate::mssql_dump) fn v85_palette_color(text: &str) -> Option<&'static str> {
     v85_palette_color_index(text.trim()).and_then(v85_palette_color_name)
 }
 
 /// Palette colour: space `4` ("automatic" to an 8.3.27 reader) with kind `5`.
-pub(super) fn v85_palette_color_index(text: &str) -> Option<i64> {
+pub(in crate::mssql_dump) fn v85_palette_color_index(text: &str) -> Option<i64> {
     let node = parse_node(text).ok()?;
     let members = node.list()?;
     if !is_v85_color(members) || members[1].leaf() != Some("4") || members[3].leaf() != Some("5") {
@@ -453,7 +453,9 @@ fn short_tuple_end(bytes: &[u8], start: usize, limit: usize) -> Option<usize> {
 /// BSP rows carry them by the tens of thousands. Rewriting them therefore
 /// changes nothing an 8.3.27 base stores. A palette colour, which 8.3.27
 /// cannot spell, stays as stored for the readers that name palettes.
-pub(super) fn rewrite_v85_primitives_in_place(text: &str) -> std::borrow::Cow<'_, str> {
+pub(in crate::mssql_dump) fn rewrite_v85_primitives_in_place(
+    text: &str,
+) -> std::borrow::Cow<'_, str> {
     const MAX_TUPLE: usize = 512;
     let bytes = text.as_bytes();
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
@@ -514,7 +516,7 @@ pub(super) fn rewrite_v85_primitives_in_place(text: &str) -> std::borrow::Cow<'_
 
 /// Rewrites the 8.5 colour and font tuples of any brace text into their
 /// 8.3.27 spelling. A palette colour, which 8.3.27 cannot spell, is refused.
-pub(super) fn down_convert_v85_primitives_text(text: &str) -> Result<String> {
+pub(in crate::mssql_dump) fn down_convert_v85_primitives_text(text: &str) -> Result<String> {
     let mut facts = FormV85Facts::default();
     let node = convert_primitives(parse_node(text)?, &mut facts);
     if facts.palette_colors != 0 {
@@ -584,7 +586,7 @@ fn item_identity(members: &[Node]) -> Option<&str> {
 }
 
 /// 8.5 item revision -> (8.3.27 revision, appended members).
-pub(super) fn item_revision(revision: &str) -> Option<(&'static str, usize)> {
+pub(in crate::mssql_dump) fn item_revision(revision: &str) -> Option<(&'static str, usize)> {
     Some(match revision {
         "48" => ("37", 15),
         "34" => ("31", 7),
@@ -598,7 +600,7 @@ pub(super) fn item_revision(revision: &str) -> Option<(&'static str, usize)> {
 
 /// The property-bag slot of a record that carries one, before the optional
 /// common prefix shifts it.
-pub(super) fn bag_base_slot(v83_revision: &str) -> Option<usize> {
+pub(in crate::mssql_dump) fn bag_base_slot(v83_revision: &str) -> Option<usize> {
     match v83_revision {
         "22" => Some(20),
         "37" => Some(39),
@@ -615,7 +617,7 @@ pub(super) fn bag_base_slot(v83_revision: &str) -> Option<usize> {
 /// members, while a `CommandBar` (kind 0) moves from `{1,...}` of three to
 /// `{2,...}` of four. Every (kind, shape) pair of the 8.5 BSP bodies is listed;
 /// each maps onto the one shape the 8.3.27 BSP bodies give that kind.
-pub(super) fn bag_revision(
+pub(in crate::mssql_dump) fn bag_revision(
     v83_owner: &str,
     kind: &str,
     revision: &str,

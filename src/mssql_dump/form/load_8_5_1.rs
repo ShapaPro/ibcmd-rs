@@ -25,8 +25,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::form_v85::Node;
-use super::form_v85_writer::{
+use super::layout_8_5_1::Node;
+use super::xml_2_21_writer::{
     FIELD_TAGS, GROUPING, TRI_STATE, XmlEdits, child_text, element_name, simple_text,
 };
 use crate::module_blob::MetadataSourceContext;
@@ -1661,7 +1661,7 @@ fn v85_base64_leaf(payload: &str) -> String {
         if !document.starts_with(b"<?xml") {
             return None;
         }
-        let declared = super::declare_palette_namespace_beside_style(bytes.clone());
+        let declared = super::super::declare_palette_namespace_beside_style(bytes.clone());
         (declared != bytes).then_some(declared)
     });
     let encoded = match declared {
@@ -2202,7 +2202,7 @@ mod tests {
                     for len in 0..=80 {
                         let revision = revision.to_string();
                         if let Some((v83, appended)) =
-                            super::super::form_v85::bag_revision(owner, &kind, &revision, len)
+                            super::super::layout_8_5_1::bag_revision(owner, &kind, &revision, len)
                         {
                             let (v85, defaults) = up_bag(owner, &kind, v83, len - appended)
                                 .unwrap_or_else(|| {

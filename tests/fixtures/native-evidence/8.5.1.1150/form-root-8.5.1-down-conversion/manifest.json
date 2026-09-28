@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_id": "8.5.1.1150-xml-2.21-form-root-v85-down-conversion",
+  "fixture_id": "8.5.1.1150-xml-2.21-form-root-8.5.1-down-conversion",
   "scope": "diagnostic_only",
   "evidence": {
     "status": "platform_written",
@@ -8,7 +8,7 @@
     "platform_version": "8.5.1.1150",
     "source_version": "2.21",
     "database_kind": "real_configuration",
-    "note": "Config table rows of the BSP 3.2 lab clone ibcmd_rs_bsp_85_src_20260922, re-saved by platform 8.5.1.1150 (root revision 59, 12 members appended to the root trailer), read offline from the lab row cache; the native 8.5.1.1150 export writes each `proves` property. The source export reads such a body through its 8.3.27 down-conversion (form_v85), and extract_form_body_xml reads it the same way."
+    "note": "Config table rows of the BSP 3.2 lab clone ibcmd_rs_bsp_85_src_20260922, re-saved by platform 8.5.1.1150 (root revision 59, 12 members appended to the root trailer), read offline from the lab row cache; the native 8.5.1.1150 export writes each `proves` property. The source export reads such a body through its 8.3.27 down-conversion (form/layout_8_5_1.rs), and extract_form_body_xml reads it the same way."
   },
   "objects": [
     {
