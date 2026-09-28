@@ -1,9 +1,10 @@
 # ibcmd-rs
 
 Быстрая замена штатного `ibcmd` для выгрузки и загрузки конфигурации 1С
-между XML-файлами и базой на Microsoft SQL Server. Утилита работает с
-таблицами базы напрямую, а на выходе даёт тот же XML, что и штатный
-`ibcmd infobase config export`.
+между XML-файлами и базой на Microsoft SQL Server. Утилиту можно положить
+вместо `ibcmd.exe`: у команд `infobase config export` и `infobase config
+import` тот же синтаксис, тот же вывод и те же коды возврата, а на выходе тот
+же XML, что у штатного `ibcmd`. Утилиты SQL Server (`sqlcmd`, `bcp`) не нужны.
 
 > **Внимание.** Проект экспериментальный и предназначен для исследований и
 > обучения. Команды, которые пишут в базу, запускайте только на копиях баз.
@@ -12,32 +13,90 @@
 
 | Задача | Команда | Проверено |
 |---|---|---|
-| Выгрузить конфигурацию из базы в XML (аналог `config export`) | `mssql-dump-config` | БСП и ERP УХ, платформы 8.3.27 и 8.5: все файлы совпадают со штатной выгрузкой |
-| Загрузить XML в существующую базу (аналог `config import`) | `mssql-stage-source-objects` | БСП и ERP УХ: после загрузки штатная выгрузка совпадает с исходным XML |
-| Загрузить XML в пустую базу | `mssql-stage-source-objects --base-free` | БСП и ERP УХ, 8.3.27 и 8.5 |
-| Сравнить два дерева XML | `source-diff` | — |
-| Выгрузить XML без сервера, из сохранённых строк таблицы Config | `mssql-dump-config --rows-dir` | — |
+| Выгрузить конфигурацию из базы в XML | `ibcmd infobase config export` | БСП и ERP УХ, платформы 8.3.27 и 8.5: все файлы совпадают со штатной выгрузкой |
+| Загрузить XML в существующую базу | `ibcmd infobase config import` | после загрузки и штатного `config apply` штатная выгрузка совпадает с исходным XML |
+| Загрузить XML в пустую базу | `ibcmd infobase config import` (режим выбирается сам) | БСП и ERP УХ, 8.3.27 и 8.5 |
+| Сравнить два дерева XML | `ibcmd-rs source-diff` | — |
 
 Скорость на одной машине, ERP УХ (около 140 тысяч файлов):
 
 | | штатный `ibcmd` | `ibcmd-rs` |
 |---|---|---|
-| Выгрузка ERP УХ 8.3.27 | 6–7 мин | 3,5–4,5 мин |
+| Выгрузка ERP УХ 8.3.27 | 6–7 мин | 3–4 мин |
 | Выгрузка ERP УХ 8.5 | 5,5–7 мин | 3–4 мин |
 | Загрузка ERP УХ 8.5 (XML в ConfigSave) | 11 мин 49 с | 7 мин 16 с |
 
-Применение конфигурации (`config apply`) в обоих случаях выполняет платформа.
+Применение конфигурации (`config apply`) и создание базы выполняет штатная
+платформа.
 
 ## Что нужно
 
 - Windows x64.
-- Microsoft SQL Server и его утилиты `sqlcmd` и `bcp` (Command Line Utilities).
-- Для загрузки: штатная платформа 1С (`ibcmd.exe`) той же версии, что и база.
-  Она создаёт пустую базу и применяет загруженную конфигурацию.
+- Microsoft SQL Server (вход Windows или логин SQL Server).
+- Для загрузки: штатная платформа 1С той же версии, что и база. Она создаёт
+  пустую базу и применяет загруженную конфигурацию.
 
 Скачайте архив `ibcmd-rs-<версия>-x86_64-pc-windows-msvc.zip` со страницы
 [Releases](https://github.com/Untru/ibcmd-rs/releases) и распакуйте его.
-Версия утилиты: `ibcmd-rs --version`.
+
+## Как подменить ibcmd
+
+Скопируйте `ibcmd-rs.exe` под именем `ibcmd.exe` в отдельную папку и
+запускайте выгрузку и загрузку из неё, как штатный `ibcmd`:
+
+```
+ibcmd infobase config export --dbms=MSSQLServer --db-server=localhost ^
+  --db-name=MyBase C:\export\MyBase
+
+ibcmd infobase config import --dbms=MSSQLServer --db-server=localhost ^
+  --db-name=MyBase C:\export\MyBase
+```
+
+Штатный `ibcmd.exe` платформы не заменяйте: `config apply` и `infobase
+create` по-прежнему выполняет он. Если положить утилиту в папку платформы
+(`...\1cv8\8.3.27.2214\bin\`), версию платформы она возьмёт из имени папки.
+
+Вывод такой же, как у штатного:
+
+```
+[INFO] Экспорт конфигурации в XML...
+[INFO] Экспорт конфигурации в XML успешно завершен
+```
+
+**Параметры.** Принимаются все общие параметры штатного `ibcmd` в обоих
+написаниях (`--db-server` и `--database-server`, `--x=значение` и
+`--x значение`):
+- `--dbms=MSSQLServer`, `--db-server`, `--db-name`, `--db-user`, `--db-pwd`;
+- `-W` — пароль СУБД из стандартного ввода;
+- `-c/--config` — файл настроек штатного `ibcmd`, из его раздела `database:`
+  берутся сервер, база, логин и пароль;
+- `--data`, `--temp`, `--user`, `--password`;
+- у выгрузки `--threads`; `--force` принимается, но непустой каталог, как и у
+  штатного, не перезаписывается.
+
+Свои параметры утилиты:
+- `--platform` — версия платформы, см. ниже;
+- `--report <файл>` — подробный отчёт в JSON;
+- `--sqlcmd <путь>` — работать через `sqlcmd` и `bcp`, как версия 0.2.
+
+**Загрузка в пустую базу.** Отдельного ключа не нужно: если в таблице Config
+базы нет строк этой конфигурации (база только что создана `ibcmd infobase
+create`), конфигурация собирается целиком из XML.
+
+**Чего пока нет.** Остальные команды и режимы штатного `ibcmd` (`config
+apply`, `infobase create`, CF, расширения, `server` и другие), файловые базы
+(`--db-path`) и СУБД кроме MSSQLServer отвечают сообщением «не
+поддерживается в этой версии ibcmd-rs» с кодом 1. Штатный `ibcmd` вместо них
+не запускается.
+
+**Коды возврата:**
+
+| Код | Когда |
+|---|---|
+| 0 | успех |
+| 2 | ошибка в командной строке: неизвестный параметр, нет значения, неполная команда (как у штатного) |
+| −1 | операция завершилась с ошибкой (как у штатного; в bash видно как 255) |
+| 1 | команда или параметр не поддерживаются в этой версии ibcmd-rs |
 
 ## Как указать платформу
 
@@ -52,8 +111,7 @@
 
 При выгрузке это формат, в котором будет записан XML. При загрузке — формат
 загружаемых файлов: утилита проверяет, что он совпадает. Неизвестная версия
-отклоняется со списком известных. Прежний `--source-version 2.20 | 2.21`
-по-прежнему принимается.
+отклоняется со списком известных.
 
 Без `--platform` платформа берётся по порядку:
 
@@ -87,75 +145,43 @@ platform = "8.5.1.1150"
 
 ## Подключение к SQL Server
 
-По умолчанию утилита подключается к `localhost` с входом Windows. Для входа
-SQL Server укажите `--sql-user <логин>`, а пароль положите в переменную
-окружения `IBCMD_DB_PSW` или передайте `--sql-pwd`. Имя сервера задаёт
-`--server`. Путь к `sqlcmd` задаёт `--sqlcmd`; `bcp` ищется рядом с ним.
-Сервер и логин без параметров берутся из переменных `IBCMD_RS_DB_SERVER`,
-`IBCMD_RS_DB_USER` или из `db-server` и `db-user` в `ibcmd-rs.toml`; пароль в
-этом файле не хранится.
+Утилита подключается к SQL Server сама, по протоколу TDS; `sqlcmd` и `bcp`
+не нужны.
 
-В примерах ниже:
+- **Сервер:** `localhost`, `сервер\экземпляр` (или `сервер/экземпляр`, как
+  пишет штатный `ibcmd`), `сервер,порт`. Только TCP; для `np:` и `lpc:`
+  укажите `--sqlcmd`.
+- **Вход:** по умолчанию Windows. Для логина SQL Server укажите `--db-user`, а
+  пароль передайте `--db-pwd`, через `-W` или в переменной `IBCMD_DB_PSW`.
+- **Шифрование** включено; сертификат сервера принимается без проверки, как у
+  `sqlcmd -C`.
+- **Соединения:** выгрузка читает базу по нескольким соединениям, их число
+  задаёт `IBCMD_RS_SQL_CONNECTIONS` (по умолчанию 4).
 
-```
-set SQLCMD=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\180\Tools\Binn\SQLCMD.EXE
-```
+Сервер и логин без параметров берутся из переменных `IBCMD_RS_DB_SERVER` и
+`IBCMD_RS_DB_USER`, из `db-server` и `db-user` в `ibcmd-rs.toml` или из
+раздела `database:` файла `--config`. Пароль в `ibcmd-rs.toml` не хранится.
 
-## Выгрузить конфигурацию в XML
+## Команды самой утилиты
 
-```
-ibcmd-rs mssql-dump-config --database MyBase --sqlcmd "%SQLCMD%" ^
-  --extract-metadata-xml --extract-module-text --no-binary-rows ^
-  --platform 8.3.27 -o C:\export\MyBase
-```
-
-В папке `C:\export\MyBase` окажется то же дерево XML, что у штатной выгрузки,
-плюс служебный `manifest.json`. `--overwrite` разрешает писать в непустую
-папку.
-
-## Загрузить XML в существующую базу
-
-Загрузка идёт в два шага, как у штатного `ibcmd`: сначала конфигурация
-записывается в таблицу ConfigSave, потом её применяет платформа.
+Кроме синтаксиса `ibcmd`, у утилиты есть свои команды с подробными
+параметрами (`ibcmd-rs --help`):
 
 ```
-ibcmd-rs mssql-stage-source-objects --database MyBase --sqlcmd "%SQLCMD%" ^
+ibcmd-rs mssql-dump-config --database MyBase --extract-metadata-xml ^
+  --extract-module-text --no-binary-rows --platform 8.3.27 -o C:\export\MyBase
+
+ibcmd-rs mssql-stage-source-objects --database MyBase ^
   --source-root C:\export\MyBase --platform 8.3.27 ^
-  --replace-config-save --allow-non-lab
+  --replace-config-save --allow-non-lab [--base-free]
 
-ibcmd infobase config apply --dbms=MSSQLServer --db-server=localhost ^
-  --db-name=MyBase --force
-```
-
-`--allow-non-lab` — обязательное подтверждение, что команда будет писать в
-базу. `--script-only` только подготовит данные и SQL, ничего не записывая.
-Штатному `ibcmd` при входе SQL Server добавьте `--db-user` и `--db-pwd`.
-
-## Загрузить XML в пустую базу
-
-```
-ibcmd infobase create --dbms=MSSQLServer --db-server=localhost ^
-  --db-name=NewBase --create-database
-
-ibcmd-rs mssql-stage-source-objects --database NewBase --sqlcmd "%SQLCMD%" ^
-  --source-root C:\export\MyBase --platform 8.3.27 ^
-  --replace-config-save --allow-non-lab --base-free
-
-ibcmd infobase config apply --dbms=MSSQLServer --db-server=localhost ^
-  --db-name=NewBase --force
-```
-
-`--base-free` собирает все строки конфигурации только из XML, ничего не
-читая из целевой базы.
-
-## Сравнить две выгрузки
-
-```
 ibcmd-rs source-diff -o diff.json C:\export\native C:\export\ours
 ```
 
-В `diff.json` будут итоги (`unchanged`, `different`, `left_only`,
-`right_only`) и список расхождений по файлам.
+У них сервер задаёт `--server`, логин — `--sql-user`, пароль — `--sql-pwd` или
+`IBCMD_DB_PSW`. `mssql-dump-config --rows-dir` выгружает XML без сервера, из
+сохранённых строк таблицы Config. В `diff.json` будут итоги (`unchanged`,
+`different`, `left_only`, `right_only`) и список расхождений по файлам.
 
 ## Ограничения
 
@@ -164,9 +190,7 @@ ibcmd-rs source-diff -o diff.json C:\export\native C:\export\ours
   штатная платформа 1С.
 - Проверено на БСП и ERP УХ, платформы 8.3.27.2214 и 8.5.1.1150. Другие
   конфигурации и версии платформы могут дать расхождения.
-- При загрузке ERP УХ в пустую базу в `ConfigDumpInfo.xml` нет 145 пустых
-  служебных записей: справки и предопределённых данных без содержимого.
-  На остальные файлы XML это не влияет.
+- `ibcmd -v` печатает версию утилиты, а не платформы.
 - Остальные команды (`ibcmd-rs --help`: расширения, CF, аудит) —
   исследовательские и проверены меньше.
 
