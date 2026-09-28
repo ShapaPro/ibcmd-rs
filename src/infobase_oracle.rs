@@ -295,7 +295,7 @@ pub fn roundtrip_config(
             legacy_adapter: config.legacy_adapter.clone(),
             xml_version_given: config.xml_version_given,
         },
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         &args.db_pwd_env,
         &after_apply_dir,
         args.overwrite,
@@ -477,12 +477,14 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
             },
         };
         if args.drop_target_db_after_run {
-            if let Err(error) = crate::mssql::drop_database(
-                &args.sqlcmd,
+            let dropped = crate::sql::SqlExec::from_options(crate::sql::SqlOptions::integrated(
                 &config.db_server,
-                &entry.target_db,
-                args.allow_non_lab,
-            ) {
+                args.sqlcmd.as_deref(),
+            ))
+            .and_then(|sql| {
+                crate::mssql::drop_database(&sql, &entry.target_db, args.allow_non_lab)
+            });
+            if let Err(error) = dropped {
                 entry.cleanup_error = Some(format!("{error:#}"));
             }
         }

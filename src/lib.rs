@@ -45,6 +45,7 @@ pub mod source;
 pub mod source_audit;
 pub(crate) mod source_listing;
 pub mod source_oracle;
+pub mod sql;
 pub mod storage_map;
 pub mod templates;
 pub mod trace;

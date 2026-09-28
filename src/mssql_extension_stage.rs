@@ -19,6 +19,8 @@ use ibcmd_core::storage::{MAX_STORAGE_ENTRIES, MAX_STORAGE_IMAGE_RETAINED_BYTES}
 use sha1::{Digest, Sha1};
 use uuid::Uuid;
 
+use crate::sql::{ScriptVariables, SqlBackend, SqlExec};
+
 const EVIDENCED_CONFIGINFO_STORAGE_FORMATS_8327: [u32; 4] = [80_310, 80_314, 80_321, 80_324];
 const MAX_CONFIGINFO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONFIGINFO_DESCRIPTOR_BYTES: usize = 64 * 1024;
@@ -167,7 +169,12 @@ pub enum ExtensionStageError {
     LimitExceeded(String),
     SafetyGate(String),
     Io(String),
-    SqlcmdFailed { code: Option<i32>, stderr: String },
+    SqlcmdFailed {
+        code: Option<i32>,
+        stderr: String,
+    },
+    /// The built-in SQL client reported the failure.
+    SqlFailed(String),
 }
 
 impl Display for ExtensionStageError {
@@ -185,6 +192,7 @@ impl Display for ExtensionStageError {
             Self::SqlcmdFailed { code, stderr } => {
                 write!(formatter, "sqlcmd failed with exit code {code:?}: {stderr}")
             }
+            Self::SqlFailed(message) => write!(formatter, "SQL Server request failed: {message}"),
         }
     }
 }
@@ -767,15 +775,13 @@ fn inflate_raw_bounded(bytes: &[u8], maximum: usize) -> Result<Vec<u8>, Extensio
     Ok(output)
 }
 
-/// Executes a previously validated stage script through a temporary `-i` file.
-/// `-b` makes SQL errors propagate as a non-zero process exit. Binary payloads
-/// never enter the Windows command line and `-Q` is never used.
+/// Executes a previously validated stage script: through the built-in
+/// client on a session of its own, or with `--sqlcmd` through a temporary
+/// `-i` file (`-b` makes SQL errors propagate as a non-zero process exit;
+/// binary payloads never enter the Windows command line and `-Q` is never
+/// used). `$(` is literal text either way (`sqlcmd -x`).
 pub fn execute_configcassave_stage_script(
-    sqlcmd: &Path,
-    server: &str,
-    sql_user: Option<&str>,
-    sql_password: Option<&str>,
-    trust_server_certificate: bool,
+    sql: &SqlExec,
     script: &ExtensionStageScript,
     allow_non_lab: bool,
 ) -> Result<(), ExtensionStageError> {
@@ -786,52 +792,53 @@ pub fn execute_configcassave_stage_script(
             script.sql.len()
         )));
     }
-    if sql_user.is_some() != sql_password.is_some() {
+    if sql.user().is_some() != sql.password().is_some() {
         return Err(ExtensionStageError::SafetyGate(
             "SQL user and password must be supplied together".to_owned(),
         ));
     }
+    let tools = match sql.backend() {
+        SqlBackend::Client(client) => {
+            return client
+                .run_script(&script.sql, ScriptVariables::Literal)
+                .map_err(|error| {
+                    ExtensionStageError::SqlFailed(bounded_message(&format!("{error:#}")))
+                });
+        }
+        SqlBackend::Tools(tools) => tools,
+    };
     let temp = TempSqlScript::create(script.sql.as_bytes())?;
     let mut command = sqlcmd_command(
-        sqlcmd,
-        server,
-        sql_user,
-        sql_password,
-        trust_server_certificate,
+        &tools.sqlcmd,
+        sql.server(),
+        sql.user(),
+        sql.password(),
+        sql.trust_server_certificate(),
         temp.path(),
     );
     let output = command.output().map_err(|error| {
-        ExtensionStageError::Io(format!("failed to start {}: {error}", sqlcmd.display()))
+        ExtensionStageError::Io(format!(
+            "failed to start {}: {error}",
+            tools.sqlcmd.display()
+        ))
     })?;
     propagate_sqlcmd_exit(output)
 }
 
 /// Builds, validates, and executes one extension staging transaction.
 /// This is the integration boundary used by the load command; it returns the
-/// exact postcondition metadata only after `sqlcmd -b` exits successfully.
+/// exact postcondition metadata only after the script succeeded.
 pub fn execute_configcassave_stage(
-    sqlcmd: &Path,
-    server: &str,
-    sql_user: Option<&str>,
-    sql_password: Option<&str>,
+    sql: &SqlExec,
     database: &str,
     snapshot: &ExtensionRegistrySnapshot,
     plan: &ExtensionStagePlan,
     replace_prefix: bool,
     allow_non_lab: bool,
-    trust_server_certificate: bool,
 ) -> Result<ExtensionStageScript, ExtensionStageError> {
     let script =
         build_configcassave_stage_sql(database, snapshot, plan, replace_prefix, allow_non_lab)?;
-    execute_configcassave_stage_script(
-        sqlcmd,
-        server,
-        sql_user,
-        sql_password,
-        trust_server_certificate,
-        &script,
-        allow_non_lab,
-    )?;
+    execute_configcassave_stage_script(sql, &script, allow_non_lab)?;
     Ok(script)
 }
 
@@ -879,18 +886,24 @@ fn propagate_sqlcmd_exit(output: Output) -> Result<(), ExtensionStageError> {
     if stderr.is_empty() {
         stderr = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     }
-    if stderr.len() > 8 * 1024 {
-        let mut boundary = 8 * 1024;
-        while !stderr.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        stderr.truncate(boundary);
-        stderr.push_str("...[truncated]");
-    }
     Err(ExtensionStageError::SqlcmdFailed {
         code: output.status.code(),
-        stderr,
+        stderr: bounded_message(&stderr),
     })
+}
+
+/// A failure's text, cut at 8 KiB.
+fn bounded_message(message: &str) -> String {
+    let mut message = message.to_owned();
+    if message.len() > 8 * 1024 {
+        let mut boundary = 8 * 1024;
+        while !message.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        message.truncate(boundary);
+        message.push_str("...[truncated]");
+    }
+    message
 }
 
 struct TempSqlScript {

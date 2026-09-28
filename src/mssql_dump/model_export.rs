@@ -622,14 +622,24 @@ pub fn configuration_compatibility_8_5_or_later(args: &MssqlDumpConfigArgs) -> R
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
+    // `--rows-dir` answers every read from its folder; no login is needed.
+    let sql = if args.rows_dir.is_some() {
+        crate::sql::SqlExec::detached("--rows-dir reads every row from its folder")
+    } else {
+        crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
+            sqlcmd: args.sqlcmd.as_deref(),
+            bcp: args.bcp_executable.as_deref(),
+            server: &args.server,
+            user: args.sql_user.as_deref(),
+            password: password.as_deref(),
+            password_env: &args.sql_pwd_env,
+            trust_server_certificate: true,
+        })?
+    };
     let read = |name: &str| -> Result<crate::metadata_model::brace::Brace> {
         let names = BTreeSet::from([name.to_string()]);
-        let rows = fetch_binary_rows_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            password.as_deref(),
+        let rows = fetch_binary_rows(
+            &sql,
             &args.database,
             MssqlConfigurationTableRole::Current.sql_name(),
             &names,
@@ -733,8 +743,9 @@ pub fn audit_name_index(
 ) -> Result<NameIndexAudit> {
     let _offline = offline_rows::activate(rows_dir)?;
     let started = Instant::now();
-    let none = Path::new("");
-    let metadata_rows = fetch_metadata_rows_bcp(none, none, "", None, None, "", "Config")?;
+    // The offline rows answer every read; nothing may reach a database.
+    let sql = crate::sql::SqlExec::detached("the name-index audit reads a rows folder only");
+    let metadata_rows = fetch_metadata_rows(&sql, "", "Config")?;
     let texts = build_metadata_text_rows_audited(&metadata_rows).rows;
     let fetch_ms = elapsed_ms(started);
     let legacy_started = Instant::now();
@@ -745,16 +756,8 @@ pub fn audit_name_index(
     let legacy_ms = elapsed_ms(legacy_started);
     let model_started = Instant::now();
     let plan = ModelPlan::new(&metadata_rows, &texts, source_version);
-    let predefined_rows = fetch_config_rows_bcp(
-        none,
-        none,
-        "",
-        None,
-        None,
-        "",
-        "Config",
-        &plan.predefined_body_file_names(),
-    )?;
+    let predefined_rows =
+        fetch_config_rows(&sql, "", "Config", &plan.predefined_body_file_names())?;
     let legacy = LegacyNames {
         object_refs: &object_refs,
         type_index: &type_index,

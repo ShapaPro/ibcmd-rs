@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::cli::{MssqlDumpExtensionArgs, MssqlExtensionListArgs, MssqlExtensionListFormat};
 use crate::mssql_dump::StorageImageSourceExportReport;
-use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image_bcp};
+use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image};
 use crate::mssql_extensions::{MssqlExtensionInfo, list_extensions};
+use crate::sql::{SqlExec, SqlOptions};
 
 #[derive(Debug, Serialize)]
 pub struct MssqlExtensionDumpReport {
@@ -51,21 +52,22 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
     )?;
     validate_selected_names(&selected)?;
     let password = resolve_password(args)?;
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: args.bcp_executable.as_deref(),
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: args.sqlcmd_trust_cert,
+    })?;
     let mut fetched = Vec::with_capacity(selected.len());
     for extension in selected {
         let root = CasHash::parse_hex(&extension.active_cas_root)
             .with_context(|| format!("extension {:?} has an invalid CAS root", extension.name))?;
-        let image = fetch_cas_storage_image_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            args.sql_user.as_deref(),
-            password.as_deref(),
-            &args.database,
-            MssqlStorageTable::ConfigCas,
-            root,
-        )
-        .with_context(|| format!("failed to fetch extension {:?}", extension.name))?;
+        let image =
+            fetch_cas_storage_image(&sql, &args.database, MssqlStorageTable::ConfigCas, root)
+                .with_context(|| format!("failed to fetch extension {:?}", extension.name))?;
         fetched.push((extension, image));
     }
 

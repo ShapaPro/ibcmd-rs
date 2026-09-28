@@ -89,6 +89,7 @@ use crate::source_audit::{
     SourceLoadCoverageAuditReport, audit_source_load_coverage_from_manifest,
 };
 use crate::source_listing;
+use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 mod empty_stage;
 mod stage_timing;
@@ -96,21 +97,6 @@ mod stage_timing;
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
 };
-
-#[derive(Clone, Copy)]
-struct SqlAuth<'a> {
-    user: Option<&'a str>,
-    password: Option<&'a str>,
-}
-
-impl<'a> SqlAuth<'a> {
-    fn integrated() -> Self {
-        Self {
-            user: None,
-            password: None,
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MssqlCompareReport {
@@ -781,33 +767,14 @@ fn classify_versions_dependency(
     required_base_key(&entry, "versions")
 }
 
-fn fetch_classified_versions_blob_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+fn fetch_classified_versions_blob(
+    sql: &SqlExec,
     database: &str,
     axes: &CompileAxes,
     selected_config_rows: usize,
 ) -> Result<Vec<u8>> {
     let required = classify_versions_dependency(axes, selected_config_rows)?;
-    fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())
-}
-
-fn fetch_classified_versions_blob(
-    sqlcmd: &Path,
-    server: &str,
-    database: &str,
-    axes: &CompileAxes,
-    selected_config_rows: usize,
-) -> Result<Vec<u8>> {
-    fetch_classified_versions_blob_with_auth(
-        sqlcmd,
-        server,
-        SqlAuth::integrated(),
-        database,
-        axes,
-        selected_config_rows,
-    )
+    fetch_config_blob(sql, database, required.as_str())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -846,8 +813,9 @@ fn staged_metadata_object_report(
 }
 
 pub fn compare_databases(args: &MssqlCompareArgs) -> Result<MssqlCompareReport> {
-    let left = load_table_shapes(&args.sqlcmd, &args.server, &args.left)?;
-    let right = load_table_shapes(&args.sqlcmd, &args.server, &args.right)?;
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
+    let left = load_table_shapes(&sql, &args.left)?;
+    let right = load_table_shapes(&sql, &args.right)?;
     Ok(compare_shapes(&args.left, &args.right, &left, &right))
 }
 
@@ -862,21 +830,17 @@ pub fn capture_activation_snapshot(
             args.output.display()
         );
     }
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
     let snapshot = MssqlActivationSnapshot {
         schema_version: 1,
         database: args.database.clone(),
         tables: ["Config", "ConfigSave", "Params"]
             .into_iter()
-            .map(|table| storage_table_stats(&args.sqlcmd, &args.server, &args.database, table))
+            .map(|table| storage_table_stats(&sql, &args.database, table))
             .collect::<Result<Vec<_>>>()?,
-        config_rows: config_row_digests(&args.sqlcmd, &args.server, &args.database, "Config")?,
-        config_save_rows: config_row_digests(
-            &args.sqlcmd,
-            &args.server,
-            &args.database,
-            "ConfigSave",
-        )?,
-        params_rows: config_row_digests(&args.sqlcmd, &args.server, &args.database, "Params")?,
+        config_rows: config_row_digests(&sql, &args.database, "Config")?,
+        config_save_rows: config_row_digests(&sql, &args.database, "ConfigSave")?,
+        params_rows: config_row_digests(&sql, &args.database, "Params")?,
     };
     let text = serde_json::to_string_pretty(&snapshot)?;
     fs::write(&args.output, text)
@@ -947,7 +911,7 @@ pub fn activate_staged_main(
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
-            sqlcmd: &args.sqlcmd,
+            sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
             ras_endpoint: &args.ras_endpoint,
             server: &args.server,
@@ -971,17 +935,17 @@ pub fn activate_staged_main(
         &args.sql_pwd_env,
     );
     let user = args.sql_user.as_deref();
-    let empty = BTreeSet::new();
-    let staged = crate::mssql_dump::fetch_main_activation_rows_bcp(
-        &args.sqlcmd,
-        &args.bcp_executable,
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        args.bcp_executable.as_deref(),
         &args.server,
         user,
         password.as_deref(),
-        &args.database,
-        "ConfigSave",
-        &empty,
+        &args.sql_pwd_env,
     )?;
+    let empty = BTreeSet::new();
+    let staged =
+        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, "ConfigSave", &empty)?;
     if staged.is_empty() {
         bail!("ConfigSave is empty; there is no staged main-configuration change");
     }
@@ -989,25 +953,13 @@ pub fn activate_staged_main(
         .iter()
         .map(|row| row.file_name.clone())
         .collect::<BTreeSet<_>>();
-    let active = crate::mssql_dump::fetch_main_activation_rows_bcp(
-        &args.sqlcmd,
-        &args.bcp_executable,
-        &args.server,
-        user,
-        password.as_deref(),
-        &args.database,
-        "Config",
-        &selected,
-    )?;
+    let active =
+        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, "Config", &selected)?;
     let marker_name = BTreeSet::from(["DynamicallyUpdated".to_owned()]);
     let config_marker = exactly_one_optional_marker(
         "Config",
-        crate::mssql_dump::fetch_main_activation_rows_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            user,
-            password.as_deref(),
+        crate::mssql_dump::fetch_main_activation_rows(
+            &sql,
             &args.database,
             "Config",
             &marker_name,
@@ -1015,12 +967,8 @@ pub fn activate_staged_main(
     )?;
     let params_marker = exactly_one_optional_marker(
         "Params",
-        crate::mssql_dump::fetch_main_activation_rows_bcp(
-            &args.sqlcmd,
-            &args.bcp_executable,
-            &args.server,
-            user,
-            password.as_deref(),
+        crate::mssql_dump::fetch_main_activation_rows(
+            &sql,
             &args.database,
             "Params",
             &marker_name,
@@ -1108,11 +1056,7 @@ pub fn activate_staged_main(
             .as_ref()
             .map(crate::mssql_worker_switch::prepare_dedicated_worker)
             .transpose()?;
-        let sql_auth = SqlAuth {
-            user,
-            password: password.as_deref(),
-        };
-        run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &script)?;
+        run_sql_file(&sql, &script)?;
         if let (Some(options), Some(plan)) = (worker_options.as_ref(), worker_plan.as_ref()) {
             worker_switch = Some(crate::mssql_worker_switch::switch_dedicated_worker(
                 options, plan,
@@ -1241,34 +1185,22 @@ pub fn audit_source_parity(
     }
     let bootstrap_readiness =
         source_bootstrap_readiness_report(&args.source_root, &metadata_xmls, &common_module_xmls)?;
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
 
-    install_always_used_constants_source(
-        &args.sqlcmd,
-        &args.server,
-        SqlAuth::integrated(),
-        &args.database,
-        Some(&args.source_root),
-    );
+    install_always_used_constants_source(&sql, &args.database, Some(&args.source_root));
     let source = MetadataSourceContext::new(args.source_root.clone());
     let metadata_results = parallel::install(|| {
         metadata_xmls
             .par_iter()
             .map(|xml| {
-                prepare_metadata_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    SqlAuth::integrated(),
-                    &args.database,
-                    xml.clone(),
-                    Some(&source),
-                )
-                .map_err(|error| {
-                    source_parity_prepare_failure(
-                        "metadata_object",
-                        source_relative_path(&args.source_root, xml),
-                        error,
-                    )
-                })
+                prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
+                    .map_err(|error| {
+                        source_parity_prepare_failure(
+                            "metadata_object",
+                            source_relative_path(&args.source_root, xml),
+                            error,
+                        )
+                    })
             })
             .collect::<Vec<_>>()
     })?;
@@ -1276,21 +1208,15 @@ pub fn audit_source_parity(
         common_module_xmls
             .par_iter()
             .map(|xml| {
-                prepare_common_module_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    SqlAuth::integrated(),
-                    &args.database,
-                    xml.clone(),
-                    None,
+                prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None).map_err(
+                    |error| {
+                        source_parity_prepare_failure(
+                            "common_module",
+                            source_relative_path(&args.source_root, xml),
+                            error,
+                        )
+                    },
                 )
-                .map_err(|error| {
-                    source_parity_prepare_failure(
-                        "common_module",
-                        source_relative_path(&args.source_root, xml),
-                        error,
-                    )
-                })
             })
             .collect::<Vec<_>>()
     })?;
@@ -1320,8 +1246,7 @@ pub fn audit_source_parity(
     ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
     let changes = source_stage_change_ids(&metadata_objects, &common_modules);
     let versions_blob = fetch_classified_versions_blob(
-        &args.sqlcmd,
-        &args.server,
+        &sql,
         &args.database,
         &legacy_non_xml_compile_axes(),
         changes.len(),
@@ -1362,12 +1287,8 @@ pub fn audit_source_parity(
     let mut expected_config_file_names =
         source_stage_change_ids(&metadata_objects, &common_modules);
     expected_config_file_names.push("versions".to_string());
-    let config_blobs = fetch_config_blobs_for_files(
-        &args.sqlcmd,
-        &args.server,
-        &args.database,
-        &expected_config_file_names,
-    )?;
+    let config_blobs =
+        fetch_config_blobs_for_files(&sql, &args.database, &expected_config_file_names)?;
     let config_digest_parity = source_config_digest_parity_report(
         &metadata_objects,
         &common_modules,
@@ -2641,7 +2562,10 @@ fn classify_source_parity_error(message: &str) -> (String, Option<String>) {
             Some(file_name.trim().to_string()),
         );
     }
-    if message.starts_with("sqlcmd failed:") {
+    if message.starts_with("sqlcmd failed:")
+        || message.starts_with(crate::sql::mssql::REQUEST_FAILED)
+        || message.starts_with("failed to connect to SQL Server")
+    {
         return ("sql_error".to_string(), None);
     }
     if message.contains("does not contain JSON array")
@@ -2679,6 +2603,7 @@ fn classify_version_patch_error(message: &str) -> String {
 
 pub fn clone_database(args: &MssqlCloneArgs) -> Result<MssqlCloneReport> {
     require_non_lab_confirmation(args.allow_non_lab, "database clone")?;
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
     let backup = args.backup.clone().unwrap_or_else(|| {
         PathBuf::from(format!(
             r"C:\temp\ibcmd-rs\{}_to_{}.bak",
@@ -2690,17 +2615,17 @@ pub fn clone_database(args: &MssqlCloneArgs) -> Result<MssqlCloneReport> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    if database_exists(&args.sqlcmd, &args.server, &args.target)? {
+    if database_exists(&sql, &args.target)? {
         if !args.overwrite {
             return Err(anyhow!(
                 "target database {} already exists; pass --overwrite to replace it",
                 args.target
             ));
         }
-        drop_database(&args.sqlcmd, &args.server, &args.target, args.allow_non_lab)?;
+        drop_database(&sql, &args.target, args.allow_non_lab)?;
     }
 
-    let files = load_database_files(&args.sqlcmd, &args.server, &args.source)?;
+    let files = load_database_files(&sql, &args.source)?;
     let data_file = files
         .iter()
         .find(|file| file.type_desc.eq_ignore_ascii_case("ROWS"))
@@ -2713,7 +2638,7 @@ pub fn clone_database(args: &MssqlCloneArgs) -> Result<MssqlCloneReport> {
     let data_target = sibling_path(&data_file.physical_name, &format!("{}.mdf", args.target))?;
     let log_target = sibling_path(&log_file.physical_name, &format!("{}_log.ldf", args.target))?;
 
-    let sql = format!(
+    let statement = format!(
         "BACKUP DATABASE {source} TO DISK = N'{backup}' WITH INIT, COPY_ONLY, STATS = 10;\n\
          RESTORE DATABASE {target} FROM DISK = N'{backup}' WITH \
          MOVE N'{data_logical}' TO N'{data_target}', \
@@ -2727,7 +2652,7 @@ pub fn clone_database(args: &MssqlCloneArgs) -> Result<MssqlCloneReport> {
         data_target = quote_string(&data_target),
         log_target = quote_string(&log_target),
     );
-    run_sql(&args.sqlcmd, &args.server, &sql)?;
+    run_sql(&sql, &statement)?;
 
     Ok(MssqlCloneReport {
         source: args.source.clone(),
@@ -2737,24 +2662,20 @@ pub fn clone_database(args: &MssqlCloneArgs) -> Result<MssqlCloneReport> {
     })
 }
 
-pub fn drop_database(
-    sqlcmd: &Path,
-    server: &str,
-    database: &str,
-    allow_non_lab: bool,
-) -> Result<()> {
+pub fn drop_database(sql: &SqlExec, database: &str, allow_non_lab: bool) -> Result<()> {
     require_non_lab_confirmation(allow_non_lab, "database drop")?;
-    if !database_exists(sqlcmd, server, database)? {
+    if !database_exists(sql, database)? {
         return Ok(());
     }
     let drop_sql = format!(
         "ALTER DATABASE {target} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {target};",
         target = quote_ident(database)
     );
-    run_sql(sqlcmd, server, &drop_sql)
+    run_sql(sql, &drop_sql)
 }
 
 pub fn export_storage_bundle(args: &MssqlStorageExportArgs) -> Result<StorageBundleExportReport> {
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("failed to create {}", args.output_dir.display()))?;
 
@@ -2775,7 +2696,7 @@ pub fn export_storage_bundle(args: &MssqlStorageExportArgs) -> Result<StorageBun
             &target,
             args.bcp_trust_cert,
         )?;
-        let stats = storage_table_stats(&args.sqlcmd, &args.server, &args.database, table)?;
+        let stats = storage_table_stats(&sql, &args.database, table)?;
         tables.push(StorageTableManifest {
             table_name: table.to_string(),
             file_name: target
@@ -2810,20 +2731,21 @@ pub fn import_storage_bundle(args: &MssqlStorageImportArgs) -> Result<StorageBun
         ));
     }
     require_non_lab_confirmation(args.allow_non_lab, "storage import")?;
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
 
     let manifest = read_storage_manifest(&args.input_dir)?;
     validate_storage_manifest(&manifest)?;
 
     let before = storage_tables()
         .iter()
-        .map(|table| storage_table_stats(&args.sqlcmd, &args.server, &args.database, table))
+        .map(|table| storage_table_stats(&sql, &args.database, table))
         .collect::<Result<Vec<_>>>()?;
 
     let reset_sql = format!(
         "USE {db}; DELETE FROM ConfigSave; DELETE FROM Config; DELETE FROM Params;",
         db = quote_ident(&args.database)
     );
-    run_sql(&args.sqlcmd, &args.server, &reset_sql)?;
+    run_sql(&sql, &reset_sql)?;
 
     for table in storage_tables() {
         let file = args.input_dir.join(format!("{table}.bcp"));
@@ -2842,7 +2764,7 @@ pub fn import_storage_bundle(args: &MssqlStorageImportArgs) -> Result<StorageBun
 
     let after = storage_tables()
         .iter()
-        .map(|table| storage_table_stats(&args.sqlcmd, &args.server, &args.database, table))
+        .map(|table| storage_table_stats(&sql, &args.database, table))
         .collect::<Result<Vec<_>>>()?;
     compare_storage_bundle_tables(&manifest.tables, &after)?;
 
@@ -2855,6 +2777,7 @@ pub fn import_storage_bundle(args: &MssqlStorageImportArgs) -> Result<StorageBun
 }
 
 pub fn export_delta_bundle(args: &MssqlDeltaExportArgs) -> Result<DeltaBundleExportReport> {
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("failed to create {}", args.output_dir.display()))?;
 
@@ -2874,8 +2797,8 @@ pub fn export_delta_bundle(args: &MssqlDeltaExportArgs) -> Result<DeltaBundleExp
         &target,
         args.bcp_trust_cert,
     )?;
-    let table = storage_table_stats(&args.sqlcmd, &args.server, &args.database, "ConfigSave")?;
-    let rows = configsave_row_digests(&args.sqlcmd, &args.server, &args.database)?;
+    let table = storage_table_stats(&sql, &args.database, "ConfigSave")?;
+    let rows = configsave_row_digests(&sql, &args.database)?;
 
     let manifest = DeltaBundleManifest {
         source_database: Some(args.database.clone()),
@@ -2897,10 +2820,11 @@ pub fn export_delta_bundle(args: &MssqlDeltaExportArgs) -> Result<DeltaBundleExp
 
 pub fn import_delta_bundle(args: &MssqlDeltaImportArgs) -> Result<DeltaBundleImportReport> {
     require_non_lab_confirmation(args.allow_non_lab, "delta import")?;
+    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
     let manifest = read_delta_manifest(&args.input_dir)?;
     validate_delta_manifest(&manifest)?;
 
-    let before = storage_table_stats(&args.sqlcmd, &args.server, &args.database, "ConfigSave")?;
+    let before = storage_table_stats(&sql, &args.database, "ConfigSave")?;
     if before.row_count != 0 && !args.replace_config_save {
         return Err(anyhow!(
             "target ConfigSave has {} rows; pass --replace-config-save to delete them first",
@@ -2913,7 +2837,7 @@ pub fn import_delta_bundle(args: &MssqlDeltaImportArgs) -> Result<DeltaBundleImp
             "USE {db}; DELETE FROM ConfigSave;",
             db = quote_ident(&args.database)
         );
-        run_sql(&args.sqlcmd, &args.server, &reset_sql)?;
+        run_sql(&sql, &reset_sql)?;
     }
 
     let file = args.input_dir.join("ConfigSave.bcp");
@@ -2929,7 +2853,7 @@ pub fn import_delta_bundle(args: &MssqlDeltaImportArgs) -> Result<DeltaBundleImp
         args.bcp_trust_cert,
     )?;
 
-    let after = storage_table_stats(&args.sqlcmd, &args.server, &args.database, "ConfigSave")?;
+    let after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
     compare_storage_table_manifests(&manifest.table, &after)?;
 
     Ok(DeltaBundleImportReport {
@@ -2948,14 +2872,16 @@ pub fn stage_common_module(args: &MssqlStageCommonModuleArgs) -> Result<StageCom
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
-    let report = stage_common_module_specs(
-        &args.sqlcmd,
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
         &args.server,
-        sql_auth,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
+    let report = stage_common_module_specs(
+        &sql,
         &args.database,
         vec![CommonModuleStageSpec {
             module_id: args.module_id.clone(),
@@ -2993,15 +2919,17 @@ pub fn stage_common_modules(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
+        &args.server,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
     let specs = parse_common_module_specs(&args.modules)?;
     stage_common_module_specs(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
+        &sql,
         &args.database,
         specs,
         args.replace_config_save,
@@ -3023,10 +2951,14 @@ pub fn stage_common_module_metadata(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
+        &args.server,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
 
     let module_id = normalize_uuid_arg(&args.module_id)?;
     let xml = fs::read(&args.xml)
@@ -3039,13 +2971,7 @@ pub fn stage_common_module_metadata(
         SourcePayload::CommonModuleMetadataXml { xml: &xml },
     )?;
     let required = required_base_key(&dependency, "CommonModule metadata XML")?;
-    let base_metadata_blob = fetch_config_blob_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        required.as_str(),
-    )?;
+    let base_metadata_blob = fetch_config_blob(&sql, &args.database, required.as_str())?;
     let packed_metadata = pack_common_module_metadata_blob_from_xml(&base_metadata_blob, &xml)?;
     if packed_metadata.properties.uuid != module_id {
         return Err(anyhow!(
@@ -3055,23 +2981,10 @@ pub fn stage_common_module_metadata(
         ));
     }
 
-    let versions_blob = fetch_classified_versions_blob_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        &axes,
-        1,
-    )?;
+    let versions_blob = fetch_classified_versions_blob(&sql, &args.database, &axes, 1)?;
     let patched_versions = patch_versions_blob_bytes(&versions_blob, &[module_id.clone()], true)?;
 
-    let before = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    let before = storage_table_stats(&sql, &args.database, "ConfigSave")?;
     let script = args.script_output.clone().unwrap_or_else(|| {
         default_stage_script_path(
             &args.database,
@@ -3082,22 +2995,17 @@ pub fn stage_common_module_metadata(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let sql = build_stage_common_module_metadata_sql(
+    let statements = build_stage_common_module_metadata_sql(
         &args.database,
         &module_id,
         &packed_metadata.blob,
         &patched_versions.blob,
     );
-    fs::write(&script, sql).with_context(|| format!("failed to write {}", script.display()))?;
-    run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &script)?;
+    fs::write(&script, statements)
+        .with_context(|| format!("failed to write {}", script.display()))?;
+    run_sql_file(&sql, &script)?;
 
-    let after = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    let after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
 
     Ok(StageCommonModuleMetadataReport {
         database: args.database.clone(),
@@ -3129,14 +3037,16 @@ pub fn stage_common_module_object(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
-    let prepared = prepare_common_module_object_stage(
-        &args.sqlcmd,
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
         &args.server,
-        sql_auth,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
+    let prepared = prepare_common_module_object_stage(
+        &sql,
         &args.database,
         args.xml.clone(),
         args.text.clone(),
@@ -3159,9 +3069,7 @@ pub fn stage_common_module_object(
 
     let default_name = format!("common_module_object_{}", prepared.module_id);
     let report = stage_prepared_common_module_objects(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
+        &sql,
         &args.database,
         vec![prepared],
         args.replace_config_save,
@@ -3205,32 +3113,25 @@ pub fn stage_common_module_objects(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
+        &args.server,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
 
     let prepared = parallel::install(|| {
         args.xmls
             .par_iter()
-            .map(|xml| {
-                prepare_common_module_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    sql_auth,
-                    &args.database,
-                    xml.clone(),
-                    None,
-                )
-            })
+            .map(|xml| prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None))
             .collect::<Result<Vec<_>>>()
     })??;
     ensure_unique_common_module_object_ids(&prepared)?;
 
     stage_prepared_common_module_objects(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
+        &sql,
         &args.database,
         prepared,
         args.replace_config_save,
@@ -3256,31 +3157,22 @@ pub fn stage_metadata_objects(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
-
-    install_always_used_constants_source(
-        &args.sqlcmd,
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        None,
         &args.server,
-        sql_auth,
-        &args.database,
-        args.source_root.as_deref(),
-    );
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
+
+    install_always_used_constants_source(&sql, &args.database, args.source_root.as_deref());
     let source = args.source_root.clone().map(MetadataSourceContext::new);
     let prepared = parallel::install(|| {
         args.xmls
             .par_iter()
             .map(|xml| {
-                prepare_metadata_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    sql_auth,
-                    &args.database,
-                    xml.clone(),
-                    source.as_ref(),
-                )
+                prepare_metadata_object_stage(&sql, &args.database, xml.clone(), source.as_ref())
             })
             .collect::<Result<Vec<_>>>()
     })??;
@@ -3293,10 +3185,8 @@ pub fn stage_metadata_objects(
                 .chain(object.body_rows.iter().map(|body| body.body_id.clone()))
         })
         .collect::<Vec<_>>();
-    let versions_blob = fetch_classified_versions_blob_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
+    let versions_blob = fetch_classified_versions_blob(
+        &sql,
         &args.database,
         &legacy_non_xml_compile_axes(),
         changes.len(),
@@ -3304,13 +3194,7 @@ pub fn stage_metadata_objects(
     let patched_versions =
         patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
 
-    let before = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    let before = storage_table_stats(&sql, &args.database, "ConfigSave")?;
     let script = args.script_output.clone().unwrap_or_else(|| {
         default_stage_script_path(
             &args.database,
@@ -3321,17 +3205,13 @@ pub fn stage_metadata_objects(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let sql = build_stage_metadata_objects_sql(&args.database, &prepared, &patched_versions.blob);
-    fs::write(&script, sql).with_context(|| format!("failed to write {}", script.display()))?;
-    run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &script)?;
+    let statements =
+        build_stage_metadata_objects_sql(&args.database, &prepared, &patched_versions.blob);
+    fs::write(&script, statements)
+        .with_context(|| format!("failed to write {}", script.display()))?;
+    run_sql_file(&sql, &script)?;
 
-    let after = storage_table_stats_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        "ConfigSave",
-    )?;
+    let after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
     let objects = prepared
         .into_iter()
         .map(staged_metadata_object_report)
@@ -3431,18 +3311,21 @@ pub fn import_target_state(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
-    let sql = format!(
+    let sql = stage_sql(
+        args.sqlcmd.as_deref(),
+        args.bcp_executable.as_deref(),
+        &args.server,
+        args.sql_user.as_deref(),
+        sql_password.as_deref(),
+        &args.sql_pwd_env,
+    )?;
+    let query = format!(
         "SET NOCOUNT ON; USE {db}; SELECT COUNT_BIG(*) AS config_rows, COUNT_BIG(CASE WHEN FileName = N'{uuid}' THEN 1 END) AS configuration_rows FROM dbo.Config FOR JSON PATH;",
         db = quote_ident(&args.database),
         uuid = quote_string(configuration_uuid),
     );
-    let stdout = run_sql_capture_with_auth(&args.sqlcmd, &args.server, sql_auth, &sql)
+    let json = query_json_required(&sql, &query, "import_target_state")
         .with_context(|| format!("failed to read the Config table of {}", args.database))?;
-    let json = extract_json_array(&stdout, "import_target_state")?;
     let counts: Vec<Counts> =
         serde_json::from_str(&json).context("failed to parse the Config row counts")?;
     let counts = counts
@@ -3467,6 +3350,7 @@ pub fn stage_source_objects(
             "staging deletes existing ConfigSave rows; pass --replace-config-save"
         ));
     }
+    stage_timing::reset_from_env();
 
     let manifest = scan_sources_with_prefixes(&args.source_root, &args.path_prefix)?;
     let metadata_xmls = filter_source_paths_by_prefix(
@@ -3492,50 +3376,38 @@ pub fn stage_source_objects(
         args.sql_pwd.as_deref(),
         &args.sql_pwd_env,
     );
-    let sql_auth = SqlAuth {
-        user: args.sql_user.as_deref(),
-        password: sql_password.as_deref(),
-    };
-    // `--script-only` with the base rows in files reaches no database at all.
-    if args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some() {
+    // `--script-only` with the base rows in files reaches no database at all
+    // (and needs no login).
+    let offline = args.script_only && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_some();
+    let sql = if offline {
         OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    install_always_used_constants_source(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
-        &args.database,
-        Some(&args.source_root),
-    );
-    // A bulk stage reads the base rows it patches with one bcp query instead
-    // of one sqlcmd call per object (ERP УХ: over an hour without it).
-    if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
-        let bcp = args
-            .bcp_executable
-            .clone()
-            .unwrap_or_else(|| crate::mssql_dump::bcp_executable_for_sqlcmd(&args.sqlcmd));
-        let rows = crate::mssql_dump::fetch_config_part0_rows_bcp(
-            &bcp,
+        SqlExec::detached("an offline --script-only stage reaches no database")
+    } else {
+        stage_sql(
+            args.sqlcmd.as_deref(),
+            args.bcp_executable.as_deref(),
             &args.server,
-            sql_auth.user,
-            sql_auth.password,
-            &args.database,
-        )
-        .context("failed to read the target's Config rows in bulk")?;
+            args.sql_user.as_deref(),
+            sql_password.as_deref(),
+            &args.sql_pwd_env,
+        )?
+    };
+    install_always_used_constants_source(&sql, &args.database, Some(&args.source_root));
+    // A bulk stage reads the base rows it patches in one pass (in slices on
+    // several connections; one bcp query with --sqlcmd) instead of one query
+    // per object (ERP УХ: over an hour without it).
+    if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
+        let rows = timed_stage_step("base rows read", || {
+            crate::mssql_dump::fetch_config_part0_rows(&sql, &args.database)
+                .context("failed to read the target's Config rows in bulk")
+        })?;
         let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), rows));
     }
     let metadata_objects = parallel::install(|| {
         metadata_xmls
             .par_iter()
             .map(|xml| {
-                prepare_metadata_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    sql_auth,
-                    &args.database,
-                    xml.clone(),
-                    Some(&source),
-                )
+                prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
             })
             .collect::<Result<Vec<_>>>()
     })??;
@@ -3543,26 +3415,15 @@ pub fn stage_source_objects(
     let common_modules = parallel::install(|| {
         common_module_xmls
             .par_iter()
-            .map(|xml| {
-                prepare_common_module_object_stage(
-                    &args.sqlcmd,
-                    &args.server,
-                    sql_auth,
-                    &args.database,
-                    xml.clone(),
-                    None,
-                )
-            })
+            .map(|xml| prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None))
             .collect::<Result<Vec<_>>>()
     })??;
     let common_module_count = common_modules.len();
     ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
 
     let changes = source_stage_change_ids(&metadata_objects, &common_modules);
-    let versions_blob = fetch_classified_versions_blob_with_auth(
-        &args.sqlcmd,
-        &args.server,
-        sql_auth,
+    let versions_blob = fetch_classified_versions_blob(
+        &sql,
         &args.database,
         &legacy_non_xml_compile_axes(),
         changes.len(),
@@ -3580,13 +3441,7 @@ pub fn stage_source_objects(
     let before = if args.script_only {
         unqueried_storage_table_stats("ConfigSave")
     } else {
-        storage_table_stats_with_auth(
-            &args.sqlcmd,
-            &args.server,
-            sql_auth,
-            &args.database,
-            "ConfigSave",
-        )?
+        storage_table_stats(&sql, &args.database, "ConfigSave")?
     };
     let mut scripts = Vec::with_capacity(batches.len().max(2));
     let mut running_rows = 0usize;
@@ -3595,19 +3450,13 @@ pub fn stage_source_objects(
     if !args.per_row {
         scripts = stage_source_rows_bulk(
             args,
-            sql_auth,
+            &sql,
             &metadata_objects,
             &common_modules,
             &patched_versions.blob,
         )?;
         if !args.script_only {
-            after = storage_table_stats_with_auth(
-                &args.sqlcmd,
-                &args.server,
-                sql_auth,
-                &args.database,
-                "ConfigSave",
-            )?;
+            after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
         }
     }
 
@@ -3626,7 +3475,7 @@ pub fn stage_source_objects(
         let batch_report = &batch_reports[index];
         running_rows += batch.row_count;
         debug_assert_eq!(running_rows, batch_report.running_staged_rows);
-        let sql = build_stage_source_objects_sql(
+        let statements = build_stage_source_objects_sql(
             &args.database,
             &batch.metadata_objects,
             &batch.common_modules,
@@ -3635,16 +3484,11 @@ pub fn stage_source_objects(
             batch_report.include_versions_row,
             batch_report.expected_total_rows,
         );
-        fs::write(&script, sql).with_context(|| format!("failed to write {}", script.display()))?;
+        fs::write(&script, statements)
+            .with_context(|| format!("failed to write {}", script.display()))?;
         if !args.script_only {
-            run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &script)?;
-            after = storage_table_stats_with_auth(
-                &args.sqlcmd,
-                &args.server,
-                sql_auth,
-                &args.database,
-                "ConfigSave",
-            )?;
+            run_sql_file(&sql, &script)?;
+            after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
         }
         scripts.push(script);
     }
@@ -3712,7 +3556,7 @@ pub fn stage_exchange_plan_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3725,7 +3569,7 @@ fn integrated_single_xml_metadata_stage_args(
     database: &str,
     xml: &Path,
     source_root: Option<PathBuf>,
-    sqlcmd: &Path,
+    sqlcmd: Option<&Path>,
     replace_config_save: bool,
     allow_non_lab: bool,
     script_output: Option<PathBuf>,
@@ -3738,7 +3582,7 @@ fn integrated_single_xml_metadata_stage_args(
         database: database.to_string(),
         xmls: vec![xml.to_path_buf()],
         source_root,
-        sqlcmd: sqlcmd.to_path_buf(),
+        sqlcmd: sqlcmd.map(Path::to_path_buf),
         replace_config_save,
         allow_non_lab,
         script_output,
@@ -3852,7 +3696,7 @@ pub fn stage_business_process_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3868,7 +3712,7 @@ pub fn stage_document_journal_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3884,7 +3728,7 @@ pub fn stage_report_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3900,7 +3744,7 @@ pub fn stage_data_processor_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3916,7 +3760,7 @@ pub fn stage_catalog_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3932,7 +3776,7 @@ pub fn stage_information_register_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3948,7 +3792,7 @@ pub fn stage_scheduled_job_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3964,7 +3808,7 @@ pub fn stage_xdtopackage_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3978,7 +3822,7 @@ pub fn stage_role_object(args: &MssqlStageRoleObjectArgs) -> Result<StageMetadat
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -3994,7 +3838,7 @@ pub fn stage_constant_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4010,7 +3854,7 @@ pub fn stage_defined_type_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4026,7 +3870,7 @@ pub fn stage_session_parameter_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4042,7 +3886,7 @@ pub fn stage_settings_storage_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4058,7 +3902,7 @@ pub fn stage_functional_option_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4074,7 +3918,7 @@ pub fn stage_functional_options_parameter_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4090,7 +3934,7 @@ pub fn stage_event_subscription_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4106,7 +3950,7 @@ pub fn stage_http_service_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4122,7 +3966,7 @@ pub fn stage_web_service_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4138,7 +3982,7 @@ pub fn stage_common_attribute_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4154,7 +3998,7 @@ pub fn stage_language_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4170,7 +4014,7 @@ pub fn stage_style_item_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4186,7 +4030,7 @@ macro_rules! passthrough_metadata_stage {
                 &args.database,
                 &args.xml,
                 args.source_root.clone(),
-                &args.sqlcmd,
+                args.sqlcmd.as_deref(),
                 args.replace_config_save,
                 args.allow_non_lab,
                 args.script_output.clone(),
@@ -4215,7 +4059,7 @@ pub fn stage_task_object(args: &MssqlStageTaskObjectArgs) -> Result<StageMetadat
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4231,7 +4075,7 @@ pub fn stage_subsystem_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4247,7 +4091,7 @@ pub fn stage_command_group_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4261,7 +4105,7 @@ pub fn stage_enum_object(args: &MssqlStageEnumObjectArgs) -> Result<StageMetadat
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4277,7 +4121,7 @@ pub fn stage_document_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4293,7 +4137,7 @@ pub fn stage_filter_criteria_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4309,7 +4153,7 @@ pub fn stage_accounting_register_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4325,7 +4169,7 @@ pub fn stage_accumulation_register_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4341,7 +4185,7 @@ pub fn stage_calculation_register_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4357,7 +4201,7 @@ pub fn stage_chart_of_characteristic_types_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4373,7 +4217,7 @@ pub fn stage_chart_of_accounts_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4389,7 +4233,7 @@ pub fn stage_chart_of_calculation_types_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4405,7 +4249,7 @@ pub fn stage_chart_of_calculation_registers_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4421,7 +4265,7 @@ pub fn stage_common_command_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4437,7 +4281,7 @@ pub fn stage_common_form_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4453,7 +4297,7 @@ pub fn stage_common_picture_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4469,7 +4313,7 @@ pub fn stage_common_template_object(
         &args.database,
         &args.xml,
         args.source_root.clone(),
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         args.replace_config_save,
         args.allow_non_lab,
         args.script_output.clone(),
@@ -4478,9 +4322,7 @@ pub fn stage_common_template_object(
 }
 
 fn prepare_metadata_object_stage(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: PathBuf,
     source: Option<&MetadataSourceContext>,
@@ -4497,8 +4339,7 @@ fn prepare_metadata_object_stage(
         SourcePayload::MetadataXml { xml: &xml },
     )?;
     let required = required_base_key(&dependency, "metadata XML")?;
-    let base_metadata_blob =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_metadata_blob = fetch_config_blob(sql, database, required.as_str())?;
     let packed_metadata =
         pack_simple_metadata_blob_from_xml_with_source(&base_metadata_blob, &xml, source)?;
     if packed_metadata.properties.uuid != object_id {
@@ -4509,9 +4350,7 @@ fn prepare_metadata_object_stage(
         ));
     }
     let body_rows = prepare_metadata_body_rows(
-        sqlcmd,
-        server,
-        sql_auth,
+        sql,
         database,
         &xml_path,
         &xml,
@@ -4569,9 +4408,7 @@ impl MetadataBodyFamily {
 }
 
 fn prepare_metadata_body_rows(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     xml: &[u8],
@@ -4582,7 +4419,7 @@ fn prepare_metadata_body_rows(
     let mut rows = Vec::new();
     for family in MetadataBodyFamily::ALL {
         rows.extend(prepare_metadata_body_family(
-            family, sqlcmd, server, sql_auth, database, xml_path, xml, properties, source, axes,
+            family, sql, database, xml_path, xml, properties, source, axes,
         )?);
     }
     Ok(rows)
@@ -4590,9 +4427,7 @@ fn prepare_metadata_body_rows(
 
 fn prepare_metadata_body_family(
     family: MetadataBodyFamily,
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     xml: &[u8],
@@ -4601,31 +4436,29 @@ fn prepare_metadata_body_family(
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     match family {
-        MetadataBodyFamily::KindBody => prepare_metadata_kind_body_rows(
-            sqlcmd, server, sql_auth, database, xml_path, xml, properties, source, axes,
-        ),
+        MetadataBodyFamily::KindBody => {
+            prepare_metadata_kind_body_rows(sql, database, xml_path, xml, properties, source, axes)
+        }
         MetadataBodyFamily::Help => {
-            prepare_object_help_body_row(sqlcmd, server, database, xml_path, properties, source)
+            prepare_object_help_body_row(sql, database, xml_path, properties, source)
         }
         MetadataBodyFamily::ObjectModules => {
-            prepare_object_module_body_rows(sqlcmd, server, database, xml_path, properties, axes)
+            prepare_object_module_body_rows(sql, database, xml_path, properties, axes)
         }
-        MetadataBodyFamily::NestedCommandModules => prepare_nested_command_module_body_rows(
-            sqlcmd, server, database, xml_path, xml, properties, axes,
-        ),
-        MetadataBodyFamily::CommandInterface => prepare_command_interface_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
-        ),
-        MetadataBodyFamily::AdditionalIndexes => prepare_additional_indexes_body_row(
-            sqlcmd, server, database, xml_path, properties, axes,
-        ),
+        MetadataBodyFamily::NestedCommandModules => {
+            prepare_nested_command_module_body_rows(sql, database, xml_path, xml, properties, axes)
+        }
+        MetadataBodyFamily::CommandInterface => {
+            prepare_command_interface_body_row(sql, database, xml_path, properties, source, axes)
+        }
+        MetadataBodyFamily::AdditionalIndexes => {
+            prepare_additional_indexes_body_row(sql, database, xml_path, properties, axes)
+        }
     }
 }
 
 fn prepare_metadata_kind_body_rows(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     xml: &[u8],
@@ -4634,13 +4467,10 @@ fn prepare_metadata_kind_body_rows(
     axes: &CompileAxes,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     match properties.kind.as_str() {
-        "Style" => prepare_style_body_row(sqlcmd, server, database, xml_path, properties, source),
-        "ScheduledJob" => {
-            prepare_scheduled_job_body_row(sqlcmd, server, database, xml_path, properties)
-        }
+        "Style" => prepare_style_body_row(sql, database, xml_path, properties, source),
+        "ScheduledJob" => prepare_scheduled_job_body_row(sql, database, xml_path, properties),
         "XDTOPackage" => prepare_raw_deflated_body_row(
-            sqlcmd,
-            server,
+            sql,
             database,
             infer_xdto_package_body_path(xml_path),
             properties,
@@ -4648,37 +4478,32 @@ fn prepare_metadata_kind_body_rows(
             axes,
         ),
         "WSReference" => prepare_ws_reference_body_row(xml_path, properties),
-        "CommonTemplate" | "Template" => prepare_template_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, xml, properties, source, axes,
-        ),
-        "CommonPicture" => {
-            prepare_common_picture_body_row(sqlcmd, server, database, xml_path, properties)
+        "CommonTemplate" | "Template" => {
+            prepare_template_body_row(sql, database, xml_path, xml, properties, source, axes)
         }
-        "Configuration" => prepare_configuration_asset_body_rows(
-            sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
-        ),
-        "BusinessProcess" => prepare_business_process_flowchart_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, properties, axes,
-        ),
-        "Catalog" | "ChartOfCharacteristicTypes" => prepare_predefined_data_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, properties, axes,
-        ),
-        "ExchangePlan" => prepare_exchange_plan_content_body_row(
-            sqlcmd, server, database, xml_path, properties, source,
-        ),
-        "Form" | "CommonForm" => prepare_form_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
-        ),
-        "Role" => prepare_role_rights_body_row(
-            sqlcmd, server, sql_auth, database, xml_path, properties, source, axes,
-        ),
+        "CommonPicture" => prepare_common_picture_body_row(sql, database, xml_path, properties),
+        "Configuration" => {
+            prepare_configuration_asset_body_rows(sql, database, xml_path, properties, source, axes)
+        }
+        "BusinessProcess" => {
+            prepare_business_process_flowchart_body_row(sql, database, xml_path, properties, axes)
+        }
+        "Catalog" | "ChartOfCharacteristicTypes" => {
+            prepare_predefined_data_body_row(sql, database, xml_path, properties, axes)
+        }
+        "ExchangePlan" => {
+            prepare_exchange_plan_content_body_row(sql, database, xml_path, properties, source)
+        }
+        "Form" | "CommonForm" => {
+            prepare_form_body_row(sql, database, xml_path, properties, source, axes)
+        }
+        "Role" => prepare_role_rights_body_row(sql, database, xml_path, properties, source, axes),
         _ => Ok(Vec::new()),
     }
 }
 
 fn prepare_additional_indexes_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -4749,8 +4574,7 @@ fn additional_indexes_body_suffix(kind: &str) -> Option<&'static str> {
 }
 
 fn prepare_style_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -4780,8 +4604,7 @@ fn prepare_style_body_row(
 }
 
 fn prepare_scheduled_job_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -4876,8 +4699,7 @@ fn prepare_ws_reference_body_row(
 }
 
 fn prepare_raw_deflated_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     body_path: PathBuf,
     properties: &SimpleMetadataXmlProperties,
@@ -4900,9 +4722,7 @@ fn prepare_raw_deflated_body_row(
 }
 
 fn prepare_template_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     xml: &[u8],
@@ -4929,8 +4749,7 @@ fn prepare_template_body_row(
                 return Ok(Vec::new());
             };
             let body_id = format!("{}.0", properties.uuid);
-            let base =
-                fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, &body_id).ok();
+            let base = fetch_config_blob(sql, database, &body_id).ok();
             let brace_base = base.filter(|blob| {
                 crate::compiler::families::native::inflate(blob).is_ok_and(|plain| {
                     let text = String::from_utf8_lossy(&plain);
@@ -4971,9 +4790,9 @@ fn prepare_template_body_row(
             };
             prepare_raw_template_body_row(body_path, properties, kind, source)
         }
-        TemplateKind::HtmlDocument => prepare_html_template_body_row(
-            sqlcmd, server, database, xml_path, properties, source, axes,
-        ),
+        TemplateKind::HtmlDocument => {
+            prepare_html_template_body_row(sql, database, xml_path, properties, source, axes)
+        }
         // Diagnostic switch for a real load while the spreadsheet writer's
         // bodies are not yet platform-readable (native ibcmd refuses them):
         // stage nothing, so the target keeps its own row for the body.
@@ -4982,12 +4801,12 @@ fn prepare_template_body_row(
         {
             Ok(Vec::new())
         }
-        TemplateKind::SpreadsheetDocument => prepare_spreadsheet_template_body_row(
-            sqlcmd, server, database, xml_path, properties, source, axes,
-        ),
-        TemplateKind::AddIn | TemplateKind::BinaryData => prepare_binary_template_body_row(
-            sqlcmd, server, database, xml_path, properties, kind, axes,
-        ),
+        TemplateKind::SpreadsheetDocument => {
+            prepare_spreadsheet_template_body_row(sql, database, xml_path, properties, source, axes)
+        }
+        TemplateKind::AddIn | TemplateKind::BinaryData => {
+            prepare_binary_template_body_row(sql, database, xml_path, properties, kind, axes)
+        }
     }
 }
 
@@ -5045,8 +4864,7 @@ fn prepare_raw_template_body_row(
 }
 
 fn prepare_spreadsheet_template_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5143,8 +4961,7 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
 }
 
 fn prepare_html_template_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5188,8 +5005,7 @@ pub(crate) fn html_template_source_row(
 }
 
 fn prepare_binary_template_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5224,8 +5040,7 @@ fn prepare_binary_template_body_row(
 }
 
 fn prepare_common_picture_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5267,9 +5082,7 @@ pub(crate) fn configuration_asset_owner_uuid(xml_path: &Path) -> Option<String> 
 }
 
 fn prepare_configuration_asset_body_rows(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5293,16 +5106,14 @@ fn prepare_configuration_asset_body_rows(
     let source = source.or(inferred.as_ref());
     let mut rows = Vec::new();
     rows.extend(prepare_configuration_ext_picture_body_row(
-        sqlcmd,
-        server,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "Splash.xml"),
         "2",
     )?);
     rows.extend(prepare_configuration_raw_deflated_body_row(
-        sqlcmd,
-        server,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "ParentConfigurations.bin"),
@@ -5320,8 +5131,7 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_configuration_raw_deflated_body_row(
-        sqlcmd,
-        server,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "MobileClientSignature.bin"),
@@ -5330,9 +5140,7 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_configuration_command_interface_body_row(
-        sqlcmd,
-        server,
-        sql_auth,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "CommandInterface.xml"),
@@ -5341,9 +5149,7 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_configuration_command_interface_body_row(
-        sqlcmd,
-        server,
-        sql_auth,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "MainSectionCommandInterface.xml"),
@@ -5361,8 +5167,7 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_configuration_ext_picture_body_row(
-        sqlcmd,
-        server,
+        sql,
         database,
         properties,
         infer_configuration_ext_body_path(xml_path, "MainSectionPicture.xml"),
@@ -5575,8 +5380,7 @@ fn prepare_configuration_interface_asset_body_row(
 }
 
 fn prepare_configuration_ext_picture_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     properties: &SimpleMetadataXmlProperties,
     body_path: PathBuf,
@@ -5620,9 +5424,7 @@ fn prepare_configuration_ext_picture_body_row(
 }
 
 fn prepare_configuration_command_interface_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     properties: &SimpleMetadataXmlProperties,
     body_path: PathBuf,
@@ -5658,8 +5460,7 @@ fn prepare_configuration_command_interface_body_row(
     }
     base_free_command_interface_refusal(&body_id, &xml, source)?;
     let required = required_base_key(&classification, "Configuration CommandInterface")?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let packed = pack_command_interface_blob_from_xml(&base_body, &xml).with_context(|| {
         format!(
             "failed to pack Configuration CommandInterface {}",
@@ -5675,8 +5476,7 @@ fn prepare_configuration_command_interface_body_row(
 }
 
 fn prepare_configuration_raw_deflated_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     properties: &SimpleMetadataXmlProperties,
     body_path: PathBuf,
@@ -5708,8 +5508,7 @@ fn prepare_configuration_raw_deflated_body_row(
 }
 
 fn prepare_exchange_plan_content_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5748,9 +5547,7 @@ fn prepare_exchange_plan_content_body_row(
 }
 
 fn prepare_predefined_data_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5766,8 +5563,7 @@ fn prepare_predefined_data_body_row(
     let body_id = format!("{}.{}", properties.uuid, suffix);
     let reason = predefined_data_base_free_blocker_reason(&body_path)?;
     let required = classify_required_base(axes, &body_id, &body_path, &reason, "PredefinedData")?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let xml = fs::read(&body_path)
         .with_context(|| format!("failed to read PredefinedData {}", body_path.display()))?;
     let packed = pack_predefined_data_blob_from_xml(&base_body, &xml)
@@ -5781,9 +5577,7 @@ fn prepare_predefined_data_body_row(
 }
 
 fn prepare_business_process_flowchart_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5802,8 +5596,7 @@ fn prepare_business_process_flowchart_body_row(
         &reason,
         "BusinessProcess Flowchart",
     )?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let xml = fs::read(&body_path).with_context(|| {
         format!(
             "failed to read BusinessProcess Flowchart {}",
@@ -5826,9 +5619,7 @@ fn prepare_business_process_flowchart_body_row(
 }
 
 fn prepare_form_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -5974,8 +5765,7 @@ fn prepare_form_body_row(
         &module_path
     };
     let required = classify_required_base(axes, &body_id, provenance, &reason, "Form body")?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     if !source_listing::exists(&form_item_assets_root) {
         let native_form_matches = if form_xml.is_empty() {
             true
@@ -6032,9 +5822,7 @@ fn prepare_form_body_row(
 }
 
 fn prepare_role_rights_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -6074,8 +5862,7 @@ fn prepare_role_rights_body_row(
     }
     let reason = role_rights_base_free_blocker_reason(&body_path, source)?;
     let required = classify_required_base(axes, &body_id, &body_path, &reason, "Role Rights")?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let packed = pack_role_rights_blob_from_xml_with_source(&base_body, &xml, source)
         .with_context(|| format!("failed to pack Role rights {}", body_path.display()))?;
     Ok(vec![PreparedMetadataBodyStage {
@@ -6087,9 +5874,7 @@ fn prepare_role_rights_body_row(
 }
 
 fn prepare_command_interface_body_row(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -6135,8 +5920,7 @@ fn prepare_command_interface_body_row(
     }
     base_free_command_interface_refusal(&body_id, &xml, source)?;
     let required = required_base_key(&classification, "CommandInterface")?;
-    let base_body =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let packed = pack_command_interface_blob_from_xml(&base_body, &xml)
         .with_context(|| format!("failed to pack CommandInterface {}", body_path.display()))?;
     Ok(vec![PreparedMetadataBodyStage {
@@ -6168,8 +5952,7 @@ impl HelpSourceRow {
 }
 
 fn prepare_object_help_body_row(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -6329,8 +6112,7 @@ fn resolve_help_body_id_from_config_rows(
 }
 
 fn prepare_object_module_body_rows(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
@@ -6427,8 +6209,7 @@ fn predefined_data_body_suffix(kind: &str) -> Option<&'static str> {
 }
 
 fn prepare_nested_command_module_body_rows(
-    _sqlcmd: &Path,
-    _server: &str,
+    _sql: &SqlExec,
     _database: &str,
     xml_path: &Path,
     xml: &[u8],
@@ -6678,9 +6459,7 @@ fn path_ends_with_for_stage(path: &[String], suffix: &[&str]) -> bool {
 }
 
 fn prepare_common_module_object_stage(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     xml_path: PathBuf,
     text_path: Option<PathBuf>,
@@ -6705,8 +6484,7 @@ fn prepare_common_module_object_stage(
         SourcePayload::CommonModuleMetadataXml { xml: &xml },
     )?;
     let required = required_base_key(&dependency, "CommonModule metadata XML")?;
-    let base_metadata_blob =
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, required.as_str())?;
+    let base_metadata_blob = fetch_config_blob(sql, database, required.as_str())?;
     let packed_metadata = pack_common_module_metadata_blob_from_xml(&base_metadata_blob, &xml)?;
     let module_body_id = format!("{module_id}.0");
     let (text_bytes, module_blob, module_blob_sha256) = if has_module_body {
@@ -6737,9 +6515,7 @@ fn prepare_common_module_object_stage(
 }
 
 fn stage_prepared_common_module_objects(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     prepared: Vec<PreparedCommonModuleObjectStage>,
     replace_config_save: bool,
@@ -6760,28 +6536,28 @@ fn stage_prepared_common_module_objects(
         .iter()
         .flat_map(PreparedCommonModuleObjectStage::row_ids)
         .collect::<Vec<_>>();
-    let versions_blob = fetch_classified_versions_blob_with_auth(
-        sqlcmd,
-        server,
-        sql_auth,
+    let versions_blob = fetch_classified_versions_blob(
+        sql,
         database,
         &legacy_non_xml_compile_axes(),
         changes.len(),
     )?;
     let patched_versions = patch_versions_blob_bytes(&versions_blob, &changes, true)?;
 
-    let before = storage_table_stats_with_auth(sqlcmd, server, sql_auth, database, "ConfigSave")?;
+    let before = storage_table_stats(sql, database, "ConfigSave")?;
     let script =
         script_output.unwrap_or_else(|| default_stage_script_path(database, default_script_name));
     if let Some(parent) = script.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let sql = build_stage_common_module_objects_sql(database, &prepared, &patched_versions.blob);
-    fs::write(&script, sql).with_context(|| format!("failed to write {}", script.display()))?;
-    run_sql_file_with_auth(sqlcmd, server, sql_auth, &script)?;
+    let statements =
+        build_stage_common_module_objects_sql(database, &prepared, &patched_versions.blob);
+    fs::write(&script, statements)
+        .with_context(|| format!("failed to write {}", script.display()))?;
+    run_sql_file(sql, &script)?;
 
-    let after = storage_table_stats_with_auth(sqlcmd, server, sql_auth, database, "ConfigSave")?;
+    let after = storage_table_stats(sql, database, "ConfigSave")?;
     let modules = prepared
         .into_iter()
         .map(|module| StagedCommonModuleObjectReport {
@@ -6818,9 +6594,7 @@ fn stage_prepared_common_module_objects(
 }
 
 fn stage_common_module_specs(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     specs: Vec<CommonModuleStageSpec>,
     replace_config_save: bool,
@@ -6861,17 +6635,15 @@ fn stage_common_module_specs(
         .iter()
         .flat_map(|module| [module.spec.module_id.clone(), module.module_body_id.clone()])
         .collect::<Vec<_>>();
-    let versions_blob = fetch_classified_versions_blob_with_auth(
-        sqlcmd,
-        server,
-        sql_auth,
+    let versions_blob = fetch_classified_versions_blob(
+        sql,
         database,
         &legacy_non_xml_compile_axes(),
         changes.len(),
     )?;
     let patched_versions = patch_versions_blob_bytes(&versions_blob, &changes, true)?;
 
-    let before = storage_table_stats_with_auth(sqlcmd, server, sql_auth, database, "ConfigSave")?;
+    let before = storage_table_stats(sql, database, "ConfigSave")?;
     let script = script_output.unwrap_or_else(|| {
         default_stage_script_path(database, &format!("common_modules_{}", prepared.len()))
     });
@@ -6879,11 +6651,12 @@ fn stage_common_module_specs(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let sql = build_stage_common_modules_sql(database, &prepared, &patched_versions.blob);
-    fs::write(&script, sql).with_context(|| format!("failed to write {}", script.display()))?;
-    run_sql_file_with_auth(sqlcmd, server, sql_auth, &script)?;
+    let statements = build_stage_common_modules_sql(database, &prepared, &patched_versions.blob);
+    fs::write(&script, statements)
+        .with_context(|| format!("failed to write {}", script.display()))?;
+    run_sql_file(sql, &script)?;
 
-    let after = storage_table_stats_with_auth(sqlcmd, server, sql_auth, database, "ConfigSave")?;
+    let after = storage_table_stats(sql, database, "ConfigSave")?;
     let modules = prepared
         .into_iter()
         .map(|module| StagedCommonModuleReport {
@@ -7133,8 +6906,8 @@ fn compare_shapes(
     }
 }
 
-fn load_table_shapes(sqlcmd: &Path, server: &str, database: &str) -> Result<Vec<TableShape>> {
-    let sql = format!(
+fn load_table_shapes(sql: &SqlExec, database: &str) -> Result<Vec<TableShape>> {
+    let query = format!(
         "SET NOCOUNT ON; USE {db};\n\
          SELECT t.name AS table_name,\n\
                 ISNULL(SUM(CASE WHEN ps.index_id IN (0, 1) THEN ps.row_count ELSE 0 END), 0) AS row_count,\n\
@@ -7158,46 +6931,28 @@ fn load_table_shapes(sqlcmd: &Path, server: &str, database: &str) -> Result<Vec<
          FOR JSON PATH;",
         db = quote_ident(database)
     );
-    let stdout = run_sql_capture(sqlcmd, server, &sql)?;
-    let json = extract_json_array(&stdout, &format!("load_table_shapes({database})"))?;
+    let json = query_json_required(sql, &query, &format!("load_table_shapes({database})"))?;
     serde_json::from_str(&json)
         .with_context(|| format!("failed to parse table JSON for {database}"))
 }
 
-fn load_database_files(sqlcmd: &Path, server: &str, database: &str) -> Result<Vec<DatabaseFile>> {
-    let sql = format!(
+fn load_database_files(sql: &SqlExec, database: &str) -> Result<Vec<DatabaseFile>> {
+    let query = format!(
         "SET NOCOUNT ON; USE {db}; SELECT name, type_desc, physical_name FROM sys.database_files FOR JSON PATH;",
         db = quote_ident(database)
     );
-    let stdout = run_sql_capture(sqlcmd, server, &sql)?;
-    let json = extract_json_array(&stdout, &format!("load_database_files({database})"))?;
+    let json = query_json_required(sql, &query, &format!("load_database_files({database})"))?;
     serde_json::from_str(&json).with_context(|| format!("failed to parse file JSON for {database}"))
 }
 
-fn storage_table_stats(
-    sqlcmd: &Path,
-    server: &str,
-    database: &str,
-    table: &str,
-) -> Result<StorageTableManifest> {
-    storage_table_stats_with_auth(sqlcmd, server, SqlAuth::integrated(), database, table)
-}
-
-fn storage_table_stats_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    database: &str,
-    table: &str,
-) -> Result<StorageTableManifest> {
-    let sql = format!(
+fn storage_table_stats(sql: &SqlExec, database: &str, table: &str) -> Result<StorageTableManifest> {
+    let query = format!(
         "SET NOCOUNT ON; USE {db}; SELECT N'{table}' AS table_name, COUNT_BIG(*) AS row_count, ISNULL(SUM(CONVERT(bigint, DATALENGTH(BinaryData))), 0) AS binary_bytes, CONVERT(bigint, CHECKSUM_AGG(BINARY_CHECKSUM(*))) AS row_checksum FROM {table_ident} FOR JSON PATH;",
         db = quote_ident(database),
         table = quote_string(table),
         table_ident = quote_ident(table),
     );
-    let stdout = run_sql_capture_with_auth(sqlcmd, server, sql_auth, &sql)?;
-    let json = extract_json_array(&stdout, &format!("storage_table_stats({table})"))?;
+    let json = query_json_required(sql, &query, &format!("storage_table_stats({table})"))?;
     let mut values: Vec<StorageTableManifest> = serde_json::from_str(&json)
         .with_context(|| format!("failed to parse storage stats JSON for {table}"))?;
     let mut value = values
@@ -7207,21 +6962,16 @@ fn storage_table_stats_with_auth(
     Ok(value)
 }
 
-fn configsave_row_digests(
-    sqlcmd: &Path,
-    server: &str,
-    database: &str,
-) -> Result<Vec<ConfigSaveRowDigest>> {
-    config_row_digests(sqlcmd, server, database, "ConfigSave")
+fn configsave_row_digests(sql: &SqlExec, database: &str) -> Result<Vec<ConfigSaveRowDigest>> {
+    config_row_digests(sql, database, "ConfigSave")
 }
 
 fn config_row_digests(
-    sqlcmd: &Path,
-    server: &str,
+    sql: &SqlExec,
     database: &str,
     table: &str,
 ) -> Result<Vec<ConfigSaveRowDigest>> {
-    let sql = format!(
+    let query = format!(
         "SET NOCOUNT ON; USE {db};\n\
          SELECT FileName AS file_name,\n\
                 PartNo AS part_no,\n\
@@ -7234,14 +6984,17 @@ fn config_row_digests(
         db = quote_ident(database),
         table_ident = quote_ident(table),
     );
-    let stdout = run_sql_capture(sqlcmd, server, &sql)?;
-    // `sqlcmd` emits no result row for an empty top-level `FOR JSON PATH`
-    // query (apart from the database-context diagnostic). The command has
-    // already succeeded, so this is the canonical empty digest set.
-    if !stdout.contains('[') {
+    // A top-level `FOR JSON PATH` over no rows returns no result row at all
+    // (sqlcmd prints nothing but the database-context diagnostic); the query
+    // has succeeded, so this is the canonical empty digest set.
+    let Some(json) = query_json(
+        sql,
+        &query,
+        &format!("config_row_digests({table}, {database})"),
+    )?
+    else {
         return Ok(Vec::new());
-    }
-    let json = extract_json_array(&stdout, &format!("config_row_digests({table}, {database})"))?;
+    };
     serde_json::from_str(&json)
         .with_context(|| format!("failed to parse {table} digests JSON for {database}"))
 }
@@ -7295,31 +7048,12 @@ fn diff_activation_rows(
 /// constants set is compiled. `IBCMD_RS_ALWAYS_USED_CONSTANTS` still
 /// overrides it; an empty infobase (`--base-free`, `audit-empty-stage`)
 /// never installs it and clears the flags instead.
-fn install_always_used_constants_source(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    database: &str,
-    source_root: Option<&Path>,
-) {
-    let sqlcmd = sqlcmd.to_path_buf();
-    let server = server.to_string();
-    let user = sql_auth.user.map(str::to_string);
-    let password = sql_auth.password.map(str::to_string);
+fn install_always_used_constants_source(sql: &SqlExec, database: &str, source_root: Option<&Path>) {
+    let sql = sql.clone();
     let database = database.to_string();
     let source_root = source_root.map(Path::to_path_buf);
     crate::module_blob::set_always_used_constants_source(move || {
-        let sql_auth = SqlAuth {
-            user: user.as_deref(),
-            password: password.as_deref(),
-        };
-        target_always_used_constants(
-            &sqlcmd,
-            &server,
-            sql_auth,
-            &database,
-            source_root.as_deref(),
-        )
+        target_always_used_constants(&sql, &database, source_root.as_deref())
     });
 }
 
@@ -7328,14 +7062,12 @@ fn install_always_used_constants_source(
 /// every constant of the tree. A row that is missing or does not read counts
 /// as not flagged.
 fn target_always_used_constants(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     source_root: Option<&Path>,
 ) -> Vec<String> {
     let fetch = |name: &str| {
-        fetch_config_blob_with_auth(sqlcmd, server, sql_auth, database, name)
+        fetch_config_blob(sql, database, name)
             .ok()
             .and_then(|blob| crate::module_blob::inflate_raw(&blob).ok())
     };
@@ -7383,7 +7115,7 @@ fn target_always_used_constants(
             .collect()
     } else {
         let names = constants.iter().cloned().collect::<Vec<_>>();
-        fetch_config_blobs_for_files_with_auth(sqlcmd, server, sql_auth, database, &names)
+        fetch_config_blobs_for_files(sql, database, &names)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|row| {
@@ -7405,25 +7137,9 @@ fn target_always_used_constants(
     flagged
 }
 
+/// Part 0 of the named Config rows, a hundred names a query.
 fn fetch_config_blobs_for_files(
-    sqlcmd: &Path,
-    server: &str,
-    database: &str,
-    file_names: &[String],
-) -> Result<Vec<BinaryBlobRow>> {
-    fetch_config_blobs_for_files_with_auth(
-        sqlcmd,
-        server,
-        SqlAuth::integrated(),
-        database,
-        file_names,
-    )
-}
-
-fn fetch_config_blobs_for_files_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     database: &str,
     file_names: &[String],
 ) -> Result<Vec<BinaryBlobRow>> {
@@ -7440,7 +7156,24 @@ fn fetch_config_blobs_for_files_with_auth(
             .map(|file_name| format!("N'{}'", quote_string(file_name)))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
+        if let SqlBackend::Client(client) = sql.backend() {
+            ensure_online("run a query")?;
+            let query = format!(
+                "SELECT FileName, DataSize, BinaryData FROM {db}.dbo.Config \
+                 WHERE PartNo = 0 AND FileName IN ({selected}) ORDER BY FileName",
+                db = quote_ident(database),
+            );
+            client.read_rows(&query, &[], &mut |mut row| {
+                rows.push(BinaryBlobRow {
+                    file_name: row.take_text(0)?,
+                    data_size: row.i64(1)?,
+                    binary_hex: encode_hex(row.binary(2)?),
+                });
+                Ok(())
+            })?;
+            continue;
+        }
+        let query = format!(
             "SET NOCOUNT ON; USE {db};\n\
              SELECT COALESCE((\n\
                  SELECT FileName AS file_name,\n\
@@ -7453,9 +7186,9 @@ fn fetch_config_blobs_for_files_with_auth(
              ), '[]');",
             db = quote_ident(database),
         );
-        let stdout = run_sql_capture_with_auth(sqlcmd, server, sql_auth, &sql)?;
-        let json = extract_json_array(
-            &stdout,
+        let json = query_json_required(
+            sql,
+            &query,
             &format!("fetch_config_blobs_for_files({database})"),
         )?;
         let mut chunk_rows: Vec<BinaryBlobRow> = serde_json::from_str(&json)
@@ -7466,7 +7199,7 @@ fn fetch_config_blobs_for_files_with_auth(
 }
 
 /// Part 0 of every Config row of one database, read in bulk before a
-/// `--bulk` stage; `fetch_config_blob_with_auth` answers from it first.
+/// `--bulk` stage; `fetch_config_blob` answers from it first.
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
     String,
     std::collections::HashMap<String, Vec<u8>>,
@@ -7475,8 +7208,7 @@ static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
 /// Set by a stage that must not reach SQL Server: `--script-only` with its
 /// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
 /// --script-only`. A base row missing from the directory is then a missing
-/// row, not a query, and every sqlcmd or bcp run fails instead of
-/// connecting.
+/// row, not a query, and every request fails instead of connecting.
 static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn ensure_online(action: &str) -> Result<()> {
@@ -7508,13 +7240,9 @@ static BASE_FREE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// the row name back out of it.
 const BASE_FREE_MISSING_ROW: &str = "base-free stage has no base Config row";
 
-fn fetch_config_blob_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    database: &str,
-    file_name: &str,
-) -> Result<Vec<u8>> {
+/// Part 0 of one Config row: from the bulk prefetch, the lab row folder, or
+/// a query.
+fn fetch_config_blob(sql: &SqlExec, database: &str, file_name: &str) -> Result<Vec<u8>> {
     if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
         bail!("{BASE_FREE_MISSING_ROW} {file_name}");
     }
@@ -7526,10 +7254,11 @@ fn fetch_config_blob_with_auth(
             .cloned()
             .ok_or_else(|| anyhow!("Config row not found: {file_name}"));
     }
-    // A dry run over a large tree fetches thousands of base rows one sqlcmd
-    // call at a time (ERP УХ: over an hour). `IBCMD_RS_BASE_ROWS_DIR` names a
-    // `mssql-dump-config --write-binary-rows` table directory of the same
-    // database (`<file name>__part0.bin`), read in place of the query.
+    // A dry run over a large tree fetches thousands of base rows one query
+    // at a time (ERP УХ: over an hour through sqlcmd).
+    // `IBCMD_RS_BASE_ROWS_DIR` names a `mssql-dump-config --write-binary-rows`
+    // table directory of the same database (`<file name>__part0.bin`), read
+    // in place of the query.
     if let Some(dir) = std::env::var_os("IBCMD_RS_BASE_ROWS_DIR") {
         let path = PathBuf::from(dir).join(format!("{file_name}__part0.bin"));
         if let Ok(bytes) = fs::read(&path) {
@@ -7541,7 +7270,29 @@ fn fetch_config_blob_with_auth(
             bail!("Config row not found: {file_name}");
         }
     }
-    let sql = format!(
+    if let SqlBackend::Client(client) = sql.backend() {
+        ensure_online("run a query")?;
+        let query = format!(
+            "SELECT DataSize, BinaryData FROM {db}.dbo.Config WHERE FileName = @P1 AND PartNo = 0",
+            db = quote_ident(database),
+        );
+        let mut row = None;
+        client.read_rows(&query, &[SqlParam::Text(file_name)], &mut |mut found| {
+            if row.is_none() {
+                row = Some((found.i64(0)?, found.take_binary(1)?));
+            }
+            Ok(())
+        })?;
+        let (data_size, bytes) = row.ok_or_else(|| anyhow!("Config row not found: {file_name}"))?;
+        if bytes.len() as i64 != data_size {
+            bail!(
+                "Config row {file_name} DataSize {data_size} does not match BinaryData length {}",
+                bytes.len()
+            );
+        }
+        return Ok(bytes);
+    }
+    let query = format!(
         "SET NOCOUNT ON; USE {db};\n\
          SELECT COALESCE((\n\
              SELECT FileName AS file_name,\n\
@@ -7554,8 +7305,7 @@ fn fetch_config_blob_with_auth(
         db = quote_ident(database),
         file_name = quote_string(file_name),
     );
-    let stdout = run_sql_capture_with_auth(sqlcmd, server, sql_auth, &sql)?;
-    let json = extract_json_array(&stdout, &format!("fetch_config_blob({file_name})"))?;
+    let json = query_json_required(sql, &query, &format!("fetch_config_blob({file_name})"))?;
     let mut rows: Vec<BinaryBlobRow> = serde_json::from_str(&json)
         .with_context(|| format!("failed to parse Config blob JSON for {file_name}"))?;
     let row = rows
@@ -7573,13 +7323,23 @@ fn fetch_config_blob_with_auth(
     Ok(bytes)
 }
 
-fn database_exists(sqlcmd: &Path, server: &str, database: &str) -> Result<bool> {
-    let sql = format!(
+fn database_exists(sql: &SqlExec, database: &str) -> Result<bool> {
+    let query = format!(
         "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name = N'{}';",
         quote_string(database)
     );
-    let stdout = run_sql_capture(sqlcmd, server, &sql)?;
-    Ok(first_i32(&stdout).unwrap_or_default() > 0)
+    ensure_online("run a query")?;
+    match sql.backend() {
+        SqlBackend::Client(client) => Ok(client
+            .query_scalar(&query, &[])?
+            .and_then(|count| count.as_i64())
+            .unwrap_or_default()
+            > 0),
+        SqlBackend::Tools(tools) => {
+            let stdout = sqlcmd_capture(sql, tools, &query)?;
+            Ok(first_i32(&stdout).unwrap_or_default() > 0)
+        }
+    }
 }
 
 fn resolve_sqlcmd_password(
@@ -7594,6 +7354,28 @@ fn resolve_sqlcmd_password(
         .or_else(|| std::env::var(password_env).ok())
 }
 
+/// The SQL handle of a staging command: the built-in client, or sqlcmd (and
+/// bcp) when `--sqlcmd` names them. The certificate is trusted, as the
+/// `sqlcmd -C` of the 0.2 path did.
+fn stage_sql(
+    sqlcmd: Option<&Path>,
+    bcp: Option<&Path>,
+    server: &str,
+    user: Option<&str>,
+    password: Option<&str>,
+    password_env: &str,
+) -> Result<SqlExec> {
+    SqlExec::from_options(SqlOptions {
+        sqlcmd,
+        bcp,
+        server,
+        user,
+        password,
+        password_env,
+        trust_server_certificate: true,
+    })
+}
+
 fn by_table_name(tables: &[TableShape]) -> BTreeMap<String, &TableShape> {
     tables
         .iter()
@@ -7601,15 +7383,16 @@ fn by_table_name(tables: &[TableShape]) -> BTreeMap<String, &TableShape> {
         .collect()
 }
 
-fn run_sql(sqlcmd: &Path, server: &str, sql: &str) -> Result<()> {
-    run_sql_with_auth(sqlcmd, server, SqlAuth::integrated(), sql)
-}
-
-fn run_sql_with_auth(sqlcmd: &Path, server: &str, sql_auth: SqlAuth<'_>, sql: &str) -> Result<()> {
+/// Runs statements that return nothing (`sqlcmd -Q` on the `--sqlcmd` path).
+fn run_sql(sql: &SqlExec, statement: &str) -> Result<()> {
     ensure_online("run a statement")?;
-    let output = sqlcmd_command_with_auth(sqlcmd, server, sql_auth, sql)
+    let tools = match sql.backend() {
+        SqlBackend::Client(client) => return client.execute(statement, &[]).map(drop),
+        SqlBackend::Tools(tools) => tools,
+    };
+    let output = sqlcmd_command(sql, tools, statement)
         .output()
-        .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
+        .with_context(|| format!("failed to launch sqlcmd at {}", tools.sqlcmd.display()))?;
     if output.status.success() {
         return Ok(());
     }
@@ -7621,25 +7404,47 @@ fn run_sql_with_auth(sqlcmd: &Path, server: &str, sql_auth: SqlAuth<'_>, sql: &s
     ))
 }
 
-fn run_sql_capture(sqlcmd: &Path, server: &str, sql: &str) -> Result<String> {
-    run_sql_capture_with_auth(sqlcmd, server, SqlAuth::integrated(), sql)
+/// The JSON document a `FOR JSON` query builds, `None` when it returned no
+/// row (sqlcmd printed no `[`).
+fn query_json(sql: &SqlExec, query: &str, context: &str) -> Result<Option<String>> {
+    ensure_online("run a query")?;
+    match sql.backend() {
+        SqlBackend::Client(client) => client
+            .query_json(query)
+            .with_context(|| format!("{context}: the query failed")),
+        SqlBackend::Tools(tools) => {
+            let stdout = sqlcmd_capture(sql, tools, query)?;
+            if !stdout.contains('[') {
+                return Ok(None);
+            }
+            extract_json_array(&stdout, context).map(Some)
+        }
+    }
 }
 
-fn run_sql_capture_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    sql: &str,
-) -> Result<String> {
-    ensure_online("run a query")?;
-    // A connection that never logged in ran nothing, so it is retried: an
-    // ERP УХ audit issues thousands of these calls and died after 80 minutes
-    // on one login timeout while the machine was busy.
+/// As [`query_json`], for a query that always returns a document.
+fn query_json_required(sql: &SqlExec, query: &str, context: &str) -> Result<String> {
+    match sql.backend() {
+        // sqlcmd's output is searched for the array, whose absence it names.
+        SqlBackend::Tools(tools) => {
+            ensure_online("run a query")?;
+            let stdout = sqlcmd_capture(sql, tools, query)?;
+            extract_json_array(&stdout, context)
+        }
+        SqlBackend::Client(_) => query_json(sql, query, context)?
+            .ok_or_else(|| anyhow!("{context}: the query returned no JSON document")),
+    }
+}
+
+/// The output of `sqlcmd -Q`; a connection that never logged in ran nothing,
+/// so it is retried: an ERP УХ audit issues thousands of these calls and died
+/// after 80 minutes on one login timeout while the machine was busy.
+fn sqlcmd_capture(sql: &SqlExec, tools: &SqlTools, query: &str) -> Result<String> {
     let mut attempt = 0u32;
     loop {
-        let output = sqlcmd_command_with_auth(sqlcmd, server, sql_auth, sql)
+        let output = sqlcmd_command(sql, tools, query)
             .output()
-            .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
+            .with_context(|| format!("failed to launch sqlcmd at {}", tools.sqlcmd.display()))?;
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).to_string());
         }
@@ -7671,16 +7476,24 @@ fn sqlcmd_failed_before_login(stdout: &str, stderr: &str) -> bool {
     .any(|marker| text.contains(marker))
 }
 
-fn run_sql_file_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    script: &Path,
-) -> Result<()> {
+/// Runs a script file written for `sqlcmd -i`: through the built-in client
+/// batch by batch (refusing sqlcmd's own commands and variables), or through
+/// sqlcmd itself with `--sqlcmd`.
+fn run_sql_file(sql: &SqlExec, script: &Path) -> Result<()> {
     ensure_online("run a script")?;
-    let output = sqlcmd_file_command_with_auth(sqlcmd, server, sql_auth, script)
+    let tools = match sql.backend() {
+        SqlBackend::Client(client) => {
+            let text = fs::read_to_string(script)
+                .with_context(|| format!("failed to read {}", script.display()))?;
+            return client
+                .run_script(&text, ScriptVariables::Refuse)
+                .with_context(|| format!("SQL script {} failed", script.display()));
+        }
+        SqlBackend::Tools(tools) => tools,
+    };
+    let output = sqlcmd_file_command(sql, tools, script)
         .output()
-        .with_context(|| format!("failed to launch sqlcmd at {}", sqlcmd.display()))?;
+        .with_context(|| format!("failed to launch sqlcmd at {}", tools.sqlcmd.display()))?;
     if output.status.success() {
         return Ok(());
     }
@@ -7759,18 +7572,13 @@ fn run_bcp(mut command: Command) -> Result<()> {
     ))
 }
 
-fn sqlcmd_command_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    sql: &str,
-) -> Command {
-    let mut command = Command::new(sqlcmd);
-    command.arg("-S").arg(server);
-    match sql_auth.user {
+fn sqlcmd_command(sql: &SqlExec, tools: &SqlTools, statement: &str) -> Command {
+    let mut command = Command::new(&tools.sqlcmd);
+    command.arg("-S").arg(sql.server());
+    match sql.user() {
         Some(user) => {
             command.arg("-U").arg(user);
-            if let Some(password) = sql_auth.password {
+            if let Some(password) = sql.password() {
                 command.env("SQLCMDPASSWORD", password);
             }
         }
@@ -7790,22 +7598,17 @@ fn sqlcmd_command_with_auth(
         .arg("-Y")
         .arg("0")
         .arg("-Q")
-        .arg(sql);
+        .arg(statement);
     command
 }
 
-fn sqlcmd_file_command_with_auth(
-    sqlcmd: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-    script: &Path,
-) -> Command {
-    let mut command = Command::new(sqlcmd);
-    command.arg("-S").arg(server);
-    match sql_auth.user {
+fn sqlcmd_file_command(sql: &SqlExec, tools: &SqlTools, script: &Path) -> Command {
+    let mut command = Command::new(&tools.sqlcmd);
+    command.arg("-S").arg(sql.server());
+    match sql.user() {
         Some(user) => {
             command.arg("-U").arg(user);
-            if let Some(password) = sql_auth.password {
+            if let Some(password) = sql.password() {
                 command.env("SQLCMDPASSWORD", password);
             }
         }
@@ -8583,20 +8386,16 @@ fn bulk_stage_paths(base: Option<&PathBuf>, database: &str) -> (PathBuf, PathBuf
     )
 }
 
-fn bcp_in_with_auth(
-    bcp: &Path,
-    table: &str,
-    file: &Path,
-    server: &str,
-    sql_auth: SqlAuth<'_>,
-) -> Result<()> {
+/// `bcp in` of a native-format rows file into the tempdb staging table (the
+/// `--sqlcmd` path).
+fn bcp_in_stage_rows(sql: &SqlExec, bcp: &Path, table: &str, file: &Path) -> Result<()> {
     let mut command = Command::new(bcp);
     command
         .arg(table)
         .arg("in")
         .arg(file)
         .arg("-S")
-        .arg(server)
+        .arg(sql.server())
         .arg("-n")
         .arg("-u")
         .arg("-a")
@@ -8605,10 +8404,10 @@ fn bcp_in_with_auth(
         .arg("2000")
         .arg("-h")
         .arg("TABLOCK");
-    match sql_auth.user {
+    match sql.user() {
         Some(user) => {
             command.arg("-U").arg(user);
-            if let Some(password) = sql_auth.password {
+            if let Some(password) = sql.password() {
                 command.arg("-P").arg(password);
             }
         }
@@ -8619,13 +8418,113 @@ fn bcp_in_with_auth(
     run_bcp(command)
 }
 
-/// The bulk load: every staged row in one native bcp file, loaded into a
-/// tempdb table (the 1C database's own schema is never touched), then moved
-/// into ConfigSave by one guarded transaction. With `--script-only` the file
-/// and both scripts are written and nothing runs.
+/// Whether a bulk stage writes its rows as a bcp native-format file: the
+/// `--sqlcmd` path loads it with `bcp in`, and `--script-only` leaves it
+/// beside the scripts; the built-in client sends the rows from memory.
+fn bulk_stage_rows_file_needed(sql: &SqlExec, script_only: bool) -> bool {
+    script_only || sql.tools().is_some()
+}
+
+/// Runs a bulk stage whose scripts and rows are ready: the prepare script
+/// (the tempdb table), the rows into it, then the apply script (the guarded
+/// move into ConfigSave). The tempdb table is dropped when a step fails.
+fn run_bulk_stage(
+    sql: &SqlExec,
+    table: &str,
+    rows: &[BulkStageRow<'_>],
+    rows_path: &Path,
+    prepare_path: &Path,
+    apply_path: &Path,
+) -> Result<()> {
+    run_sql_file(sql, prepare_path)?;
+    let loaded = timed_stage_step("rows into the tempdb table", || {
+        load_bulk_stage_rows(sql, table, rows, rows_path)
+    })
+    .and_then(|()| timed_stage_step("apply into ConfigSave", || run_sql_file(sql, apply_path)));
+    if let Err(error) = loaded {
+        let drop = format!(
+            "IF OBJECT_ID(N'tempdb.dbo.{name}', N'U') IS NOT NULL DROP TABLE tempdb.dbo.{table};",
+            name = quote_string(&quote_ident(table)),
+            table = quote_ident(table),
+        );
+        let _ = run_sql(sql, &drop);
+        return Err(error);
+    }
+    if sql.tools().is_some() {
+        let _ = fs::remove_file(rows_path);
+    }
+    Ok(())
+}
+
+/// Runs one SQL step of a stage; with `IBCMD_RS_STAGE_TIMING` set, says how
+/// long it took.
+fn timed_stage_step<R>(label: &str, step: impl FnOnce() -> Result<R>) -> Result<R> {
+    let started = std::time::Instant::now();
+    let result = step();
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: {label} in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    result
+}
+
+/// The staged rows into the tempdb table: from memory through the built-in
+/// client, or with `bcp in` from the rows file.
+fn load_bulk_stage_rows(
+    sql: &SqlExec,
+    table: &str,
+    rows: &[BulkStageRow<'_>],
+    rows_path: &Path,
+) -> Result<()> {
+    ensure_online("write the staged rows")?;
+    let qualified = format!("tempdb.dbo.{}", quote_ident(table));
+    let client = match sql.backend() {
+        SqlBackend::Tools(tools) => {
+            return bcp_in_stage_rows(sql, &tools.bcp, &qualified, rows_path);
+        }
+        SqlBackend::Client(client) => client,
+    };
+    let lengths = rows
+        .iter()
+        .map(|row| {
+            i64::try_from(row.blob.len())
+                .with_context(|| format!("staged row {} is too large", row.file_name))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let values = rows
+        .iter()
+        .zip(&lengths)
+        .map(|(row, length)| {
+            vec![
+                SqlParam::Text(row.file_name),
+                SqlParam::U8(u8::from(row.requires_config_row)),
+                SqlParam::I64(*length),
+                SqlParam::Binary(row.blob),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let written = client
+        .write_rows(
+            &qualified,
+            &["FileName", "Kind", "DataSize", "BinaryData"],
+            &values,
+        )
+        .with_context(|| format!("failed to write the staged rows into {qualified}"))?;
+    if written != rows.len() as u64 {
+        bail!("{qualified} took {written} of {} staged rows", rows.len());
+    }
+    Ok(())
+}
+
+/// The bulk load: every staged row loaded into a tempdb table (the 1C
+/// database's own schema is never touched), then moved into ConfigSave by
+/// one guarded transaction. With `--script-only` the rows file and both
+/// scripts are written and nothing runs.
 fn stage_source_rows_bulk(
     args: &MssqlStageSourceObjectsArgs,
-    sql_auth: SqlAuth<'_>,
+    sql: &SqlExec,
     metadata_objects: &[PreparedMetadataObjectStage],
     common_modules: &[PreparedCommonModuleObjectStage],
     versions_blob: &[u8],
@@ -8638,7 +8537,9 @@ fn stage_source_rows_bulk(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let table = bulk_stage_table_name(&args.database);
-    write_bulk_stage_rows(&rows_path, &rows)?;
+    if bulk_stage_rows_file_needed(sql, args.script_only) {
+        write_bulk_stage_rows(&rows_path, &rows)?;
+    }
     fs::write(&prepare_path, build_bulk_stage_prepare_sql(&table))
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
     // `root` and `version` join the staged rows in ConfigSave.
@@ -8649,29 +8550,7 @@ fn stage_source_rows_bulk(
     )
     .with_context(|| format!("failed to write {}", apply_path.display()))?;
     if !args.script_only {
-        let bcp = args
-            .bcp_executable
-            .clone()
-            .unwrap_or_else(|| crate::mssql_dump::bcp_executable_for_sqlcmd(&args.sqlcmd));
-        run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &prepare_path)?;
-        let loaded = bcp_in_with_auth(
-            &bcp,
-            &format!("tempdb.dbo.{}", quote_ident(&table)),
-            &rows_path,
-            &args.server,
-            sql_auth,
-        )
-        .and_then(|()| run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &apply_path));
-        if let Err(error) = loaded {
-            let drop = format!(
-                "IF OBJECT_ID(N'tempdb.dbo.{name}', N'U') IS NOT NULL DROP TABLE tempdb.dbo.{table};",
-                name = quote_string(&quote_ident(&table)),
-                table = quote_ident(&table),
-            );
-            let _ = run_sql_capture_with_auth(&args.sqlcmd, &args.server, sql_auth, &drop);
-            return Err(error);
-        }
-        let _ = fs::remove_file(&rows_path);
+        run_bulk_stage(sql, &table, &rows, &rows_path, &prepare_path, &apply_path)?;
     }
     Ok(vec![prepare_path, apply_path])
 }
@@ -9334,14 +9213,14 @@ mod tests {
     use super::{
         BinaryBlobRow, BulkStageRow, ColumnShape, CommonModuleStageSpec, ConfigSaveRowDigest,
         DeltaBundleManifest, PreparedCommonModuleObjectStage, PreparedCommonModuleStage,
-        PreparedMetadataBodyStage, PreparedMetadataObjectStage, SqlAuth, StorageBundleManifest,
+        PreparedMetadataBodyStage, PreparedMetadataObjectStage, StorageBundleManifest,
         StorageTableManifest, TableShape, activate_staged_main, build_bulk_stage_apply_sql,
         build_source_stage_batches, build_source_stage_batches_within, compare_shapes,
         compare_storage_table_manifests, diff_activation_rows, encode_hex,
         filter_source_paths_by_prefix, infer_common_module_text_path, is_root_common_module_xml,
         is_root_metadata_xml, is_stage_metadata_xml, quote_ident, quote_string,
         require_non_lab_confirmation, source_common_module_xmls, source_metadata_xmls,
-        source_stage_batch_reports, source_xml_version_from_bytes, sqlcmd_file_command_with_auth,
+        source_stage_batch_reports, source_xml_version_from_bytes, sqlcmd_file_command,
         validate_delta_manifest, validate_selected_source_versions, validate_storage_manifest,
         write_bulk_stage_rows,
     };
@@ -9365,8 +9244,8 @@ mod tests {
         let args = MssqlActivateStagedMainArgs {
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
             sqlcmd_trust_cert: false,
-            sqlcmd: PathBuf::from("must-not-run-sqlcmd"),
-            bcp_executable: PathBuf::from("must-not-run-bcp"),
+            sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
+            bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
             server: "must-not-connect".to_owned(),
             sql_user: None,
             sql_pwd: None,
@@ -9402,6 +9281,21 @@ mod tests {
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A SQL handle for unit tests: any request it gets fails.
+    fn test_sql() -> crate::sql::SqlExec {
+        crate::sql::SqlExec::detached("a unit test must not reach SQL Server")
+    }
+
+    /// The `--sqlcmd` path's handle, for tests of the command lines it builds.
+    fn tools_sql(login: Option<(&str, &str)>) -> crate::sql::SqlExec {
+        crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
+            user: login.map(|(user, _)| user),
+            password: login.map(|(_, password)| password),
+            ..crate::sql::SqlOptions::integrated("localhost", Some(Path::new("sqlcmd")))
+        })
+        .unwrap()
+    }
 
     fn test_compile_axes() -> crate::compiler::CompileAxes {
         super::legacy_non_xml_compile_axes()
@@ -9578,24 +9472,11 @@ mod tests {
             .with_context(|| format!("failed to parse owner XML {}", owner_xml.display()))?;
         let body_id = format!("{}.0", properties.uuid);
         let object_refs = source.moxel_object_refs()?;
-        let native_blob = super::fetch_config_blob_with_auth(
-            Path::new("sqlcmd"),
-            "localhost",
-            super::SqlAuth::integrated(),
-            "ut_ibcmd",
-            &body_id,
-        )?;
-        let applied_blob = super::fetch_config_blob_with_auth(
-            Path::new("sqlcmd"),
-            "localhost",
-            super::SqlAuth::integrated(),
-            "ut_ibcmd_sweep_01",
-            &body_id,
-        )
-        .ok();
+        let native_blob = super::fetch_config_blob(&test_sql(), "ut_ibcmd", &body_id)?;
+        let applied_blob =
+            super::fetch_config_blob(&test_sql(), "ut_ibcmd_sweep_01", &body_id).ok();
         let local_rows = super::prepare_spreadsheet_template_body_row(
-            Path::new("sqlcmd"),
-            "localhost",
+            &test_sql(),
             "ut_ibcmd",
             owner_xml,
             &properties,
@@ -10023,15 +9904,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::prepare_metadata_object_stage(
-            Path::new("missing-sqlcmd-must-not-run-for-unsupported-dialect"),
-            "missing-server",
-            super::SqlAuth::integrated(),
-            "missing-database",
-            xml_path,
-            None,
-        )
-        .unwrap_err();
+        let error =
+            super::prepare_metadata_object_stage(&test_sql(), "missing-database", xml_path, None)
+                .unwrap_err();
 
         assert!(error.to_string().contains("unsupported metadata XML"));
         assert!(error.to_string().contains("XML dialect 2.22"));
@@ -10065,9 +9940,7 @@ mod tests {
             super::mssql_compile_axes(ibcmd_core::version::XmlDialect::parse("2.22").unwrap());
 
         let error = super::prepare_form_body_row(
-            Path::new("missing-sqlcmd-must-not-run-for-unsupported-form"),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &metadata_xml,
             &properties,
@@ -10106,9 +9979,7 @@ mod tests {
         );
 
         let rows = super::prepare_form_body_row(
-            Path::new("missing-sqlcmd-marker-50-form-must-not-fetch"),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &metadata_xml,
             &properties,
@@ -10159,12 +10030,9 @@ mod tests {
             "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
             "Item",
         );
-        let missing_sqlcmd = Path::new("missing-sqlcmd-external-form-must-fetch-base");
-
+        // The base row is asked for: the handle refuses the request.
         let error = super::prepare_form_body_row(
-            missing_sqlcmd,
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &metadata_xml,
             &properties,
@@ -10174,10 +10042,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            format!("{error:#}").contains(&format!(
-                "failed to launch sqlcmd at {}",
-                missing_sqlcmd.display()
-            )),
+            format!("{error:#}").contains("a unit test must not reach SQL Server"),
             "unexpected error: {error:#}"
         );
         let _ = fs::remove_dir_all(root);
@@ -10215,9 +10080,7 @@ mod tests {
         );
 
         let error = super::prepare_command_interface_body_row(
-            Path::new("missing-sqlcmd-readable-command-interface-fetch"),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &owner_xml,
             &properties,
@@ -10226,9 +10089,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains(
-            "failed to launch sqlcmd at missing-sqlcmd-readable-command-interface-fetch"
-        ));
+        assert!(
+            format!("{error:#}").contains("a unit test must not reach SQL Server"),
+            "unexpected error: {error:#}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11401,13 +11265,10 @@ mod tests {
 
     #[test]
     fn sqlcmd_script_command_asks_for_the_largest_packet() {
-        let command = sqlcmd_file_command_with_auth(
-            Path::new("sqlcmd.exe"),
-            "localhost",
-            SqlAuth {
-                user: None,
-                password: None,
-            },
+        let sql = tools_sql(None);
+        let command = sqlcmd_file_command(
+            &sql,
+            sql.tools().unwrap(),
             Path::new("F:/scripts/batch1.sql"),
         );
         let args = command
@@ -12312,8 +12173,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_help_body_row(
-            PathBuf::from("missing-sqlcmd-for-help-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &catalog_xml,
             &properties,
@@ -12498,8 +12358,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-object-module-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &catalog_xml,
             &properties,
@@ -12537,8 +12396,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-configuration-module-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &configuration_xml,
             &properties,
@@ -12632,8 +12490,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-object-module-bin-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &processor_xml,
             &properties,
@@ -12675,8 +12532,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-web-service-module-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &service_xml,
             &properties,
@@ -12718,8 +12574,7 @@ mod tests {
         );
 
         let rows = super::prepare_object_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-filter-criterion-module-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &filter_xml,
             &properties,
@@ -12774,8 +12629,7 @@ mod tests {
         );
 
         let rows = super::prepare_nested_command_module_body_rows(
-            PathBuf::from("missing-sqlcmd-for-nested-command-module-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &xml_path,
             xml,
@@ -13482,8 +13336,7 @@ mod tests {
         );
 
         let rows = super::prepare_raw_deflated_body_row(
-            PathBuf::from("missing-sqlcmd-for-raw-body-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             body_path.clone(),
             &properties,
@@ -13532,9 +13385,7 @@ mod tests {
         );
 
         let rows = super::prepare_metadata_body_rows(
-            PathBuf::from("missing-sqlcmd-for-xdto-package-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &xml_path,
             xml,
@@ -13576,8 +13427,7 @@ mod tests {
         );
 
         let rows = super::prepare_raw_deflated_body_row(
-            PathBuf::from("missing-sqlcmd-for-ws-reference-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             body_path.clone(),
             &properties,
@@ -13620,8 +13470,7 @@ mod tests {
         );
 
         let rows = super::prepare_additional_indexes_body_row(
-            PathBuf::from("missing-sqlcmd-for-additional-indexes-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &document_xml,
             &properties,
@@ -13664,8 +13513,7 @@ mod tests {
         );
 
         let error = super::prepare_additional_indexes_body_row(
-            PathBuf::from("missing-sqlcmd-for-unmapped-additional-indexes-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &register_xml,
             &properties,
@@ -13700,8 +13548,7 @@ mod tests {
         );
 
         let rows = super::prepare_binary_template_body_row(
-            PathBuf::from("missing-sqlcmd-for-binary-template-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &template_xml,
             &properties,
@@ -13758,12 +13605,7 @@ mod tests {
         );
 
         let rows = super::prepare_template_body_row(
-            Path::new("missing-sqlcmd-dcs-template-must-not-fetch"),
-            "missing-server",
-            super::SqlAuth {
-                user: None,
-                password: None,
-            },
+            &test_sql(),
             "missing-database",
             &template_xml,
             owner,
@@ -14034,12 +13876,7 @@ mod tests {
         );
 
         let error = super::prepare_template_body_row(
-            Path::new("missing-sqlcmd-unknown-template-must-not-run"),
-            "missing-server",
-            super::SqlAuth {
-                user: None,
-                password: None,
-            },
+            &test_sql(),
             "missing-database",
             &template_xml,
             owner,
@@ -14090,8 +13927,7 @@ mod tests {
         );
 
         let rows = super::prepare_spreadsheet_template_body_row(
-            PathBuf::from("missing-sqlcmd-for-spreadsheet-template-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &template_xml,
             &properties,
@@ -14208,8 +14044,7 @@ mod tests {
         );
 
         let rows = super::prepare_html_template_body_row(
-            PathBuf::from("missing-sqlcmd-for-html-template-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &template_xml,
             &properties,
@@ -14258,8 +14093,7 @@ mod tests {
         let source = MetadataSourceContext::new(root.clone());
 
         let rows = super::prepare_style_body_row(
-            PathBuf::from("missing-sqlcmd-for-style-body-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &style_xml,
             &properties,
@@ -14302,8 +14136,7 @@ mod tests {
         );
 
         let rows = super::prepare_common_picture_body_row(
-            PathBuf::from("missing-sqlcmd-for-common-picture-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &picture_xml,
             &properties,
@@ -14370,8 +14203,7 @@ mod tests {
         let source = MetadataSourceContext::new(root.clone());
 
         let rows = super::prepare_exchange_plan_content_body_row(
-            PathBuf::from("missing-sqlcmd-for-exchange-plan-content-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &exchange_xml,
             &properties,
@@ -14415,8 +14247,7 @@ mod tests {
         );
 
         let rows = super::prepare_scheduled_job_body_row(
-            PathBuf::from("missing-sqlcmd-for-schedule-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &job_xml,
             &properties,
@@ -14501,8 +14332,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_ext_picture_body_row(
-            PathBuf::from("missing-sqlcmd-for-configuration-picture-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &properties,
             body_path.clone(),
@@ -14585,9 +14415,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_asset_body_rows(
-            PathBuf::from("missing-sqlcmd-for-main-section-picture-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &root.join("Configuration.xml"),
             &properties,
@@ -14671,9 +14499,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_asset_body_rows(
-            PathBuf::from("missing-sqlcmd-for-configuration-binary-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &configuration_xml,
             &properties,
@@ -14852,9 +14678,7 @@ mod tests {
         );
 
         let rows = super::prepare_command_interface_body_row(
-            PathBuf::from("missing-sqlcmd-for-command-interface-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &subsystem_xml,
             &properties,
@@ -14898,9 +14722,7 @@ mod tests {
         );
 
         let rows = super::prepare_command_interface_body_row(
-            PathBuf::from("missing-sqlcmd-for-common-command-interface-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &common_command_xml,
             &properties,
@@ -14987,9 +14809,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_command_interface_body_row(
-            PathBuf::from("missing-sqlcmd-for-configuration-command-interface-test").as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &properties,
             body_path.clone(),
@@ -15079,10 +14899,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_command_interface_body_row(
-            PathBuf::from("missing-sqlcmd-for-configuration-main-section-command-interface-test")
-                .as_path(),
-            "missing-server",
-            super::SqlAuth::integrated(),
+            &test_sql(),
             "missing-database",
             &properties,
             body_path.clone(),
@@ -15258,8 +15075,7 @@ mod tests {
         );
 
         let rows = super::prepare_configuration_raw_deflated_body_row(
-            PathBuf::from("missing-sqlcmd-for-mobile-client-signature-test").as_path(),
-            "missing-server",
+            &test_sql(),
             "missing-database",
             &properties,
             body_path.clone(),
@@ -16139,12 +15955,8 @@ mod tests {
 
     #[test]
     fn sqlcmd_command_uses_integrated_auth_by_default() {
-        let command = super::sqlcmd_command_with_auth(
-            Path::new("sqlcmd"),
-            "localhost",
-            super::SqlAuth::integrated(),
-            "SELECT 1",
-        );
+        let sql = tools_sql(None);
+        let command = super::sqlcmd_command(&sql, sql.tools().unwrap(), "SELECT 1");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
@@ -16157,15 +15969,8 @@ mod tests {
 
     #[test]
     fn sqlcmd_command_switches_to_sql_auth_when_user_is_present() {
-        let command = super::sqlcmd_command_with_auth(
-            Path::new("sqlcmd"),
-            "localhost",
-            super::SqlAuth {
-                user: Some("stage-user"),
-                password: Some("stage-secret"),
-            },
-            "SELECT 1",
-        );
+        let sql = tools_sql(Some(("stage-user", "stage-secret")));
+        let command = super::sqlcmd_command(&sql, sql.tools().unwrap(), "SELECT 1");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())

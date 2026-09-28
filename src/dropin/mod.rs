@@ -290,10 +290,8 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         user: common.user.clone(),
         password: common.password.clone(),
         password_env: "IBCMD_USER_PSW".to_string(),
-        sqlcmd: common
-            .sqlcmd
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("sqlcmd")),
+        // the built-in SQL Server client, unless `--sqlcmd` asks for sqlcmd.exe
+        sqlcmd: common.sqlcmd.clone(),
         overwrite: false,
         count_files: common.report.is_some(),
         output_dir: PathBuf::from(&request.path),
@@ -324,10 +322,8 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         user: common.user.clone(),
         password: common.password.clone(),
         password_env: "IBCMD_USER_PSW".to_string(),
-        sqlcmd: common
-            .sqlcmd
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("sqlcmd")),
+        // the built-in SQL Server client, unless `--sqlcmd` asks for sqlcmd.exe
+        sqlcmd: common.sqlcmd.clone(),
         // An import replaces the saved configuration, as the platform's does.
         replace_config_save: true,
         allow_non_lab: true,
@@ -566,7 +562,7 @@ mod tests {
         assert_eq!(sql_server_name("sql01/inst"), r"sql01\inst");
         assert_eq!(sql_server_name(r"lpc:sql01\inst"), r"lpc:sql01\inst");
         assert_eq!(args.db_pwd_env, "IBCMD_DB_PSW");
-        assert_eq!(args.sqlcmd, PathBuf::from("sqlcmd"));
+        assert_eq!(args.sqlcmd, None);
         assert!(!args.overwrite);
         assert!(args.count_files);
         assert_eq!(args.output_dir, PathBuf::from("out"));

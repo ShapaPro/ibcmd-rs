@@ -102,10 +102,10 @@ pub(crate) enum PlatformNeed<'a> {
     /// The research round trip: the XML version given, else 2.20.
     Given,
     /// An export into `output_dir`: the settings, then the configuration's
-    /// compatibility mode (read through `sqlcmd`, and only when nothing
-    /// above decides).
+    /// compatibility mode (read through the built-in client, or `sqlcmd`
+    /// when given, and only when nothing above decides).
     Export {
-        sqlcmd: &'a Path,
+        sqlcmd: Option<&'a Path>,
         output_dir: &'a Path,
         overwrite: bool,
     },
@@ -176,7 +176,7 @@ impl InfobaseConfigExportArgs {
             db_pwd: self.db_pwd.as_deref(),
             db_pwd_env: &self.db_pwd_env,
             need: PlatformNeed::Export {
-                sqlcmd: &self.sqlcmd,
+                sqlcmd: self.sqlcmd.as_deref(),
                 output_dir: &self.output_dir,
                 overwrite: self.overwrite,
             },
@@ -210,7 +210,7 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
     ensure_mssql(&config.dbms)?;
     export_config_report(
         &config,
-        &args.sqlcmd,
+        args.sqlcmd.as_deref(),
         &args.db_pwd_env,
         &args.output_dir,
         args.overwrite,
@@ -221,7 +221,7 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
 
 pub(crate) fn export_config_report(
     config: &ConnectionConfig,
-    sqlcmd: &Path,
+    sqlcmd: Option<&Path>,
     db_pwd_env: &str,
     output_dir_arg: &Path,
     overwrite: bool,
@@ -272,7 +272,7 @@ pub(crate) fn export_config_report(
 /// The export of the connection's database into `output_dir`.
 fn dump_args(
     config: &ConnectionConfig,
-    sqlcmd: &Path,
+    sqlcmd: Option<&Path>,
     db_pwd_env: &str,
     output_dir: PathBuf,
     file_names: Vec<String>,
@@ -282,8 +282,8 @@ fn dump_args(
         rows_dir: None,
         model_export: false,
         legacy_export: false,
-        sqlcmd: sqlcmd.to_path_buf(),
-        bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
+        sqlcmd: sqlcmd.map(Path::to_path_buf),
+        bcp_executable: None,
         runtime_journal: None,
         server: config.db_server.clone(),
         sql_user: config.db_user.clone(),
@@ -1014,7 +1014,7 @@ mod tests {
             user: None,
             password: None,
             password_env: "IBCMD_USER_PSW".to_string(),
-            sqlcmd: PathBuf::from("sqlcmd"),
+            sqlcmd: None,
             replace_config_save: true,
             allow_non_lab: true,
             batch_size: Some(250),
@@ -1088,7 +1088,7 @@ mod tests {
             password: None,
             password_env: "IBCMD_USER_PSW".to_string(),
             // never run: every case here settles before a probe
-            sqlcmd: PathBuf::from("no-such-sqlcmd"),
+            sqlcmd: None,
             overwrite: false,
             count_files: false,
             output_dir: PathBuf::from("out"),

@@ -26,13 +26,13 @@ use serde::Serialize;
 use super::stage_timing;
 use super::{
     BASE_FREE_MISSING_ROW, BASE_FREE_STAGE, BulkStageRow, GeneratedBlobReport, MetadataBodyFamily,
-    SqlAuth, StageSourceObjectsReport, StagedMetadataBodyReport, StagedMetadataObjectReport,
-    StorageTableManifest, bcp_in_with_auth, build_bulk_stage_prepare_sql, bulk_stage_paths,
-    bulk_stage_table_name, command_interface_body_suffix, infer_common_module_text_path,
-    mssql_compile_axes_from_metadata_xml, pack_module_body_source, prepare_metadata_body_family,
-    quote_ident, quote_string, require_non_lab_confirmation, resolve_sqlcmd_password,
-    run_sql_capture_with_auth, run_sql_file_with_auth, source_module_body_path,
-    source_xml_version_from_bytes, storage_table_stats_with_auth, write_bulk_stage_rows,
+    StageSourceObjectsReport, StagedMetadataBodyReport, StagedMetadataObjectReport,
+    StorageTableManifest, build_bulk_stage_prepare_sql, bulk_stage_paths,
+    bulk_stage_rows_file_needed, bulk_stage_table_name, command_interface_body_suffix,
+    infer_common_module_text_path, mssql_compile_axes_from_metadata_xml, pack_module_body_source,
+    prepare_metadata_body_family, quote_ident, require_non_lab_confirmation,
+    resolve_sqlcmd_password, run_bulk_stage, source_module_body_path,
+    source_xml_version_from_bytes, stage_sql, storage_table_stats, write_bulk_stage_rows,
 };
 use crate::cli::MssqlStageSourceObjectsArgs;
 use crate::compiler::families::assets::SourceAssetRegistry;
@@ -49,6 +49,7 @@ use crate::module_blob::{
 };
 use crate::parallel;
 use crate::source_listing::{self, SourceListing};
+use crate::sql::SqlExec;
 
 /// One row of the stage: its Config file name and stored bytes.
 #[derive(Debug, Clone)]
@@ -478,9 +479,7 @@ pub(crate) fn prepare_empty_object(
             let result = catch(|| {
                 prepare_metadata_body_family(
                     family,
-                    Path::new("sqlcmd"),
-                    "",
-                    SqlAuth::integrated(),
+                    &SqlExec::detached(BASE_FREE_MISSING_ROW),
                     "",
                     path,
                     &xml,
@@ -1659,13 +1658,37 @@ pub(super) fn stage_source_objects_base_free(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let table = bulk_stage_table_name(&args.database);
-    let write_started = std::time::Instant::now();
-    write_bulk_stage_rows(&rows_path, &bulk)?;
-    if stage_timing::enabled() {
-        eprintln!(
-            "stage timing: bcp file written in {:.1} s",
-            write_started.elapsed().as_secs_f64()
+    // The SQL handle is built before the first write, so a wrong server name or
+    // a missing password stops the stage before any file is written.
+    let sql = if args.script_only {
+        None
+    } else {
+        let sql_password = resolve_sqlcmd_password(
+            args.sql_user.as_deref(),
+            args.sql_pwd.as_deref(),
+            &args.sql_pwd_env,
         );
+        Some(stage_sql(
+            args.sqlcmd.as_deref(),
+            args.bcp_executable.as_deref(),
+            &args.server,
+            args.sql_user.as_deref(),
+            sql_password.as_deref(),
+            &args.sql_pwd_env,
+        )?)
+    };
+    if sql
+        .as_ref()
+        .is_none_or(|sql| bulk_stage_rows_file_needed(sql, args.script_only))
+    {
+        let write_started = std::time::Instant::now();
+        write_bulk_stage_rows(&rows_path, &bulk)?;
+        if stage_timing::enabled() {
+            eprintln!(
+                "stage timing: bcp file written in {:.1} s",
+                write_started.elapsed().as_secs_f64()
+            );
+        }
     }
     fs::write(&prepare_path, build_bulk_stage_prepare_sql(&table))
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
@@ -1684,53 +1707,10 @@ pub(super) fn stage_source_objects_base_free(
     };
     let mut before = not_queried("ConfigSave");
     let mut after = not_queried("ConfigSave");
-    if !args.script_only {
-        let sql_password = resolve_sqlcmd_password(
-            args.sql_user.as_deref(),
-            args.sql_pwd.as_deref(),
-            &args.sql_pwd_env,
-        );
-        let sql_auth = SqlAuth {
-            user: args.sql_user.as_deref(),
-            password: sql_password.as_deref(),
-        };
-        before = storage_table_stats_with_auth(
-            &args.sqlcmd,
-            &args.server,
-            sql_auth,
-            &args.database,
-            "ConfigSave",
-        )?;
-        let bcp = args
-            .bcp_executable
-            .clone()
-            .unwrap_or_else(|| crate::mssql_dump::bcp_executable_for_sqlcmd(&args.sqlcmd));
-        run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &prepare_path)?;
-        let loaded = bcp_in_with_auth(
-            &bcp,
-            &format!("tempdb.dbo.{}", quote_ident(&table)),
-            &rows_path,
-            &args.server,
-            sql_auth,
-        )
-        .and_then(|()| run_sql_file_with_auth(&args.sqlcmd, &args.server, sql_auth, &apply_path));
-        if let Err(error) = loaded {
-            let drop = format!(
-                "IF OBJECT_ID(N'tempdb.dbo.{name}', N'U') IS NOT NULL DROP TABLE tempdb.dbo.{table};",
-                name = quote_string(&quote_ident(&table)),
-                table = quote_ident(&table),
-            );
-            let _ = run_sql_capture_with_auth(&args.sqlcmd, &args.server, sql_auth, &drop);
-            return Err(error);
-        }
-        let _ = fs::remove_file(&rows_path);
-        after = storage_table_stats_with_auth(
-            &args.sqlcmd,
-            &args.server,
-            sql_auth,
-            &args.database,
-            "ConfigSave",
-        )?;
+    if let Some(sql) = &sql {
+        before = storage_table_stats(sql, &args.database, "ConfigSave")?;
+        run_bulk_stage(sql, &table, &bulk, &rows_path, &prepare_path, &apply_path)?;
+        after = storage_table_stats(sql, &args.database, "ConfigSave")?;
     }
 
     let report_started = std::time::Instant::now();

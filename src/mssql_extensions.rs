@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 
 use crate::cli::MssqlExtensionListArgs;
+use crate::sql::{SqlBackend, SqlExec, SqlOptions, SqlRow};
 
 const EXTENSION_INFO_MAGIC_8_3_27: [u8; 4] = [0x43, 0xc2, 0x9a, 0x14];
 const SHA1_BYTES: usize = 20;
@@ -339,32 +340,35 @@ impl std::error::Error for ExtensionRegistryTransportError {}
 
 pub fn list_extensions(args: &MssqlExtensionListArgs) -> Result<MssqlExtensionListReport> {
     let password = resolve_password(args)?;
-    let preflight_stdout = run_sqlcmd(
-        &args.sqlcmd,
-        &args.server,
-        args.sql_user.as_deref(),
-        password.as_deref(),
-        args.sqlcmd_trust_cert,
-        &extension_registry_preflight_query(&args.database),
-    )?;
-    let bounds = parse_preflight(&preflight_stdout)?;
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: None,
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password: password.as_deref(),
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: args.sqlcmd_trust_cert,
+    })?;
+    let preflight = registry_lines(&sql, &extension_registry_preflight_query(&args.database))?;
+    let bounds = parse_preflight(&preflight)?;
     validate_preflight(bounds)?;
-    let stdout = run_sqlcmd(
-        &args.sqlcmd,
-        &args.server,
-        args.sql_user.as_deref(),
-        password.as_deref(),
-        args.sqlcmd_trust_cert,
-        &extension_registry_rows_query(&args.database),
-    )?;
-    if stdout.len() > MAX_REGISTRY_TRANSPORT_BYTES {
+    let lines = registry_lines(&sql, &extension_registry_rows_query(&args.database))?;
+    let transport_bytes = lines
+        .iter()
+        .map(|fields| fields.iter().map(|field| field.len() + 1).sum::<usize>())
+        .sum::<usize>();
+    if transport_bytes > MAX_REGISTRY_TRANSPORT_BYTES {
         return Err(ExtensionRegistryTransportError::ReportTooLarge {
-            actual: stdout.len(),
+            actual: transport_bytes,
             maximum: MAX_REGISTRY_TRANSPORT_BYTES,
         }
         .into());
     }
-    let rows = parse_registry_rows(&stdout)?;
+    let rows = lines
+        .iter()
+        .enumerate()
+        .map(|(index, fields)| registry_row_from_fields(index + 1, fields))
+        .collect::<Result<Vec<_>>>()?;
     if rows.len() > MAX_EXTENSION_ROWS {
         return Err(ExtensionRegistryTransportError::TooManyRows {
             actual: rows.len(),
@@ -523,6 +527,50 @@ fn resolve_password_with(
         })
 }
 
+/// The registry query's result, one list of trimmed fields per row: typed
+/// values through the built-in client, or the `|`-separated lines of
+/// `sqlcmd -h -1 -W` with `--sqlcmd`.
+fn registry_lines(sql: &SqlExec, query: &str) -> Result<Vec<Vec<String>>> {
+    match sql.backend() {
+        SqlBackend::Client(client) => Ok(client
+            .query_rows(query, &[])?
+            .iter()
+            .map(|row: &SqlRow| {
+                row.values
+                    .iter()
+                    .map(|value| value.to_text().trim().to_owned())
+                    .collect()
+            })
+            .collect()),
+        SqlBackend::Tools(tools) => {
+            let stdout = run_sqlcmd(
+                &tools.sqlcmd,
+                sql.server(),
+                sql.user(),
+                sql.password(),
+                sql.trust_server_certificate(),
+                query,
+            )?;
+            if stdout.len() > MAX_REGISTRY_TRANSPORT_BYTES {
+                return Err(ExtensionRegistryTransportError::ReportTooLarge {
+                    actual: stdout.len(),
+                    maximum: MAX_REGISTRY_TRANSPORT_BYTES,
+                }
+                .into());
+            }
+            Ok(stdout
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    line.split('|')
+                        .map(|field| field.trim().to_owned())
+                        .collect()
+                })
+                .collect())
+        }
+    }
+}
+
 fn run_sqlcmd(
     executable: &Path,
     server: &str,
@@ -569,13 +617,10 @@ fn run_sqlcmd(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn parse_preflight(stdout: &str) -> Result<RegistryBounds> {
-    let line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+fn parse_preflight(lines: &[Vec<String>]) -> Result<RegistryBounds> {
+    let values = lines
+        .first()
         .ok_or(ExtensionRegistryTransportError::InvalidPreflight)?;
-    let values = line.split('|').map(str::trim).collect::<Vec<_>>();
     if values.len() != 3 {
         return Err(ExtensionRegistryTransportError::InvalidPreflight.into());
     }
@@ -631,17 +676,10 @@ fn validate_preflight(bounds: RegistryBounds) -> Result<()> {
     Ok(())
 }
 
-fn parse_registry_rows(stdout: &str) -> Result<Vec<RawExtensionRegistryRow>> {
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .enumerate()
-        .map(|(index, line)| parse_registry_row(index + 1, line))
-        .collect()
-}
-
-fn parse_registry_row(line_number: usize, line: &str) -> Result<RawExtensionRegistryRow> {
-    let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
+fn registry_row_from_fields(
+    line_number: usize,
+    fields: &[String],
+) -> Result<RawExtensionRegistryRow> {
     if fields.len() != 11 {
         return Err(ExtensionRegistryTransportError::InvalidRow { line: line_number }.into());
     }
@@ -672,11 +710,11 @@ fn parse_registry_row(line_number: usize, line: &str) -> Result<RawExtensionRegi
     Ok(RawExtensionRegistryRow {
         registry_id: fields[0].to_owned(),
         registry_version: fields[1].to_owned(),
-        name: decode_utf16_hex(fields[2]).map_err(|_| invalid())?,
+        name: decode_utf16_hex(&fields[2]).map_err(|_| invalid())?,
         extension_order: fields[4].parse().map_err(|_| invalid())?,
         purpose: fields[5].parse().map_err(|_| invalid())?,
         scope: fields[6].parse().map_err(|_| invalid())?,
-        used_in_distributed_infobase: match fields[7] {
+        used_in_distributed_infobase: match fields[7].as_str() {
             "0" => false,
             "1" => true,
             _ => return Err(invalid().into()),
@@ -965,7 +1003,7 @@ mod tests {
 
     fn args(user: Option<&str>, password: Option<&str>) -> MssqlExtensionListArgs {
         MssqlExtensionListArgs {
-            sqlcmd: PathBuf::from("sqlcmd"),
+            sqlcmd: Some(PathBuf::from("sqlcmd")),
             server: "localhost".to_owned(),
             sql_user: user.map(str::to_owned),
             sql_pwd: password.map(str::to_owned),

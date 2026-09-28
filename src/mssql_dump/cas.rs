@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::Read;
-use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use flate2::read::DeflateDecoder;
@@ -25,9 +24,10 @@ use sha1::{Digest, Sha1};
 
 use super::config_rows::BinaryConfigRow;
 use super::fetch::{
-    BCP_INLINE_QUERY_MAX_CHARS, fetch_binary_rows_bcp, run_sql_capture_tsv,
+    BCP_INLINE_QUERY_MAX_CHARS, fetch_binary_rows, run_sql_capture_tsv,
     split_selected_file_names_for_bcp_query,
 };
+use crate::sql::{SqlBackend, SqlExec};
 
 const CAS_HASH_BYTES: usize = 20;
 const CAS_HASH_HEX_CHARS: usize = CAS_HASH_BYTES * 2;
@@ -312,30 +312,19 @@ pub fn resolve_cas_storage_image(
 }
 
 /// Fetches the manifest first and then only its referenced CAS rows.
-pub fn fetch_cas_storage_image_bcp(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub fn fetch_cas_storage_image(
+    sql: &SqlExec,
     database: &str,
     table: MssqlStorageTable,
     root_hash: CasHash,
 ) -> Result<StorageImage> {
-    Ok(fetch_cas_storage_image_with_manifest_bcp(
-        sqlcmd, bcp, server, user, password, database, table, root_hash,
-    )?
-    .0)
+    Ok(fetch_cas_storage_image_with_manifest(sql, database, table, root_hash)?.0)
 }
 
 /// Fetches one reachable CAS graph and retains its configuration identity for
 /// extension staging.
-pub fn fetch_cas_storage_image_with_manifest_bcp(
-    sqlcmd: &Path,
-    bcp: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+pub fn fetch_cas_storage_image_with_manifest(
+    sql: &SqlExec,
     database: &str,
     table: MssqlStorageTable,
     root_hash: CasHash,
@@ -347,27 +336,8 @@ pub fn fetch_cas_storage_image_with_manifest_bcp(
         );
     }
     let root_names = BTreeSet::from([root_hash.to_hex()]);
-    preflight_cas_fetch(
-        sqlcmd,
-        server,
-        user,
-        password,
-        database,
-        table,
-        &root_names,
-        MAX_CAS_MANIFEST_BYTES,
-    )?;
-    let root_rows = fetch_binary_rows_bcp(
-        sqlcmd,
-        bcp,
-        server,
-        user,
-        password,
-        database,
-        table.sql_name(),
-        &root_names,
-        false,
-    )?;
+    preflight_cas_fetch(sql, database, table, &root_names, MAX_CAS_MANIFEST_BYTES)?;
+    let root_rows = fetch_binary_rows(sql, database, table.sql_name(), &root_names, false)?;
     let root_rows = root_rows
         .into_iter()
         .map(CasStorageRow::try_from_binary)
@@ -391,26 +361,13 @@ pub fn fetch_cas_storage_image_with_manifest_bcp(
         Vec::new()
     } else {
         preflight_cas_fetch(
-            sqlcmd,
-            server,
-            user,
-            password,
+            sql,
             database,
             table,
             &child_names,
             MAX_CAS_FETCH_PACKED_BYTES,
         )?;
-        fetch_binary_rows_bcp(
-            sqlcmd,
-            bcp,
-            server,
-            user,
-            password,
-            database,
-            table.sql_name(),
-            &child_names,
-            false,
-        )?
+        fetch_binary_rows(sql, database, table.sql_name(), &child_names, false)?
     };
     let mut rows = root_rows;
     rows.extend(
@@ -432,10 +389,7 @@ struct CasFetchStats {
 }
 
 fn preflight_cas_fetch(
-    sqlcmd: &Path,
-    server: &str,
-    user: Option<&str>,
-    password: Option<&str>,
+    sql: &SqlExec,
     database: &str,
     table: MssqlStorageTable,
     selected_hashes: &BTreeSet<String>,
@@ -452,9 +406,38 @@ fn preflight_cas_fetch(
     );
     let mut total = CasFetchStats::default();
     for batch in batches {
-        let sql = build_cas_fetch_stats_sql(database, table, &batch);
-        let stdout = run_sql_capture_tsv(sqlcmd, server, user, password, &sql)?;
-        let batch = parse_cas_fetch_stats(&stdout)?;
+        let query = build_cas_fetch_stats_sql(database, table, &batch);
+        let batch = match sql.backend() {
+            SqlBackend::Client(client) => {
+                let rows = client.query_rows(&query, &[])?;
+                let [row] = rows.as_slice() else {
+                    return Err(CasGraphError::InvalidPreflightOutput(format!(
+                        "{} aggregate rows",
+                        rows.len()
+                    ))
+                    .into());
+                };
+                let count = |index: usize| -> Result<usize> {
+                    usize::try_from(row.i64(index)?)
+                        .map_err(|_| anyhow::anyhow!("negative CAS preflight count"))
+                };
+                CasFetchStats {
+                    physical_rows: count(0)?,
+                    logical_rows: count(1)?,
+                    packed_bytes: count(2)?,
+                }
+            }
+            SqlBackend::Tools(tools) => {
+                let stdout = run_sql_capture_tsv(
+                    &tools.sqlcmd,
+                    sql.server(),
+                    sql.user(),
+                    sql.password(),
+                    &query,
+                )?;
+                parse_cas_fetch_stats(&stdout)?
+            }
+        };
         total.physical_rows = checked_budget_add(
             total.physical_rows,
             batch.physical_rows,
@@ -846,17 +829,13 @@ mod tests {
     #[test]
     fn fetch_rejects_namespaced_config_cas_save_before_launching_tools() {
         let root = CasHash::parse_hex("e1a4957cd700e47cea9ad20e66d489f9e5b0bac2").unwrap();
-        let error = fetch_cas_storage_image_bcp(
-            Path::new("does-not-exist-sqlcmd"),
-            Path::new("does-not-exist-bcp"),
+        let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions::integrated(
             "localhost",
-            None,
-            None,
-            "TestDb",
-            MssqlStorageTable::ConfigCasSave,
-            root,
-        )
-        .unwrap_err();
+            Some(std::path::Path::new("does-not-exist-sqlcmd")),
+        ))
+        .unwrap();
+        let error = fetch_cas_storage_image(&sql, "TestDb", MssqlStorageTable::ConfigCasSave, root)
+            .unwrap_err();
         assert!(error.to_string().contains("not a content-addressed"));
     }
 
