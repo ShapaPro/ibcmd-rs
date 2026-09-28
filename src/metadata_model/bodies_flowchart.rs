@@ -56,7 +56,11 @@ pub fn flowchart_path(owner_xml: &Path) -> PathBuf {
 
 /// The `<uuid>.7` row, `None` when the process has no `Ext/Flowchart.xml`.
 pub fn flowchart_row(owner_xml: &Path, context: &DescriptorContext) -> Result<Option<Brace>> {
-    scheme_row(&flowchart_path(owner_xml), SchemeOwner::BusinessProcess, context)
+    scheme_row(
+        &flowchart_path(owner_xml),
+        SchemeOwner::BusinessProcess,
+        context,
+    )
 }
 
 /// `Ext/Template.xml` next to a template's XML.
@@ -93,7 +97,11 @@ enum SchemeOwner {
     Template,
 }
 
-fn scheme_row(path: &Path, owner: SchemeOwner, context: &DescriptorContext) -> Result<Option<Brace>> {
+fn scheme_row(
+    path: &Path,
+    owner: SchemeOwner,
+    context: &DescriptorContext,
+) -> Result<Option<Brace>> {
     if !path.is_file() {
         return Ok(None);
     }
@@ -222,15 +230,34 @@ impl<'a> Flowchart<'a> {
             Brace::num(1),
             self.color(text(schema, "BackColor"))?,
             Brace::flag(flag(schema, "GridEnabled")),
-            Brace::num(number(text(schema, "GridHorizontalStep"), "GridHorizontalStep")?),
-            Brace::num(number(text(schema, "GridVerticalStep"), "GridVerticalStep")?),
-            Brace::num(code(DRAW_GRID_MODES, text(schema, "DrawGridMode"), "DrawGridMode")?),
+            Brace::num(number(
+                text(schema, "GridHorizontalStep"),
+                "GridHorizontalStep",
+            )?),
+            Brace::num(number(
+                text(schema, "GridVerticalStep"),
+                "GridVerticalStep",
+            )?),
+            Brace::num(code(
+                DRAW_GRID_MODES,
+                text(schema, "DrawGridMode"),
+                "DrawGridMode",
+            )?),
             Brace::num(6),
         ];
         items.extend(parameter(6, number(text(print, "TopMargin"), "TopMargin")?));
-        items.extend(parameter(7, number(text(print, "LeftMargin"), "LeftMargin")?));
-        items.extend(parameter(8, number(text(print, "BottomMargin"), "BottomMargin")?));
-        items.extend(parameter(9, number(text(print, "RightMargin"), "RightMargin")?));
+        items.extend(parameter(
+            7,
+            number(text(print, "LeftMargin"), "LeftMargin")?,
+        ));
+        items.extend(parameter(
+            8,
+            number(text(print, "BottomMargin"), "BottomMargin")?,
+        ));
+        items.extend(parameter(
+            9,
+            number(text(print, "RightMargin"), "RightMargin")?,
+        ));
         items.extend(parameter(13, i64::from(flag(print, "BlackAndWhite"))));
         items.extend(parameter(
             16,
@@ -465,7 +492,10 @@ impl<'a> Flowchart<'a> {
             Ok(brace_list![Brace::List(wrapper)])
         };
         Ok(match tag {
-            "Decoration" => (0, brace_list![base.clone(), Brace::num(2), self.decoration(properties)?]),
+            "Decoration" => (
+                0,
+                brace_list![base.clone(), Brace::num(2), self.decoration(properties)?],
+            ),
             "ConnectionLine" => (1, self.line(base.clone(), properties)?),
             "Start" => (
                 2,
@@ -493,7 +523,10 @@ impl<'a> Flowchart<'a> {
                     shape(vec![
                         Brace::num(3),
                         Brace::num(number(text(properties, "TruePortIndex"), "TruePortIndex")?),
-                        Brace::num(number(text(properties, "FalsePortIndex"), "FalsePortIndex")?),
+                        Brace::num(number(
+                            text(properties, "FalsePortIndex"),
+                            "FalsePortIndex"
+                        )?),
                     ])?,
                     events(item, &["ConditionCheck"])
                 ],
@@ -675,8 +708,16 @@ impl<'a> Flowchart<'a> {
                 "segment index",
             )?));
         }
-        geometry.push(Brace::num(code(ARROWS, text(properties, "BeginArrow"), "BeginArrow")?));
-        geometry.push(Brace::num(code(ARROWS, text(properties, "EndArrow"), "EndArrow")?));
+        geometry.push(Brace::num(code(
+            ARROWS,
+            text(properties, "BeginArrow"),
+            "BeginArrow",
+        )?));
+        geometry.push(Brace::num(code(
+            ARROWS,
+            text(properties, "EndArrow"),
+            "EndArrow",
+        )?));
 
         Ok(brace_list![
             base,
@@ -722,9 +763,7 @@ impl<'a> Flowchart<'a> {
                 let port = |name: &str| text(properties, name).trim().parse::<i64>().ok();
                 let true_port = port("TruePortIndex");
                 let false_port = port("FalsePortIndex");
-                i64::from(
-                    Some(from_port) == true_port || (from_port == 3 && false_port != Some(3)),
-                )
+                i64::from(Some(from_port) == true_port || (from_port == 3 && false_port != Some(3)))
             }
             "Switch" if from_port >= 6 => (from_port - 6) / 2,
             _ => 0,
@@ -889,7 +928,14 @@ mod tests {
         );
         assert_eq!(
             outline("Condition", false, 140, 240, 260, 300).unwrap(),
-            vec![(140, 270), (157, 240), (242, 240), (259, 270), (242, 299), (157, 299)]
+            vec![
+                (140, 270),
+                (157, 240),
+                (242, 240),
+                (259, 270),
+                (242, 299),
+                (157, 299)
+            ]
         );
         assert_eq!(
             outline("Split", false, 320, 160, 360, 180).unwrap(),

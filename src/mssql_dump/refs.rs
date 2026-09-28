@@ -542,7 +542,11 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
             None => {}
         }
         for (owner, field) in row.password_fields {
-            index.password_fields.entry(owner).or_default().insert(field);
+            index
+                .password_fields
+                .entry(owner)
+                .or_default()
+                .insert(field);
         }
     }
     index
@@ -610,9 +614,11 @@ fn field_declarations_of_row(
             type_index,
             builtin_type_reference,
         );
-        let [ConstantValueType::Reference {
-            reference: type_reference,
-        }] = value_types.as_slice()
+        let [
+            ConstantValueType::Reference {
+                reference: type_reference,
+            },
+        ] = value_types.as_slice()
         else {
             continue;
         };
@@ -634,12 +640,11 @@ fn field_declarations_of_row(
         "Catalog" => catalog_declared_standard_attributes(&row.text, header).map(|declared| {
             RowFieldDeclaration::Table(format!("Catalog.{}", header.name), declared)
         }),
-        "InformationRegister" => information_register_declared_standard_attributes(
-            &row.text, header,
-        )
-        .map(|declared| {
-            RowFieldDeclaration::Table(format!("InformationRegister.{}", header.name), declared)
-        }),
+        "InformationRegister" => {
+            information_register_declared_standard_attributes(&row.text, header).map(|declared| {
+                RowFieldDeclaration::Table(format!("InformationRegister.{}", header.name), declared)
+            })
+        }
         "CommonAttribute" => common_attribute_declared_content(&row.text, object_refs)
             .map(|content| RowFieldDeclaration::CommonAttribute(header.name.clone(), content)),
         "Constant" => constant_declared_use_always(&row.text, &header.uuid)
@@ -672,8 +677,7 @@ fn field_declarations_of_row(
         if child_name.is_empty() || child_name.contains('.') {
             continue;
         }
-        if metadata_child_declares_password_mode(&row.text, marker_start, &child.uuid)
-            == Some(true)
+        if metadata_child_declares_password_mode(&row.text, marker_start, &child.uuid) == Some(true)
         {
             out.password_fields
                 .push((owner_reference.clone(), child_name.to_lowercase()));
@@ -921,9 +925,7 @@ pub(super) type RowChildReferences = Vec<(MetadataHeader, usize, Option<String>)
 
 /// [`RowChildReferences`] of every row with a kind and a header, read in
 /// parallel; `None` for the others. One reading for both indexes.
-pub(super) fn child_references_by_row(
-    rows: &[MetadataTextRow],
-) -> Vec<Option<RowChildReferences>> {
+pub(super) fn child_references_by_row(rows: &[MetadataTextRow]) -> Vec<Option<RowChildReferences>> {
     let per_row = |row: &MetadataTextRow| {
         let (Some(kind), Some(header)) = (row.kind.as_deref(), row.header.as_ref()) else {
             return None;
@@ -2800,9 +2802,7 @@ pub(super) fn build_metadata_type_set_leaf_index_from_texts(
     rows: &[MetadataTextRow],
     type_index: &BTreeMap<String, String>,
 ) -> MetadataTypeSetLeafIndex {
-    let per_row = |row: &MetadataTextRow| {
-        type_set_leaf_entry(row, type_index)
-    };
+    let per_row = |row: &MetadataTextRow| type_set_leaf_entry(row, type_index);
     parallel::install(|| rows.par_iter().filter_map(per_row).collect::<Vec<_>>())
         .unwrap_or_else(|_| rows.iter().filter_map(per_row).collect())
         .into_iter()
@@ -3150,13 +3150,9 @@ pub(super) fn build_template_source_reference_index_from_texts<'a>(
         let owner_path = PathBuf::from(folder).join(sanitize_source_path_segment(&header.name));
         Some(TemplateRow::Owner(row, owner_path))
     };
-    let classified = parallel::install(|| {
-        metadata_texts
-            .par_iter()
-            .map(classify)
-            .collect::<Vec<_>>()
-    })
-    .unwrap_or_else(|_| metadata_texts.iter().map(classify).collect());
+    let classified =
+        parallel::install(|| metadata_texts.par_iter().map(classify).collect::<Vec<_>>())
+            .unwrap_or_else(|_| metadata_texts.iter().map(classify).collect());
     let mut templates = Vec::<MetadataHeader>::new();
     let mut owners = Vec::new();
     for row in classified.into_iter().flatten() {
@@ -3625,7 +3621,12 @@ fn insert_v85_configuration_properties_xml(
     }
     let mut captions = String::new();
     push_localized_property(&mut captions, "\t\t\t", "Caption", &properties.caption);
-    push_localized_property(&mut captions, "\t\t\t", "ShortCaption", &properties.short_caption);
+    push_localized_property(
+        &mut captions,
+        "\t\t\t",
+        "ShortCaption",
+        &properties.short_caption,
+    );
     let candidates = [
         ("DefaultCollaborationSystemUsersChoiceForm", forms),
         (
@@ -3877,7 +3878,10 @@ pub(super) fn parse_configuration_properties_from_text(
         && !v85_tuple
         && (is_native_68_shape || is_normalized_67_shape)
     {
-        configuration_compatibility_mode_xml_under(&V85_PACKED_PLATFORM_VERSION.to_string(), ceiling)
+        configuration_compatibility_mode_xml_under(
+            &V85_PACKED_PLATFORM_VERSION.to_string(),
+            ceiling,
+        )
     } else if is_native_68_shape {
         stored_compatibility_mode.clone()
     } else if is_normalized_67_shape {

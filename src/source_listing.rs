@@ -240,7 +240,12 @@ pub(crate) fn install(listing: Option<Arc<SourceListing>>) -> Installed {
 
 fn answer(path: &Path) -> Answer {
     CURRENT
-        .try_with(|current| current.borrow().as_ref().map(|listing| listing.answer(path)))
+        .try_with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|listing| listing.answer(path))
+        })
         .ok()
         .flatten()
         .unwrap_or(Answer::Unknown)
@@ -337,7 +342,10 @@ mod tests {
             listing.answer(&root.join("catalogs/a.xml")),
             Answer::Unknown
         );
-        assert_eq!(listing.answer(Path::new("C:/elsewhere/A.xml")), Answer::Unknown);
+        assert_eq!(
+            listing.answer(Path::new("C:/elsewhere/A.xml")),
+            Answer::Unknown
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

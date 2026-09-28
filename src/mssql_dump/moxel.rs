@@ -5253,16 +5253,19 @@ pub(super) fn parse_moxel_line_table(fields: &[&str]) -> Option<Vec<MoxelLine>> 
         // which are exactly the four cell descriptors its formats cite. The
         // placeholder is read as the cell enumeration's own `None` so it can
         // be dropped with the other uncited entries rather than guessed at.
-        let placeholder = kind == MOXEL_NIL_LINE_KIND
-            && descriptor.get(3)?.trim() == "0"
-            && width == 0;
+        let placeholder =
+            kind == MOXEL_NIL_LINE_KIND && descriptor.get(3)?.trim() == "0" && width == 0;
         let line_type = match kind {
             MOXEL_CELL_LINE_KIND => "v8ui:SpreadsheetDocumentCellLineType",
             MOXEL_DRAWING_LINE_KIND => "v8ui:SpreadsheetDocumentDrawingLineType",
             _ if placeholder => "v8ui:SpreadsheetDocumentCellLineType",
             _ => return None,
         };
-        let kind = if placeholder { MOXEL_CELL_LINE_KIND } else { kind };
+        let kind = if placeholder {
+            MOXEL_CELL_LINE_KIND
+        } else {
+            kind
+        };
         let style = match (kind, descriptor.get(3)?.trim()) {
             (MOXEL_CELL_LINE_KIND, "0") => "None",
             (MOXEL_CELL_LINE_KIND, "1") => "Solid",

@@ -135,7 +135,11 @@ fn common_module(payload: &Brace) -> Result<Element> {
         .child(flag("ClientOrdinaryApplication", item(fields, 2)?)?)
         .child(flag("ServerCall", item(fields, 9)?)?)
         .child(flag("Privileged", item(fields, 5)?)?)
-        .child(coded("ReturnValuesReuse", item(fields, 8)?, RETURN_VALUES_REUSE)?);
+        .child(coded(
+            "ReturnValuesReuse",
+            item(fields, 8)?,
+            RETURN_VALUES_REUSE,
+        )?);
     Ok(object("CommonModule", &head.uuid).child(properties))
 }
 
@@ -198,7 +202,10 @@ fn color_text(node: &Brace, names: &NameIndex) -> Result<String> {
     let fields = list(node)?;
     let space = atom(item(fields, 1)?)?;
     let value = list(item(fields, 2)?)?;
-    let (version, kind) = (atom(item(fields, 0)?)?, fields.get(3).map(atom).transpose()?);
+    let (version, kind) = (
+        atom(item(fields, 0)?)?,
+        fields.get(3).map(atom).transpose()?,
+    );
     let code = |table: &[(&'static str, &'static str)]| -> Result<&'static str> {
         let code = atom(item(value, 0)?)?;
         table
@@ -317,7 +324,11 @@ fn font_attributes(node: &Brace, names: &NameIndex) -> Result<Vec<(&'static str,
                 _ => bail!("unsupported font reference {}", short(node)),
             };
             out.push(("ref", reference));
-            if kind == "1" { "WindowsFont" } else { "StyleItem" }
+            if kind == "1" {
+                "WindowsFont"
+            } else {
+                "StyleItem"
+            }
         }
         "3" => "AutoFont",
         other => bail!("unknown font kind {other}"),
@@ -422,7 +433,8 @@ fn style_item(payload: &Brace, names: &NameIndex) -> Result<Element> {
 fn palette_color(payload: &Brace, names: &NameIndex) -> Result<Element> {
     let fields = record(payload, "0", "PaletteColor")?;
     let head = header(item(fields, 1)?)?;
-    let properties = header_properties(&head)?.child(leaf("Color", color_text(item(fields, 2)?, names)?));
+    let properties =
+        header_properties(&head)?.child(leaf("Color", color_text(item(fields, 2)?, names)?));
     Ok(object("PaletteColor", &head.uuid).child(properties))
 }
 
@@ -481,7 +493,11 @@ fn command_group(payload: &Brace, names: &NameIndex) -> Result<Element> {
         .child(coded("Representation", item(fields, 3)?, REPRESENTATIONS)?)
         .child(localized_element("ToolTip", item(fields, 4)?)?)
         .child(picture(item(fields, 1)?, names)?)
-        .child(coded("Category", item(fields, 2)?, COMMAND_GROUP_CATEGORIES)?);
+        .child(coded(
+            "Category",
+            item(fields, 2)?,
+            COMMAND_GROUP_CATEGORIES,
+        )?);
     Ok(object("CommandGroup", &head.uuid).child(properties))
 }
 
@@ -520,8 +536,16 @@ fn common_command(payload: &Brace, context: &ExportContext) -> Result<Element> {
             crate::metadata_model::objects::export::shortcut(item(details, 5)?)?,
         ))
         .child(flag("IncludeHelpInContents", item(details, 6)?)?)
-        .child(type_element("CommandParameterType", item(details, 8)?, names)?)
-        .child(coded("ParameterUseMode", item(details, 11)?, PARAMETER_USE_MODES)?)
+        .child(type_element(
+            "CommandParameterType",
+            item(details, 8)?,
+            names,
+        )?)
+        .child(coded(
+            "ParameterUseMode",
+            item(details, 11)?,
+            PARAMETER_USE_MODES,
+        )?)
         .child(flag("ModifiesData", item(details, 10)?)?)
         .child(coded(
             "OnMainServerUnavalableBehavior",
@@ -554,8 +578,8 @@ fn integration_service(root: &[Brace]) -> Result<Element> {
         item(fields, 2)?,
         item(fields, 3)?,
     )?);
-    let properties =
-        header_properties(&head)?.child(text("ExternalIntegrationServiceAddress", item(fields, 4)?)?);
+    let properties = header_properties(&head)?
+        .child(text("ExternalIntegrationServiceAddress", item(fields, 4)?)?);
     let mut children = el("ChildObjects");
     for stored in only_collection(root, INTEGRATION_CHANNELS)? {
         let channel = record(item(list(stored)?, 0)?, "1", "IntegrationServiceChannel")?;
@@ -569,8 +593,15 @@ fn integration_service(root: &[Brace]) -> Result<Element> {
             item(channel, 3)?,
         )?);
         let channel_properties = header_properties(&channel_head)?
-            .child(text("ExternalIntegrationServiceChannelName", item(channel, 4)?)?)
-            .child(coded("MessageDirection", item(channel, 6)?, MESSAGE_DIRECTIONS)?)
+            .child(text(
+                "ExternalIntegrationServiceChannelName",
+                item(channel, 4)?,
+            )?)
+            .child(coded(
+                "MessageDirection",
+                item(channel, 6)?,
+                MESSAGE_DIRECTIONS,
+            )?)
             .child(text("ReceiveMessageProcessing", item(channel, 5)?)?)
             .child(flag("Transactioned", item(channel, 7)?)?);
         children.children.push(
@@ -617,7 +648,9 @@ fn http_service(root: &[Brace]) -> Result<Element> {
         }
         children.children.push(
             object("URLTemplate", &template_head.uuid)
-                .child(header_properties(&template_head)?.child(text("Template", item(record, 1)?)?))
+                .child(
+                    header_properties(&template_head)?.child(text("Template", item(record, 1)?)?),
+                )
                 .child(methods),
         );
     }
@@ -815,8 +848,10 @@ pub(crate) fn names(kind: &str, row: &Brace) -> Result<ObjectNames> {
             for stored in only_collection(root, HTTP_URL_TEMPLATES)? {
                 let template = list(stored)?;
                 let template_head = header(item(list(item(template, 0)?)?, 2)?)?;
-                let template_full =
-                    format!("HTTPService.{}.URLTemplate.{}", head.name, template_head.name);
+                let template_full = format!(
+                    "HTTPService.{}.URLTemplate.{}",
+                    head.name, template_head.name
+                );
                 for stored_method in collection(item(template, 2)?, HTTP_METHODS)? {
                     let method = list(item(list(stored_method)?, 0)?)?;
                     let method_head = header(item(method, 3)?)?;
@@ -863,10 +898,10 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::metadata_model::ObjectXml;
     use crate::metadata_model::export::write_document;
     use crate::metadata_model::objects::parts::Compat;
     use crate::metadata_model::types::tests::{context, element};
-    use crate::metadata_model::ObjectXml;
 
     /// XML -> row (the load direction) -> model -> XML: the same text.
     fn round_trip(kind: &str, xml: &str) {
@@ -875,7 +910,9 @@ mod tests {
         let object = ObjectXml {
             element: &original,
             kind,
-            uuid: Element::attr(&original, "uuid").unwrap_or_default().to_string(),
+            uuid: Element::attr(&original, "uuid")
+                .unwrap_or_default()
+                .to_string(),
             name: original
                 .path(&["Properties", "Name"])
                 .map(|name| name.text.clone())

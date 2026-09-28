@@ -113,7 +113,11 @@ fn element_from_start(start: &BytesStart<'_>) -> Result<Element> {
                 .unescape_value()
                 .context("bad XML namespace value")?
                 .into_owned();
-            let declared = if key_prefix == "xmlns" { key } else { String::new() };
+            let declared = if key_prefix == "xmlns" {
+                key
+            } else {
+                String::new()
+            };
             namespaces.push((declared, uri));
             continue;
         }

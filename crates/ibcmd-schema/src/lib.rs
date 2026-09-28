@@ -959,9 +959,7 @@ where
                 // entire `Form.xml`. The 15 `<Value xsi:nil="true"/>` of the
                 // same tree all belong to the input-field layout, which the
                 // arm above answers.
-                ("0", true, true)
-                    if layout == FormChoiceListLayoutProfile::RadioButtonOptions =>
-                {
+                ("0", true, true) if layout == FormChoiceListLayoutProfile::RadioButtonOptions => {
                     FormChoiceListValue::EmptyDesignTimeRef
                 }
                 ("0", false, true) => {

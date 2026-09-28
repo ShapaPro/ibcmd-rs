@@ -1215,7 +1215,10 @@ mod tests {
                 "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\"><Configuration uuid=\"66193438-ABC5-410b-a1f1-a204102d1a62\"><Properties><Name>Б</Name><CompatibilityMode>Version8_5_1</CompatibilityMode></Properties><ChildObjects>{children}</ChildObjects></Configuration></MetaDataObject>"
             )
         };
-        let with = configuration_facts(xml("<Language>Русский</Language><PaletteColor>Фон</PaletteColor>").as_bytes()).unwrap();
+        let with = configuration_facts(
+            xml("<Language>Русский</Language><PaletteColor>Фон</PaletteColor>").as_bytes(),
+        )
+        .unwrap();
         assert_eq!(with.features, vec![PALETTE_COLOR_FEATURE]);
         assert_eq!(with.uuid, "66193438-abc5-410b-a1f1-a204102d1a62");
         let without = configuration_facts(xml("<Language>Русский</Language>").as_bytes()).unwrap();

@@ -408,7 +408,8 @@ pub(super) fn fetch_binary_rows_bcp_query(
     table: &str,
     query: &str,
 ) -> Result<Vec<BinaryConfigRow>> {
-    let parts = fetch_binary_row_parts_bcp_query(bcp, server, user, password, database, table, query)?;
+    let parts =
+        fetch_binary_row_parts_bcp_query(bcp, server, user, password, database, table, query)?;
     assemble_binary_config_rows(parts)
         .map(|rows| apply_row_overrides(table, rows))
         .with_context(|| format!("failed to assemble native bcp rows for {database}.{table}"))
@@ -557,7 +558,10 @@ fn apply_row_overrides(table: &str, mut rows: Vec<BinaryConfigRow>) -> Vec<Binar
     else {
         return rows;
     };
-    if !table.trim_matches(['[', ']']).eq_ignore_ascii_case("Config") {
+    if !table
+        .trim_matches(['[', ']'])
+        .eq_ignore_ascii_case("Config")
+    {
         return rows;
     }
     for row in &mut rows {

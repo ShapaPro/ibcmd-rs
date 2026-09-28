@@ -27,8 +27,7 @@ use super::xml::{Element, MetadataXml};
 use super::{DescriptorContext, ObjectXml, native_text, not_yet, parse_bool};
 use crate::brace_list;
 use crate::compiler::bodies::form_native::{
-    format_native_color, format_native_control_border, format_native_font,
-    format_native_shortcut,
+    format_native_color, format_native_control_border, format_native_font, format_native_shortcut,
 };
 
 pub fn compile(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
@@ -283,7 +282,9 @@ pub fn v85_layout(context: &DescriptorContext) -> bool {
     }
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *cache
         .entry(context.root.clone())
         .or_insert_with(|| compatibility_at_least_85(&context.root))
@@ -312,7 +313,10 @@ fn compatibility_at_least_85(root: &std::path::Path) -> bool {
         .split('_')
         .map(|part| part.parse::<u32>().unwrap_or(0))
         .collect::<Vec<_>>();
-    (parts.first().copied().unwrap_or(0), parts.get(1).copied().unwrap_or(0)) >= (8, 5)
+    (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+    ) >= (8, 5)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +836,12 @@ impl StyleItem {
         };
         brace_list![
             Brace::num(1),
-            brace_list![Brace::num(3), Brace::num(kind), value, self.header.to_brace()],
+            brace_list![
+                Brace::num(3),
+                Brace::num(kind),
+                value,
+                self.header.to_brace()
+            ],
             Brace::num(0),
         ]
     }
@@ -930,8 +939,12 @@ pub fn up_convert_v85_primitives(node: &mut Brace) {
 // ---------------------------------------------------------------------------
 
 /// `ButtonRepresentation`.
-const REPRESENTATIONS: &[(&str, i64)] =
-    &[("Text", 0), ("Picture", 1), ("PictureAndText", 2), ("Auto", 3)];
+const REPRESENTATIONS: &[(&str, i64)] = &[
+    ("Text", 0),
+    ("Picture", 1),
+    ("PictureAndText", 2),
+    ("Auto", 3),
+];
 
 const COMMAND_GROUP_CATEGORIES: &[(&str, i64)] = &[
     ("NavigationPanel", 1),
@@ -1690,10 +1703,8 @@ impl Subsystem {
 /// The class of an `ApplicationUsePurpose` value.
 const USE_PURPOSE_CLASS: &str = "1708fdaa-cbce-4289-b373-07a5a74bee91";
 
-const USE_PURPOSES: &[(&str, i64)] = &[
-    ("PlatformApplication", 1),
-    ("MobilePlatformApplication", 2),
-];
+const USE_PURPOSES: &[(&str, i64)] =
+    &[("PlatformApplication", 1), ("MobilePlatformApplication", 2)];
 
 const FORM_TYPES: &[(&str, i64)] = &[("Ordinary", 0), ("Managed", 1)];
 
@@ -2001,9 +2012,8 @@ mod tests {
         let compiled =
             compile_descriptor("Subsystem", &a, &fs::read(&a).unwrap(), &context).unwrap();
         let _ = fs::remove_dir_all(&root);
-        let reference = |uuid: &str| {
-            format!("\r\n{{\"#\",{DESIGN_TIME_REFERENCE},\r\n{{1,{uuid}}}\r\n}}")
-        };
+        let reference =
+            |uuid: &str| format!("\r\n{{\"#\",{DESIGN_TIME_REFERENCE},\r\n{{1,{uuid}}}\r\n}}");
         let expected = format!(
             "\u{feff}{{1,\r\n{{22,\r\n{{3,\r\n{{1,0,aaaaaaaa-0000-0000-0000-000000000001}},\"A\",\
              \r\n{{1,\"ru\",\"А\"}},\"\",0,0,{NIL},0}},1,\r\n{{0,0}},1,\

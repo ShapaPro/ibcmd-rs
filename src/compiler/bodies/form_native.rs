@@ -202,7 +202,9 @@ pub(crate) fn format_native_shortcut(text: &str) -> Option<String> {
             } else {
                 let mut chars = key.chars();
                 let single = chars.next()?;
-                if chars.next().is_some() || !(single.is_ascii_uppercase() || single.is_ascii_digit()) {
+                if chars.next().is_some()
+                    || !(single.is_ascii_uppercase() || single.is_ascii_digit())
+                {
                     return None;
                 }
                 u32::from(single)
@@ -388,7 +390,11 @@ pub(crate) fn format_native_events(
 }
 
 /// The uuid of one event, by the kind that declares it.
-fn form_event_uuid<'a>(owner_tag: &str, main_attribute_class: &str, name: &'a str) -> Option<&'a str> {
+fn form_event_uuid<'a>(
+    owner_tag: &str,
+    main_attribute_class: &str,
+    name: &'a str,
+) -> Option<&'a str> {
     if is_uuid(name) {
         return Some(name);
     }
@@ -425,166 +431,936 @@ fn is_uuid(value: &str) -> bool {
 /// An empty class matches any form; only `BeforeWrite` and `BeforeWriteAtServer`
 /// of a form need the class, and only a document form parts company there.
 const FORM_EVENT_UUIDS: &[(&str, &str, &str, &str)] = &[
-    ("CalendarField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("CalendarField", "", "OnPeriodOutput", "1490ede6-6f33-4c6d-b971-53b2541331ea"),
-    ("CalendarField", "", "Selection", "2feb1ee9-b750-4352-bb4c-67ba1c608dc6"),
-    ("ChartField", "", "DetailProcessing", "650da4af-3233-4ce0-a1ae-23f87a226eee"),
-    ("ChartField", "", "Selection", "515cd17b-dd4c-4181-bbbf-8676467acf49"),
-    ("CheckBoxField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("ExtendedTooltip", "", "Click", "11707a99-4eb9-4373-bc8c-84891483a034"),
-    ("ExtendedTooltip", "", "URLProcessing", "d710ea07-5c96-4c43-ab6e-e138d3653780"),
-    ("Form", "", "047d4d09-961c-4bdc-8519-eef10674c35b", "047d4d09-961c-4bdc-8519-eef10674c35b"),
-    ("Form", "", "213d1900-dcad-4616-9f20-3f077156a40f", "213d1900-dcad-4616-9f20-3f077156a40f"),
-    ("Form", "", "390d5e4b-e732-4c88-8748-9e211a416984", "390d5e4b-e732-4c88-8748-9e211a416984"),
-    ("Form", "", "8f42e083-be92-4102-b1f0-fa58452c1a63", "8f42e083-be92-4102-b1f0-fa58452c1a63"),
-    ("Form", "", "9cc34712-da5f-4faa-a653-343d2085fbe8", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "", "ActivationProcessing", "b47699e1-b5d8-4c8a-91e9-183dec5820f5"),
-    ("Form", "", "AfterWrite", "047d4d09-961c-4bdc-8519-eef10674c35b"),
-    ("Form", "", "AfterWriteAtServer", "213d1900-dcad-4616-9f20-3f077156a40f"),
-    ("Form", "", "BeforeClose", "52dbb775-1631-4fd5-8c55-1615b5881dac"),
-    ("Form", "", "BeforeLoadDataFromSettingsAtServer", "e773807c-0c0c-4689-a093-231ddcd6409f"),
-    ("Form", "", "BeforeLoadUserSettingsAtServer", "40925042-2517-455b-a600-d68282829334"),
-    ("Form", "", "BeforeLoadVariantAtServer", "1dd89674-8b50-4240-9899-e3426b79cb02"),
-    ("Form", "", "ChoiceProcessing", "1d632984-de3c-4b4b-ad9f-d69682a10182"),
-    ("Form", "", "ExternalEvent", "5426e344-5740-4f23-99c1-99179a200dc5"),
-    ("Form", "", "FillCheckProcessingAtServer", "e73d6384-49d2-4885-a752-a674d6ff7742"),
-    ("Form", "", "NavigationProcessing", "93dfba16-26db-46f8-acb5-4f92f50c855f"),
-    ("Form", "", "NewWriteProcessing", "3b644f4f-055f-4808-bdc6-a50ce895e4d9"),
-    ("Form", "", "NotificationProcessing", "3699f6a3-9a2a-4c82-a775-6ff4824a08ca"),
-    ("Form", "", "OnChangeDisplaySettings", "b98da5a8-349c-4159-a6a8-17a34ceb10ec"),
-    ("Form", "", "OnClose", "ca21cd18-35b2-4281-b5c8-016ecc8da8ac"),
-    ("Form", "", "OnCreateAtServer", "9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b"),
-    ("Form", "", "OnLoadDataFromSettingsAtServer", "79cea13e-f6fb-4483-905d-713326405771"),
-    ("Form", "", "OnLoadUserSettingsAtServer", "7b15b3db-1cd0-4e1d-a74b-2c972c9e2226"),
-    ("Form", "", "OnLoadVariantAtServer", "87ce636e-9de6-4e42-9395-f0f189d08397"),
-    ("Form", "", "OnMainServerAvailabilityChange", "d6b86f20-722b-4fe6-83fa-85c6aa4c1fe5"),
+    (
+        "CalendarField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "CalendarField",
+        "",
+        "OnPeriodOutput",
+        "1490ede6-6f33-4c6d-b971-53b2541331ea",
+    ),
+    (
+        "CalendarField",
+        "",
+        "Selection",
+        "2feb1ee9-b750-4352-bb4c-67ba1c608dc6",
+    ),
+    (
+        "ChartField",
+        "",
+        "DetailProcessing",
+        "650da4af-3233-4ce0-a1ae-23f87a226eee",
+    ),
+    (
+        "ChartField",
+        "",
+        "Selection",
+        "515cd17b-dd4c-4181-bbbf-8676467acf49",
+    ),
+    (
+        "CheckBoxField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "ExtendedTooltip",
+        "",
+        "Click",
+        "11707a99-4eb9-4373-bc8c-84891483a034",
+    ),
+    (
+        "ExtendedTooltip",
+        "",
+        "URLProcessing",
+        "d710ea07-5c96-4c43-ab6e-e138d3653780",
+    ),
+    (
+        "Form",
+        "",
+        "047d4d09-961c-4bdc-8519-eef10674c35b",
+        "047d4d09-961c-4bdc-8519-eef10674c35b",
+    ),
+    (
+        "Form",
+        "",
+        "213d1900-dcad-4616-9f20-3f077156a40f",
+        "213d1900-dcad-4616-9f20-3f077156a40f",
+    ),
+    (
+        "Form",
+        "",
+        "390d5e4b-e732-4c88-8748-9e211a416984",
+        "390d5e4b-e732-4c88-8748-9e211a416984",
+    ),
+    (
+        "Form",
+        "",
+        "8f42e083-be92-4102-b1f0-fa58452c1a63",
+        "8f42e083-be92-4102-b1f0-fa58452c1a63",
+    ),
+    (
+        "Form",
+        "",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "",
+        "ActivationProcessing",
+        "b47699e1-b5d8-4c8a-91e9-183dec5820f5",
+    ),
+    (
+        "Form",
+        "",
+        "AfterWrite",
+        "047d4d09-961c-4bdc-8519-eef10674c35b",
+    ),
+    (
+        "Form",
+        "",
+        "AfterWriteAtServer",
+        "213d1900-dcad-4616-9f20-3f077156a40f",
+    ),
+    (
+        "Form",
+        "",
+        "BeforeClose",
+        "52dbb775-1631-4fd5-8c55-1615b5881dac",
+    ),
+    (
+        "Form",
+        "",
+        "BeforeLoadDataFromSettingsAtServer",
+        "e773807c-0c0c-4689-a093-231ddcd6409f",
+    ),
+    (
+        "Form",
+        "",
+        "BeforeLoadUserSettingsAtServer",
+        "40925042-2517-455b-a600-d68282829334",
+    ),
+    (
+        "Form",
+        "",
+        "BeforeLoadVariantAtServer",
+        "1dd89674-8b50-4240-9899-e3426b79cb02",
+    ),
+    (
+        "Form",
+        "",
+        "ChoiceProcessing",
+        "1d632984-de3c-4b4b-ad9f-d69682a10182",
+    ),
+    (
+        "Form",
+        "",
+        "ExternalEvent",
+        "5426e344-5740-4f23-99c1-99179a200dc5",
+    ),
+    (
+        "Form",
+        "",
+        "FillCheckProcessingAtServer",
+        "e73d6384-49d2-4885-a752-a674d6ff7742",
+    ),
+    (
+        "Form",
+        "",
+        "NavigationProcessing",
+        "93dfba16-26db-46f8-acb5-4f92f50c855f",
+    ),
+    (
+        "Form",
+        "",
+        "NewWriteProcessing",
+        "3b644f4f-055f-4808-bdc6-a50ce895e4d9",
+    ),
+    (
+        "Form",
+        "",
+        "NotificationProcessing",
+        "3699f6a3-9a2a-4c82-a775-6ff4824a08ca",
+    ),
+    (
+        "Form",
+        "",
+        "OnChangeDisplaySettings",
+        "b98da5a8-349c-4159-a6a8-17a34ceb10ec",
+    ),
+    (
+        "Form",
+        "",
+        "OnClose",
+        "ca21cd18-35b2-4281-b5c8-016ecc8da8ac",
+    ),
+    (
+        "Form",
+        "",
+        "OnCreateAtServer",
+        "9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b",
+    ),
+    (
+        "Form",
+        "",
+        "OnLoadDataFromSettingsAtServer",
+        "79cea13e-f6fb-4483-905d-713326405771",
+    ),
+    (
+        "Form",
+        "",
+        "OnLoadUserSettingsAtServer",
+        "7b15b3db-1cd0-4e1d-a74b-2c972c9e2226",
+    ),
+    (
+        "Form",
+        "",
+        "OnLoadVariantAtServer",
+        "87ce636e-9de6-4e42-9395-f0f189d08397",
+    ),
+    (
+        "Form",
+        "",
+        "OnMainServerAvailabilityChange",
+        "d6b86f20-722b-4fe6-83fa-85c6aa4c1fe5",
+    ),
     ("Form", "", "OnOpen", "3ccc650e-f631-4cae-8e33-3eaac610b5f9"),
-    ("Form", "", "OnReadAtServer", "390d5e4b-e732-4c88-8748-9e211a416984"),
-    ("Form", "", "OnReopen", "6b3175a5-c143-4179-a670-ef231dc0a688"),
-    ("Form", "", "OnSaveDataInSettingsAtServer", "1952a54f-35ad-4928-902f-df212ab38ca3"),
-    ("Form", "", "OnSaveUserSettingsAtServer", "961ee7c6-0327-422b-adcb-97a90c46753d"),
-    ("Form", "", "OnSaveVariantAtServer", "499bb7af-6262-4de4-819f-ef264d1a20ec"),
-    ("Form", "", "OnUpdateUserSettingSetAtServer", "d817bccf-504e-4133-a79a-dd16e3a4df73"),
-    ("Form", "", "OnWriteAtServer", "c1bc0d3e-d35e-4207-a06b-ece68ed25314"),
-    ("Form", "", "URLGetProcessing", "674956b3-e469-4fdc-acf5-24ebf88cf7ab"),
-    ("Form", "", "URLListGetProcessing", "44498116-1641-4bfa-ae33-86e53c205797"),
-    ("Form", "", "URLProcessing", "e0cd9bdf-88fa-428c-9f1f-86f7f73b11e2"),
-    ("Form", "", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "", "c1bc0d3e-d35e-4207-a06b-ece68ed25314", "c1bc0d3e-d35e-4207-a06b-ece68ed25314"),
-    ("FormattedDocumentField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("GanttChartField", "", "DetailProcessing", "8724b8d4-140d-4357-8ac9-46e29ba7b168"),
-    ("GanttChartField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
+    (
+        "Form",
+        "",
+        "OnReadAtServer",
+        "390d5e4b-e732-4c88-8748-9e211a416984",
+    ),
+    (
+        "Form",
+        "",
+        "OnReopen",
+        "6b3175a5-c143-4179-a670-ef231dc0a688",
+    ),
+    (
+        "Form",
+        "",
+        "OnSaveDataInSettingsAtServer",
+        "1952a54f-35ad-4928-902f-df212ab38ca3",
+    ),
+    (
+        "Form",
+        "",
+        "OnSaveUserSettingsAtServer",
+        "961ee7c6-0327-422b-adcb-97a90c46753d",
+    ),
+    (
+        "Form",
+        "",
+        "OnSaveVariantAtServer",
+        "499bb7af-6262-4de4-819f-ef264d1a20ec",
+    ),
+    (
+        "Form",
+        "",
+        "OnUpdateUserSettingSetAtServer",
+        "d817bccf-504e-4133-a79a-dd16e3a4df73",
+    ),
+    (
+        "Form",
+        "",
+        "OnWriteAtServer",
+        "c1bc0d3e-d35e-4207-a06b-ece68ed25314",
+    ),
+    (
+        "Form",
+        "",
+        "URLGetProcessing",
+        "674956b3-e469-4fdc-acf5-24ebf88cf7ab",
+    ),
+    (
+        "Form",
+        "",
+        "URLListGetProcessing",
+        "44498116-1641-4bfa-ae33-86e53c205797",
+    ),
+    (
+        "Form",
+        "",
+        "URLProcessing",
+        "e0cd9bdf-88fa-428c-9f1f-86f7f73b11e2",
+    ),
+    (
+        "Form",
+        "",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "",
+        "c1bc0d3e-d35e-4207-a06b-ece68ed25314",
+        "c1bc0d3e-d35e-4207-a06b-ece68ed25314",
+    ),
+    (
+        "FormattedDocumentField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "GanttChartField",
+        "",
+        "DetailProcessing",
+        "8724b8d4-140d-4357-8ac9-46e29ba7b168",
+    ),
+    (
+        "GanttChartField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
     // The exporter's own table (form_schema.rs, `FORM_GANTT_CHART_*`): ERP УХ
     // `DataProcessors/ДиаграммаГантаОперации/Forms/Форма` stores the second.
-    ("GanttChartField", "", "Selection", "3aab5acd-9e00-4d33-8242-3cdb677bb0f3"),
-    ("GanttChartField", "", "OnIntervalEditEnd", "fe4544e7-5b1a-441c-8ab9-198137e6d3c7"),
-    ("GraphicalSchemaField", "", "OnActivate", "83c14f85-ab1f-4c77-bd3b-81970b72543b"),
-    ("GraphicalSchemaField", "", "Selection", "3c3da18f-fc18-4f77-8c2d-96c25bec40a5"),
-    ("HTMLDocumentField", "", "DocumentComplete", "53325f0c-b112-4c44-ab12-5d1ee0b1f07b"),
-    ("HTMLDocumentField", "", "OnClick", "da8dfb86-c5d1-4e35-a8a4-01b167a60ad3"),
-    ("InputField", "", "AutoComplete", "178a97c4-0ffe-4fcc-93e6-505369939da5"),
-    ("InputField", "", "ChoiceProcessing", "f72043b8-2d79-414e-bc4e-3972fe9dbca1"),
-    ("InputField", "", "Clearing", "b50dc41b-c15a-4ebe-a17f-d01e51c47de6"),
-    ("InputField", "", "Creating", "aeba313d-c467-44b3-b4a2-956340932c8f"),
-    ("InputField", "", "EditTextChange", "14256303-d2b7-4a58-bfab-e77493d10a59"),
-    ("InputField", "", "MultipleValuesDelete", "49ede602-af78-4a50-b821-ec81f6778f2d"),
-    ("InputField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
+    (
+        "GanttChartField",
+        "",
+        "Selection",
+        "3aab5acd-9e00-4d33-8242-3cdb677bb0f3",
+    ),
+    (
+        "GanttChartField",
+        "",
+        "OnIntervalEditEnd",
+        "fe4544e7-5b1a-441c-8ab9-198137e6d3c7",
+    ),
+    (
+        "GraphicalSchemaField",
+        "",
+        "OnActivate",
+        "83c14f85-ab1f-4c77-bd3b-81970b72543b",
+    ),
+    (
+        "GraphicalSchemaField",
+        "",
+        "Selection",
+        "3c3da18f-fc18-4f77-8c2d-96c25bec40a5",
+    ),
+    (
+        "HTMLDocumentField",
+        "",
+        "DocumentComplete",
+        "53325f0c-b112-4c44-ab12-5d1ee0b1f07b",
+    ),
+    (
+        "HTMLDocumentField",
+        "",
+        "OnClick",
+        "da8dfb86-c5d1-4e35-a8a4-01b167a60ad3",
+    ),
+    (
+        "InputField",
+        "",
+        "AutoComplete",
+        "178a97c4-0ffe-4fcc-93e6-505369939da5",
+    ),
+    (
+        "InputField",
+        "",
+        "ChoiceProcessing",
+        "f72043b8-2d79-414e-bc4e-3972fe9dbca1",
+    ),
+    (
+        "InputField",
+        "",
+        "Clearing",
+        "b50dc41b-c15a-4ebe-a17f-d01e51c47de6",
+    ),
+    (
+        "InputField",
+        "",
+        "Creating",
+        "aeba313d-c467-44b3-b4a2-956340932c8f",
+    ),
+    (
+        "InputField",
+        "",
+        "EditTextChange",
+        "14256303-d2b7-4a58-bfab-e77493d10a59",
+    ),
+    (
+        "InputField",
+        "",
+        "MultipleValuesDelete",
+        "49ede602-af78-4a50-b821-ec81f6778f2d",
+    ),
+    (
+        "InputField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
     // Platform 8.5 (8.5.1.1150 BSP: 6 bindings).
-    ("InputField", "", "MultipleValuesAdd", "9d59f117-9183-4044-be98-829c9cd48754"),
-    ("InputField", "", "Opening", "ac5a9c5a-5f1d-4fc5-b88c-a187038c16d1"),
-    ("InputField", "", "StartChoice", "1960479b-4d89-4eba-8b39-0aa802020558"),
-    ("InputField", "", "StartListChoice", "b3b65989-73ac-4db3-b6cb-398cb41a062f"),
-    ("InputField", "", "TextEditEnd", "c331eb1b-d32b-4533-844c-1276600b64e3"),
-    ("InputField", "", "Tuning", "70636369-514c-4662-977e-1c3976c9756c"),
-    ("LabelDecoration", "", "Click", "11707a99-4eb9-4373-bc8c-84891483a034"),
-    ("LabelDecoration", "", "URLProcessing", "d710ea07-5c96-4c43-ab6e-e138d3653780"),
-    ("LabelField", "", "Click", "eba5f295-c611-4dd9-84b5-22911ad60c53"),
-    ("LabelField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("LabelField", "", "URLProcessing", "509eca20-d6e4-4fef-a0f8-3a6b44c64178"),
-    ("Pages", "", "OnCurrentPageChange", "526c501f-ed3f-4db4-8731-fd0324707501"),
-    ("PictureDecoration", "", "Click", "9874537f-454c-40ae-83e9-3b9cefbc6d08"),
-    ("PictureDecoration", "", "Drag", "8ad48496-8d0b-4f6c-ae48-99d95227884b"),
-    ("PictureDecoration", "", "DragCheck", "0d644ff6-443b-4390-86fa-7f9105e42711"),
-    ("PictureField", "", "Click", "996b8c30-7a89-4973-8d56-2c9ce2976695"),
-    ("PictureField", "", "Drag", "8ad48496-8d0b-4f6c-ae48-99d95227884b"),
-    ("PictureField", "", "DragCheck", "0d644ff6-443b-4390-86fa-7f9105e42711"),
-    ("PictureField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("RadioButtonField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("SpreadSheetDocumentField", "", "AdditionalDetailProcessing", "0b8dc702-d001-4637-a215-9f35613e096c"),
-    ("SpreadSheetDocumentField", "", "BeforeWrite", "b7646583-04d3-4905-8f04-8985914bd1b7"),
-    ("Table", "", "OnCurrentParentChange", "2971b9a9-1724-4f34-aaa4-f3db584c3ca0"),
-    ("SpreadSheetDocumentField", "", "BeforePrint", "61455593-0982-4415-bc2e-2e8722a7abd0"),
-    ("SpreadSheetDocumentField", "", "DetailProcessing", "2988b2a5-c887-4928-94ae-5d0c9c31e999"),
-    ("SpreadSheetDocumentField", "", "Drag", "8ad48496-8d0b-4f6c-ae48-99d95227884b"),
-    ("SpreadSheetDocumentField", "", "DragCheck", "0d644ff6-443b-4390-86fa-7f9105e42711"),
-    ("SpreadSheetDocumentField", "", "DragEnd", "cb286ab3-3a1c-40d2-a232-6e64f624ccec"),
-    ("SpreadSheetDocumentField", "", "DragStart", "6d4d6747-a823-4f61-ab31-a426572f2c6c"),
-    ("SpreadSheetDocumentField", "", "OnActivate", "2042ec93-3108-4190-b767-ec6c10dd9ff4"),
-    ("SpreadSheetDocumentField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("SpreadSheetDocumentField", "", "OnChangeAreaContent", "411a4578-276c-4f4a-b56a-b3b01181c997"),
-    ("SpreadSheetDocumentField", "", "Selection", "22287505-97d8-4258-a318-209e2493f7eb"),
-    ("SpreadSheetDocumentField", "", "URLProcessing", "06d41ccc-4e8a-46f8-aeff-b3303cf753d2"),
-    ("Table", "", "2391e7b8-7235-45d7-ab7e-6ff3dc086396", "2391e7b8-7235-45d7-ab7e-6ff3dc086396"),
-    ("Table", "", "2ccfdec5-583d-4eca-8319-e55de492665a", "2ccfdec5-583d-4eca-8319-e55de492665a"),
-    ("Table", "", "4d88756d-bad4-4fde-92e1-c1f1402ac6b2", "4d88756d-bad4-4fde-92e1-c1f1402ac6b2"),
-    ("Table", "", "AfterDeleteRow", "de65638d-a806-4a76-bc10-f62bbc86e0e7"),
-    ("Table", "", "BeforeAddRow", "2391e7b8-7235-45d7-ab7e-6ff3dc086396"),
-    ("Table", "", "BeforeCollapse", "a7a9dc42-29b6-4c5b-8980-6d0b87149bdd"),
-    ("Table", "", "BeforeDeleteRow", "2ccfdec5-583d-4eca-8319-e55de492665a"),
-    ("Table", "", "BeforeEditEnd", "4d88756d-bad4-4fde-92e1-c1f1402ac6b2"),
-    ("Table", "", "BeforeExpand", "7c39b7bc-db0f-4410-9d98-8e5b7896995e"),
-    ("Table", "", "BeforeLoadUserSettingsAtServer", "c41e7b98-098c-433e-8ac3-56ec2a2c49e2"),
-    ("Table", "", "BeforeRowChange", "ab930362-ff94-4dcb-ad16-188805d23e3c"),
-    ("Table", "", "ChoiceProcessing", "8bfdb5eb-62dc-4851-8a2c-e983526356bf"),
+    (
+        "InputField",
+        "",
+        "MultipleValuesAdd",
+        "9d59f117-9183-4044-be98-829c9cd48754",
+    ),
+    (
+        "InputField",
+        "",
+        "Opening",
+        "ac5a9c5a-5f1d-4fc5-b88c-a187038c16d1",
+    ),
+    (
+        "InputField",
+        "",
+        "StartChoice",
+        "1960479b-4d89-4eba-8b39-0aa802020558",
+    ),
+    (
+        "InputField",
+        "",
+        "StartListChoice",
+        "b3b65989-73ac-4db3-b6cb-398cb41a062f",
+    ),
+    (
+        "InputField",
+        "",
+        "TextEditEnd",
+        "c331eb1b-d32b-4533-844c-1276600b64e3",
+    ),
+    (
+        "InputField",
+        "",
+        "Tuning",
+        "70636369-514c-4662-977e-1c3976c9756c",
+    ),
+    (
+        "LabelDecoration",
+        "",
+        "Click",
+        "11707a99-4eb9-4373-bc8c-84891483a034",
+    ),
+    (
+        "LabelDecoration",
+        "",
+        "URLProcessing",
+        "d710ea07-5c96-4c43-ab6e-e138d3653780",
+    ),
+    (
+        "LabelField",
+        "",
+        "Click",
+        "eba5f295-c611-4dd9-84b5-22911ad60c53",
+    ),
+    (
+        "LabelField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "LabelField",
+        "",
+        "URLProcessing",
+        "509eca20-d6e4-4fef-a0f8-3a6b44c64178",
+    ),
+    (
+        "Pages",
+        "",
+        "OnCurrentPageChange",
+        "526c501f-ed3f-4db4-8731-fd0324707501",
+    ),
+    (
+        "PictureDecoration",
+        "",
+        "Click",
+        "9874537f-454c-40ae-83e9-3b9cefbc6d08",
+    ),
+    (
+        "PictureDecoration",
+        "",
+        "Drag",
+        "8ad48496-8d0b-4f6c-ae48-99d95227884b",
+    ),
+    (
+        "PictureDecoration",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "PictureField",
+        "",
+        "Click",
+        "996b8c30-7a89-4973-8d56-2c9ce2976695",
+    ),
+    (
+        "PictureField",
+        "",
+        "Drag",
+        "8ad48496-8d0b-4f6c-ae48-99d95227884b",
+    ),
+    (
+        "PictureField",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "PictureField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "RadioButtonField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "AdditionalDetailProcessing",
+        "0b8dc702-d001-4637-a215-9f35613e096c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "BeforeWrite",
+        "b7646583-04d3-4905-8f04-8985914bd1b7",
+    ),
+    (
+        "Table",
+        "",
+        "OnCurrentParentChange",
+        "2971b9a9-1724-4f34-aaa4-f3db584c3ca0",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "BeforePrint",
+        "61455593-0982-4415-bc2e-2e8722a7abd0",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "DetailProcessing",
+        "2988b2a5-c887-4928-94ae-5d0c9c31e999",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "Drag",
+        "8ad48496-8d0b-4f6c-ae48-99d95227884b",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "DragEnd",
+        "cb286ab3-3a1c-40d2-a232-6e64f624ccec",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "DragStart",
+        "6d4d6747-a823-4f61-ab31-a426572f2c6c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "OnActivate",
+        "2042ec93-3108-4190-b767-ec6c10dd9ff4",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "OnChangeAreaContent",
+        "411a4578-276c-4f4a-b56a-b3b01181c997",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "Selection",
+        "22287505-97d8-4258-a318-209e2493f7eb",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        "",
+        "URLProcessing",
+        "06d41ccc-4e8a-46f8-aeff-b3303cf753d2",
+    ),
+    (
+        "Table",
+        "",
+        "2391e7b8-7235-45d7-ab7e-6ff3dc086396",
+        "2391e7b8-7235-45d7-ab7e-6ff3dc086396",
+    ),
+    (
+        "Table",
+        "",
+        "2ccfdec5-583d-4eca-8319-e55de492665a",
+        "2ccfdec5-583d-4eca-8319-e55de492665a",
+    ),
+    (
+        "Table",
+        "",
+        "4d88756d-bad4-4fde-92e1-c1f1402ac6b2",
+        "4d88756d-bad4-4fde-92e1-c1f1402ac6b2",
+    ),
+    (
+        "Table",
+        "",
+        "AfterDeleteRow",
+        "de65638d-a806-4a76-bc10-f62bbc86e0e7",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeAddRow",
+        "2391e7b8-7235-45d7-ab7e-6ff3dc086396",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeCollapse",
+        "a7a9dc42-29b6-4c5b-8980-6d0b87149bdd",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeDeleteRow",
+        "2ccfdec5-583d-4eca-8319-e55de492665a",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeEditEnd",
+        "4d88756d-bad4-4fde-92e1-c1f1402ac6b2",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeExpand",
+        "7c39b7bc-db0f-4410-9d98-8e5b7896995e",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeLoadUserSettingsAtServer",
+        "c41e7b98-098c-433e-8ac3-56ec2a2c49e2",
+    ),
+    (
+        "Table",
+        "",
+        "BeforeRowChange",
+        "ab930362-ff94-4dcb-ad16-188805d23e3c",
+    ),
+    (
+        "Table",
+        "",
+        "ChoiceProcessing",
+        "8bfdb5eb-62dc-4851-8a2c-e983526356bf",
+    ),
     ("Table", "", "Drag", "8ad48496-8d0b-4f6c-ae48-99d95227884b"),
-    ("Table", "", "DragCheck", "0d644ff6-443b-4390-86fa-7f9105e42711"),
-    ("Table", "", "DragEnd", "cb286ab3-3a1c-40d2-a232-6e64f624ccec"),
-    ("Table", "", "DragStart", "6d4d6747-a823-4f61-ab31-a426572f2c6c"),
-    ("Table", "", "NewWriteProcessing", "ce67decf-16b8-4d61-b347-4e6a063580dc"),
-    ("Table", "", "OnActivateCell", "f228b12f-d892-4925-b338-695617357b32"),
-    ("Table", "", "OnActivateField", "6e973761-8683-47fa-a609-4e230950294d"),
-    ("Table", "", "OnActivateRow", "60edb81d-887b-478e-94ee-7fef2b13393d"),
+    (
+        "Table",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "Table",
+        "",
+        "DragEnd",
+        "cb286ab3-3a1c-40d2-a232-6e64f624ccec",
+    ),
+    (
+        "Table",
+        "",
+        "DragStart",
+        "6d4d6747-a823-4f61-ab31-a426572f2c6c",
+    ),
+    (
+        "Table",
+        "",
+        "NewWriteProcessing",
+        "ce67decf-16b8-4d61-b347-4e6a063580dc",
+    ),
+    (
+        "Table",
+        "",
+        "OnActivateCell",
+        "f228b12f-d892-4925-b338-695617357b32",
+    ),
+    (
+        "Table",
+        "",
+        "OnActivateField",
+        "6e973761-8683-47fa-a609-4e230950294d",
+    ),
+    (
+        "Table",
+        "",
+        "OnActivateRow",
+        "60edb81d-887b-478e-94ee-7fef2b13393d",
+    ),
     // Platform 8.5 (8.5.1.1150 BSP: 79 and 5 bindings).
-    ("Table", "", "OnHover", "c676f87f-6c33-4dba-aad8-0526726d1bcf"),
-    ("Table", "", "OnSelectedRowsSetChange", "147fd867-8f22-4463-939d-4b48c5860c89"),
-    ("Table", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("Table", "", "OnEditEnd", "01d80ddd-dce5-4db3-beb5-f63c97cb05b9"),
-    ("Table", "", "OnGetDataAtServer", "97365900-eadf-4dfd-a9aa-fbb9ecabd079"),
-    ("Table", "", "OnLoadUserSettingsAtServer", "336b3ee5-d67f-4651-b098-e2c53f8317e2"),
-    ("Table", "", "OnSaveUserSettingsAtServer", "a73dae96-734d-42e4-8ae7-b70249ecd233"),
-    ("Table", "", "OnStartEdit", "b3c10170-c5ff-4cba-b537-679e1c872b45"),
-    ("Table", "", "OnUpdateUserSettingSetAtServer", "e91128e6-621d-4dc8-b12e-bd65aeb37e2d"),
-    ("Table", "", "RefreshRequestProcessing", "ff33c4d6-a0db-4906-992e-37b3f44cd97a"),
-    ("Table", "", "Selection", "1282f000-23b6-4887-87f4-9e8e79db3d32"),
-    ("Table", "", "URLGetProcessing", "674956b3-e469-4fdc-acf5-24ebf88cf7ab"),
-    ("Table", "", "ValueChoice", "0d8cf5b0-55eb-4d1e-960a-22c160210945"),
-    ("Table", "", "ab930362-ff94-4dcb-ad16-188805d23e3c", "ab930362-ff94-4dcb-ad16-188805d23e3c"),
-    ("Table", "", "b3c10170-c5ff-4cba-b537-679e1c872b45", "b3c10170-c5ff-4cba-b537-679e1c872b45"),
-    ("Table", "", "de65638d-a806-4a76-bc10-f62bbc86e0e7", "de65638d-a806-4a76-bc10-f62bbc86e0e7"),
-    ("TextDocumentField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("TrackBarField", "", "OnChange", "fe115cc8-9e33-4684-a166-bd5136fe7a9f"),
-    ("Form", "cfg:AccountingRegisterRecordSet", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:AccountingRegisterRecordSet", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:BusinessProcessObject", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:BusinessProcessObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:CatalogObject", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:CatalogObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:ChartOfAccountsObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:ChartOfCalculationTypesObject", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:ChartOfCalculationTypesObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:ChartOfCharacteristicTypesObject", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:ChartOfCharacteristicTypesObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:ConstantsSet", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:ConstantsSet", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:DocumentObject", "BeforeWrite", "8a5894c9-d2ff-4c1d-b433-89cc352bbfbc"),
-    ("Form", "cfg:DocumentObject", "BeforeWriteAtServer", "8f42e083-be92-4102-b1f0-fa58452c1a63"),
-    ("Form", "cfg:ExchangePlanObject", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:ExchangePlanObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:InformationRegisterRecordManager", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:InformationRegisterRecordManager", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:InformationRegisterRecordSet", "BeforeWrite", "9cc34712-da5f-4faa-a653-343d2085fbe8"),
-    ("Form", "cfg:InformationRegisterRecordSet", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
-    ("Form", "cfg:TaskObject", "BeforeWriteAtServer", "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"),
+    (
+        "Table",
+        "",
+        "OnHover",
+        "c676f87f-6c33-4dba-aad8-0526726d1bcf",
+    ),
+    (
+        "Table",
+        "",
+        "OnSelectedRowsSetChange",
+        "147fd867-8f22-4463-939d-4b48c5860c89",
+    ),
+    (
+        "Table",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "Table",
+        "",
+        "OnEditEnd",
+        "01d80ddd-dce5-4db3-beb5-f63c97cb05b9",
+    ),
+    (
+        "Table",
+        "",
+        "OnGetDataAtServer",
+        "97365900-eadf-4dfd-a9aa-fbb9ecabd079",
+    ),
+    (
+        "Table",
+        "",
+        "OnLoadUserSettingsAtServer",
+        "336b3ee5-d67f-4651-b098-e2c53f8317e2",
+    ),
+    (
+        "Table",
+        "",
+        "OnSaveUserSettingsAtServer",
+        "a73dae96-734d-42e4-8ae7-b70249ecd233",
+    ),
+    (
+        "Table",
+        "",
+        "OnStartEdit",
+        "b3c10170-c5ff-4cba-b537-679e1c872b45",
+    ),
+    (
+        "Table",
+        "",
+        "OnUpdateUserSettingSetAtServer",
+        "e91128e6-621d-4dc8-b12e-bd65aeb37e2d",
+    ),
+    (
+        "Table",
+        "",
+        "RefreshRequestProcessing",
+        "ff33c4d6-a0db-4906-992e-37b3f44cd97a",
+    ),
+    (
+        "Table",
+        "",
+        "Selection",
+        "1282f000-23b6-4887-87f4-9e8e79db3d32",
+    ),
+    (
+        "Table",
+        "",
+        "URLGetProcessing",
+        "674956b3-e469-4fdc-acf5-24ebf88cf7ab",
+    ),
+    (
+        "Table",
+        "",
+        "ValueChoice",
+        "0d8cf5b0-55eb-4d1e-960a-22c160210945",
+    ),
+    (
+        "Table",
+        "",
+        "ab930362-ff94-4dcb-ad16-188805d23e3c",
+        "ab930362-ff94-4dcb-ad16-188805d23e3c",
+    ),
+    (
+        "Table",
+        "",
+        "b3c10170-c5ff-4cba-b537-679e1c872b45",
+        "b3c10170-c5ff-4cba-b537-679e1c872b45",
+    ),
+    (
+        "Table",
+        "",
+        "de65638d-a806-4a76-bc10-f62bbc86e0e7",
+        "de65638d-a806-4a76-bc10-f62bbc86e0e7",
+    ),
+    (
+        "TextDocumentField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "TrackBarField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "Form",
+        "cfg:AccountingRegisterRecordSet",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:AccountingRegisterRecordSet",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:BusinessProcessObject",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:BusinessProcessObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:CatalogObject",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:CatalogObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:ChartOfAccountsObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:ChartOfCalculationTypesObject",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:ChartOfCalculationTypesObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:ChartOfCharacteristicTypesObject",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:ChartOfCharacteristicTypesObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:ConstantsSet",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:ConstantsSet",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:DocumentObject",
+        "BeforeWrite",
+        "8a5894c9-d2ff-4c1d-b433-89cc352bbfbc",
+    ),
+    (
+        "Form",
+        "cfg:DocumentObject",
+        "BeforeWriteAtServer",
+        "8f42e083-be92-4102-b1f0-fa58452c1a63",
+    ),
+    (
+        "Form",
+        "cfg:ExchangePlanObject",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:ExchangePlanObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:InformationRegisterRecordManager",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:InformationRegisterRecordManager",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:InformationRegisterRecordSet",
+        "BeforeWrite",
+        "9cc34712-da5f-4faa-a653-343d2085fbe8",
+    ),
+    (
+        "Form",
+        "cfg:InformationRegisterRecordSet",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
+    (
+        "Form",
+        "cfg:TaskObject",
+        "BeforeWriteAtServer",
+        "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6",
+    ),
 ];
 
 /// The font a form item names, in the shape a body stores it.
@@ -653,7 +1429,15 @@ pub(crate) fn format_native_font(
     }
     if let Some(bold) = attributes.get("bold") {
         mask |= 1 << 2;
-        values.push((2, if native_font_flag(bold)? { "700" } else { "400" }.to_string()));
+        values.push((
+            2,
+            if native_font_flag(bold)? {
+                "700"
+            } else {
+                "400"
+            }
+            .to_string(),
+        ));
     }
     for (name, bit) in [("italic", 3u32), ("underline", 4), ("strikeout", 5)] {
         if let Some(value) = attributes.get(name) {
@@ -1059,7 +1843,12 @@ pub(crate) fn format_field_item(item: &NativeFieldItem<'_>) -> Option<String> {
     )?;
     let header_horizontal = root_code(
         item.header_horizontal_align,
-        &[("Left", "0"), ("Center", "1"), ("Right", "2"), ("Auto", "3")],
+        &[
+            ("Left", "0"),
+            ("Center", "1"),
+            ("Right", "2"),
+            ("Auto", "3"),
+        ],
         "0",
     )?;
     let footer_horizontal = root_code(
@@ -1569,11 +2358,7 @@ pub(crate) fn format_input_payload(payload: &NativeInputPayload<'_>) -> Option<S
         &[("Items", "0"), ("Folders", "1"), ("FoldersAndItems", "2")],
         "3",
     )?;
-    let incomplete = root_code(
-        payload.incomplete_choice_mode,
-        &[("OnActivate", "1")],
-        "0",
-    )?;
+    let incomplete = root_code(payload.incomplete_choice_mode, &[("OnActivate", "1")], "0")?;
     let edit_text_update = root_code(
         payload.edit_text_update,
         &[("DontUse", "1"), ("OnValueChange", "2"), ("Always", "3")],
@@ -2114,9 +2899,7 @@ impl NativeSpreadsheetPayload<'_> {
     }
 }
 
-pub(crate) fn format_spreadsheet_payload(
-    payload: &NativeSpreadsheetPayload<'_>,
-) -> Option<String> {
+pub(crate) fn format_spreadsheet_payload(payload: &NativeSpreadsheetPayload<'_>) -> Option<String> {
     let bar = |value| root_code(value, &[("false", "0"), ("true", "1")], "1");
     let bar_tail = |value| root_code(value, &[("false", "0"), ("true", "1")], "2");
     let vertical = bar(payload.vertical_scroll_bar)?;
@@ -2175,7 +2958,12 @@ pub(crate) fn format_spreadsheet_payload(
 /// slots 1 and 2 in all three, with 50 and 10 the values a field that names
 /// neither carries. All 135, 94 and 47 records of the corpus are reproduced
 /// exactly, first time.
-pub(crate) fn format_document_payload(wrapper: u8, width: &str, height: &str, tail: &str) -> String {
+pub(crate) fn format_document_payload(
+    wrapper: u8,
+    width: &str,
+    height: &str,
+    tail: &str,
+) -> String {
     format!("{{{wrapper},{width},{height},{tail}}}")
 }
 
@@ -2183,242 +2971,1402 @@ pub(crate) fn format_document_payload(wrapper: u8, width: &str, height: &str, ta
 /// by the target item's tag, whether it is bound to a dynamic list, and the
 /// command's name. Measured over every item button of ERP УХ.
 const ITEM_STANDARD_COMMAND_UUIDS: &[(&str, bool, &str, &str)] = &[
-    ("FormattedDocumentField", false, "AlignCenter", "ab0ebc39-68ee-4034-b2f4-43eee55bd651"),
-    ("FormattedDocumentField", false, "AlignJustify", "56ae90b6-588f-406e-919c-cc5cc7f86297"),
-    ("FormattedDocumentField", false, "AlignLeft", "87ecfbdd-8e2b-4ba2-a315-0897020f382f"),
-    ("FormattedDocumentField", false, "AlignRight", "e428af27-c4f7-4577-b80e-95a79f94322d"),
-    ("FormattedDocumentField", false, "BackColor", "17724105-6e59-4d52-8a42-cf0fb4838037"),
-    ("FormattedDocumentField", false, "Bold", "f20eefc2-f819-4ab1-be67-87b3ca2e26e6"),
-    ("FormattedDocumentField", false, "BulletedList", "a0033f06-56f7-4855-b901-7ac66fe1bb99"),
-    ("FormattedDocumentField", false, "CopyToClipboard", "7a294bdc-b86b-4b73-abc4-df9c811f61ef"),
-    ("FormattedDocumentField", false, "CutToClipboard", "83670388-2e45-439e-9968-587eca6c7f8d"),
-    ("FormattedDocumentField", false, "DecreaseFontSize", "ec647dcc-2be7-486c-9046-d8b371f9909e"),
-    ("FormattedDocumentField", false, "DecreaseIndent", "39f6b9f1-7aa1-4a03-a01b-e127d51bc228"),
-    ("FormattedDocumentField", false, "Font", "a8f6b59e-b712-4d3e-a974-55a3be4eb295"),
-    ("FormattedDocumentField", false, "IncreaseFontSize", "0bdc43a3-79f0-48d6-bce4-1142542e1a59"),
-    ("FormattedDocumentField", false, "IncreaseIndent", "d0a4d953-115b-4059-a6cb-6e67f903a4f3"),
-    ("FormattedDocumentField", false, "Italic", "a8631f01-318a-4da2-80a9-9075c7524463"),
-    ("FormattedDocumentField", false, "NumberedList", "2b5d0007-b74c-4786-a904-37e64bda8414"),
-    ("FormattedDocumentField", false, "PasteFromClipboard", "905692d2-c3e7-4433-8f10-8d2ce35f652b"),
-    ("FormattedDocumentField", false, "Picture", "9d8a3915-de52-4227-91cd-2fce22e09972"),
-    ("FormattedDocumentField", false, "Preview", "4ca32834-6f9f-4dfb-89ce-6db36931c89b"),
-    ("FormattedDocumentField", false, "Print", "a8483976-8b13-416a-9680-133b306dc6b0"),
-    ("FormattedDocumentField", false, "SaveAs", "5a331cec-bf93-4af5-8f51-80fd7118db47"),
-    ("FormattedDocumentField", false, "SelectAll", "b67f202a-dcf8-41f3-bda8-1ff9bed5f2ef"),
-    ("FormattedDocumentField", false, "TextColor", "71007f7d-1995-44aa-9125-9926e70a35b5"),
-    ("FormattedDocumentField", false, "Underline", "85bd789b-0047-46f9-9b2e-845907fc1b1d"),
-    ("GraphicalSchemaField", false, "PageSetup", "01db2225-b62d-4112-a4b6-d39d627bf79f"),
-    ("GraphicalSchemaField", false, "Preview", "1d13f9a3-402a-46cb-9c68-1709356840f2"),
-    ("GraphicalSchemaField", false, "Print", "e2d6f793-b786-4640-a91b-8d77f73860f1"),
-    ("PDFDocumentField", false, "GoBack", "32a87619-85ce-495a-a195-2719f5e9c71e"),
-    ("PDFDocumentField", false, "GoForward", "85a1b7ee-e94d-4783-b519-4af123f58596"),
-    ("PDFDocumentField", false, "GoToBegin", "a4e92b1d-5e86-4a86-b276-00e71ecf3fd4"),
-    ("PDFDocumentField", false, "GoToEnd", "3e80231d-e169-456e-8373-0b9d4c15c8ab"),
-    ("PDFDocumentField", false, "RotateClockwise", "30f0b852-3284-4ae4-838b-f89b78388bdc"),
-    ("PDFDocumentField", false, "RotateCounterclockwise", "e28575de-9fe8-4a8e-a285-13250de33d49"),
-    ("PDFDocumentField", false, "ScaleDown", "1e5ebd8b-32ee-4af9-b85c-3a0417000660"),
-    ("PDFDocumentField", false, "ScaleUp", "d9117be6-f436-40fd-9670-8d71b99b2477"),
-    ("SpreadSheetDocumentField", false, "AlignCenter", "ab0ebc39-68ee-4034-b2f4-43eee55bd651"),
-    ("SpreadSheetDocumentField", false, "AlignJustify", "56ae90b6-588f-406e-919c-cc5cc7f86297"),
-    ("SpreadSheetDocumentField", false, "AlignLeft", "87ecfbdd-8e2b-4ba2-a315-0897020f382f"),
-    ("SpreadSheetDocumentField", false, "AlignRight", "e428af27-c4f7-4577-b80e-95a79f94322d"),
-    ("SpreadSheetDocumentField", false, "BackColor", "17724105-6e59-4d52-8a42-cf0fb4838037"),
-    ("SpreadSheetDocumentField", false, "Bold", "f20eefc2-f819-4ab1-be67-87b3ca2e26e6"),
-    ("SpreadSheetDocumentField", false, "BorderAll", "4efdcc95-9f24-4652-a5ed-febfaa51f135"),
-    ("SpreadSheetDocumentField", false, "BorderBottom", "5ff37d88-ba18-428c-bf49-9ccde4c46268"),
-    ("SpreadSheetDocumentField", false, "BorderColor", "c1c95e8a-37b4-477c-9df1-7bc0fdbc1bd3"),
-    ("SpreadSheetDocumentField", false, "BorderInside", "c4713141-07d1-411f-8804-172d4b8c4f01"),
-    ("SpreadSheetDocumentField", false, "BorderLeft", "635136cc-3a47-43d1-8893-d7d536bf37c4"),
-    ("SpreadSheetDocumentField", false, "BorderNone", "1177792e-7da2-4755-81a9-997f2d0e3dce"),
-    ("SpreadSheetDocumentField", false, "BorderOutline", "05183b65-aa1f-401c-ac34-d99a6ff4ff60"),
-    ("SpreadSheetDocumentField", false, "BorderRight", "e05dddd1-40ad-44a2-8ae7-0a551f0b1809"),
-    ("SpreadSheetDocumentField", false, "BorderTop", "81be7ad1-a93f-4936-92d0-d59c10213f28"),
-    ("SpreadSheetDocumentField", false, "ClearAll", "59e67a77-8141-42cf-b062-7cb92e210b6d"),
-    ("SpreadSheetDocumentField", false, "ClearContent", "7eae9c22-db31-4f27-a56a-b4dd62d21a2c"),
-    ("SpreadSheetDocumentField", false, "CollapseAllGroups", "ff5c34f8-b172-4ef2-91d3-48283a66a725"),
-    ("SpreadSheetDocumentField", false, "CopyToClipboard", "1ba33890-92e9-42a3-95bd-a5c783f46d55"),
-    ("SpreadSheetDocumentField", false, "DeleteColumns", "202efa3a-32e6-482c-8bc9-1a596bdd57f4"),
-    ("SpreadSheetDocumentField", false, "DeleteComment", "531b9a9b-e4b3-4fe2-9562-1ff678c6d73d"),
-    ("SpreadSheetDocumentField", false, "DeleteRows", "7b63d2c2-5b6b-472e-8f6c-7438d952be73"),
-    ("SpreadSheetDocumentField", false, "Edit", "5c52ec51-6000-4190-b8c8-bd6201a271f5"),
-    ("SpreadSheetDocumentField", false, "ExpandAllGroups", "12acffde-8389-4e5e-bd86-ff248262d84a"),
-    ("SpreadSheetDocumentField", false, "Find", "0cf34151-92d3-42fd-954f-5938433908a4"),
-    ("SpreadSheetDocumentField", false, "FindNext", "29fc1bfc-7bf8-4849-9b4b-3e42d12ebcbb"),
-    ("SpreadSheetDocumentField", false, "FindPrevious", "474180f3-c5bd-49bf-bfd4-fddb03918295"),
-    ("SpreadSheetDocumentField", false, "FixTable", "b34f83ab-1cd7-41b1-89bd-dd0804a47b26"),
-    ("SpreadSheetDocumentField", false, "Font", "05e95a55-947e-4dde-a657-16ec11750a2f"),
-    ("SpreadSheetDocumentField", false, "InsertComment", "ed6630f2-c296-43dd-b408-d370513fcebc"),
-    ("SpreadSheetDocumentField", false, "InsertRows", "e5c3a5a6-695d-41bf-9c88-4367fd2a2a6e"),
-    ("SpreadSheetDocumentField", false, "Italic", "a8631f01-318a-4da2-80a9-9075c7524463"),
-    ("SpreadSheetDocumentField", false, "Merge", "f4df676f-eefb-48bd-9117-83ee6c207cb5"),
-    ("SpreadSheetDocumentField", false, "PageSetup", "41c1bb40-1027-4fd1-a19e-17976100e64b"),
-    ("SpreadSheetDocumentField", false, "PasteFromClipboard", "edf14e37-e755-4d1c-970c-48ed776e3a0e"),
-    ("SpreadSheetDocumentField", false, "Preview", "5aa38159-2001-42ae-8451-f8cabe0762c3"),
-    ("SpreadSheetDocumentField", false, "Print", "d673d512-f71a-48a6-ae5d-527a64ffd813"),
-    ("SpreadSheetDocumentField", false, "PrintImmediately", "0e355e57-d603-4ac6-998b-c522c43d3668"),
-    ("SpreadSheetDocumentField", false, "Properties", "be8800c3-8ccf-444a-bbf0-8f3078ff0ded"),
-    ("SpreadSheetDocumentField", false, "RemoveName", "adc3d2d0-4d84-4038-a453-ab5d693a60bd"),
-    ("SpreadSheetDocumentField", false, "Save", "d8e20c4d-3519-49aa-80e5-d6d66fee741a"),
-    ("SpreadSheetDocumentField", false, "SaveAs", "999b786e-0534-4fca-8b62-f706d5336798"),
-    ("SpreadSheetDocumentField", false, "SelectAll", "cca9b248-5f35-477f-a49d-95da3b7becad"),
-    ("SpreadSheetDocumentField", false, "SetName", "5ce7de77-4796-41a0-beb3-7dc420053639"),
-    ("SpreadSheetDocumentField", false, "ShowGrid", "83c3121e-60cc-4b47-a296-0c1976f0d766"),
-    ("SpreadSheetDocumentField", false, "ShowGroups", "b55ad06a-ee91-4435-a747-6f51884772d9"),
-    ("SpreadSheetDocumentField", false, "ShowHeaders", "4a9ec98e-c814-47b6-911f-694effc10fc5"),
-    ("SpreadSheetDocumentField", false, "SplitCell", "02bdf755-7bc7-4e41-a199-f65cef10e6bc"),
-    ("SpreadSheetDocumentField", false, "TextColor", "71007f7d-1995-44aa-9125-9926e70a35b5"),
-    ("SpreadSheetDocumentField", false, "ThickBorderBottom", "65ee8b9b-8a0a-4de8-9a71-3a7a8c43c4ba"),
-    ("SpreadSheetDocumentField", false, "ThickBorderOutline", "08872d94-c57a-470f-a050-0d4d81765df2"),
-    ("SpreadSheetDocumentField", false, "ThickBorderTop", "a01654df-d7f1-4ec5-8b03-258d953de2e7"),
-    ("SpreadSheetDocumentField", false, "Underline", "85bd789b-0047-46f9-9b2e-845907fc1b1d"),
-    ("Table", false, "Add", "b0016a68-ec64-4e6d-b905-c71fd62efc4c"),
+    (
+        "FormattedDocumentField",
+        false,
+        "AlignCenter",
+        "ab0ebc39-68ee-4034-b2f4-43eee55bd651",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "AlignJustify",
+        "56ae90b6-588f-406e-919c-cc5cc7f86297",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "AlignLeft",
+        "87ecfbdd-8e2b-4ba2-a315-0897020f382f",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "AlignRight",
+        "e428af27-c4f7-4577-b80e-95a79f94322d",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "BackColor",
+        "17724105-6e59-4d52-8a42-cf0fb4838037",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Bold",
+        "f20eefc2-f819-4ab1-be67-87b3ca2e26e6",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "BulletedList",
+        "a0033f06-56f7-4855-b901-7ac66fe1bb99",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "CopyToClipboard",
+        "7a294bdc-b86b-4b73-abc4-df9c811f61ef",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "CutToClipboard",
+        "83670388-2e45-439e-9968-587eca6c7f8d",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "DecreaseFontSize",
+        "ec647dcc-2be7-486c-9046-d8b371f9909e",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "DecreaseIndent",
+        "39f6b9f1-7aa1-4a03-a01b-e127d51bc228",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Font",
+        "a8f6b59e-b712-4d3e-a974-55a3be4eb295",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "IncreaseFontSize",
+        "0bdc43a3-79f0-48d6-bce4-1142542e1a59",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "IncreaseIndent",
+        "d0a4d953-115b-4059-a6cb-6e67f903a4f3",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Italic",
+        "a8631f01-318a-4da2-80a9-9075c7524463",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "NumberedList",
+        "2b5d0007-b74c-4786-a904-37e64bda8414",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "PasteFromClipboard",
+        "905692d2-c3e7-4433-8f10-8d2ce35f652b",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Picture",
+        "9d8a3915-de52-4227-91cd-2fce22e09972",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Preview",
+        "4ca32834-6f9f-4dfb-89ce-6db36931c89b",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Print",
+        "a8483976-8b13-416a-9680-133b306dc6b0",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "SaveAs",
+        "5a331cec-bf93-4af5-8f51-80fd7118db47",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "SelectAll",
+        "b67f202a-dcf8-41f3-bda8-1ff9bed5f2ef",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "TextColor",
+        "71007f7d-1995-44aa-9125-9926e70a35b5",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Underline",
+        "85bd789b-0047-46f9-9b2e-845907fc1b1d",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "PageSetup",
+        "01db2225-b62d-4112-a4b6-d39d627bf79f",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "Preview",
+        "1d13f9a3-402a-46cb-9c68-1709356840f2",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "Print",
+        "e2d6f793-b786-4640-a91b-8d77f73860f1",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "GoBack",
+        "32a87619-85ce-495a-a195-2719f5e9c71e",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "GoForward",
+        "85a1b7ee-e94d-4783-b519-4af123f58596",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "GoToBegin",
+        "a4e92b1d-5e86-4a86-b276-00e71ecf3fd4",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "GoToEnd",
+        "3e80231d-e169-456e-8373-0b9d4c15c8ab",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "RotateClockwise",
+        "30f0b852-3284-4ae4-838b-f89b78388bdc",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "RotateCounterclockwise",
+        "e28575de-9fe8-4a8e-a285-13250de33d49",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "ScaleDown",
+        "1e5ebd8b-32ee-4af9-b85c-3a0417000660",
+    ),
+    (
+        "PDFDocumentField",
+        false,
+        "ScaleUp",
+        "d9117be6-f436-40fd-9670-8d71b99b2477",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignCenter",
+        "ab0ebc39-68ee-4034-b2f4-43eee55bd651",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignJustify",
+        "56ae90b6-588f-406e-919c-cc5cc7f86297",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignLeft",
+        "87ecfbdd-8e2b-4ba2-a315-0897020f382f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignRight",
+        "e428af27-c4f7-4577-b80e-95a79f94322d",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BackColor",
+        "17724105-6e59-4d52-8a42-cf0fb4838037",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Bold",
+        "f20eefc2-f819-4ab1-be67-87b3ca2e26e6",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderAll",
+        "4efdcc95-9f24-4652-a5ed-febfaa51f135",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderBottom",
+        "5ff37d88-ba18-428c-bf49-9ccde4c46268",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderColor",
+        "c1c95e8a-37b4-477c-9df1-7bc0fdbc1bd3",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderInside",
+        "c4713141-07d1-411f-8804-172d4b8c4f01",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderLeft",
+        "635136cc-3a47-43d1-8893-d7d536bf37c4",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderNone",
+        "1177792e-7da2-4755-81a9-997f2d0e3dce",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderOutline",
+        "05183b65-aa1f-401c-ac34-d99a6ff4ff60",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderRight",
+        "e05dddd1-40ad-44a2-8ae7-0a551f0b1809",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BorderTop",
+        "81be7ad1-a93f-4936-92d0-d59c10213f28",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ClearAll",
+        "59e67a77-8141-42cf-b062-7cb92e210b6d",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ClearContent",
+        "7eae9c22-db31-4f27-a56a-b4dd62d21a2c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "CollapseAllGroups",
+        "ff5c34f8-b172-4ef2-91d3-48283a66a725",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "CopyToClipboard",
+        "1ba33890-92e9-42a3-95bd-a5c783f46d55",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "DeleteColumns",
+        "202efa3a-32e6-482c-8bc9-1a596bdd57f4",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "DeleteComment",
+        "531b9a9b-e4b3-4fe2-9562-1ff678c6d73d",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "DeleteRows",
+        "7b63d2c2-5b6b-472e-8f6c-7438d952be73",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Edit",
+        "5c52ec51-6000-4190-b8c8-bd6201a271f5",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ExpandAllGroups",
+        "12acffde-8389-4e5e-bd86-ff248262d84a",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Find",
+        "0cf34151-92d3-42fd-954f-5938433908a4",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "FindNext",
+        "29fc1bfc-7bf8-4849-9b4b-3e42d12ebcbb",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "FindPrevious",
+        "474180f3-c5bd-49bf-bfd4-fddb03918295",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "FixTable",
+        "b34f83ab-1cd7-41b1-89bd-dd0804a47b26",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Font",
+        "05e95a55-947e-4dde-a657-16ec11750a2f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertComment",
+        "ed6630f2-c296-43dd-b408-d370513fcebc",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertRows",
+        "e5c3a5a6-695d-41bf-9c88-4367fd2a2a6e",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Italic",
+        "a8631f01-318a-4da2-80a9-9075c7524463",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Merge",
+        "f4df676f-eefb-48bd-9117-83ee6c207cb5",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "PageSetup",
+        "41c1bb40-1027-4fd1-a19e-17976100e64b",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "PasteFromClipboard",
+        "edf14e37-e755-4d1c-970c-48ed776e3a0e",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Preview",
+        "5aa38159-2001-42ae-8451-f8cabe0762c3",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Print",
+        "d673d512-f71a-48a6-ae5d-527a64ffd813",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "PrintImmediately",
+        "0e355e57-d603-4ac6-998b-c522c43d3668",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Properties",
+        "be8800c3-8ccf-444a-bbf0-8f3078ff0ded",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RemoveName",
+        "adc3d2d0-4d84-4038-a453-ab5d693a60bd",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Save",
+        "d8e20c4d-3519-49aa-80e5-d6d66fee741a",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SaveAs",
+        "999b786e-0534-4fca-8b62-f706d5336798",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SelectAll",
+        "cca9b248-5f35-477f-a49d-95da3b7becad",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SetName",
+        "5ce7de77-4796-41a0-beb3-7dc420053639",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowGrid",
+        "83c3121e-60cc-4b47-a296-0c1976f0d766",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowGroups",
+        "b55ad06a-ee91-4435-a747-6f51884772d9",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowHeaders",
+        "4a9ec98e-c814-47b6-911f-694effc10fc5",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SplitCell",
+        "02bdf755-7bc7-4e41-a199-f65cef10e6bc",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "TextColor",
+        "71007f7d-1995-44aa-9125-9926e70a35b5",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ThickBorderBottom",
+        "65ee8b9b-8a0a-4de8-9a71-3a7a8c43c4ba",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ThickBorderOutline",
+        "08872d94-c57a-470f-a050-0d4d81765df2",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ThickBorderTop",
+        "a01654df-d7f1-4ec5-8b03-258d953de2e7",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Underline",
+        "85bd789b-0047-46f9-9b2e-845907fc1b1d",
+    ),
+    (
+        "Table",
+        false,
+        "Add",
+        "b0016a68-ec64-4e6d-b905-c71fd62efc4c",
+    ),
     // Platform 8.5 (8.5.1.1150 BSP), read back by the exporter's
     // `form_table_standard_command_suffix` whatever the table shows.
-    ("Table", false, "ClearTableMarksAppearance", "daf40cdf-c477-48c5-9627-57d5450e1f3d"),
-    ("Table", true, "ClearTableMarksAppearance", "daf40cdf-c477-48c5-9627-57d5450e1f3d"),
-    ("Table", false, "AddMultiple", "6db04d66-8367-4b9d-a368-16742c09f654"),
-    ("Table", true, "AddMultiple", "6db04d66-8367-4b9d-a368-16742c09f654"),
-    ("Table", false, "AddFilterItem", "fca750bc-4fb6-40e2-ae0f-e818939a32e7"),
-    ("Table", false, "AddAutoOrderItem", "48e12019-0fd6-46eb-aab6-2acba716a623"),
-    ("Table", false, "AddFilterItemGroup", "a5fdef31-bbf0-4a9d-98aa-fd5fd8f1344a"),
-    ("Table", false, "AddGroup", "7b70c79a-199e-4e87-a7eb-29dea9a5ad69"),
-    ("Table", false, "AddOrderItem", "62ff963c-9426-43af-bb23-1d2ef3a9a0c1"),
-    ("Table", false, "AddTable", "46647493-f1bf-4cd6-9110-6bfab80b62de"),
-    ("Table", false, "CancelSearch", "44ad3ec9-f3c2-4913-9224-5f9fb6418743"),
-    ("Table", false, "Change", "b41f5bbc-ba5d-4888-8cd1-db246a371418"),
-    ("Table", false, "CheckAll", "18248aa8-e621-4e19-a611-54fb8923644c"),
-    ("Table", false, "Choose", "8969c93a-23e5-4bef-941d-aaef315858d2"),
-    ("Table", false, "ChooseAll", "15664824-eedc-4a92-9f6b-c89a2dead157"),
-    ("Table", false, "Copy", "0ae4bea5-23be-42a7-b69e-97b11b29c453"),
-    ("Table", false, "CopyToClipboard", "88078230-1f6b-415f-99e4-ad2ff73810cf"),
-    ("Table", false, "Delete", "8d772f97-c0ef-47c0-9cb0-efea28c61341"),
-    ("Table", false, "Detailed", "e6900951-1a42-4397-bf00-cabb2cd7ad6d"),
-    ("Table", false, "EndEdit", "9ef79140-3de6-436a-8dda-610bb963f5db"),
-    ("Table", false, "Find", "c0519548-2a9a-44de-a25e-faf01e089d4d"),
-    ("Table", false, "FindByCurrentValue", "714d44cc-63da-4431-b33a-428e398d2a08"),
-    ("Table", false, "GroupFilterItems", "4a817da0-5797-4e16-906f-02fb869e1873"),
-    ("Table", false, "HierarchicalList", "01833a5a-6553-4c49-b445-095018107bb5"),
-    ("Table", false, "List", "0d0249a4-2b2f-4fc0-a66f-b36f9494b3cc"),
-    ("Table", false, "MoveDown", "fa51b106-eae6-44c7-8054-76cbb3100603"),
-    ("Table", false, "MoveUp", "37740564-9e86-44a0-bea9-3f485a5a3f91"),
-    ("Table", false, "OutputList", "49602716-fea6-497f-8047-726404038857"),
-    ("Table", false, "Pickup", "59b4387d-f5be-4658-901f-bd3068217469"),
-    ("Table", false, "SearchEverywhere", "7b683784-b474-441a-ba63-3d757bd0ffd4"),
-    ("Table", false, "SearchHistory", "d96b0c03-b209-4d01-a3fc-17a14f873b64"),
-    ("Table", false, "SelectAll", "51c99108-107c-43e1-8918-e48835bf2495"),
-    ("Table", false, "SetPresentation", "7d4db5ed-0981-4020-b3b8-886b7165ba05"),
-    ("Table", false, "ShowMultipleSelection", "e7216412-03ac-4a81-99c2-1d7c28e88e31"),
-    ("Table", false, "ShowRowRearrangement", "8af6ebff-cd02-4bfe-a984-44a292623708"),
-    ("Table", false, "SortListAsc", "2bbe4e12-06d2-409b-a972-eea585125d83"),
-    ("Table", false, "SortListDesc", "58b2a785-23f6-4b0e-a324-9a1323285595"),
-    ("Table", false, "Tree", "05468165-f954-45a5-84f2-6641c51f9f23"),
-    ("Table", false, "UncheckAll", "5048cc44-702b-44e3-8445-9af75c02724d"),
-    ("Table", false, "Ungroup", "82b88a24-2856-484a-afd9-55a15bdf9785"),
-    ("Table", false, "UseFieldAsValue", "d7e55d2e-bfea-4d80-b4ad-a1bb31ec2147"),
-    ("Table", false, "UserSettingItemProperties", "1f1e900a-8488-4159-81be-9704eb96906d"),
+    (
+        "Table",
+        false,
+        "ClearTableMarksAppearance",
+        "daf40cdf-c477-48c5-9627-57d5450e1f3d",
+    ),
+    (
+        "Table",
+        true,
+        "ClearTableMarksAppearance",
+        "daf40cdf-c477-48c5-9627-57d5450e1f3d",
+    ),
+    (
+        "Table",
+        false,
+        "AddMultiple",
+        "6db04d66-8367-4b9d-a368-16742c09f654",
+    ),
+    (
+        "Table",
+        true,
+        "AddMultiple",
+        "6db04d66-8367-4b9d-a368-16742c09f654",
+    ),
+    (
+        "Table",
+        false,
+        "AddFilterItem",
+        "fca750bc-4fb6-40e2-ae0f-e818939a32e7",
+    ),
+    (
+        "Table",
+        false,
+        "AddAutoOrderItem",
+        "48e12019-0fd6-46eb-aab6-2acba716a623",
+    ),
+    (
+        "Table",
+        false,
+        "AddFilterItemGroup",
+        "a5fdef31-bbf0-4a9d-98aa-fd5fd8f1344a",
+    ),
+    (
+        "Table",
+        false,
+        "AddGroup",
+        "7b70c79a-199e-4e87-a7eb-29dea9a5ad69",
+    ),
+    (
+        "Table",
+        false,
+        "AddOrderItem",
+        "62ff963c-9426-43af-bb23-1d2ef3a9a0c1",
+    ),
+    (
+        "Table",
+        false,
+        "AddTable",
+        "46647493-f1bf-4cd6-9110-6bfab80b62de",
+    ),
+    (
+        "Table",
+        false,
+        "CancelSearch",
+        "44ad3ec9-f3c2-4913-9224-5f9fb6418743",
+    ),
+    (
+        "Table",
+        false,
+        "Change",
+        "b41f5bbc-ba5d-4888-8cd1-db246a371418",
+    ),
+    (
+        "Table",
+        false,
+        "CheckAll",
+        "18248aa8-e621-4e19-a611-54fb8923644c",
+    ),
+    (
+        "Table",
+        false,
+        "Choose",
+        "8969c93a-23e5-4bef-941d-aaef315858d2",
+    ),
+    (
+        "Table",
+        false,
+        "ChooseAll",
+        "15664824-eedc-4a92-9f6b-c89a2dead157",
+    ),
+    (
+        "Table",
+        false,
+        "Copy",
+        "0ae4bea5-23be-42a7-b69e-97b11b29c453",
+    ),
+    (
+        "Table",
+        false,
+        "CopyToClipboard",
+        "88078230-1f6b-415f-99e4-ad2ff73810cf",
+    ),
+    (
+        "Table",
+        false,
+        "Delete",
+        "8d772f97-c0ef-47c0-9cb0-efea28c61341",
+    ),
+    (
+        "Table",
+        false,
+        "Detailed",
+        "e6900951-1a42-4397-bf00-cabb2cd7ad6d",
+    ),
+    (
+        "Table",
+        false,
+        "EndEdit",
+        "9ef79140-3de6-436a-8dda-610bb963f5db",
+    ),
+    (
+        "Table",
+        false,
+        "Find",
+        "c0519548-2a9a-44de-a25e-faf01e089d4d",
+    ),
+    (
+        "Table",
+        false,
+        "FindByCurrentValue",
+        "714d44cc-63da-4431-b33a-428e398d2a08",
+    ),
+    (
+        "Table",
+        false,
+        "GroupFilterItems",
+        "4a817da0-5797-4e16-906f-02fb869e1873",
+    ),
+    (
+        "Table",
+        false,
+        "HierarchicalList",
+        "01833a5a-6553-4c49-b445-095018107bb5",
+    ),
+    (
+        "Table",
+        false,
+        "List",
+        "0d0249a4-2b2f-4fc0-a66f-b36f9494b3cc",
+    ),
+    (
+        "Table",
+        false,
+        "MoveDown",
+        "fa51b106-eae6-44c7-8054-76cbb3100603",
+    ),
+    (
+        "Table",
+        false,
+        "MoveUp",
+        "37740564-9e86-44a0-bea9-3f485a5a3f91",
+    ),
+    (
+        "Table",
+        false,
+        "OutputList",
+        "49602716-fea6-497f-8047-726404038857",
+    ),
+    (
+        "Table",
+        false,
+        "Pickup",
+        "59b4387d-f5be-4658-901f-bd3068217469",
+    ),
+    (
+        "Table",
+        false,
+        "SearchEverywhere",
+        "7b683784-b474-441a-ba63-3d757bd0ffd4",
+    ),
+    (
+        "Table",
+        false,
+        "SearchHistory",
+        "d96b0c03-b209-4d01-a3fc-17a14f873b64",
+    ),
+    (
+        "Table",
+        false,
+        "SelectAll",
+        "51c99108-107c-43e1-8918-e48835bf2495",
+    ),
+    (
+        "Table",
+        false,
+        "SetPresentation",
+        "7d4db5ed-0981-4020-b3b8-886b7165ba05",
+    ),
+    (
+        "Table",
+        false,
+        "ShowMultipleSelection",
+        "e7216412-03ac-4a81-99c2-1d7c28e88e31",
+    ),
+    (
+        "Table",
+        false,
+        "ShowRowRearrangement",
+        "8af6ebff-cd02-4bfe-a984-44a292623708",
+    ),
+    (
+        "Table",
+        false,
+        "SortListAsc",
+        "2bbe4e12-06d2-409b-a972-eea585125d83",
+    ),
+    (
+        "Table",
+        false,
+        "SortListDesc",
+        "58b2a785-23f6-4b0e-a324-9a1323285595",
+    ),
+    (
+        "Table",
+        false,
+        "Tree",
+        "05468165-f954-45a5-84f2-6641c51f9f23",
+    ),
+    (
+        "Table",
+        false,
+        "UncheckAll",
+        "5048cc44-702b-44e3-8445-9af75c02724d",
+    ),
+    (
+        "Table",
+        false,
+        "Ungroup",
+        "82b88a24-2856-484a-afd9-55a15bdf9785",
+    ),
+    (
+        "Table",
+        false,
+        "UseFieldAsValue",
+        "d7e55d2e-bfea-4d80-b4ad-a1bb31ec2147",
+    ),
+    (
+        "Table",
+        false,
+        "UserSettingItemProperties",
+        "1f1e900a-8488-4159-81be-9704eb96906d",
+    ),
     // rt-uuids.md: corpus-pinned, and the platform's own registration for
     // names that only ever occur together.
-    ("Table", true, "CreateByParameter", "b59f3c87-e213-4947-abae-9dbaffaef147"),
-    ("Table", false, "Expand", "fc120c02-7f39-469b-b357-b2dd8d4b0765"),
-    ("Table", false, "AddChart", "a10f1c0b-73ec-448f-b6d2-be0c86e95712"),
-    ("Table", false, "AddNestedSchema", "e809ae75-11b6-480d-bc87-caf93b28236d"),
-    ("Table", false, "UserSettings", "329bb47c-392f-4779-a1af-347d06bb624b"),
-    ("Table", false, "Group", "33ff70c9-5df3-4907-9611-7649411f9180"),
-    ("Table", false, "LoadSettings", "358196aa-1061-458a-8fba-e9cd11081205"),
-    ("Table", false, "SaveSettings", "49a25ff2-06bc-4547-a119-a428f60bdfbf"),
-    ("Table", false, "StandardSettings", "3bd8cc97-31ca-4fad-acf4-cc8f4d648a95"),
-    ("SpreadSheetDocumentField", false, "ColumnWidth", "97407339-2c9f-400b-bd5b-3d97b6d00c21"),
-    ("SpreadSheetDocumentField", false, "Ellipse", "93d90e38-02a4-42f8-828a-2798f51c4500"),
-    ("SpreadSheetDocumentField", false, "GoToCell", "25d773e7-9961-49fc-a9c8-527079090143"),
-    ("SpreadSheetDocumentField", false, "Group", "e406e2a0-f06b-4402-b8c3-9017c95df44c"),
-    ("SpreadSheetDocumentField", false, "Hide", "b573b54a-ce87-4078-bd21-4f06709157c6"),
-    ("SpreadSheetDocumentField", false, "InsertColumnsLeft", "468dca2b-17be-4657-bae8-64b94fcf6187"),
-    ("SpreadSheetDocumentField", false, "InsertColumnsRight", "0a2d962b-5178-4fce-983b-19068b919f41"),
-    ("SpreadSheetDocumentField", false, "InsertRowsBottom", "1d6dbce7-a813-437b-89b8-450319ed13bd"),
-    ("SpreadSheetDocumentField", false, "InsertRowsTop", "4ecc8cf1-2a26-446f-9fb6-93db4ffee068"),
-    ("SpreadSheetDocumentField", false, "Line", "c9b9e671-7c9b-44b5-97e9-dd1ee51a1bfd"),
-    ("SpreadSheetDocumentField", false, "Picture", "a97ea34e-7af2-412c-aa9d-b3393b1914ac"),
-    ("SpreadSheetDocumentField", false, "Rectangle", "852f0fba-4338-4c43-a2da-851fcffd07bb"),
-    ("SpreadSheetDocumentField", false, "RowHeight", "17b9f6bb-74b3-439d-b719-eb236b2fe001"),
-    ("SpreadSheetDocumentField", false, "SearchEverywhere", "ff533ae0-46a9-4e1d-aa3a-6dffa27e076b"),
-    ("SpreadSheetDocumentField", false, "Show", "1b680da5-a5ca-4ea7-8db9-df079de39b61"),
-    ("SpreadSheetDocumentField", false, "Text", "80455469-5f1c-4817-a992-756dfee9138f"),
-    ("SpreadSheetDocumentField", false, "Ungroup", "88a56d46-abff-4925-91a2-6592a4664912"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingBottom", "9f71febd-8c22-4471-8410-31f455bb3c57"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingCenter", "f2b6b156-d929-4be2-af5b-9c9b792524bb"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingLeft", "ee0aab77-fd5f-4594-9c5e-e989a953642f"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingMiddle", "719daaab-c2d0-473d-b373-faf18ebe7d9d"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingRight", "80a0b41c-24df-40e4-8269-683fb557214d"),
-    ("SpreadSheetDocumentField", false, "AlignDrawingTop", "f9395bfa-9301-4cec-8c1e-e2b62fb3abd6"),
-    ("SpreadSheetDocumentField", false, "BringDrawingForward", "49a22a23-d2cf-4f84-97ae-66f94f863145"),
-    ("SpreadSheetDocumentField", false, "BringDrawingToFront", "b383fa5a-2324-4e7e-a166-aabb5d64aea3"),
-    ("SpreadSheetDocumentField", false, "CombineToGroup", "4402cb7a-f68e-44cd-9478-52a695b18a25"),
-    ("SpreadSheetDocumentField", false, "DistributeDrawingsHorizontally", "60abcc40-dc62-4d03-833b-7b8ab8232d2c"),
-    ("SpreadSheetDocumentField", false, "DistributeDrawingsVertically", "7f3f496d-506c-4239-98fb-58e1ea6ba54a"),
-    ("SpreadSheetDocumentField", false, "EqualDrawingHeight", "f5773ab5-4036-49ca-8286-7a4ea2c354d7"),
-    ("SpreadSheetDocumentField", false, "EqualDrawingSize", "fd523437-4160-4a52-a70b-9166c7eebcf0"),
-    ("SpreadSheetDocumentField", false, "EqualDrawingWidth", "5ccf1fce-3fab-4fb6-ac04-a9b2cf689cee"),
-    ("SpreadSheetDocumentField", false, "RemoveFromGroup", "69333d9f-28d1-446b-bd9a-cf8f85cf1704"),
-    ("SpreadSheetDocumentField", false, "RemoveRepeatOnEachPage", "0e8c7cb4-f146-4208-af36-b3f8c7d71b66"),
-    ("SpreadSheetDocumentField", false, "RepeatOnEachPage", "c50fd6b2-51a1-47e0-8cd3-84b16823287c"),
-    ("SpreadSheetDocumentField", false, "SendDrawingBackward", "7e79f8d3-6cab-49d5-aac0-43f5056ed958"),
-    ("SpreadSheetDocumentField", false, "SendDrawingToBack", "14bd1c58-da9d-41db-a515-75f8b39fdc52"),
-    ("SpreadSheetDocumentField", false, "BlackAndWhiteView", "9e525e9b-99ed-4d89-9f02-2bf449ba65e6"),
-    ("SpreadSheetDocumentField", false, "HeaderFooter", "2da58c85-ae4d-403f-b0e2-c50027a5467f"),
-    ("SpreadSheetDocumentField", false, "InsertPageBreak", "952af05e-0771-4c26-adb6-a3418a262e4a"),
-    ("SpreadSheetDocumentField", false, "Names", "feb51db7-bc1f-4b9f-a6e6-db24d5f812ab"),
-    ("SpreadSheetDocumentField", false, "NextComment", "3e15759b-551a-46c4-8d24-8d6df22a1a64"),
-    ("SpreadSheetDocumentField", false, "PageViewMode", "1c7e6bb5-54ac-4ebf-8823-e92b3cf629da"),
-    ("SpreadSheetDocumentField", false, "PreviousComment", "e1ae173a-22c3-4909-a72c-5454b64c6446"),
-    ("SpreadSheetDocumentField", false, "RemovePageBreak", "3a7ef674-f589-4734-9b22-954ea64dc79f"),
-    ("SpreadSheetDocumentField", false, "RemovePrintArea", "41f3fbde-476a-4984-bd12-b32e990af811"),
-    ("SpreadSheetDocumentField", false, "SetPrintArea", "6728e5c7-8f67-4b0d-bd6f-90b728218fe3"),
-    ("SpreadSheetDocumentField", false, "ShowCellNames", "0c66c888-7512-402c-941d-96bec0e5749a"),
-    ("SpreadSheetDocumentField", false, "ShowComments", "95dbc17e-d11e-4008-b9a9-24d5f5b1d061"),
-    ("SpreadSheetDocumentField", false, "ShowRowAndColumnNames", "08fdfb5b-192a-41a9-b57a-9781cd3ef7b6"),
-    ("SpreadSheetDocumentField", false, "Redo", "6f1ea963-0807-4de8-b544-b5666f500b05"),
-    ("SpreadSheetDocumentField", false, "Undo", "f5814962-2bef-43dd-b633-a193d4b0970e"),
-    ("FormattedDocumentField", false, "SearchEverywhere", "6e2f7ea0-a346-4c78-96d9-a0f512000910"),
-    ("FormattedDocumentField", false, "Char", "871100d5-049d-4b22-a46a-fabf54bd64c3"),
-    ("FormattedDocumentField", false, "Hyperlink", "6d83186a-5838-40a5-95e7-8990193adf0a"),
-    ("FormattedDocumentField", false, "LineSpacing", "408f351e-0536-46be-8916-a891db9bfbe6"),
-    ("FormattedDocumentField", false, "Redo", "6f1ea963-0807-4de8-b544-b5666f500b05"),
-    ("FormattedDocumentField", false, "Strikeout", "db1cd9b3-bdf4-43f5-abd6-c2e4bd85d709"),
-    ("FormattedDocumentField", false, "Undo", "f5814962-2bef-43dd-b633-a193d4b0970e"),
-    ("Table", true, "AddFilterItem", "fca750bc-4fb6-40e2-ae0f-e818939a32e7"),
-    ("Table", true, "CancelSearch", "44ad3ec9-f3c2-4913-9224-5f9fb6418743"),
-    ("Table", true, "Change", "b41f5bbc-ba5d-4888-8cd1-db246a371418"),
-    ("Table", true, "ChangeHistory", "11761e12-cf32-4826-a175-b23213e3b229"),
-    ("Table", true, "Choose", "8969c93a-23e5-4bef-941d-aaef315858d2"),
-    ("Table", true, "Copy", "0ae4bea5-23be-42a7-b69e-97b11b29c453"),
-    ("Table", true, "CopyToClipboard", "88078230-1f6b-415f-99e4-ad2ff73810cf"),
-    ("Table", true, "Create", "0f8d6d98-2f8b-405a-b8b3-0538e9d95da5"),
-    ("Table", true, "CreateFolder", "d82ca05c-2966-4d77-9a39-a1eea087bfa7"),
-    ("Table", true, "DynamicListStandardSettings", "33b7b9cd-6979-4435-8c58-d9bc8250edec"),
-    ("Table", true, "Find", "c0519548-2a9a-44de-a25e-faf01e089d4d"),
-    ("Table", true, "FindByCurrentValue", "714d44cc-63da-4431-b33a-428e398d2a08"),
-    ("Table", true, "GetURL", "0e36114c-5b59-4005-9426-374a6c067e4a"),
-    ("Table", true, "GroupFilterItems", "4a817da0-5797-4e16-906f-02fb869e1873"),
-    ("Table", true, "HierarchicalList", "01833a5a-6553-4c49-b445-095018107bb5"),
-    ("Table", true, "LevelDown", "dc118d99-b351-4e30-9310-e864f2e53ec0"),
-    ("Table", true, "LevelUp", "0e9b637d-cf6e-4330-8a8f-cd44842e34bb"),
-    ("Table", true, "List", "0d0249a4-2b2f-4fc0-a66f-b36f9494b3cc"),
-    ("Table", true, "ListSettings", "14559f7c-853c-42a4-9ea1-01546107747b"),
-    ("Table", true, "LoadDynamicListSettings", "182a793b-22a5-4625-b316-6a5be7f88078"),
-    ("Table", true, "MoveDown", "fa51b106-eae6-44c7-8054-76cbb3100603"),
-    ("Table", true, "MoveItem", "27bd521a-51c6-4fe7-846d-a98f988774b5"),
-    ("Table", true, "MoveUp", "37740564-9e86-44a0-bea9-3f485a5a3f91"),
-    ("Table", true, "OutputList", "825c1c15-ef8f-47ab-b002-e6b84b3e5b10"),
-    ("Table", true, "Post", "e3dd8850-fc3c-41b1-bbb3-7c66af082608"),
-    ("Table", true, "Refresh", "403bc6e6-b98e-4181-9f43-9c75cbbf82cf"),
-    ("Table", true, "SaveDynamicListSettings", "95b4bc12-2ece-4d7a-b3e2-6f9293620a06"),
-    ("Table", true, "SearchEverywhere", "7b683784-b474-441a-ba63-3d757bd0ffd4"),
-    ("Table", true, "SearchHistory", "d96b0c03-b209-4d01-a3fc-17a14f873b64"),
-    ("Table", true, "SetDateInterval", "daa306cd-a78a-4e74-a14c-739daba624cb"),
-    ("Table", true, "SetDeletionMark", "a2f737a8-0114-4e86-a214-45e5c213fa65"),
-    ("Table", true, "ShowMultipleSelection", "e7216412-03ac-4a81-99c2-1d7c28e88e31"),
-    ("Table", true, "Tree", "05468165-f954-45a5-84f2-6641c51f9f23"),
-    ("Table", true, "UndoPosting", "04ac7211-e74f-4776-9749-35a9282b1d52"),
+    (
+        "Table",
+        true,
+        "CreateByParameter",
+        "b59f3c87-e213-4947-abae-9dbaffaef147",
+    ),
+    (
+        "Table",
+        false,
+        "Expand",
+        "fc120c02-7f39-469b-b357-b2dd8d4b0765",
+    ),
+    (
+        "Table",
+        false,
+        "AddChart",
+        "a10f1c0b-73ec-448f-b6d2-be0c86e95712",
+    ),
+    (
+        "Table",
+        false,
+        "AddNestedSchema",
+        "e809ae75-11b6-480d-bc87-caf93b28236d",
+    ),
+    (
+        "Table",
+        false,
+        "UserSettings",
+        "329bb47c-392f-4779-a1af-347d06bb624b",
+    ),
+    (
+        "Table",
+        false,
+        "Group",
+        "33ff70c9-5df3-4907-9611-7649411f9180",
+    ),
+    (
+        "Table",
+        false,
+        "LoadSettings",
+        "358196aa-1061-458a-8fba-e9cd11081205",
+    ),
+    (
+        "Table",
+        false,
+        "SaveSettings",
+        "49a25ff2-06bc-4547-a119-a428f60bdfbf",
+    ),
+    (
+        "Table",
+        false,
+        "StandardSettings",
+        "3bd8cc97-31ca-4fad-acf4-cc8f4d648a95",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ColumnWidth",
+        "97407339-2c9f-400b-bd5b-3d97b6d00c21",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Ellipse",
+        "93d90e38-02a4-42f8-828a-2798f51c4500",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "GoToCell",
+        "25d773e7-9961-49fc-a9c8-527079090143",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Group",
+        "e406e2a0-f06b-4402-b8c3-9017c95df44c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Hide",
+        "b573b54a-ce87-4078-bd21-4f06709157c6",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertColumnsLeft",
+        "468dca2b-17be-4657-bae8-64b94fcf6187",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertColumnsRight",
+        "0a2d962b-5178-4fce-983b-19068b919f41",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertRowsBottom",
+        "1d6dbce7-a813-437b-89b8-450319ed13bd",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertRowsTop",
+        "4ecc8cf1-2a26-446f-9fb6-93db4ffee068",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Line",
+        "c9b9e671-7c9b-44b5-97e9-dd1ee51a1bfd",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Picture",
+        "a97ea34e-7af2-412c-aa9d-b3393b1914ac",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Rectangle",
+        "852f0fba-4338-4c43-a2da-851fcffd07bb",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RowHeight",
+        "17b9f6bb-74b3-439d-b719-eb236b2fe001",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SearchEverywhere",
+        "ff533ae0-46a9-4e1d-aa3a-6dffa27e076b",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Show",
+        "1b680da5-a5ca-4ea7-8db9-df079de39b61",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Text",
+        "80455469-5f1c-4817-a992-756dfee9138f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Ungroup",
+        "88a56d46-abff-4925-91a2-6592a4664912",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingBottom",
+        "9f71febd-8c22-4471-8410-31f455bb3c57",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingCenter",
+        "f2b6b156-d929-4be2-af5b-9c9b792524bb",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingLeft",
+        "ee0aab77-fd5f-4594-9c5e-e989a953642f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingMiddle",
+        "719daaab-c2d0-473d-b373-faf18ebe7d9d",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingRight",
+        "80a0b41c-24df-40e4-8269-683fb557214d",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "AlignDrawingTop",
+        "f9395bfa-9301-4cec-8c1e-e2b62fb3abd6",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BringDrawingForward",
+        "49a22a23-d2cf-4f84-97ae-66f94f863145",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BringDrawingToFront",
+        "b383fa5a-2324-4e7e-a166-aabb5d64aea3",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "CombineToGroup",
+        "4402cb7a-f68e-44cd-9478-52a695b18a25",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "DistributeDrawingsHorizontally",
+        "60abcc40-dc62-4d03-833b-7b8ab8232d2c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "DistributeDrawingsVertically",
+        "7f3f496d-506c-4239-98fb-58e1ea6ba54a",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "EqualDrawingHeight",
+        "f5773ab5-4036-49ca-8286-7a4ea2c354d7",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "EqualDrawingSize",
+        "fd523437-4160-4a52-a70b-9166c7eebcf0",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "EqualDrawingWidth",
+        "5ccf1fce-3fab-4fb6-ac04-a9b2cf689cee",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RemoveFromGroup",
+        "69333d9f-28d1-446b-bd9a-cf8f85cf1704",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RemoveRepeatOnEachPage",
+        "0e8c7cb4-f146-4208-af36-b3f8c7d71b66",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RepeatOnEachPage",
+        "c50fd6b2-51a1-47e0-8cd3-84b16823287c",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SendDrawingBackward",
+        "7e79f8d3-6cab-49d5-aac0-43f5056ed958",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SendDrawingToBack",
+        "14bd1c58-da9d-41db-a515-75f8b39fdc52",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "BlackAndWhiteView",
+        "9e525e9b-99ed-4d89-9f02-2bf449ba65e6",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "HeaderFooter",
+        "2da58c85-ae4d-403f-b0e2-c50027a5467f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "InsertPageBreak",
+        "952af05e-0771-4c26-adb6-a3418a262e4a",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Names",
+        "feb51db7-bc1f-4b9f-a6e6-db24d5f812ab",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "NextComment",
+        "3e15759b-551a-46c4-8d24-8d6df22a1a64",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "PageViewMode",
+        "1c7e6bb5-54ac-4ebf-8823-e92b3cf629da",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "PreviousComment",
+        "e1ae173a-22c3-4909-a72c-5454b64c6446",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RemovePageBreak",
+        "3a7ef674-f589-4734-9b22-954ea64dc79f",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "RemovePrintArea",
+        "41f3fbde-476a-4984-bd12-b32e990af811",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "SetPrintArea",
+        "6728e5c7-8f67-4b0d-bd6f-90b728218fe3",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowCellNames",
+        "0c66c888-7512-402c-941d-96bec0e5749a",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowComments",
+        "95dbc17e-d11e-4008-b9a9-24d5f5b1d061",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "ShowRowAndColumnNames",
+        "08fdfb5b-192a-41a9-b57a-9781cd3ef7b6",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Redo",
+        "6f1ea963-0807-4de8-b544-b5666f500b05",
+    ),
+    (
+        "SpreadSheetDocumentField",
+        false,
+        "Undo",
+        "f5814962-2bef-43dd-b633-a193d4b0970e",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "SearchEverywhere",
+        "6e2f7ea0-a346-4c78-96d9-a0f512000910",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Char",
+        "871100d5-049d-4b22-a46a-fabf54bd64c3",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Hyperlink",
+        "6d83186a-5838-40a5-95e7-8990193adf0a",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "LineSpacing",
+        "408f351e-0536-46be-8916-a891db9bfbe6",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Redo",
+        "6f1ea963-0807-4de8-b544-b5666f500b05",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Strikeout",
+        "db1cd9b3-bdf4-43f5-abd6-c2e4bd85d709",
+    ),
+    (
+        "FormattedDocumentField",
+        false,
+        "Undo",
+        "f5814962-2bef-43dd-b633-a193d4b0970e",
+    ),
+    (
+        "Table",
+        true,
+        "AddFilterItem",
+        "fca750bc-4fb6-40e2-ae0f-e818939a32e7",
+    ),
+    (
+        "Table",
+        true,
+        "CancelSearch",
+        "44ad3ec9-f3c2-4913-9224-5f9fb6418743",
+    ),
+    (
+        "Table",
+        true,
+        "Change",
+        "b41f5bbc-ba5d-4888-8cd1-db246a371418",
+    ),
+    (
+        "Table",
+        true,
+        "ChangeHistory",
+        "11761e12-cf32-4826-a175-b23213e3b229",
+    ),
+    (
+        "Table",
+        true,
+        "Choose",
+        "8969c93a-23e5-4bef-941d-aaef315858d2",
+    ),
+    (
+        "Table",
+        true,
+        "Copy",
+        "0ae4bea5-23be-42a7-b69e-97b11b29c453",
+    ),
+    (
+        "Table",
+        true,
+        "CopyToClipboard",
+        "88078230-1f6b-415f-99e4-ad2ff73810cf",
+    ),
+    (
+        "Table",
+        true,
+        "Create",
+        "0f8d6d98-2f8b-405a-b8b3-0538e9d95da5",
+    ),
+    (
+        "Table",
+        true,
+        "CreateFolder",
+        "d82ca05c-2966-4d77-9a39-a1eea087bfa7",
+    ),
+    (
+        "Table",
+        true,
+        "DynamicListStandardSettings",
+        "33b7b9cd-6979-4435-8c58-d9bc8250edec",
+    ),
+    (
+        "Table",
+        true,
+        "Find",
+        "c0519548-2a9a-44de-a25e-faf01e089d4d",
+    ),
+    (
+        "Table",
+        true,
+        "FindByCurrentValue",
+        "714d44cc-63da-4431-b33a-428e398d2a08",
+    ),
+    (
+        "Table",
+        true,
+        "GetURL",
+        "0e36114c-5b59-4005-9426-374a6c067e4a",
+    ),
+    (
+        "Table",
+        true,
+        "GroupFilterItems",
+        "4a817da0-5797-4e16-906f-02fb869e1873",
+    ),
+    (
+        "Table",
+        true,
+        "HierarchicalList",
+        "01833a5a-6553-4c49-b445-095018107bb5",
+    ),
+    (
+        "Table",
+        true,
+        "LevelDown",
+        "dc118d99-b351-4e30-9310-e864f2e53ec0",
+    ),
+    (
+        "Table",
+        true,
+        "LevelUp",
+        "0e9b637d-cf6e-4330-8a8f-cd44842e34bb",
+    ),
+    (
+        "Table",
+        true,
+        "List",
+        "0d0249a4-2b2f-4fc0-a66f-b36f9494b3cc",
+    ),
+    (
+        "Table",
+        true,
+        "ListSettings",
+        "14559f7c-853c-42a4-9ea1-01546107747b",
+    ),
+    (
+        "Table",
+        true,
+        "LoadDynamicListSettings",
+        "182a793b-22a5-4625-b316-6a5be7f88078",
+    ),
+    (
+        "Table",
+        true,
+        "MoveDown",
+        "fa51b106-eae6-44c7-8054-76cbb3100603",
+    ),
+    (
+        "Table",
+        true,
+        "MoveItem",
+        "27bd521a-51c6-4fe7-846d-a98f988774b5",
+    ),
+    (
+        "Table",
+        true,
+        "MoveUp",
+        "37740564-9e86-44a0-bea9-3f485a5a3f91",
+    ),
+    (
+        "Table",
+        true,
+        "OutputList",
+        "825c1c15-ef8f-47ab-b002-e6b84b3e5b10",
+    ),
+    (
+        "Table",
+        true,
+        "Post",
+        "e3dd8850-fc3c-41b1-bbb3-7c66af082608",
+    ),
+    (
+        "Table",
+        true,
+        "Refresh",
+        "403bc6e6-b98e-4181-9f43-9c75cbbf82cf",
+    ),
+    (
+        "Table",
+        true,
+        "SaveDynamicListSettings",
+        "95b4bc12-2ece-4d7a-b3e2-6f9293620a06",
+    ),
+    (
+        "Table",
+        true,
+        "SearchEverywhere",
+        "7b683784-b474-441a-ba63-3d757bd0ffd4",
+    ),
+    (
+        "Table",
+        true,
+        "SearchHistory",
+        "d96b0c03-b209-4d01-a3fc-17a14f873b64",
+    ),
+    (
+        "Table",
+        true,
+        "SetDateInterval",
+        "daa306cd-a78a-4e74-a14c-739daba624cb",
+    ),
+    (
+        "Table",
+        true,
+        "SetDeletionMark",
+        "a2f737a8-0114-4e86-a214-45e5c213fa65",
+    ),
+    (
+        "Table",
+        true,
+        "ShowMultipleSelection",
+        "e7216412-03ac-4a81-99c2-1d7c28e88e31",
+    ),
+    (
+        "Table",
+        true,
+        "Tree",
+        "05468165-f954-45a5-84f2-6641c51f9f23",
+    ),
+    (
+        "Table",
+        true,
+        "UndoPosting",
+        "04ac7211-e74f-4776-9749-35a9282b1d52",
+    ),
 ];
 
 /// The uuid a `<Button>` stores for `Form.StandardCommand.<name>`, by the
@@ -2445,169 +4393,777 @@ const FORM_STANDARD_COMMAND_UUIDS: &[(&str, &str, &str)] = &[
     ("", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
     ("", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
     ("", "Ignore", "d7e9e72c-8fa7-430c-a3e9-aeadfd57dfc7"),
-    ("", "OpenFromStandaloneServer", "0ea1a92b-3477-44dd-b152-ea7d411f1c5d"),
+    (
+        "",
+        "OpenFromStandaloneServer",
+        "0ea1a92b-3477-44dd-b152-ea7d411f1c5d",
+    ),
     ("", "Retry", "5174ad3f-0569-42fd-8adf-011d8206db6c"),
     ("", "No", "06ee6a21-061e-47f8-81c5-92ae8b8f3b5d"),
     ("", "OK", "f3613d5c-20c6-46e5-b4d5-7d712ece1296"),
     ("", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
     ("", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
     ("", "Yes", "5d41082e-9619-42ec-b96f-98b082b3a2f0"),
-    ("cfg:AccountingRegisterRecordSet", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:AccountingRegisterRecordSet", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:AccountingRegisterRecordSet", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:BusinessProcessObject", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:BusinessProcessObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:BusinessProcessObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:BusinessProcessObject", "OK", "f3613d5c-20c6-46e5-b4d5-7d712ece1296"),
-    ("cfg:BusinessProcessObject", "Start", "8d7bcd38-1bbb-4dc1-a9ad-cc9d5966ca8e"),
-    ("cfg:BusinessProcessObject", "StartAndClose", "e6a9041f-4d43-4f06-8e17-e95753531565"),
-    ("cfg:BusinessProcessObject", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:CatalogObject", "Cancel", "679b62d9-ff72-4329-bf3a-c0c32b311dd2"),
-    ("cfg:CatalogObject", "ChangeHistory", "174e58ce-82ad-4787-b956-9367937f7971"),
-    ("cfg:CatalogObject", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:CatalogObject", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:CatalogObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:CatalogObject", "Delete", "c32d43de-b820-49d0-bf7a-d70829f48f40"),
-    ("cfg:CatalogObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:CatalogObject", "Reread", "1f317795-c420-4a30-b594-c492abc55f7a"),
-    ("cfg:CatalogObject", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:CatalogObject", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
-    ("cfg:CatalogObject", "SetDeletionMark", "827b541d-30c1-4f06-aecf-92aa496a0835"),
-    ("cfg:CatalogObject", "ShowInList", "3a17e914-ec6a-4280-b4df-78914f40522b"),
-    ("cfg:CatalogObject", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:CatalogObject", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:ChartOfCalculationTypesObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:ChartOfCharacteristicTypesObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:ChartOfCharacteristicTypesObject", "SetDeletionMark", "827b541d-30c1-4f06-aecf-92aa496a0835"),
-    ("cfg:ChartOfCharacteristicTypesObject", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:ChartOfCharacteristicTypesObject", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:ConstantsSet", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:ConstantsSet", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:ConstantsSet", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
+    (
+        "cfg:AccountingRegisterRecordSet",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:AccountingRegisterRecordSet",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:AccountingRegisterRecordSet",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "OK",
+        "f3613d5c-20c6-46e5-b4d5-7d712ece1296",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "Start",
+        "8d7bcd38-1bbb-4dc1-a9ad-cc9d5966ca8e",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "StartAndClose",
+        "e6a9041f-4d43-4f06-8e17-e95753531565",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Cancel",
+        "679b62d9-ff72-4329-bf3a-c0c32b311dd2",
+    ),
+    (
+        "cfg:CatalogObject",
+        "ChangeHistory",
+        "174e58ce-82ad-4787-b956-9367937f7971",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:CatalogObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Delete",
+        "c32d43de-b820-49d0-bf7a-d70829f48f40",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Reread",
+        "1f317795-c420-4a30-b594-c492abc55f7a",
+    ),
+    (
+        "cfg:CatalogObject",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:CatalogObject",
+        "SaveValues",
+        "239f0103-8de9-4fdf-b485-eb5531da7e51",
+    ),
+    (
+        "cfg:CatalogObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:CatalogObject",
+        "ShowInList",
+        "3a17e914-ec6a-4280-b4df-78914f40522b",
+    ),
+    (
+        "cfg:CatalogObject",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:CatalogObject",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:ChartOfCalculationTypesObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:ChartOfCharacteristicTypesObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:ChartOfCharacteristicTypesObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:ChartOfCharacteristicTypesObject",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:ChartOfCharacteristicTypesObject",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:ConstantsSet",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:ConstantsSet",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:ConstantsSet",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
     // 8.5.1.1150 BSP `ПолнотекстовыйПоискВДанных` form, the uuid the
     // exporter names back (`form_standard_command_suffix`).
-    ("cfg:ConstantsSet", "ChangeHistory", "174e58ce-82ad-4787-b956-9367937f7971"),
-    ("cfg:ConstantsSet", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:DataProcessorObject", "Cancel", "679b62d9-ff72-4329-bf3a-c0c32b311dd2"),
-    ("cfg:DataProcessorObject", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:DataProcessorObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:DataProcessorObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:DataProcessorObject", "Ignore", "d7e9e72c-8fa7-430c-a3e9-aeadfd57dfc7"),
-    ("cfg:DataProcessorObject", "No", "06ee6a21-061e-47f8-81c5-92ae8b8f3b5d"),
-    ("cfg:DataProcessorObject", "OK", "f3613d5c-20c6-46e5-b4d5-7d712ece1296"),
-    ("cfg:DataProcessorObject", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:DataProcessorObject", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
-    ("cfg:DataProcessorObject", "Yes", "5d41082e-9619-42ec-b96f-98b082b3a2f0"),
-    ("cfg:DocumentObject", "ChangeHistory", "174e58ce-82ad-4787-b956-9367937f7971"),
-    ("cfg:DocumentObject", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:DocumentObject", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:DocumentObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:DocumentObject", "Delete", "c32d43de-b820-49d0-bf7a-d70829f48f40"),
-    ("cfg:DocumentObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:DocumentObject", "Post", "3b8cedbc-8e74-4017-b901-d14b09f32f7a"),
-    ("cfg:DocumentObject", "PostAndClose", "87317f86-057f-477e-9045-2da4e4980199"),
-    ("cfg:DocumentObject", "Reread", "1f317795-c420-4a30-b594-c492abc55f7a"),
-    ("cfg:DocumentObject", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:DocumentObject", "SetDeletionMark", "827b541d-30c1-4f06-aecf-92aa496a0835"),
-    ("cfg:DocumentObject", "ShowInList", "3a17e914-ec6a-4280-b4df-78914f40522b"),
-    ("cfg:DocumentObject", "UndoPosting", "389ef1f1-97ce-4326-adf5-886b2dead75c"),
-    ("cfg:DocumentObject", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:DocumentObject", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:DynamicList", "Cancel", "679b62d9-ff72-4329-bf3a-c0c32b311dd2"),
-    ("cfg:DynamicList", "CancelSearch", "96e0bc70-f8ff-4732-8119-060923203629"),
-    ("cfg:DynamicList", "Change", "6886601d-276c-4d3f-af0a-05c586025608"),
-    ("cfg:DynamicList", "ChangeHistory", "c9abb6b0-eafd-4505-8312-9a7b6888cbf3"),
-    ("cfg:DynamicList", "Choose", "8e2b82cf-d1ea-46b2-afdf-a8d64e66ea2b"),
-    ("cfg:DynamicList", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:DynamicList", "Copy", "342c531d-dc73-458a-8ac4-6a746916a33b"),
-    ("cfg:DynamicList", "Create", "4f834c38-add1-45e4-a9f3-cefe3efac5c9"),
-    ("cfg:DynamicList", "CreateFolder", "d8772fd1-a3bf-417d-8334-c49968dbb45e"),
-    ("cfg:DynamicList", "CreateInitialImage", "62778a6d-6114-471c-93f7-e1ccd54bd266"),
-    ("cfg:DynamicList", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:DynamicList", "DynamicListStandardSettings", "d603a249-6eb3-4e38-bb2d-a8a86a8ab156"),
-    ("cfg:DynamicList", "Find", "bdefa701-6685-453e-a02a-3683d0cc16d3"),
-    ("cfg:DynamicList", "FindByCurrentValue", "b520ca45-d8db-4982-b128-bb42a6afd911"),
-    ("cfg:DynamicList", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:DynamicList", "HierarchicalList", "ffc5e8d5-40a7-4893-a590-49bd588f9466"),
-    ("cfg:DynamicList", "LevelDown", "aa042316-63ba-4f10-8d39-3935474562d0"),
-    ("cfg:DynamicList", "LevelUp", "e44f9b41-bf53-4837-b4d4-f0ff9cdf0feb"),
-    ("cfg:DynamicList", "List", "a2b927a1-35af-43e3-af73-4af22ac2c0fa"),
-    ("cfg:DynamicList", "ListSettings", "1c00edb8-a826-4855-9bde-94dbc5f620e5"),
-    ("cfg:DynamicList", "LoadDynamicListSettings", "952c2984-9955-415a-8235-5c710aabe732"),
-    ("cfg:DynamicList", "MoveItem", "39c6a2fb-45cc-41b1-853f-967fb68aa1df"),
-    ("cfg:DynamicList", "No", "06ee6a21-061e-47f8-81c5-92ae8b8f3b5d"),
-    ("cfg:DynamicList", "OutputList", "9758d344-4b1d-4dc9-80bd-81060bc18b2a"),
-    ("cfg:DynamicList", "Post", "4c569466-1af5-4fc1-9b63-7bf6493097bf"),
-    ("cfg:DynamicList", "ReadChanges", "e7ae2a27-60a2-44ae-ab1d-f307d11c85bf"),
-    ("cfg:DynamicList", "Refresh", "fd8f031f-c168-4e1b-8b0c-15eb3057e688"),
-    ("cfg:DynamicList", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:DynamicList", "SaveDynamicListSettings", "d5c3842d-7252-4370-9174-756a6cc553e5"),
-    ("cfg:DynamicList", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
-    ("cfg:DynamicList", "SetDateInterval", "eb880cb2-a91f-4ad6-afb7-f0e6d7a1b111"),
-    ("cfg:DynamicList", "SetDeletionMark", "2e86453d-8958-4c9a-a1b4-b15215eedc2e"),
-    ("cfg:DynamicList", "ShowMultipleSelection", "9fea4ba9-7d33-47d4-a271-cb54df4a9b74"),
-    ("cfg:DynamicList", "Tree", "0b83270d-7f95-4cdd-93c3-342d7991fed5"),
-    ("cfg:DynamicList", "UndoPosting", "441362c1-0c86-4f73-bf50-6e1048a2db73"),
-    ("cfg:DynamicList", "WriteChanges", "a29c4f3a-3b41-480a-a31e-5f9f73aa3216"),
-    ("cfg:ExchangePlanObject", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:ExchangePlanObject", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:ExchangePlanObject", "CreateInitialImage", "d82e191e-f052-40ee-8691-00cac5b34629"),
-    ("cfg:ExchangePlanObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:ExchangePlanObject", "Delete", "c32d43de-b820-49d0-bf7a-d70829f48f40"),
-    ("cfg:ExchangePlanObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:ExchangePlanObject", "ReadChanges", "3328a951-c3c8-4f22-b99e-814f7cea6b82"),
-    ("cfg:ExchangePlanObject", "SetDeletionMark", "827b541d-30c1-4f06-aecf-92aa496a0835"),
-    ("cfg:ExchangePlanObject", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:ExchangePlanObject", "WriteChanges", "8b81add7-25af-4df7-a69c-144e3e3e4c8e"),
-    ("cfg:InformationRegisterRecordManager", "ChangeHistory", "174e58ce-82ad-4787-b956-9367937f7971"),
-    ("cfg:InformationRegisterRecordManager", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:InformationRegisterRecordManager", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:InformationRegisterRecordManager", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:InformationRegisterRecordManager", "Delete", "c32d43de-b820-49d0-bf7a-d70829f48f40"),
-    ("cfg:InformationRegisterRecordManager", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:InformationRegisterRecordManager", "Reread", "1f317795-c420-4a30-b594-c492abc55f7a"),
-    ("cfg:InformationRegisterRecordManager", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:InformationRegisterRecordManager", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:InformationRegisterRecordSet", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:InformationRegisterRecordSet", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:InformationRegisterRecordSet", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:InformationRegisterRecordSet", "Reread", "1f317795-c420-4a30-b594-c492abc55f7a"),
-    ("cfg:InformationRegisterRecordSet", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:InformationRegisterRecordSet", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
-    ("cfg:InformationRegisterRecordSet", "SwitchActivity", "f4613f71-5449-48ed-aea5-de005b272a1d"),
-    ("cfg:InformationRegisterRecordSet", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("cfg:InformationRegisterRecordSet", "WriteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:ReportObject", "CancelEdit", "8149a06a-dbf3-4d4d-a275-5385a4196fc7"),
-    ("cfg:ReportObject", "ChangeVariant", "fb9d7977-258a-440a-9b59-0a650c86f6a2"),
-    ("cfg:ReportObject", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("cfg:ReportObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:ReportObject", "EndEdit", "74c1abd6-b274-4654-baf0-7b8418b792ea"),
-    ("cfg:ReportObject", "Generate", "b5e6da6b-cec4-450c-876a-6a5f0837f6cc"),
-    ("cfg:ReportObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:ReportObject", "LoadReportSettings", "b0c9afb6-320c-4e36-be21-8f6d48116415"),
-    ("cfg:ReportObject", "LoadVariant", "b08b7a35-583a-4756-b814-0436ff9139c0"),
-    ("cfg:ReportObject", "NewWindow", "03df6ee5-883c-4cc6-b319-d886d1a9b2c8"),
-    ("cfg:ReportObject", "Print", "a11fe36e-0b45-4c07-80b3-2346b660a51e"),
-    ("cfg:ReportObject", "ReportSettings", "0fb774df-ec1c-4e23-9ed1-e089974f74bf"),
-    ("cfg:ReportObject", "RestoreValues", "71e0226e-ebb2-4e33-8745-0a94a01bbf15"),
-    ("cfg:ReportObject", "Save", "a6d73055-3730-42e7-8934-3145ee987141"),
-    ("cfg:ReportObject", "SaveReportSettings", "7910bb04-ddcc-4e5d-89f0-104c6ad0f187"),
-    ("cfg:ReportObject", "SaveValues", "239f0103-8de9-4fdf-b485-eb5531da7e51"),
-    ("cfg:ReportObject", "SaveVariant", "9bffcf73-7b1d-4a8d-bf23-5e051af3ee29"),
-    ("cfg:TaskObject", "Copy", "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988"),
-    ("cfg:TaskObject", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
-    ("cfg:TaskObject", "Delete", "c32d43de-b820-49d0-bf7a-d70829f48f40"),
+    (
+        "cfg:ConstantsSet",
+        "ChangeHistory",
+        "174e58ce-82ad-4787-b956-9367937f7971",
+    ),
+    (
+        "cfg:ConstantsSet",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "Cancel",
+        "679b62d9-ff72-4329-bf3a-c0c32b311dd2",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "Ignore",
+        "d7e9e72c-8fa7-430c-a3e9-aeadfd57dfc7",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "No",
+        "06ee6a21-061e-47f8-81c5-92ae8b8f3b5d",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "OK",
+        "f3613d5c-20c6-46e5-b4d5-7d712ece1296",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "SaveValues",
+        "239f0103-8de9-4fdf-b485-eb5531da7e51",
+    ),
+    (
+        "cfg:DataProcessorObject",
+        "Yes",
+        "5d41082e-9619-42ec-b96f-98b082b3a2f0",
+    ),
+    (
+        "cfg:DocumentObject",
+        "ChangeHistory",
+        "174e58ce-82ad-4787-b956-9367937f7971",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:DocumentObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Delete",
+        "c32d43de-b820-49d0-bf7a-d70829f48f40",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Post",
+        "3b8cedbc-8e74-4017-b901-d14b09f32f7a",
+    ),
+    (
+        "cfg:DocumentObject",
+        "PostAndClose",
+        "87317f86-057f-477e-9045-2da4e4980199",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Reread",
+        "1f317795-c420-4a30-b594-c492abc55f7a",
+    ),
+    (
+        "cfg:DocumentObject",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:DocumentObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:DocumentObject",
+        "ShowInList",
+        "3a17e914-ec6a-4280-b4df-78914f40522b",
+    ),
+    (
+        "cfg:DocumentObject",
+        "UndoPosting",
+        "389ef1f1-97ce-4326-adf5-886b2dead75c",
+    ),
+    (
+        "cfg:DocumentObject",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:DocumentObject",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:DynamicList",
+        "Cancel",
+        "679b62d9-ff72-4329-bf3a-c0c32b311dd2",
+    ),
+    (
+        "cfg:DynamicList",
+        "CancelSearch",
+        "96e0bc70-f8ff-4732-8119-060923203629",
+    ),
+    (
+        "cfg:DynamicList",
+        "Change",
+        "6886601d-276c-4d3f-af0a-05c586025608",
+    ),
+    (
+        "cfg:DynamicList",
+        "ChangeHistory",
+        "c9abb6b0-eafd-4505-8312-9a7b6888cbf3",
+    ),
+    (
+        "cfg:DynamicList",
+        "Choose",
+        "8e2b82cf-d1ea-46b2-afdf-a8d64e66ea2b",
+    ),
+    (
+        "cfg:DynamicList",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:DynamicList",
+        "Copy",
+        "342c531d-dc73-458a-8ac4-6a746916a33b",
+    ),
+    (
+        "cfg:DynamicList",
+        "Create",
+        "4f834c38-add1-45e4-a9f3-cefe3efac5c9",
+    ),
+    (
+        "cfg:DynamicList",
+        "CreateFolder",
+        "d8772fd1-a3bf-417d-8334-c49968dbb45e",
+    ),
+    (
+        "cfg:DynamicList",
+        "CreateInitialImage",
+        "62778a6d-6114-471c-93f7-e1ccd54bd266",
+    ),
+    (
+        "cfg:DynamicList",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:DynamicList",
+        "DynamicListStandardSettings",
+        "d603a249-6eb3-4e38-bb2d-a8a86a8ab156",
+    ),
+    (
+        "cfg:DynamicList",
+        "Find",
+        "bdefa701-6685-453e-a02a-3683d0cc16d3",
+    ),
+    (
+        "cfg:DynamicList",
+        "FindByCurrentValue",
+        "b520ca45-d8db-4982-b128-bb42a6afd911",
+    ),
+    (
+        "cfg:DynamicList",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:DynamicList",
+        "HierarchicalList",
+        "ffc5e8d5-40a7-4893-a590-49bd588f9466",
+    ),
+    (
+        "cfg:DynamicList",
+        "LevelDown",
+        "aa042316-63ba-4f10-8d39-3935474562d0",
+    ),
+    (
+        "cfg:DynamicList",
+        "LevelUp",
+        "e44f9b41-bf53-4837-b4d4-f0ff9cdf0feb",
+    ),
+    (
+        "cfg:DynamicList",
+        "List",
+        "a2b927a1-35af-43e3-af73-4af22ac2c0fa",
+    ),
+    (
+        "cfg:DynamicList",
+        "ListSettings",
+        "1c00edb8-a826-4855-9bde-94dbc5f620e5",
+    ),
+    (
+        "cfg:DynamicList",
+        "LoadDynamicListSettings",
+        "952c2984-9955-415a-8235-5c710aabe732",
+    ),
+    (
+        "cfg:DynamicList",
+        "MoveItem",
+        "39c6a2fb-45cc-41b1-853f-967fb68aa1df",
+    ),
+    (
+        "cfg:DynamicList",
+        "No",
+        "06ee6a21-061e-47f8-81c5-92ae8b8f3b5d",
+    ),
+    (
+        "cfg:DynamicList",
+        "OutputList",
+        "9758d344-4b1d-4dc9-80bd-81060bc18b2a",
+    ),
+    (
+        "cfg:DynamicList",
+        "Post",
+        "4c569466-1af5-4fc1-9b63-7bf6493097bf",
+    ),
+    (
+        "cfg:DynamicList",
+        "ReadChanges",
+        "e7ae2a27-60a2-44ae-ab1d-f307d11c85bf",
+    ),
+    (
+        "cfg:DynamicList",
+        "Refresh",
+        "fd8f031f-c168-4e1b-8b0c-15eb3057e688",
+    ),
+    (
+        "cfg:DynamicList",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:DynamicList",
+        "SaveDynamicListSettings",
+        "d5c3842d-7252-4370-9174-756a6cc553e5",
+    ),
+    (
+        "cfg:DynamicList",
+        "SaveValues",
+        "239f0103-8de9-4fdf-b485-eb5531da7e51",
+    ),
+    (
+        "cfg:DynamicList",
+        "SetDateInterval",
+        "eb880cb2-a91f-4ad6-afb7-f0e6d7a1b111",
+    ),
+    (
+        "cfg:DynamicList",
+        "SetDeletionMark",
+        "2e86453d-8958-4c9a-a1b4-b15215eedc2e",
+    ),
+    (
+        "cfg:DynamicList",
+        "ShowMultipleSelection",
+        "9fea4ba9-7d33-47d4-a271-cb54df4a9b74",
+    ),
+    (
+        "cfg:DynamicList",
+        "Tree",
+        "0b83270d-7f95-4cdd-93c3-342d7991fed5",
+    ),
+    (
+        "cfg:DynamicList",
+        "UndoPosting",
+        "441362c1-0c86-4f73-bf50-6e1048a2db73",
+    ),
+    (
+        "cfg:DynamicList",
+        "WriteChanges",
+        "a29c4f3a-3b41-480a-a31e-5f9f73aa3216",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "CreateInitialImage",
+        "d82e191e-f052-40ee-8691-00cac5b34629",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "Delete",
+        "c32d43de-b820-49d0-bf7a-d70829f48f40",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "ReadChanges",
+        "3328a951-c3c8-4f22-b99e-814f7cea6b82",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:ExchangePlanObject",
+        "WriteChanges",
+        "8b81add7-25af-4df7-a69c-144e3e3e4c8e",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "ChangeHistory",
+        "174e58ce-82ad-4787-b956-9367937f7971",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Delete",
+        "c32d43de-b820-49d0-bf7a-d70829f48f40",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Reread",
+        "1f317795-c420-4a30-b594-c492abc55f7a",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:InformationRegisterRecordManager",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "Reread",
+        "1f317795-c420-4a30-b594-c492abc55f7a",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "SaveValues",
+        "239f0103-8de9-4fdf-b485-eb5531da7e51",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "SwitchActivity",
+        "f4613f71-5449-48ed-aea5-de005b272a1d",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "cfg:InformationRegisterRecordSet",
+        "WriteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:ReportObject",
+        "CancelEdit",
+        "8149a06a-dbf3-4d4d-a275-5385a4196fc7",
+    ),
+    (
+        "cfg:ReportObject",
+        "ChangeVariant",
+        "fb9d7977-258a-440a-9b59-0a650c86f6a2",
+    ),
+    (
+        "cfg:ReportObject",
+        "Close",
+        "3772996b-41f4-4c47-a5a8-ea397db424ae",
+    ),
+    (
+        "cfg:ReportObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:ReportObject",
+        "EndEdit",
+        "74c1abd6-b274-4654-baf0-7b8418b792ea",
+    ),
+    (
+        "cfg:ReportObject",
+        "Generate",
+        "b5e6da6b-cec4-450c-876a-6a5f0837f6cc",
+    ),
+    (
+        "cfg:ReportObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:ReportObject",
+        "LoadReportSettings",
+        "b0c9afb6-320c-4e36-be21-8f6d48116415",
+    ),
+    (
+        "cfg:ReportObject",
+        "LoadVariant",
+        "b08b7a35-583a-4756-b814-0436ff9139c0",
+    ),
+    (
+        "cfg:ReportObject",
+        "NewWindow",
+        "03df6ee5-883c-4cc6-b319-d886d1a9b2c8",
+    ),
+    (
+        "cfg:ReportObject",
+        "Print",
+        "a11fe36e-0b45-4c07-80b3-2346b660a51e",
+    ),
+    (
+        "cfg:ReportObject",
+        "ReportSettings",
+        "0fb774df-ec1c-4e23-9ed1-e089974f74bf",
+    ),
+    (
+        "cfg:ReportObject",
+        "RestoreValues",
+        "71e0226e-ebb2-4e33-8745-0a94a01bbf15",
+    ),
+    (
+        "cfg:ReportObject",
+        "Save",
+        "a6d73055-3730-42e7-8934-3145ee987141",
+    ),
+    (
+        "cfg:ReportObject",
+        "SaveReportSettings",
+        "7910bb04-ddcc-4e5d-89f0-104c6ad0f187",
+    ),
+    (
+        "cfg:ReportObject",
+        "SaveValues",
+        "239f0103-8de9-4fdf-b485-eb5531da7e51",
+    ),
+    (
+        "cfg:ReportObject",
+        "SaveVariant",
+        "9bffcf73-7b1d-4a8d-bf23-5e051af3ee29",
+    ),
+    (
+        "cfg:TaskObject",
+        "Copy",
+        "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
+    ),
+    (
+        "cfg:TaskObject",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
+    (
+        "cfg:TaskObject",
+        "Delete",
+        "c32d43de-b820-49d0-bf7a-d70829f48f40",
+    ),
     // The task-object spelling of `WriteAndClose`'s uuid. 17 ERP УХ and 3 BSP
     // forms exclude it, and no form ever excludes both spellings.
-    ("cfg:TaskObject", "ExecuteAndClose", "32df4349-2607-4c2b-a4b9-bca4a1a28bd7"),
-    ("cfg:TaskObject", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
-    ("cfg:TaskObject", "Reread", "1f317795-c420-4a30-b594-c492abc55f7a"),
-    ("cfg:TaskObject", "SetDeletionMark", "827b541d-30c1-4f06-aecf-92aa496a0835"),
-    ("cfg:TaskObject", "Write", "fe558fde-99b3-45d0-a060-9fc2905309f6"),
-    ("dcsset:SettingsComposer", "CancelEdit", "8149a06a-dbf3-4d4d-a275-5385a4196fc7"),
-    ("xs:string", "Cancel", "679b62d9-ff72-4329-bf3a-c0c32b311dd2"),
+    (
+        "cfg:TaskObject",
+        "ExecuteAndClose",
+        "32df4349-2607-4c2b-a4b9-bca4a1a28bd7",
+    ),
+    (
+        "cfg:TaskObject",
+        "Help",
+        "39bb0fe9-771d-4dd5-8a6e-2d16984523af",
+    ),
+    (
+        "cfg:TaskObject",
+        "Reread",
+        "1f317795-c420-4a30-b594-c492abc55f7a",
+    ),
+    (
+        "cfg:TaskObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:TaskObject",
+        "Write",
+        "fe558fde-99b3-45d0-a060-9fc2905309f6",
+    ),
+    (
+        "dcsset:SettingsComposer",
+        "CancelEdit",
+        "8149a06a-dbf3-4d4d-a275-5385a4196fc7",
+    ),
+    (
+        "xs:string",
+        "Cancel",
+        "679b62d9-ff72-4329-bf3a-c0c32b311dd2",
+    ),
     ("xs:string", "Close", "3772996b-41f4-4c47-a5a8-ea397db424ae"),
-    ("xs:string", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
+    (
+        "xs:string",
+        "CustomizeForm",
+        "198ea630-fda2-4cda-8a23-f999f4c67ee6",
+    ),
     ("xs:string", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
 ];
 
@@ -2662,7 +5218,9 @@ pub(crate) fn item_standard_command_uuid(
 /// `Delete` is the direct-delete command.
 ///
 /// A kind outside those seven is unmeasured and gets no answer.
-pub(crate) fn dynamic_list_delete_command_uuid(main_table_kind: Option<&str>) -> Option<&'static str> {
+pub(crate) fn dynamic_list_delete_command_uuid(
+    main_table_kind: Option<&str>,
+) -> Option<&'static str> {
     match main_table_kind {
         Some("InformationRegister") => Some("1cc781aa-f32b-4dc7-996a-6c38c3deda5c"),
         None
@@ -2985,11 +5543,7 @@ pub(crate) fn format_table_head(head: &NativeTableHead<'_>) -> Option<String> {
         Some(block) => format!("1,{block}"),
         None => "0".to_string(),
     };
-    let representation = root_code(
-        head.representation,
-        &[("List", "0"), ("Tree", "2")],
-        "1",
-    )?;
+    let representation = root_code(head.representation, &[("List", "0"), ("Tree", "2")], "1")?;
     let title_location = root_code(
         head.title_location,
         &[
@@ -3016,7 +5570,8 @@ pub(crate) fn format_table_head(head: &NativeTableHead<'_>) -> Option<String> {
         &[("SingleRow", "0"), ("MultiRow", "1")],
         "1",
     )?;
-    let row_selection_mode = root_code(head.row_selection_mode, &[("Row", "1"), ("Cell", "0")], "0")?;
+    let row_selection_mode =
+        root_code(head.row_selection_mode, &[("Row", "1"), ("Cell", "0")], "0")?;
     let horizontal_scroll = root_code(
         head.horizontal_scroll_bar,
         &[("DontUse", "0"), ("UseAlways", "1")],
@@ -3274,11 +5829,7 @@ pub(crate) fn format_table_tail(tail: &NativeTableTail<'_>) -> Option<String> {
         ],
         "0",
     )?;
-    let search_on_input = root_code(
-        tail.search_on_input,
-        &[("Use", "0"), ("DontUse", "1")],
-        "2",
-    )?;
+    let search_on_input = root_code(tail.search_on_input, &[("Use", "0"), ("DontUse", "1")], "2")?;
     // A table that does not name a drag mode writes 1, not 0.
     let drag = root_code(tail.file_drag_mode, &[("AsFile", "0")], "1")?;
     Some(format!(
@@ -3781,10 +6332,7 @@ impl Default for NativeLabelDecorationPayload<'_> {
             events: "{0,1,0}",
             back_color: "{3,4,{0}}",
             border_color: "{3,4,{0}}",
-            border: concat!(
-                "{3,0,{0},0,1,0,",
-                "48312c09-257f-4b29-b280-284dd89efc1e}"
-            ),
+            border: concat!("{3,0,{0},0,1,0,", "48312c09-257f-4b29-b280-284dd89efc1e}"),
         }
     }
 }
@@ -3879,10 +6427,7 @@ impl Default for NativePictureDecorationPayload<'_> {
             zoomable: false,
             nonselected_picture_text: "{1,0}",
             border_color: "{3,4,{0}}",
-            border: concat!(
-                "{3,0,{0},0,1,0,",
-                "48312c09-257f-4b29-b280-284dd89efc1e}"
-            ),
+            border: concat!("{3,0,{0},0,1,0,", "48312c09-257f-4b29-b280-284dd89efc1e}"),
             enable_start_drag: false,
             enable_drag: false,
             events: "{0,1,0}",
@@ -4307,14 +6852,26 @@ pub(crate) fn format_form_attribute_save(paths: &[String]) -> String {
     // before `{1,{17}}` (271 of 271 lists).
     let key = |path: &String| {
         let fields = top_level_braced_fields(path);
-        let count = fields.first().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+        let count = fields
+            .first()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
         let segments = fields
             .iter()
             .skip(1)
             .map(|segment| {
                 let inner = top_level_braced_fields(segment);
-                let first = inner.first().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
-                (first, inner.get(1..).map(|rest| rest.join(",")).unwrap_or_default())
+                let first = inner
+                    .first()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                (
+                    first,
+                    inner
+                        .get(1..)
+                        .map(|rest| rest.join(","))
+                        .unwrap_or_default(),
+                )
             })
             .collect::<Vec<_>>();
         (count, segments)
@@ -4332,7 +6889,10 @@ pub(crate) fn format_form_attribute_save(paths: &[String]) -> String {
 /// The top-level members of one `{…}` value, braces removed.
 fn top_level_braced_fields(text: &str) -> Vec<String> {
     let text = text.trim();
-    let Some(inner) = text.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) else {
+    let Some(inner) = text
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
         return vec![text.to_string()];
     };
     let mut fields = Vec::new();
@@ -4748,7 +7308,11 @@ pub(crate) fn format_usual_group_payload(payload: &NativeUsualGroupPayload<'_>) 
         &[("Top", "0"), ("Center", "1"), ("Bottom", "2")],
         "3",
     )?;
-    let through_align = root_code(payload.through_align, &[("Use", "0"), ("DontUse", "1")], "2")?;
+    let through_align = root_code(
+        payload.through_align,
+        &[("Use", "0"), ("DontUse", "1")],
+        "2",
+    )?;
     let children_align = root_code(
         payload.children_align,
         &[
@@ -5930,8 +8494,11 @@ const DATA_PATH_STANDARD_PERIOD_MEMBERS: &[(&str, &str)] =
     &[("Variant", "0"), ("StartDate", "1"), ("EndDate", "2")];
 const DATA_PATH_STANDARD_BEGINNING_DATE_MEMBERS: &[(&str, &str)] =
     &[("Variant", "0"), ("Date", "1")];
-const DATA_PATH_COMPOSER_MEMBERS: &[(&str, &str)] =
-    &[("Settings", "0"), ("UserSettings", "1"), ("FixedSettings", "2")];
+const DATA_PATH_COMPOSER_MEMBERS: &[(&str, &str)] = &[
+    ("Settings", "0"),
+    ("UserSettings", "1"),
+    ("FixedSettings", "2"),
+];
 /// A bare `cfg:ReportObject` -- a common form's `Отчет` -- has one member the
 /// walk reaches, the composer, stored under the platform's own uuid.
 const DATA_PATH_REPORT_OBJECT_MEMBERS: &[(&str, &str)] =
@@ -5939,8 +8506,11 @@ const DATA_PATH_REPORT_OBJECT_MEMBERS: &[(&str, &str)] =
 const DATA_PATH_GANTT_CHART_MEMBERS: &[(&str, &str)] = &[("Point", "0"), ("Text", "1")];
 
 /// A dynamic list's own members, ahead of its query fields.
-const DATA_PATH_DYNAMIC_LIST_MEMBERS: &[(&str, &str)] =
-    &[("Order", "-1"), ("Filter", "-2"), ("SettingsComposer", "-6")];
+const DATA_PATH_DYNAMIC_LIST_MEMBERS: &[(&str, &str)] = &[
+    ("Order", "-1"),
+    ("Filter", "-2"),
+    ("SettingsComposer", "-6"),
+];
 
 /// The settings-composer sub-tree. The numbering is **per parent collection**:
 /// `Presentation` is 10010 under a filter item and 10004 under a
@@ -6022,8 +8592,11 @@ const DATA_PATH_DCS_APPEARANCE: &[(&str, &str)] = &[
 ];
 const DATA_PATH_DCS_FILTER_AVAILABLE_FIELDS: &[(&str, &str)] =
     &[("FieldPicture", "10000"), ("Title", "10001")];
-const DATA_PATH_DCS_FIELDS: &[(&str, &str)] =
-    &[("Use", "10000"), ("FieldPicture", "10001"), ("Field", "10002")];
+const DATA_PATH_DCS_FIELDS: &[(&str, &str)] = &[
+    ("Use", "10000"),
+    ("FieldPicture", "10001"),
+    ("Field", "10002"),
+];
 
 /// The standard-attribute table: `(scope, name)` to the negative number the
 /// body stores.
@@ -6071,13 +8644,21 @@ const DATA_PATH_STANDARD_ATTRIBUTES: &[(&str, &str, &str)] = &[
     ("ChartOfAccounts", "ExtDimensionTypes", "-12"),
     ("ChartOfAccounts", "Order", "-17"),
     ("ChartOfAccounts", "Ref", "-2"),
-    ("ChartOfAccounts/ExtDimensionTypes", "ExtDimensionType", "-13"),
+    (
+        "ChartOfAccounts/ExtDimensionTypes",
+        "ExtDimensionType",
+        "-13",
+    ),
     ("ChartOfAccounts/ExtDimensionTypes", "TurnoversOnly", "-15"),
     ("ChartOfCalculationTypes", "Code", "-2"),
     ("ChartOfCalculationTypes", "Description", "-3"),
     ("ChartOfCalculationTypes", "ActionPeriodIsBasic", "-4"),
     ("ChartOfCalculationTypes", "BaseCalculationTypes", "-10"),
-    ("ChartOfCalculationTypes", "DisplacingCalculationTypes", "-20"),
+    (
+        "ChartOfCalculationTypes",
+        "DisplacingCalculationTypes",
+        "-20",
+    ),
     ("ChartOfCalculationTypes", "LeadingCalculationTypes", "-30"),
     (
         "ChartOfCalculationTypes/BaseCalculationTypes",
@@ -6401,7 +8982,10 @@ fn data_path_context_for_types(types: &[String]) -> DataPathContext {
     if keys.is_empty() {
         DataPathContext::Stop
     } else {
-        DataPathContext::Meta { keys, section: None }
+        DataPathContext::Meta {
+            keys,
+            section: None,
+        }
     }
 }
 
@@ -6413,7 +8997,8 @@ fn data_path_context_expanding(
 ) -> DataPathContext {
     if let [only] = types
         && let Some(name) = only.trim().strip_prefix("cfg:DefinedType.")
-        && let Some(object) = configuration.and_then(|source| source.object(&format!("DefinedType.{name}")))
+        && let Some(object) =
+            configuration.and_then(|source| source.object(&format!("DefinedType.{name}")))
         && !object.types.is_empty()
     {
         return data_path_context_for_types(&object.types);
@@ -6554,7 +9139,10 @@ fn resolve_data_path_tokens<'a>(
                 let item = form.items.get(next)?;
                 emitted.push(format!("{{{},{FORM_ITEM_NAMESPACE_UUID}}}", item.id));
                 index += 2;
-                if tokens.get(index).is_some_and(|token| token.0 == "CurrentData") {
+                if tokens
+                    .get(index)
+                    .is_some_and(|token| token.0 == "CurrentData")
+                {
                     index += 1;
                 }
                 // The context after the head is the one the item's own path
@@ -6563,7 +9151,9 @@ fn resolve_data_path_tokens<'a>(
                 // prefix is that path expanded to its attribute (111 holders).
                 let inner = parse_data_path_tokens(item.data_path.as_deref()?);
                 match (depth < 8)
-                    .then(|| resolve_data_path_tokens(form, configuration, &inner, &None, depth + 1))
+                    .then(|| {
+                        resolve_data_path_tokens(form, configuration, &inner, &None, depth + 1)
+                    })
                     .flatten()
                 {
                     Some(head) => {
@@ -6828,7 +9418,10 @@ fn resolve_metadata_data_path_part(
     }
     if name == "RowsCount"
         && (section.is_some()
-            || matches!(object.class.as_str(), "InformationRegister" | "AccountingRegister"))
+            || matches!(
+                object.class.as_str(),
+                "InformationRegister" | "AccountingRegister"
+            ))
     {
         return Some((
             format!("{{{DATA_PATH_ROWS_COUNT_MARKER}}}"),
@@ -6907,7 +9500,12 @@ mod tests {
             functional_options: Some("{0,{0,{\"B\",1},0}}"),
             data_path: "{2,{1},{3}}",
             payload: &format_plain_field_payload(false),
-            context_menu: &format_field_context_menu("21", "ПериодЗакупокКонтекстноеМеню", None, &[]),
+            context_menu: &format_field_context_menu(
+                "21",
+                "ПериодЗакупокКонтекстноеМеню",
+                None,
+                &[],
+            ),
             extended_tooltip: &format_extended_tooltip("22", "ПериодЗакупокРасширеннаяПодсказка"),
             ..NativeFieldItem::default()
         })
@@ -6924,8 +9522,16 @@ mod tests {
             functional_options: Some("{0,{0,{\"B\",1},0}}"),
             data_path: "{1,{2}}",
             payload: &format_plain_field_payload(true),
-            context_menu: &format_field_context_menu("47", "АнкетаПоставщикаКонтекстноеМеню", None, &[]),
-            extended_tooltip: &format_extended_tooltip("48", "АнкетаПоставщикаРасширеннаяПодсказка"),
+            context_menu: &format_field_context_menu(
+                "47",
+                "АнкетаПоставщикаКонтекстноеМеню",
+                None,
+                &[],
+            ),
+            extended_tooltip: &format_extended_tooltip(
+                "48",
+                "АнкетаПоставщикаРасширеннаяПодсказка",
+            ),
             ..NativeFieldItem::default()
         })
         .expect("a field record");
@@ -7030,7 +9636,10 @@ mod tests {
         );
 
         assert_eq!(format_russian_title(""), "{1,0}");
-        assert_eq!(format_russian_title("Внимание"), "{1,1,{\"ru\",\"Внимание\"}}");
+        assert_eq!(
+            format_russian_title("Внимание"),
+            "{1,1,{\"ru\",\"Внимание\"}}"
+        );
     }
 
     /// One childless record of each group kind, exactly as an ERP УХ form
@@ -7143,7 +9752,10 @@ mod tests {
             ..NativeTableHead::default()
         })
         .expect("a table head");
-        assert_eq!(head, "55,{29,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,\"Список\",0,0,1,{1,2,{\"ru\",\"Список\"},{\"en\",\"List\"}},{1,0},{1,{7}},0,1,0,0,0,1,1,0,0,0,0,0,1,0,0,1,0,1,2,2,0,0,0,0,0,1,2,0,0,1,1,{1,{3}},{4,0,{0},\"\",-1,-1,1,0,\"\"},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,0");
+        assert_eq!(
+            head,
+            "55,{29,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,\"Список\",0,0,1,{1,2,{\"ru\",\"Список\"},{\"en\",\"List\"}},{1,0},{1,{7}},0,1,0,0,0,1,1,0,0,0,0,0,1,0,0,1,0,1,2,2,0,0,0,0,0,1,2,0,0,1,1,{1,{3}},{4,0,{0},\"\",-1,-1,1,0,\"\"},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{3,4,{0}},{7,3,0,1,100},{0,0,0},0,0"
+        );
         assert_eq!(top_level_members(&format!("{{{head}}}")).len(), 54);
 
         // The record puts the bag, the events, the two children and the
@@ -7155,10 +9767,16 @@ mod tests {
             "{0}",
             "{22,{30,x},0}",
             "{22,{31,x},0}",
-            &[("77ffcc29-7f2d-4223-b22f-19666e7250ba", "{37,{32,x},0}".to_string())],
+            &[(
+                "77ffcc29-7f2d-4223-b22f-19666e7250ba",
+                "{37,{32,x},0}".to_string(),
+            )],
             "2,2,1,0",
         );
-        assert!(record.contains(",1,5,{\"B\",0},{0,1,0},{0},1,{22,{30,x},0},1,{22,{31,x},0},1,77ffcc29-"));
+        assert!(
+            record
+                .contains(",1,5,{\"B\",0},{0,1,0},{0},1,{22,{30,x},0},1,{22,{31,x},0},1,77ffcc29-")
+        );
         assert!(record.ends_with(",{37,{32,x},0},2,2,1,0}"));
 
         // A spelling the corpus never showed is refused.
@@ -7214,7 +9832,9 @@ mod tests {
             display_importance: "0",
         })
         .expect("a table tail");
-        assert!(spoken.starts_with("1,0,0,1,{\"Pattern\"},\"\",\"\",1,1,8,1,{12,{6,x},0},6,2,2,1,"));
+        assert!(
+            spoken.starts_with("1,0,0,1,{\"Pattern\"},\"\",\"\",1,1,8,1,{12,{6,x},0},6,2,2,1,")
+        );
         assert!(spoken.ends_with(",1,0,70,0,0,12,3,3,3,0,6,3,0,0,0,0"));
 
         // A spelling the corpus never showed is refused.
@@ -7276,7 +9896,10 @@ mod tests {
         })
         .expect("a decoration record");
         assert!(labelled.contains(",\"Надпись\",{1,0},{1,0},0,0,0,2,2,"));
-        assert!(labelled.contains(",1,{22,{9,x},0},0,1,{1,{1,0},0},7,1,{12,{10,x},0},1,0,0,1,0,3,3,0,0}"));
+        assert!(
+            labelled
+                .contains(",1,{22,{9,x},0},0,1,{1,{1,0},0},7,1,{12,{10,x},0},1,0,0,1,0,3,3,0,0}")
+        );
         assert_eq!(top_level_members(&labelled).len(), 36);
 
         // A picture decoration is the same record with kind 1.
@@ -7611,7 +10234,9 @@ mod tests {
             ..NativeFieldItem::default()
         })
         .expect("a field record");
-        assert!(spoken.contains(",\"Поле\",4,2,{1,0},{1,0},{1,{2}},{0},0,1,1,1,1,{1,0},{1,0},0,0,1,2,1,0,2,2,1,"));
+        assert!(spoken.contains(
+            ",\"Поле\",4,2,{1,0},{1,0},{1,{2}},{0},0,1,1,1,1,{1,0},{1,0},0,0,1,2,1,0,2,2,1,"
+        ));
         assert!(spoken.contains(",{0},1,8,1,{12,{6,x},0},1,0,0,0,0,0}"));
         assert!(spoken.contains(",{22,{5,x},0},0,"));
 
@@ -7795,7 +10420,9 @@ mod tests {
                 ..NativeFormCommand::default()
             })
             .as_deref(),
-            Some("{9,{10,409b9a53-7f7e-4178-86c1-33176c7c7a7a},\"Команда9\",{1,0},{1,0},{0,{0,{\"B\",1},0}},{0,57,0},{4,0,{0},\"\",-1,-1,1,0,\"\"},\"Команда9\",3,0,0,{0,0},1,0,1,0,0,1}")
+            Some(
+                "{9,{10,409b9a53-7f7e-4178-86c1-33176c7c7a7a},\"Команда9\",{1,0},{1,0},{0,{0,{\"B\",1},0}},{0,57,0},{4,0,{0},\"\",-1,-1,1,0,\"\"},\"Команда9\",3,0,0,{0,0},1,0,1,0,0,1}"
+            )
         );
 
         // A value table's own columns, verbatim out of
@@ -7962,7 +10589,10 @@ mod tests {
 
         // A table that names none of the three writes 0 for each; one that
         // names them writes the codes the corpus gives.
-        assert_eq!(&members[members.len() - 25..members.len() - 22], &["0", "0", "0"]);
+        assert_eq!(
+            &members[members.len() - 25..members.len() - 22],
+            &["0", "0", "0"]
+        );
         let shown = format_table_item(&NativeTableItem {
             head: "55,{56,02023637-7868-4a5f-8576-835a76e0c9ba},0,2,0,\"Отбор\",{0}",
             context_menu: &context_menu,
@@ -8067,12 +10697,30 @@ mod tests {
     /// one per wrapper with no overlap.
     #[test]
     fn writes_a_root_with_its_children() {
-        assert_eq!(child_kind_uuid(37), Some("77ffcc29-7f2d-4223-b22f-19666e7250ba"));
-        assert_eq!(child_kind_uuid(22), Some("cd5394d0-7dda-4b56-8927-93ccbe967a01"));
-        assert_eq!(child_kind_uuid(31), Some("a9f3b1ac-f51b-431e-b102-55a69acdecad"));
-        assert_eq!(child_kind_uuid(12), Some("3d3cb80c-508b-41fa-8a18-680cdf5f1712"));
-        assert_eq!(child_kind_uuid(55), Some("143c00f7-a42d-4cd7-9189-88e4467dc768"));
-        assert_eq!(child_kind_uuid(5), Some("c5259a1d-518a-4afd-b98d-0176027e4feb"));
+        assert_eq!(
+            child_kind_uuid(37),
+            Some("77ffcc29-7f2d-4223-b22f-19666e7250ba")
+        );
+        assert_eq!(
+            child_kind_uuid(22),
+            Some("cd5394d0-7dda-4b56-8927-93ccbe967a01")
+        );
+        assert_eq!(
+            child_kind_uuid(31),
+            Some("a9f3b1ac-f51b-431e-b102-55a69acdecad")
+        );
+        assert_eq!(
+            child_kind_uuid(12),
+            Some("3d3cb80c-508b-41fa-8a18-680cdf5f1712")
+        );
+        assert_eq!(
+            child_kind_uuid(55),
+            Some("143c00f7-a42d-4cd7-9189-88e4467dc768")
+        );
+        assert_eq!(
+            child_kind_uuid(5),
+            Some("c5259a1d-518a-4afd-b98d-0176027e4feb")
+        );
         assert_eq!(child_kind_uuid(50), None);
 
         let bar = format_empty_auto_command_bar("-1", "FormCommandBar");
@@ -8097,7 +10745,10 @@ mod tests {
             events: "{0,1,0}",
             command_set: "{0}",
             command_bar: &bar,
-            children: &[(child_kind_uuid(37).expect("a field has a kind uuid"), field.clone())],
+            children: &[(
+                child_kind_uuid(37).expect("a field has a kind uuid"),
+                field.clone(),
+            )],
             tail: &format_root_tail(&NativeRootTail::default()).expect("a default tail"),
         });
 
@@ -8181,7 +10832,10 @@ mod tests {
     fn writes_the_label_payloads_the_platform_stores() {
         // A label that names only a height: the height lands in slot 2.
         assert_eq!(
-            format_label_payload(&NativeLabelPayload { height: "2", ..NativeLabelPayload::plain(false) }),
+            format_label_payload(&NativeLabelPayload {
+                height: "2",
+                ..NativeLabelPayload::plain(false)
+            }),
             "{11,0,2,2,2,2,{1,0},0,{3,4,{0}},{3,4,{0}},{7,3,0,1,100},2,{0,1,0},{3,4,{0}},{3,0,{0},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e},1,0,0,1,0}"
         );
         // Width and height together.
@@ -8194,24 +10848,30 @@ mod tests {
             "{11,16,1,2,2,2,{1,0},0,{3,4,{0}},{3,4,{0}},{7,3,0,1,100},2,{0,1,0},{3,4,{0}},{3,0,{0},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e},1,0,0,1,0}"
         );
         // `HorizontalStretch` is three-valued: false, true, and not named.
-        assert!(format_label_payload(&NativeLabelPayload {
-            horizontal_stretch: Some(false),
-            ..NativeLabelPayload::plain(false)
-        })
-        .starts_with("{11,0,0,0,"));
-        assert!(format_label_payload(&NativeLabelPayload {
-            horizontal_stretch: Some(true),
-            ..NativeLabelPayload::plain(false)
-        })
-        .starts_with("{11,0,0,1,"));
+        assert!(
+            format_label_payload(&NativeLabelPayload {
+                horizontal_stretch: Some(false),
+                ..NativeLabelPayload::plain(false)
+            })
+            .starts_with("{11,0,0,0,")
+        );
+        assert!(
+            format_label_payload(&NativeLabelPayload {
+                horizontal_stretch: Some(true),
+                ..NativeLabelPayload::plain(false)
+            })
+            .starts_with("{11,0,0,1,")
+        );
         assert!(format_label_payload(&NativeLabelPayload::plain(false)).starts_with("{11,0,0,2,"));
         // A maximum width switches the auto flag off and lands in slot 16.
-        assert!(format_label_payload(&NativeLabelPayload {
-            auto_max_width: false,
-            max_width: "15",
-            ..NativeLabelPayload::plain(false)
-        })
-        .ends_with(",0,15,0,1,0}"));
+        assert!(
+            format_label_payload(&NativeLabelPayload {
+                auto_max_width: false,
+                max_width: "15",
+                ..NativeLabelPayload::plain(false)
+            })
+            .ends_with(",0,15,0,1,0}")
+        );
     }
 
     /// The payload 24 361 input fields of the corpus carry unchanged, and the
@@ -8220,27 +10880,35 @@ mod tests {
     fn writes_the_input_payloads_the_platform_stores() {
         assert_eq!(
             format_input_payload(&NativeInputPayload::plain()).as_deref(),
-            Some("{36,{3,0},0,0,2,2,1,2,2,2,2,2,2,2,2,2,{\"U\"},{\"U\"},\"\",0,{4,0,{0},\"\",-1,-1,1,0,\"\"},0,0,2,3,00000000-0000-0000-0000-000000000000,{5006,0},{0,0},2,{1,0},{1,0},2,1,0,{\"Pattern\"},1,{0,1,0},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},1,{3,0,0},0,{1,0},2,0,2,0,1,0,0,1,0,0,0,0,0,0,0,0,0,{0},0,{5007,0},0}")
+            Some(
+                "{36,{3,0},0,0,2,2,1,2,2,2,2,2,2,2,2,2,{\"U\"},{\"U\"},\"\",0,{4,0,{0},\"\",-1,-1,1,0,\"\"},0,0,2,3,00000000-0000-0000-0000-000000000000,{5006,0},{0,0},2,{1,0},{1,0},2,1,0,{\"Pattern\"},1,{0,1,0},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},1,{3,0,0},0,{1,0},2,0,2,0,1,0,0,1,0,0,0,0,0,0,0,0,0,{0},0,{5007,0},0}"
+            )
         );
-        assert!(format_input_payload(&NativeInputPayload {
-            width: "25",
-            ..NativeInputPayload::plain()
-        })
-        .expect("an input payload")
-        .starts_with("{36,{3,0},25,0,2,2,"));
-        assert!(format_input_payload(&NativeInputPayload {
-            auto_max_width: false,
-            max_width: "28",
-            ..NativeInputPayload::plain()
-        })
-        .expect("an input payload")
-        .contains(",2,0,2,0,0,28,0,1,0,"));
-        assert!(format_input_payload(&NativeInputPayload {
-            mask: "999-999-999 99",
-            ..NativeInputPayload::plain()
-        })
-        .expect("an input payload")
-        .contains(",{\"U\"},\"999-999-999 99\",0,"));
+        assert!(
+            format_input_payload(&NativeInputPayload {
+                width: "25",
+                ..NativeInputPayload::plain()
+            })
+            .expect("an input payload")
+            .starts_with("{36,{3,0},25,0,2,2,")
+        );
+        assert!(
+            format_input_payload(&NativeInputPayload {
+                auto_max_width: false,
+                max_width: "28",
+                ..NativeInputPayload::plain()
+            })
+            .expect("an input payload")
+            .contains(",2,0,2,0,0,28,0,1,0,")
+        );
+        assert!(
+            format_input_payload(&NativeInputPayload {
+                mask: "999-999-999 99",
+                ..NativeInputPayload::plain()
+            })
+            .expect("an input payload")
+            .contains(",{\"U\"},\"999-999-999 99\",0,")
+        );
     }
 
     /// The payload of `ГруппаШапка`, a usual group of an ERP УХ form body,
@@ -8436,11 +11104,21 @@ mod tests {
             "{3,50,10,{3,4,{0}},0,{0,1,0},1,0,0,1,0,1,1}"
         );
         assert_eq!(
-            format_document_payload(5, "50", "10", "1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},1,0,0,1,0,{0,1,0}"),
+            format_document_payload(
+                5,
+                "50",
+                "10",
+                "1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},1,0,0,1,0,{0,1,0}"
+            ),
             "{5,50,10,1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},1,0,0,1,0,{0,1,0}}"
         );
         assert_eq!(
-            format_document_payload(1, "50", "10", "1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,1,0},1,0,0,1,0"),
+            format_document_payload(
+                1,
+                "50",
+                "10",
+                "1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,1,0},1,0,0,1,0"
+            ),
             "{1,50,10,1,1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,1,0},1,0,0,1,0}"
         );
 
@@ -8504,7 +11182,10 @@ mod tests {
     #[test]
     fn writes_the_colours_the_platform_stores() {
         let none = |_: &str| None;
-        assert_eq!(format_native_color(None, none).as_deref(), Some("{3,4,{0}}"));
+        assert_eq!(
+            format_native_color(None, none).as_deref(),
+            Some("{3,4,{0}}")
+        );
         // The three bytes in the other order: blue first.
         assert_eq!(
             format_native_color(Some("#0000FF"), none).as_deref(),
@@ -8694,9 +11375,15 @@ mod tests {
 
         // One event of an input field.
         assert_eq!(
-            format_native_events("InputField", "", &[event("OnChange", "ОтборСчетПриИзменении")])
-                .as_deref(),
-            Some("{1,fe115cc8-9e33-4684-a166-bd5136fe7a9f,\"ОтборСчетПриИзменении\",1,0,fe115cc8-9e33-4684-a166-bd5136fe7a9f,0,1}")
+            format_native_events(
+                "InputField",
+                "",
+                &[event("OnChange", "ОтборСчетПриИзменении")]
+            )
+            .as_deref(),
+            Some(
+                "{1,fe115cc8-9e33-4684-a166-bd5136fe7a9f,\"ОтборСчетПриИзменении\",1,0,fe115cc8-9e33-4684-a166-bd5136fe7a9f,0,1}"
+            )
         );
 
         // Two events of a table: both pairs first, then both tails.
@@ -8713,7 +11400,9 @@ mod tests {
                 ]
             )
             .as_deref(),
-            Some("{2,1282f000-23b6-4887-87f4-9e8e79db3d32,\"СписокВыбор\",c41e7b98-098c-433e-8ac3-56ec2a2c49e2,\"СписокПередЗагрузкойПользовательскихНастроекНаСервере\",1,0,1282f000-23b6-4887-87f4-9e8e79db3d32,0,1,c41e7b98-098c-433e-8ac3-56ec2a2c49e2,0,1}")
+            Some(
+                "{2,1282f000-23b6-4887-87f4-9e8e79db3d32,\"СписокВыбор\",c41e7b98-098c-433e-8ac3-56ec2a2c49e2,\"СписокПередЗагрузкойПользовательскихНастроекНаСервере\",1,0,1282f000-23b6-4887-87f4-9e8e79db3d32,0,1,c41e7b98-098c-433e-8ac3-56ec2a2c49e2,0,1}"
+            )
         );
 
         // One event an extension gave a second handler: one pair, one tail, and
@@ -8724,31 +11413,46 @@ mod tests {
                 "",
                 &[
                     event("OnChange", "НаборДанныхБазыРаспределенияПриИзменении"),
-                    event("OnChange", "Расш1_НаборДанныхБазыРаспределенияПриИзмененииПосле"),
+                    event(
+                        "OnChange",
+                        "Расш1_НаборДанныхБазыРаспределенияПриИзмененииПосле"
+                    ),
                 ]
             )
             .as_deref(),
-            Some("{1,fe115cc8-9e33-4684-a166-bd5136fe7a9f,\"НаборДанныхБазыРаспределенияПриИзменении\",1,0,fe115cc8-9e33-4684-a166-bd5136fe7a9f,0,2,\"Расш1_НаборДанныхБазыРаспределенияПриИзмененииПосле\",1}")
+            Some(
+                "{1,fe115cc8-9e33-4684-a166-bd5136fe7a9f,\"НаборДанныхБазыРаспределенияПриИзменении\",1,0,fe115cc8-9e33-4684-a166-bd5136fe7a9f,0,2,\"Расш1_НаборДанныхБазыРаспределенияПриИзмененииПосле\",1}"
+            )
         );
 
         // A form-level event whose uuid the main attribute decides: a document
         // form writes one, every other form that declares it the other, and a
         // class the corpus never showed declaring it is refused.
-        let before_write = |class| {
-            format_native_events("Form", class, &[event("BeforeWrite", "ПередЗаписью")])
-        };
-        assert!(before_write("cfg:DocumentObject")
-            .unwrap()
-            .contains("8a5894c9-d2ff-4c1d-b433-89cc352bbfbc"));
-        assert!(before_write("cfg:CatalogObject")
-            .unwrap()
-            .contains("9cc34712-da5f-4faa-a653-343d2085fbe8"));
+        let before_write =
+            |class| format_native_events("Form", class, &[event("BeforeWrite", "ПередЗаписью")]);
+        assert!(
+            before_write("cfg:DocumentObject")
+                .unwrap()
+                .contains("8a5894c9-d2ff-4c1d-b433-89cc352bbfbc")
+        );
+        assert!(
+            before_write("cfg:CatalogObject")
+                .unwrap()
+                .contains("9cc34712-da5f-4faa-a653-343d2085fbe8")
+        );
         assert_eq!(before_write(""), None);
 
         // An event the platform could not spell carries its uuid as its name.
         assert_eq!(
-            format_native_events("Form", "", &[event("b3c10170-c5ff-4cba-b537-679e1c872b45", "Обработчик")]).as_deref(),
-            Some("{1,b3c10170-c5ff-4cba-b537-679e1c872b45,\"Обработчик\",1,0,b3c10170-c5ff-4cba-b537-679e1c872b45,0,1}")
+            format_native_events(
+                "Form",
+                "",
+                &[event("b3c10170-c5ff-4cba-b537-679e1c872b45", "Обработчик")]
+            )
+            .as_deref(),
+            Some(
+                "{1,b3c10170-c5ff-4cba-b537-679e1c872b45,\"Обработчик\",1,0,b3c10170-c5ff-4cba-b537-679e1c872b45,0,1}"
+            )
         );
 
         // A name no kind declares is refused, and so is one another kind
@@ -8868,10 +11572,7 @@ mod tests {
             None
         );
         assert_eq!(
-            format_native_font(
-                &font(&[("kind", "AutoFont"), ("charSet", "204")]),
-                none
-            ),
+            format_native_font(&font(&[("kind", "AutoFont"), ("charSet", "204")]), none),
             None
         );
     }
@@ -9081,7 +11782,10 @@ mod tests {
         let form = DataPathForm {
             attributes: BTreeMap::from([(
                 "СписокКорректировок".to_string(),
-                attribute("1", &["cfg:AccumulationRegisterRecordSet.ПланыПроизводства"]),
+                attribute(
+                    "1",
+                    &["cfg:AccumulationRegisterRecordSet.ПланыПроизводства"],
+                ),
             )]),
             items: BTreeMap::from([(
                 "СписокКорректировок".to_string(),
@@ -9137,7 +11841,10 @@ mod tests {
             resolve_form_data_path(&list, None, "Список.ExtDimensionDr1"),
             None
         );
-        assert_eq!(resolve_form_data_path(&list, None, "Список.Организация"), None);
+        assert_eq!(
+            resolve_form_data_path(&list, None, "Список.Организация"),
+            None
+        );
         // The list's own three members are platform constants and do place.
         assert_eq!(
             resolve_form_data_path(&list, None, "Список.Order").as_deref(),

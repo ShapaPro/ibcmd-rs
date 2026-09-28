@@ -136,11 +136,7 @@ pub(crate) fn gantt_chart_value(settings_xml: &str, host: ChartHost) -> Result<S
 /// `<Attribute>`; the source is the element as the file spells it. Both are
 /// compared line by line with the indentation set aside, so the check does
 /// not depend on where the caller cut the element out.
-fn verify_round_trip(
-    source: &str,
-    value: &str,
-    render: fn(&str) -> Option<String>,
-) -> Result<()> {
+fn verify_round_trip(source: &str, value: &str, render: fn(&str) -> Option<String>) -> Result<()> {
     let rendered = render(value)
         .ok_or_else(|| anyhow!("the exporter cannot read back the chart the writer built"))?;
     let expected = significant_lines(source);
@@ -338,21 +334,23 @@ fn chart_record(node: &XmlNode, host: ChartHost) -> Result<String> {
     // `xLabelsOrientation` is `post[1]`'s code (`Horizontal` 0, `Vertical` 1,
     // `Auto` 2), which the points scale's own orientation mirrors; `tail[40]`
     // reads 1 on the one `Vertical` record of the stand and 0 on every other.
-    let (orientation_40, orientation_code) =
-        match leaf(c.required("xLabelsOrientation")?)?.trim() {
-            "Auto" => ("0", "2"),
-            "Horizontal" => ("0", "0"),
-            "Vertical" => ("1", "1"),
-            other => bail!(
-                "<d4p1:xLabelsOrientation> spells {other}, which the chart writer has not measured"
-            ),
-        };
+    let (orientation_40, orientation_code) = match leaf(c.required("xLabelsOrientation")?)?.trim() {
+        "Auto" => ("0", "2"),
+        "Horizontal" => ("0", "0"),
+        "Vertical" => ("1", "1"),
+        other => bail!(
+            "<d4p1:xLabelsOrientation> spells {other}, which the chart writer has not measured"
+        ),
+    };
     set(40, orientation_40.into());
     set(41, line(c.required("scaleLine")?)?);
     set(42, color(c.required("scaleColor")?)?);
     set(43, boolean(c.required("isAutoSeriesName")?)?.into());
     set(44, boolean(c.required("isAutoPointName")?)?.into());
-    set(45, code(c.required("maxMode")?, &[("NotDefined", "0")])?.into());
+    set(
+        45,
+        code(c.required("maxMode")?, &[("NotDefined", "0")])?.into(),
+    );
     set(46, integer(c.required("maxSeries")?)?);
     set(47, integer(c.required("maxSeriesPrc")?)?);
     set(48, code(c.required("spaceMode")?, &[("Half", "1")])?.into());
@@ -382,7 +380,9 @@ fn chart_record(node: &XmlNode, host: ChartHost) -> Result<String> {
         "Palette8" => "0",
         "Palette32" => "1",
         "Gradient" => "13",
-        other => bail!("<d4p1:paletteKind> spells {other}, which the chart writer has not measured"),
+        other => {
+            bail!("<d4p1:paletteKind> spells {other}, which the chart writer has not measured")
+        }
     };
     set(63, "0".into());
     set(64, "0".into());
@@ -399,7 +399,10 @@ fn chart_record(node: &XmlNode, host: ChartHost) -> Result<String> {
     exact(c.required("autoTransposition")?, "false")?;
     set(65, boolean(c.required("legendScrollEnable")?)?.into());
     set(66, color(c.required("surfaceColor")?)?);
-    set(67, code(c.required("radarScaleType")?, &[("Circle", "0")])?.into());
+    set(
+        67,
+        code(c.required("radarScaleType")?, &[("Circle", "0")])?.into(),
+    );
     set(
         68,
         code(c.required("gaugeValuesPresentation")?, &[("Needle", "0")])?.into(),
@@ -469,7 +472,11 @@ fn chart_record(node: &XmlNode, host: ChartHost) -> Result<String> {
     set(117, color(c.required("multiStageLinkColor")?)?);
     set(127, axis(c.required("valuesAxis")?)?);
     set(128, axis(c.required("pointsAxis")?)?);
-    for (slot, name) in [(139, "pointsScale"), (140, "valuesScale"), (141, "seriesScale")] {
+    for (slot, name) in [
+        (139, "pointsScale"),
+        (140, "valuesScale"),
+        (141, "seriesScale"),
+    ] {
         let block = match c.optional(name) {
             Some(scale) => scale_of(scale)?,
             None => Scale::default(),
@@ -541,7 +548,9 @@ fn chart_record(node: &XmlNode, host: ChartHost) -> Result<String> {
             d.finish()?;
             start
         }
-        _ => bail!("<d4p1:paletteKind> {palette_kind} disagrees with <d4p1:colorPaletteDescription>"),
+        _ => {
+            bail!("<d4p1:paletteKind> {palette_kind} disagrees with <d4p1:colorPaletteDescription>")
+        }
     };
     let reference_bands_palette = match c.optional("referenceBandsColorPaletteDescription") {
         None => "{0,14,{3,4,{0}},{3,4,{0}},0,0}".to_string(),
@@ -938,10 +947,13 @@ fn scale_of(node: &XmlNode) -> Result<Scale> {
     let mut title_text_source = false;
     let mut title_text = false;
     for child in &node.children {
-        let name = child
-            .name
-            .strip_prefix("d4p1:")
-            .ok_or_else(|| anyhow!("<{}> names <{}>, which the chart writer cannot place", node.name, child.name))?;
+        let name = child.name.strip_prefix("d4p1:").ok_or_else(|| {
+            anyhow!(
+                "<{}> names <{}>, which the chart writer cannot place",
+                node.name,
+                child.name
+            )
+        })?;
         ensure!(
             seen.insert(name.to_string()),
             "<{}> names <d4p1:{name}> twice",
@@ -1185,7 +1197,14 @@ fn gantt_series_like(node: &XmlNode, is_points: bool) -> Result<String> {
     let mut c = Children::chart(node)?;
     exact(c.required("testMode")?, "false")?;
     let mut v = Children::chart(c.required("value")?)?;
-    for name in ["itemKey", "key", "parentKey", "leftKey", "rightKey", "extKey"] {
+    for name in [
+        "itemKey",
+        "key",
+        "parentKey",
+        "leftKey",
+        "rightKey",
+        "extKey",
+    ] {
         exact(v.required(name)?, "0")?;
     }
     empty(v.required("title")?)?;
@@ -1247,7 +1266,9 @@ fn gantt_time_scale(node: &XmlNode) -> Result<String> {
         let day_format_rule = match leaf(l.required("dayFormatRule")?)?.trim() {
             "WeekDay" => "2",
             "MonthDayWeekDay" => "3",
-            other => bail!("<d4p1:dayFormatRule> spells {other}, which the chart writer has not measured"),
+            other => bail!(
+                "<d4p1:dayFormatRule> spells {other}, which the chart writer has not measured"
+            ),
         };
         empty(l.required("format")?)?;
         let mut labels = Children::chart(l.required("labels")?)?;
@@ -1261,7 +1282,10 @@ fn gantt_time_scale(node: &XmlNode) -> Result<String> {
             "{{8,{measure},1,{show},{level_line},{{3,0,{{12632256}}}},{day_format_rule},{{1,0}},{{0,{{1,0,0}}}},{AUTO_COLOR},{AUTO_COLOR},1}}"
         ));
     }
-    ensure!(!levels.is_empty(), "a Gantt chart's time scale names no level");
+    ensure!(
+        !levels.is_empty(),
+        "a Gantt chart's time scale names no level"
+    );
     exact(c.required("transparent")?, "false")?;
     let back_color = color(c.required("backColor")?)?;
     let text_color = color(c.required("textColor")?)?;
@@ -1361,7 +1385,9 @@ fn integer(node: &XmlNode) -> Result<String> {
     let text = leaf(node)?.trim();
     let digits = text.strip_prefix('-').unwrap_or(text);
     ensure!(
-        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && text.parse::<i64>().is_ok(),
+        !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && text.parse::<i64>().is_ok(),
         "<{}> spells {text}, which is not an integer",
         node.name
     );
@@ -1418,7 +1444,12 @@ fn percent(node: &XmlNode) -> Result<String> {
         .parse()
         .ok()
         .filter(|value| *value <= 100 && text.bytes().all(|byte| byte.is_ascii_digit()))
-        .ok_or_else(|| anyhow!("<{}> spells {text}, which is not a percentage the chart writer places", node.name))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "<{}> spells {text}, which is not a percentage the chart writer places",
+                node.name
+            )
+        })?;
     Ok(platform_double(f64::from(value) / 100.0))
 }
 
@@ -1536,12 +1567,8 @@ fn font(node: &XmlNode) -> Result<String> {
     if attributes.len() == 1 && attributes.get("kind").map(String::as_str) == Some("AutoFont") {
         return Ok(AUTO_FONT.to_string());
     }
-    format_native_font(&attributes, |_| None).ok_or_else(|| {
-        anyhow!(
-            "<{}> names a font the chart writer cannot place",
-            node.name
-        )
-    })
+    format_native_font(&attributes, |_| None)
+        .ok_or_else(|| anyhow!("<{}> names a font the chart writer cannot place", node.name))
 }
 
 /// `<… width="W" gap="false"><v8ui:style xsi:type="v8ui:ChartLineType">…`
@@ -1585,7 +1612,10 @@ fn border(node: &XmlNode, chart_border: bool) -> Result<String> {
     } else {
         BORDER_UUID
     };
-    Ok(format!("{{3,0,{{0}},{},{width},0,{uuid}}}", style.raw_code()))
+    Ok(format!(
+        "{{3,0,{{0}},{},{width},0,{uuid}}}",
+        style.raw_code()
+    ))
 }
 
 fn width_of(node: &XmlNode) -> Result<&str> {
@@ -1636,7 +1666,10 @@ fn localized(node: &XmlNode) -> Result<String> {
             item.name
         );
         let [lang, content] = item.children.as_slice() else {
-            bail!("<{}> names an item that is not a language and a text", node.name);
+            bail!(
+                "<{}> names an item that is not a language and a text",
+                node.name
+            );
         };
         ensure!(
             lang.name == "v8:lang" && content.name == "v8:content",
@@ -2175,7 +2208,12 @@ mod tests {
         let mut out = vec![
             (
                 "outer".to_string(),
-                format!("{},{},{}", outer[0].show(), outer[1].show(), outer[2].show()),
+                format!(
+                    "{},{},{}",
+                    outer[0].show(),
+                    outer[1].show(),
+                    outer[2].show()
+                ),
             ),
             (
                 "holder".to_string(),
@@ -2305,7 +2343,8 @@ mod tests {
     #[test]
     fn writes_the_modern_shape_for_an_old_record() {
         let (raw, native) = OLD_SHAPE_CHART;
-        let written = parse(&format_form_embedded_chart(element(native)).expect("chart is written"));
+        let written =
+            parse(&format_form_embedded_chart(element(native)).expect("chart is written"));
         assert_eq!(written.list()[3].list()[3].list()[0].leaf(), "74");
         assert_eq!(parse(raw).list()[3].list()[3].list()[0].leaf(), "73");
     }
@@ -2446,8 +2485,9 @@ mod tests {
         .expect("offline context");
         let render = |path: &str, uuid: &str| -> Option<String> {
             let text = std::fs::read_to_string(path).ok()?;
-            let body = crate::module_blob::parse_form_body_plain(text.trim_start_matches('\u{feff}'))
-                .expect("form body parses");
+            let body =
+                crate::module_blob::parse_form_body_plain(text.trim_start_matches('\u{feff}'))
+                    .expect("form body parses");
             crate::mssql_dump::render_form_body_xml_offline(&body, &context, uuid)
         };
         let index = std::fs::read_to_string(format!("{corpus}/index.tsv")).expect("index.tsv");

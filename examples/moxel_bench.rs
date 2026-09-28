@@ -71,7 +71,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(dir) = &write_dir {
         fs::create_dir_all(dir)?;
     }
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()?;
     let failed = AtomicUsize::new(0);
     let different = AtomicUsize::new(0);
     let missing = AtomicUsize::new(0);

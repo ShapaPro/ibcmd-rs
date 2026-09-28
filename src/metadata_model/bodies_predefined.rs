@@ -265,10 +265,7 @@ fn catalog_row(properties: &Element, items: &[&Element]) -> Result<Brace> {
     }
     let mut root = Row::new(root_values);
     root.children = catalog_items(items, code)?;
-    Ok(brace_list![
-        Brace::num(0),
-        value_tree(&columns, &[root])
-    ])
+    Ok(brace_list![Brace::num(0), value_tree(&columns, &[root])])
 }
 
 fn catalog_items(items: &[&Element], code: CodeType) -> Result<Vec<Row>> {
@@ -335,18 +332,11 @@ fn characteristic_row(
         type_description(brace_list![Brace::str("Pattern")]),
     ]);
     root.children = characteristic_items(items, code, context)?;
-    Ok(brace_list![
-        Brace::num(1),
-        value_tree(&columns, &[root])
-    ])
+    Ok(brace_list![Brace::num(1), value_tree(&columns, &[root])])
 }
 
 fn type_description(pattern: Brace) -> Brace {
-    brace_list![
-        Brace::str("#"),
-        Brace::atom(TYPE_DESCRIPTION_TYPE),
-        pattern
-    ]
+    brace_list![Brace::str("#"), Brace::atom(TYPE_DESCRIPTION_TYPE), pattern]
 }
 
 fn characteristic_items(
@@ -482,10 +472,7 @@ fn account_row(
         chart.dimension_types(None)?,
     ]);
     root.children = chart.items(items)?;
-    Ok(brace_list![
-        Brace::num(2),
-        value_tree(&columns, &[root])
-    ])
+    Ok(brace_list![Brace::num(2), value_tree(&columns, &[root])])
 }
 
 /// `(uuid, name)` of every child object of one element name, in order.

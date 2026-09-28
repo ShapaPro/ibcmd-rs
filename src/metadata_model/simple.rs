@@ -111,8 +111,7 @@ fn language(object: &ObjectXml<'_>) -> Result<Brace> {
 fn constant(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
     let properties = object.properties()?;
     let (manager_type, manager_value) = generated_ids(object.element, "Manager")?;
-    let (value_manager_type, value_manager_value) =
-        generated_ids(object.element, "ValueManager")?;
+    let (value_manager_type, value_manager_value) = generated_ids(object.element, "ValueManager")?;
     let (key_type, key_value) = generated_ids(object.element, "ValueKey")?;
     Ok(row(brace_list![
         Brace::num(16),
@@ -352,12 +351,17 @@ fn event_name(event: &str) -> Result<String> {
 /// `{1,{1,<md base>,<source pattern>,"<event>",<handler module>,"<method>"},0}`
 fn event_subscription(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<Brace> {
     let properties = object.properties()?;
-    let (module, method) = handler(properties.child_text("Handler").unwrap_or_default(), context)?;
+    let (module, method) = handler(
+        properties.child_text("Handler").unwrap_or_default(),
+        context,
+    )?;
     Ok(row(brace_list![
         Brace::num(1),
         md_base(&object.uuid, properties),
         type_pattern(properties.child("Source"), context)?,
-        Brace::str(event_name(properties.child_text("Event").unwrap_or_default().trim())?),
+        Brace::str(event_name(
+            properties.child_text("Event").unwrap_or_default().trim()
+        )?),
         module,
         method,
     ]))
@@ -380,7 +384,9 @@ fn scheduled_job(object: &ObjectXml<'_>, context: &DescriptorContext) -> Result<
     Ok(row(brace_list![
         Brace::num(2),
         md_base(&object.uuid, properties),
-        Brace::str(native_text(properties.child_text("Key").unwrap_or_default())),
+        Brace::str(native_text(
+            properties.child_text("Key").unwrap_or_default()
+        )),
         Brace::str(native_text(
             properties.child_text("Description").unwrap_or_default()
         )),
@@ -409,7 +415,12 @@ fn owned_object_uuids(
     let mut out = Vec::new();
     if let Some(children) = object.child_objects() {
         for child in children.children_named(kind) {
-            let full = format!("{}.{}.{kind}.{}", object.kind, object.name, child.text.trim());
+            let full = format!(
+                "{}.{}.{kind}.{}",
+                object.kind,
+                object.name,
+                child.text.trim()
+            );
             out.push(Brace::uuid(&object_uuid(&full, context)?));
         }
     }
