@@ -3296,6 +3296,7 @@ pub fn stage_source_objects(
             "staging deletes existing ConfigSave rows; pass --replace-config-save"
         ));
     }
+    stage_timing::reset_from_env();
 
     let manifest = scan_sources_with_prefixes(&args.source_root, &args.path_prefix)?;
     let metadata_xmls = filter_source_paths_by_prefix(
@@ -3342,8 +3343,10 @@ pub fn stage_source_objects(
     // several connections; one bcp query with --sqlcmd) instead of one query
     // per object (ERP УХ: over an hour without it).
     if !args.per_row && std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").is_none() {
-        let rows = crate::mssql_dump::fetch_config_part0_rows(&sql, &args.database)
-            .context("failed to read the target's Config rows in bulk")?;
+        let rows = timed_stage_step("base rows read", || {
+            crate::mssql_dump::fetch_config_part0_rows(&sql, &args.database)
+                .context("failed to read the target's Config rows in bulk")
+        })?;
         let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), rows));
     }
     let metadata_objects = parallel::install(|| {
@@ -8380,8 +8383,10 @@ fn run_bulk_stage(
     apply_path: &Path,
 ) -> Result<()> {
     run_sql_file(sql, prepare_path)?;
-    let loaded = load_bulk_stage_rows(sql, table, rows, rows_path)
-        .and_then(|()| run_sql_file(sql, apply_path));
+    let loaded = timed_stage_step("rows into the tempdb table", || {
+        load_bulk_stage_rows(sql, table, rows, rows_path)
+    })
+    .and_then(|()| timed_stage_step("apply into ConfigSave", || run_sql_file(sql, apply_path)));
     if let Err(error) = loaded {
         let drop = format!(
             "IF OBJECT_ID(N'tempdb.dbo.{name}', N'U') IS NOT NULL DROP TABLE tempdb.dbo.{table};",
@@ -8395,6 +8400,20 @@ fn run_bulk_stage(
         let _ = fs::remove_file(rows_path);
     }
     Ok(())
+}
+
+/// Runs one SQL step of a stage; with `IBCMD_RS_STAGE_TIMING` set, says how
+/// long it took.
+fn timed_stage_step<R>(label: &str, step: impl FnOnce() -> Result<R>) -> Result<R> {
+    let started = std::time::Instant::now();
+    let result = step();
+    if stage_timing::enabled() {
+        eprintln!(
+            "stage timing: {label} in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    result
 }
 
 /// The staged rows into the tempdb table: from memory through the built-in
