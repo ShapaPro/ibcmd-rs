@@ -124,8 +124,9 @@ pub fn prepare_dump_config_with(
     Ok(())
 }
 
-/// Refuses a load whose tree is not in the platform's XML format.
-fn check_tree(platform: PlatformSpec, source_root: &Path, database: &str) -> Result<()> {
+/// Refuses a load whose tree is not in the platform's XML format (also the
+/// drop-in `infobase config import`, `crate::infobase`).
+pub(crate) fn check_tree(platform: PlatformSpec, source_root: &Path, database: &str) -> Result<()> {
     let Some(tree) = crate::metadata_model::export::tree_version(source_root) else {
         return Ok(());
     };

@@ -17,6 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::cli::InfobaseConfigSourceVersion;
+use crate::platform::PlatformSpec;
 
 /// One option of the grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,6 +66,7 @@ pub enum Opt {
     Out,
     // ibcmd-rs's own (no native spelling)
     Report,
+    Platform,
     Sqlcmd,
     Settings,
     SourceVersion,
@@ -140,6 +142,7 @@ pub const MODE_OPTIONS: &[OptSpec] = &[
     valued(Opt::Report, &["report"], None),
     valued(Opt::Sqlcmd, &["sqlcmd"], None),
     valued(Opt::Settings, &["settings"], None),
+    valued(Opt::Platform, &["platform"], None),
     valued(Opt::SourceVersion, &["source-version"], None),
     valued(Opt::DbPwdEnv, &["db-pwd-env"], None),
 ];
@@ -346,6 +349,8 @@ pub enum Refusal {
     ImportArchive(PathBuf),
     /// A value of the wrong shape.
     InvalidValue { option: String, value: String },
+    /// Two options that exclude each other.
+    Conflict { first: String, second: String },
 }
 
 /// The connection and the other options every served command shares.
@@ -367,6 +372,9 @@ pub struct Common {
     pub report: Option<PathBuf>,
     pub sqlcmd: Option<PathBuf>,
     pub settings: Option<PathBuf>,
+    /// `--platform` (ibcmd-rs's own): the platform whose XML format is read
+    /// or written, a release (`8.3.27`) or an exact build of the registry.
+    pub platform: Option<PlatformSpec>,
     pub source_version: Option<InfobaseConfigSourceVersion>,
     pub db_pwd_env: Option<String>,
 }
@@ -664,6 +672,23 @@ fn common(scan: &Scan) -> Result<Common, Refusal> {
                 })?,
         ),
     };
+    let platform = match scan.value(Opt::Platform) {
+        None => None,
+        Some(value) => {
+            Some(
+                crate::platform::parse(value.trim()).map_err(|_| Refusal::InvalidValue {
+                    option: "--platform".to_string(),
+                    value: format!("{value} (известные версии: {})", known_platforms()),
+                })?,
+            )
+        }
+    };
+    if platform.is_some() && source_version.is_some() {
+        return Err(Refusal::Conflict {
+            first: "--platform".to_string(),
+            second: "--source-version".to_string(),
+        });
+    }
     Ok(Common {
         native_config: path(Opt::Config),
         dbms,
@@ -679,9 +704,24 @@ fn common(scan: &Scan) -> Result<Common, Refusal> {
         report: path(Opt::Report),
         sqlcmd: path(Opt::Sqlcmd),
         settings: path(Opt::Settings),
+        platform,
         source_version,
         db_pwd_env: text(Opt::DbPwdEnv),
     })
+}
+
+/// The releases and builds of the platform registry, for a refused
+/// `--platform`.
+fn known_platforms() -> String {
+    crate::platform::known()
+        .map(|known| {
+            known
+                .iter()
+                .map(|spec| spec.display())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
 }
 
 /// Every command path of the tree, with its kind (for the tests and the
@@ -793,6 +833,48 @@ mod tests {
             OsString::from(r"F:\ibcmd\lab\parity\bsp\native")
         );
         assert!(!request.base_free);
+    }
+
+    #[test]
+    fn the_platform_is_one_the_registry_knows() {
+        let request = export(&[
+            "config",
+            "export",
+            "--dbms=MSSQLServer",
+            "--db-name=b",
+            "--platform=8.5.1",
+            "out",
+        ]);
+        assert_eq!(
+            request.common.platform.map(|platform| platform.display()),
+            Some("8.5.1")
+        );
+        let request = import(&["config", "import", "--platform", "8.3.27.2214", "tree"]);
+        assert_eq!(
+            request.common.platform.map(|platform| platform.display()),
+            Some("8.3.27.2214")
+        );
+        match parse(&["config", "export", "--platform=8.4", "out"]) {
+            Err(Refusal::InvalidValue { option, value }) => {
+                assert_eq!(option, "--platform");
+                assert!(value.starts_with("8.4 (известные версии: "), "{value}");
+                assert!(value.contains("8.5.1"), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            parse(&[
+                "config",
+                "export",
+                "--platform=8.3.27",
+                "--source-version=2.20",
+                "out",
+            ]),
+            Err(Refusal::Conflict {
+                first: "--platform".to_string(),
+                second: "--source-version".to_string(),
+            })
+        );
     }
 
     #[test]

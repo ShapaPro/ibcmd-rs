@@ -49,7 +49,8 @@ pub fn refusal_exit_code(refusal: &Refusal) -> i32 {
         | Refusal::MissingValue(_)
         | Refusal::Incomplete { .. }
         | Refusal::UnknownDbms(_)
-        | Refusal::InvalidValue { .. } => EXIT_MALFORMED,
+        | Refusal::InvalidValue { .. }
+        | Refusal::Conflict { .. } => EXIT_MALFORMED,
         Refusal::UnsupportedCommand(_)
         | Refusal::UnsupportedOption { .. }
         | Refusal::UnsupportedServer(_)
@@ -169,6 +170,9 @@ pub fn refusal_message(refusal: &Refusal, program: &str) -> (String, bool) {
         Refusal::InvalidValue { option, value } => {
             format!("Недопустимое значение параметра {option}: {value}")
         }
+        Refusal::Conflict { first, second } => {
+            format!("Параметры {first} и {second} нельзя указывать вместе")
+        }
     };
     (message, false)
 }
@@ -272,6 +276,7 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         settings: common.settings.clone(),
         native_config: common.native_config.clone(),
         format: None,
+        platform: common.platform,
         source_version: common.source_version,
         dbms: common.dbms.clone(),
         db_server: common.db_server.as_deref().map(sql_server_name),
@@ -305,6 +310,7 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         settings: common.settings.clone(),
         native_config: common.native_config.clone(),
         format: None,
+        platform: common.platform,
         source_version: common.source_version,
         dbms: common.dbms.clone(),
         db_server: common.db_server.as_deref().map(sql_server_name),

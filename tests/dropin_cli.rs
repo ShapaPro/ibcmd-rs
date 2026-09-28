@@ -232,6 +232,21 @@ fn unsupported_options_and_malformed_lines_are_refused() {
         &["infobase", "config", "export", "--dbms=Foo", out.arg()],
         "Указанный тип СУБД не поддерживается: 'Foo'",
     );
+    assert_malformed(
+        &["infobase", "config", "export", "--platform=8.4", out.arg()],
+        "Недопустимое значение параметра --platform: 8.4 (известные версии: ",
+    );
+    assert_malformed(
+        &[
+            "infobase",
+            "config",
+            "export",
+            "--platform=8.3.27",
+            "--source-version=2.20",
+            out.arg(),
+        ],
+        "Параметры --platform и --source-version нельзя указывать вместе",
+    );
     // no database at all: the platform would open a file infobase; the
     // export starts and fails on the connection
     assert_exit(

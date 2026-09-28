@@ -22,8 +22,9 @@ use crate::cli::{
 };
 use crate::infobase::{
     ConnectionConfig, ConnectionRequest, InfobaseConfigExportReport, InfobaseConfigImportReport,
-    absolute_path, ensure_mssql, export_config, export_config_report, first_value, import_config,
-    prepare_output_dir, read_settings, resolve_connection, settings_string_at, settings_value,
+    PlatformNeed, absolute_path, ensure_mssql, export_config, export_config_report, first_value,
+    import_config, prepare_output_dir, read_settings, resolve_connection, settings_string_at,
+    settings_value,
 };
 use crate::module_blob::{
     parse_common_module_xml_properties, parse_simple_metadata_xml_properties,
@@ -123,6 +124,7 @@ pub fn roundtrip_config(
         settings: args.settings.as_deref(),
         native_config: None,
         format: args.format,
+        platform: None,
         source_version: args.source_version,
         dbms: args.dbms.as_deref(),
         db_server: args.db_server.as_deref(),
@@ -130,6 +132,7 @@ pub fn roundtrip_config(
         db_user: args.db_user.as_deref(),
         db_pwd: args.db_pwd.as_deref(),
         db_pwd_env: &args.db_pwd_env,
+        need: PlatformNeed::Given,
     })?;
     ensure_mssql(&config.dbms)?;
 
@@ -182,6 +185,7 @@ pub fn roundtrip_config(
             settings: args.settings.clone(),
             native_config: None,
             format: args.format,
+            platform: None,
             source_version: args.source_version,
             dbms: Some(config.dbms.clone()),
             db_server: Some(config.db_server.clone()),
@@ -213,6 +217,7 @@ pub fn roundtrip_config(
         settings: args.settings.clone(),
         native_config: None,
         format: args.format,
+        platform: None,
         source_version: args.source_version,
         dbms: Some(config.dbms.clone()),
         db_server: Some(config.db_server.clone()),
@@ -332,6 +337,7 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
         settings: args.settings.as_deref(),
         native_config: None,
         format: args.format,
+        platform: None,
         source_version: args.source_version,
         dbms: args.dbms.as_deref(),
         db_server: args.db_server.as_deref(),
@@ -339,6 +345,7 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
         db_user: args.db_user.as_deref(),
         db_pwd: args.db_pwd.as_deref(),
         db_pwd_env: &args.db_pwd_env,
+        need: PlatformNeed::Given,
     })?;
     ensure_mssql(&config.dbms)?;
 
@@ -355,6 +362,7 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
             settings: args.settings.clone(),
             native_config: None,
             format: args.format,
+            platform: None,
             source_version: args.source_version,
             dbms: Some(config.dbms.clone()),
             db_server: Some(config.db_server.clone()),

@@ -24,6 +24,8 @@ use crate::cli::{
     MssqlStageSourceObjectsArgs,
 };
 use crate::legacy_version::LegacyVersionAxes;
+use crate::platform::PlatformSpec;
+use crate::settings::{DatabaseTarget, PlatformHint, SettingSource, Settings};
 
 #[derive(Debug, Serialize)]
 pub struct InfobaseConfigExportReport {
@@ -93,12 +95,34 @@ impl std::fmt::Display for OutputDirectoryNotEmpty {
 
 impl std::error::Error for OutputDirectoryNotEmpty {}
 
+/// What an operation lets tell its platform when nothing names it (see
+/// `crate::settings::PlatformHint`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlatformNeed<'a> {
+    /// The research round trip: the XML version given, else 2.20.
+    Given,
+    /// An export into `output_dir`: the settings, then the configuration's
+    /// compatibility mode (read through `sqlcmd`, and only when nothing
+    /// above decides).
+    Export {
+        sqlcmd: &'a Path,
+        output_dir: &'a Path,
+        overwrite: bool,
+    },
+    /// An import of `source_dir`: the settings, then the tree's own
+    /// `Configuration.xml`; a platform named for the database must be the
+    /// tree's.
+    Import { source_dir: &'a Path },
+}
+
 /// Everything a command was given to reach its database with.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ConnectionRequest<'a> {
     pub settings: Option<&'a Path>,
     pub native_config: Option<&'a Path>,
     pub format: Option<InfobaseConfigFormat>,
+    /// `--platform`: its XML format, above everything else.
+    pub platform: Option<PlatformSpec>,
     pub source_version: Option<InfobaseConfigSourceVersion>,
     pub dbms: Option<&'a str>,
     pub db_server: Option<&'a str>,
@@ -106,6 +130,7 @@ pub(crate) struct ConnectionRequest<'a> {
     pub db_user: Option<&'a str>,
     pub db_pwd: Option<&'a str>,
     pub db_pwd_env: &'a str,
+    pub need: PlatformNeed<'a>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,8 +144,9 @@ pub(crate) struct ConnectionConfig {
     pub native_config: Option<PathBuf>,
     pub format: InfobaseConfigFormat,
     pub legacy_adapter: MssqlLegacyAdapter,
-    /// Whether the XML version was asked for (command line or settings)
-    /// rather than defaulted: an import reads an unasked one off the tree.
+    /// Whether the XML version was named (command line, `--settings`, or
+    /// the platform the settings give the database) rather than defaulted:
+    /// an import reads an unnamed one off the tree.
     pub xml_version_given: bool,
 }
 
@@ -141,6 +167,7 @@ impl InfobaseConfigExportArgs {
             settings: self.settings.as_deref(),
             native_config: self.native_config.as_deref(),
             format: self.format,
+            platform: self.platform,
             source_version: self.source_version,
             dbms: self.dbms.as_deref(),
             db_server: self.db_server.as_deref(),
@@ -148,6 +175,11 @@ impl InfobaseConfigExportArgs {
             db_user: self.db_user.as_deref(),
             db_pwd: self.db_pwd.as_deref(),
             db_pwd_env: &self.db_pwd_env,
+            need: PlatformNeed::Export {
+                sqlcmd: &self.sqlcmd,
+                output_dir: &self.output_dir,
+                overwrite: self.overwrite,
+            },
         }
     }
 }
@@ -158,6 +190,7 @@ impl InfobaseConfigImportArgs {
             settings: self.settings.as_deref(),
             native_config: self.native_config.as_deref(),
             format: self.format,
+            platform: self.platform,
             source_version: self.source_version,
             dbms: self.dbms.as_deref(),
             db_server: self.db_server.as_deref(),
@@ -165,6 +198,9 @@ impl InfobaseConfigImportArgs {
             db_user: self.db_user.as_deref(),
             db_pwd: self.db_pwd.as_deref(),
             db_pwd_env: &self.db_pwd_env,
+            need: PlatformNeed::Import {
+                source_dir: &self.source_dir,
+            },
         }
     }
 }
@@ -195,35 +231,14 @@ pub(crate) fn export_config_report(
     let source_version = config.legacy_source_version()?;
     let output_dir = absolute_path(output_dir_arg)?;
     prepare_output_dir(&output_dir, overwrite)?;
-    let dump_args = MssqlDumpConfigArgs {
-        rows_dir: None,
-        model_export: false,
-        legacy_export: false,
-        sqlcmd: sqlcmd.to_path_buf(),
-        bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
-        runtime_journal: None,
-        server: config.db_server.clone(),
-        sql_user: config.db_user.clone(),
-        sql_pwd: config.db_pwd.clone(),
-        sql_pwd_env: db_pwd_env.to_string(),
-        database: config.db_name.clone(),
-        output_dir: output_dir.clone(),
-        overwrite: false,
-        include_config_save: false,
+    let dump_args = dump_args(
+        config,
+        sqlcmd,
+        db_pwd_env,
+        output_dir.clone(),
         file_names,
-        file_name_lists: Vec::new(),
-        inflate: false,
-        extract_module_text: true,
-        extract_metadata_xml: true,
-        require_complete_root_metadata: false,
-        require_complete_source_assets: false,
-        collect_all_source_asset_diagnostics: false,
-        no_binary_rows: true,
-        write_binary_rows: false,
-        write_manifest: false,
-        platform: None,
         source_version,
-    };
+    );
     let dump = crate::mssql_dump::dump_config(&dump_args)?;
 
     let exported_files = if count_exported_files {
@@ -252,6 +267,46 @@ pub(crate) fn export_config_report(
         source_asset_rows: dump.total_source_asset_rows,
         dump_timings: dump.timings,
     })
+}
+
+/// The export of the connection's database into `output_dir`.
+fn dump_args(
+    config: &ConnectionConfig,
+    sqlcmd: &Path,
+    db_pwd_env: &str,
+    output_dir: PathBuf,
+    file_names: Vec<String>,
+    source_version: InfobaseConfigSourceVersion,
+) -> MssqlDumpConfigArgs {
+    MssqlDumpConfigArgs {
+        rows_dir: None,
+        model_export: false,
+        legacy_export: false,
+        sqlcmd: sqlcmd.to_path_buf(),
+        bcp_executable: crate::mssql_dump::bcp_executable_for_sqlcmd(sqlcmd),
+        runtime_journal: None,
+        server: config.db_server.clone(),
+        sql_user: config.db_user.clone(),
+        sql_pwd: config.db_pwd.clone(),
+        sql_pwd_env: db_pwd_env.to_string(),
+        database: config.db_name.clone(),
+        output_dir,
+        overwrite: false,
+        include_config_save: false,
+        file_names,
+        file_name_lists: Vec::new(),
+        inflate: false,
+        extract_module_text: true,
+        extract_metadata_xml: true,
+        require_complete_root_metadata: false,
+        require_complete_source_assets: false,
+        collect_all_source_asset_diagnostics: false,
+        no_binary_rows: true,
+        write_binary_rows: false,
+        write_manifest: false,
+        platform: None,
+        source_version,
+    }
 }
 
 pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigImportReport> {
@@ -355,51 +410,108 @@ fn build_import_stage_args(
     })
 }
 
+/// The settings of `crate::settings` -- the environment, `ibcmd-rs.toml`
+/// and the platform ibcmd's own `--config` -- read once, and only when the
+/// command line and `--settings` leave something open.
+struct Defaults<'a> {
+    native_config: Option<&'a Path>,
+    load: SettingsLoader<'a>,
+    loaded: Option<Settings>,
+}
+
+/// Reads the settings: [`Settings::load`] outside the tests.
+type SettingsLoader<'a> = &'a dyn Fn(Option<&Path>) -> Result<Settings>;
+
+impl<'a> Defaults<'a> {
+    fn new(native_config: Option<&'a Path>, load: SettingsLoader<'a>) -> Self {
+        Self {
+            native_config,
+            load,
+            loaded: None,
+        }
+    }
+
+    fn get(&mut self) -> Result<&Settings> {
+        if self.loaded.is_none() {
+            self.loaded = Some((self.load)(self.native_config)?);
+        }
+        Ok(self.loaded.as_ref().expect("the settings were read above"))
+    }
+}
+
+/// Each value, highest first: the command line, the `--settings` file (the
+/// vRunner JSON), the settings (`crate::settings`: the environment,
+/// `ibcmd-rs.toml`, the `database:` section of native `--config`), then the
+/// default (`MSSQLServer`, `localhost`). The XML version: `--platform`, the
+/// hidden `--source-version` or `--settings`; otherwise the platform the
+/// settings give the database, then what the operation shows
+/// ([`PlatformNeed`]).
 pub(crate) fn resolve_connection(request: ConnectionRequest<'_>) -> Result<ConnectionConfig> {
+    resolve_connection_with(request, &Settings::load)
+}
+
+fn resolve_connection_with(
+    request: ConnectionRequest<'_>,
+    load: SettingsLoader<'_>,
+) -> Result<ConnectionConfig> {
     let settings = match request.settings {
         Some(path) => Some(read_settings(path)?),
         None => None,
     };
-    // ---- SETTINGS HAND-OFF (0.3) ------------------------------------------
-    // `request.native_config` is the platform's ibcmd configuration file
-    // (`--config`/`-c`). It is kept (and reported) but not read yet: the
-    // settings layer of the platform track (`crate::settings`) reads the
-    // connection from it, below the command line and above the defaults.
-    // -----------------------------------------------------------------------
+    let mut defaults = Defaults::new(request.native_config, load);
     let native_config = request.native_config.map(Path::to_path_buf);
 
     let format = request
         .format
         .or_else(|| settings_format(&settings))
         .unwrap_or(InfobaseConfigFormat::Xml);
-    // ---- XML VERSION CALL POINT (0.3) -------------------------------------
-    // The one place an `infobase config` command decides its XML version:
-    // the hidden `--source-version`, else the `--settings` file, else 2.20
-    // (platform 8.3.27); an import given neither reads it off the tree
-    // (`xml_version_given`). The platform track switches this to
-    // `crate::settings::resolve_platform(...)`.
-    let legacy_adapter = resolve_legacy_adapter(&settings, request.source_version)?;
-    let xml_version_given =
-        request.source_version.is_some() || settings_xml_dialect(&settings)?.is_some();
-    // -----------------------------------------------------------------------
-    let dbms = first_value(request.dbms, settings_value(&settings, "dbms-type"))
-        .unwrap_or_else(|| "MSSQLServer".to_string());
-    let db_server = first_value(request.db_server, settings_value(&settings, "dbms-server"))
-        .unwrap_or_else(|| "localhost".to_string());
-    let db_name =
-        first_value(request.db_name, settings_value(&settings, "dbms-base")).ok_or_else(|| {
-            anyhow!(
-                "не указано имя базы данных: передайте --dbms=MSSQLServer, --db-server и --db-name \
-                 (файловые информационные базы не поддерживаются в этой версии ibcmd-rs)"
-            )
-        })?;
-    let db_user = first_value(request.db_user, settings_value(&settings, "dbms-user"));
+    let xml_version_given = request.platform.is_some()
+        || request.source_version.is_some()
+        || settings_xml_dialect(&settings)?.is_some()
+        || settings_platform_build(&settings)?.is_some();
+    let legacy_adapter = match request.platform {
+        Some(platform) => adapter_for(platform.xml_version())?,
+        None => resolve_legacy_adapter(&settings, request.source_version)?,
+    };
+    let dbms = match first_value(request.dbms, settings_value(&settings, "dbms-type")) {
+        Some(dbms) => dbms,
+        None => defaults
+            .get()?
+            .dbms()
+            .map(|dbms| dbms.value)
+            .unwrap_or_else(|| "MSSQLServer".to_string()),
+    };
+    let db_server = match first_value(request.db_server, settings_value(&settings, "dbms-server")) {
+        Some(server) => server,
+        None => defaults
+            .get()?
+            .db_server()
+            .map(|server| server.value)
+            .unwrap_or_else(|| "localhost".to_string()),
+    };
+    let db_name = match first_value(request.db_name, settings_value(&settings, "dbms-base")) {
+        Some(name) => name,
+        None => defaults
+            .get()?
+            .db_name()
+            .map(|name| name.value)
+            .ok_or_else(|| {
+                anyhow!(
+                    "не указано имя базы данных: передайте --dbms=MSSQLServer, --db-server и --db-name \
+                     (файловые информационные базы не поддерживаются в этой версии ibcmd-rs)"
+                )
+            })?,
+    };
+    let db_user = match first_value(request.db_user, settings_value(&settings, "dbms-user")) {
+        Some(user) => Some(user),
+        None => defaults.get()?.db_user().map(|user| user.value),
+    };
     let (db_pwd, password_source) = match db_user {
-        Some(_) => resolve_password(request.db_pwd, &settings, request.db_pwd_env)?,
+        Some(_) => resolve_password(request.db_pwd, &settings, request.db_pwd_env, &mut defaults)?,
         None => (None, None),
     };
 
-    Ok(ConnectionConfig {
+    let mut config = ConnectionConfig {
         dbms,
         db_server,
         db_name,
@@ -410,7 +522,100 @@ pub(crate) fn resolve_connection(request: ConnectionRequest<'_>) -> Result<Conne
         format,
         legacy_adapter,
         xml_version_given,
-    })
+    };
+    settle_platform(&mut config, &request, &mut defaults)?;
+    Ok(config)
+}
+
+/// The XML version the command line and `--settings` left open, from the
+/// platform the settings give the database (`crate::settings`), and the
+/// check of an import's tree against a platform named for it.
+fn settle_platform(
+    config: &mut ConnectionConfig,
+    request: &ConnectionRequest<'_>,
+    defaults: &mut Defaults<'_>,
+) -> Result<()> {
+    match request.need {
+        PlatformNeed::Given => Ok(()),
+        PlatformNeed::Export {
+            sqlcmd,
+            output_dir,
+            overwrite,
+        } => {
+            if config.xml_version_given {
+                return Ok(());
+            }
+            let platform = {
+                let known: &ConnectionConfig = config;
+                let probe = || {
+                    // The probe reads the database: a directory that holds
+                    // files is refused first, as the export always did
+                    // before reading it.
+                    prepare_output_dir(&absolute_path(output_dir)?, overwrite)?;
+                    crate::mssql_dump::model_export::configuration_compatibility_8_5_or_later(
+                        &dump_args(
+                            known,
+                            sqlcmd,
+                            request.db_pwd_env,
+                            PathBuf::new(),
+                            Vec::new(),
+                            InfobaseConfigSourceVersion::V2_20,
+                        ),
+                    )
+                };
+                crate::settings::resolve_platform(
+                    None,
+                    defaults.get()?,
+                    DatabaseTarget::new(Some(&known.db_server), &known.db_name),
+                    PlatformHint::Export {
+                        compatibility_8_5_or_later: &probe,
+                    },
+                )?
+            };
+            config.legacy_adapter = adapter_for(platform.xml_version())?;
+            Ok(())
+        }
+        PlatformNeed::Import { source_dir } => {
+            if let Some(platform) = request.platform {
+                let source_root = absolute_path(source_dir)?;
+                return crate::settings::commands::check_tree(
+                    platform,
+                    &source_root,
+                    &config.db_name,
+                );
+            }
+            if config.xml_version_given {
+                return Ok(());
+            }
+            let source_root = absolute_path(source_dir)?;
+            let resolved = crate::settings::resolve_platform_with_source(
+                None,
+                defaults.get()?,
+                DatabaseTarget::new(Some(&config.db_server), &config.db_name),
+                PlatformHint::Import {
+                    source_root: &source_root,
+                },
+            )?;
+            // Nothing names the platform and the tree has no
+            // Configuration.xml to say it: each file is read in the format
+            // it declares, as before the settings existed.
+            if resolved.source != SettingSource::Default {
+                crate::settings::commands::check_tree(
+                    resolved.value,
+                    &source_root,
+                    &config.db_name,
+                )?;
+                config.legacy_adapter = adapter_for(resolved.value.xml_version())?;
+                config.xml_version_given = true;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The adapter of one XML version.
+fn adapter_for(selector: InfobaseConfigSourceVersion) -> Result<MssqlLegacyAdapter> {
+    resolve_legacy_adapter(&None, Some(selector))
 }
 
 pub(crate) fn read_settings(path: &Path) -> Result<Value> {
@@ -543,6 +748,7 @@ fn resolve_password(
     cli_db_pwd: Option<&str>,
     settings: &Option<Value>,
     db_pwd_env: &str,
+    defaults: &mut Defaults<'_>,
 ) -> Result<(Option<String>, Option<String>)> {
     if let Some(value) = cli_db_pwd.filter(|value| !value.is_empty()) {
         return Ok((Some(value.to_string()), Some("--db-pwd".to_string())));
@@ -552,6 +758,10 @@ fn resolve_password(
     }
     if let Some(value) = settings_value(settings, "dbms-pwd") {
         return Ok((Some(value), Some("settings".to_string())));
+    }
+    // `IBCMD_DB_PSW` or `database.password` of native `--config`
+    if let Some(value) = defaults.get()?.db_password() {
+        return Ok((Some(value.value), Some(value.source.to_string())));
     }
     bail!(
         "не указан пароль пользователя сервера СУБД: передайте --db-pwd (--database-password), -W или переменную окружения {db_pwd_env}"
@@ -793,6 +1003,7 @@ mod tests {
             settings: None,
             native_config: None,
             format: Some(InfobaseConfigFormat::Xml),
+            platform: None,
             source_version: Some(InfobaseConfigSourceVersion::V2_21),
             dbms: Some("MSSQLServer".to_string()),
             db_server: Some("localhost".to_string()),
@@ -812,6 +1023,168 @@ mod tests {
             stage_mode: InfobaseImportStageMode::Auto,
             source_dir: PathBuf::from(r".\fixtures\source"),
         }
+    }
+
+    /// A scratch folder, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ibcmd-rs-infobase-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The settings of `dir/ibcmd-rs.toml` (as the current directory's)
+    /// and of `env`, nothing else.
+    fn settings_in<'a>(
+        dir: &'a Path,
+        env: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(Option<&Path>) -> Result<Settings> + 'a {
+        move |native_config| {
+            let lookup = |name: &str| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            };
+            Settings::from_sources(&crate::settings::SettingsSources {
+                env: &lookup,
+                executable: None,
+                current_dir: Some(dir.to_path_buf()),
+                app_data: None,
+                native_config,
+            })
+        }
+    }
+
+    fn export_args(db_name: &str) -> InfobaseConfigExportArgs {
+        InfobaseConfigExportArgs {
+            settings: None,
+            native_config: None,
+            format: None,
+            platform: None,
+            source_version: None,
+            dbms: Some("MSSQLServer".to_string()),
+            db_server: Some("localhost".to_string()),
+            db_name: Some(db_name.to_string()),
+            db_user: None,
+            db_pwd: None,
+            db_pwd_env: "IBCMD_RS_TEST_NO_SUCH_PSW".to_string(),
+            user: None,
+            password: None,
+            password_env: "IBCMD_USER_PSW".to_string(),
+            // never run: every case here settles before a probe
+            sqlcmd: PathBuf::from("no-such-sqlcmd"),
+            overwrite: false,
+            count_files: false,
+            output_dir: PathBuf::from("out"),
+        }
+    }
+
+    #[test]
+    fn a_database_entry_names_the_export_format_above_the_environment() {
+        let scratch = Scratch::new("binding");
+        fs::write(
+            scratch.0.join("ibcmd-rs.toml"),
+            "[[database]]\nname = \"uha_*\"\nplatform = \"8.5.1\"\n",
+        )
+        .unwrap();
+        let load = settings_in(&scratch.0, &[("IBCMD_RS_PLATFORM", "8.3.27")]);
+        let export = |name: &str| {
+            resolve_connection_with(export_args(name).connection(), &load)
+                .unwrap()
+                .legacy_source_version()
+                .unwrap()
+        };
+        // the entry beats IBCMD_RS_PLATFORM; the other database takes it
+        assert_eq!(export("uha_85"), InfobaseConfigSourceVersion::V2_21);
+        assert_eq!(export("bsp"), InfobaseConfigSourceVersion::V2_20);
+        // --platform beats the entry
+        let mut args = export_args("uha_85");
+        args.platform = Some(crate::platform::parse("8.3.27").unwrap());
+        let config = resolve_connection_with(args.connection(), &load).unwrap();
+        assert_eq!(
+            config.legacy_source_version().unwrap(),
+            InfobaseConfigSourceVersion::V2_20
+        );
+    }
+
+    #[test]
+    fn the_connection_takes_what_its_flags_leave_open_from_the_settings() {
+        let scratch = Scratch::new("connection");
+        fs::write(
+            scratch.0.join("ibcmd-rs.toml"),
+            "platform = \"8.3.27\"\ndb-server = \"sql02\"\ndb-user = \"reader\"\n",
+        )
+        .unwrap();
+        let load = settings_in(&scratch.0, &[("IBCMD_DB_PSW", "secret")]);
+        let mut args = export_args("bsp");
+        args.db_server = None;
+        let config = resolve_connection_with(args.connection(), &load).unwrap();
+        assert_eq!(config.db_server, "sql02");
+        assert_eq!(config.db_user.as_deref(), Some("reader"));
+        assert_eq!(config.db_pwd.as_deref(), Some("secret"));
+        assert_eq!(config.password_source.as_deref(), Some("IBCMD_DB_PSW"));
+        // a flag keeps its value
+        let mut args = export_args("bsp");
+        args.db_server = Some("sql01".to_string());
+        args.db_user = Some("sa".to_string());
+        args.db_pwd = Some("flag".to_string());
+        let config = resolve_connection_with(args.connection(), &load).unwrap();
+        assert_eq!(config.db_server, "sql01");
+        assert_eq!(config.db_user.as_deref(), Some("sa"));
+        assert_eq!(config.db_pwd.as_deref(), Some("flag"));
+    }
+
+    #[test]
+    fn an_import_tree_must_be_in_the_format_of_its_databases_platform() {
+        let scratch = Scratch::new("import-tree");
+        fs::write(
+            scratch.0.join("ibcmd-rs.toml"),
+            "[[database]]\nname = \"bsp85\"\nplatform = \"8.5.1\"\n",
+        )
+        .unwrap();
+        let tree = scratch.0.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(
+            tree.join("Configuration.xml"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\"><Configuration uuid=\"00000000-0000-0000-0000-000000000001\"/></MetaDataObject>\n",
+        )
+        .unwrap();
+        let load = settings_in(&scratch.0, &[]);
+        let import = |name: &str| {
+            let mut args = import_args();
+            args.source_version = None;
+            args.db_name = Some(name.to_string());
+            args.source_dir = tree.clone();
+            resolve_connection_with(args.connection(), &load)
+        };
+        let error = import("bsp85").unwrap_err().to_string();
+        assert!(
+            error.contains("is XML 2.20, but the platform of bsp85 is 8.5.1"),
+            "{error}"
+        );
+        // nothing names the platform of another database: the tree's own
+        let config = import("bsp").unwrap();
+        assert!(config.xml_version_given);
+        assert_eq!(
+            config.legacy_source_version().unwrap(),
+            InfobaseConfigSourceVersion::V2_20
+        );
     }
 
     #[test]
@@ -853,7 +1226,8 @@ mod tests {
     }
 
     #[test]
-    fn the_native_config_file_is_kept_for_the_settings_layer() {
+    fn a_connection_the_flags_complete_does_not_read_the_native_config() {
+        // everything is given: the (missing) file is kept, not opened
         let mut args = import_args();
         args.native_config = Some(PathBuf::from(r"C:\ibcmd\ibcmd.yml"));
         let config = resolve_connection(args.connection()).unwrap();
@@ -861,6 +1235,50 @@ mod tests {
             config.native_config.as_deref(),
             Some(Path::new(r"C:\ibcmd\ibcmd.yml"))
         );
+    }
+
+    #[test]
+    fn the_native_config_names_what_the_flags_do_not() {
+        let scratch = Scratch::new("native");
+        fs::write(
+            scratch.0.join("ibcmd-rs.toml"),
+            "platform = \"8.3.27\"
+",
+        )
+        .unwrap();
+        let native = scratch.0.join("ibcmd.yml");
+        fs::write(
+            &native,
+            "database:
+  dbms: MSSQLServer
+  server: native-server
+  name: erp_prod
+  user: native-user
+  password: native-secret
+",
+        )
+        .unwrap();
+        let load = settings_in(&scratch.0, &[]);
+        let mut args = export_args("unused");
+        args.native_config = Some(native.clone());
+        args.dbms = None;
+        args.db_server = None;
+        args.db_name = None;
+        let config = resolve_connection_with(args.connection(), &load).unwrap();
+        assert_eq!(config.dbms, "MSSQLServer");
+        assert_eq!(config.db_server, "native-server");
+        assert_eq!(config.db_name, "erp_prod");
+        assert_eq!(config.db_user.as_deref(), Some("native-user"));
+        assert_eq!(config.db_pwd.as_deref(), Some("native-secret"));
+        assert!(
+            config
+                .password_source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("database.password in ")),
+            "{:?}",
+            config.password_source
+        );
+        assert_eq!(config.native_config.as_deref(), Some(native.as_path()));
     }
 
     #[test]

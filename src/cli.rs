@@ -626,6 +626,10 @@ pub struct InfobaseConfigExportArgs {
     pub native_config: Option<PathBuf>,
     /// Source format. Can also be set in settings as format/config-format.
     pub format: Option<InfobaseConfigFormat>,
+    /// `--platform`: the platform whose XML format is written. Without it
+    /// (and without `source_version`) the settings name it
+    /// (`crate::settings`), then the configuration's compatibility mode.
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Source XML version. 2.20 matches 1C 8.3.27, 2.21 matches 1C 8.5.1. Can also be set in settings.
     pub source_version: Option<InfobaseConfigSourceVersion>,
     /// DBMS type. Only MSSQLServer is supported by the direct exporter.
@@ -668,6 +672,10 @@ pub struct InfobaseConfigImportArgs {
     pub native_config: Option<PathBuf>,
     /// Source format. Can also be set in settings as format/config-format.
     pub format: Option<InfobaseConfigFormat>,
+    /// `--platform`: the platform whose XML format the tree must be in.
+    /// Without it (and without `source_version`) the settings name it
+    /// (`crate::settings`), then the tree's own `Configuration.xml`.
+    pub platform: Option<crate::platform::PlatformSpec>,
     /// Source XML version; when neither this nor the settings give one, the
     /// tree's own (`Configuration.xml`) is read.
     pub source_version: Option<InfobaseConfigSourceVersion>,
