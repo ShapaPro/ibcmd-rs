@@ -2431,26 +2431,27 @@ fn write_source_asset_inner(
             };
             // A platform 8.5 body is read through its 8.3.27 down-conversion;
             // what its appended members say is applied to the written XML.
-            let v85_converted;
-            let mut v85_facts = None;
-            let body = if super::form_v85::is_v85_form_body(body) {
-                let (converted, facts) = super::form_v85::down_convert_v85_form_body(body)
-                    .map_err(|error| {
-                        anyhow::Error::new(SourceAssetRefusal::new(
-                            "source.form.v85.layout",
-                            MetadataSourceFailureClass::Unsupported,
-                            format!("{error:#}"),
-                        ))
-                    })
-                    .with_context(|| {
-                        format!(
-                            "failed to down-convert 8.5 form body of source asset {}",
-                            asset.primary_path.display()
-                        )
-                    })?;
-                v85_converted = converted;
-                v85_facts = Some(facts);
-                &v85_converted
+            let converted_8_5_1;
+            let mut facts_8_5_1 = None;
+            let body = if super::form::layout_8_5_1::is_form_body_8_5_1(body) {
+                let (converted, facts) =
+                    super::form::layout_8_5_1::down_convert_form_body_8_5_1(body)
+                        .map_err(|error| {
+                            anyhow::Error::new(SourceAssetRefusal::new(
+                                "source.form.layout-8-5-1",
+                                MetadataSourceFailureClass::Unsupported,
+                                format!("{error:#}"),
+                            ))
+                        })
+                        .with_context(|| {
+                            format!(
+                                "failed to down-convert 8.5 form body of source asset {}",
+                                asset.primary_path.display()
+                            )
+                        })?;
+                converted_8_5_1 = converted;
+                facts_8_5_1 = Some(facts);
+                &converted_8_5_1
             } else {
                 body
             };
@@ -2487,21 +2488,21 @@ fn write_source_asset_inner(
                     xml,
                     diagnostics: extraction_diagnostics,
                 } => {
-                    // Diagnostic: `IBCMD_RS_V85_FORM_PASS=off` writes what the 8.3.27
+                    // Diagnostic: `IBCMD_RS_XML_2_21_FORM_PASS=off` writes what the 8.3.27
                     // codec reads from the (down-converted) body, without the 2.21
                     // pass -- the XML a 2.21 load hands the 8.3.27 form writer.
-                    let v85_pass_off =
-                        std::env::var("IBCMD_RS_V85_FORM_PASS").is_ok_and(|value| value == "off");
-                    let (xml, v85_item_assets) = match &v85_facts {
-                        _ if v85_pass_off => (xml, Vec::new()),
-                        Some(facts) => super::form_v85_writer::apply_v85_form_facts(
+                    let xml_2_21_pass_off = std::env::var("IBCMD_RS_XML_2_21_FORM_PASS")
+                        .is_ok_and(|value| value == "off");
+                    let (xml, item_assets_8_5_1) = match &facts_8_5_1 {
+                        _ if xml_2_21_pass_off => (xml, Vec::new()),
+                        Some(facts) => super::form::xml_2_21_writer::apply_form_facts_8_5_1(
                             xml,
                             facts,
                             context.object_refs,
                         )
                             .map_err(|error| {
                                 anyhow::Error::new(SourceAssetRefusal::new(
-                                    "source.form.v85.facts",
+                                    "source.form.facts-8-5-1",
                                     MetadataSourceFailureClass::Unsupported,
                                     format!("{error:#}"),
                                 ))
@@ -2513,10 +2514,10 @@ fn write_source_asset_inner(
                                 )
                             })?,
                         None if context.source_version == InfobaseConfigSourceVersion::V2_21 => (
-                            super::form_v85_writer::apply_v85_upgrade_defaults(xml)
+                            super::form::xml_2_21_writer::apply_xml_2_21_upgrade_defaults(xml)
                                 .map_err(|error| {
                                     anyhow::Error::new(SourceAssetRefusal::new(
-                                        "source.form.v85.upgrade",
+                                        "source.form.xml-2-21-upgrade",
                                         MetadataSourceFailureClass::Unsupported,
                                         format!("{error:#}"),
                                     ))
@@ -2549,13 +2550,13 @@ fn write_source_asset_inner(
                     // An 8.5 body's item records carry 8.5 revisions the
                     // picture-owner scan does not know; its down-converted
                     // layout names the same owners in the 8.3.27 shape.
-                    let item_assets = if v85_facts.is_some() {
+                    let item_assets = if facts_8_5_1.is_some() {
                         let mut text = body.layout.clone();
                         for block in &body.trailing {
                             text.push_str(block);
                         }
                         let mut assets = extract_form_item_assets_from_text(&text);
-                        assets.extend(v85_item_assets);
+                        assets.extend(item_assets_8_5_1);
                         dedup_form_item_assets(assets)
                     } else {
                         extract_form_item_assets(bytes)

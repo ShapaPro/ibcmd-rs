@@ -130,7 +130,7 @@ impl EmptyStageContext {
         let facts = configuration_facts(&configuration)?;
         // Body layouts follow CompatibilityMode, not the XML dialect: a 2.21
         // tree of an 8.3-compatible configuration stores 8.3.27 bodies.
-        crate::module_blob::V85_TREE_IN_V83_LAYOUT.store(
+        crate::module_blob::XML_2_21_TREE_IN_LAYOUT_8_3.store(
             version != "2.20" && facts.compatibility < 80500,
             Ordering::Relaxed,
         );

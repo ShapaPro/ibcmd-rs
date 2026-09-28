@@ -968,15 +968,13 @@ mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
 mod fetch;
+mod form;
 mod form_body;
 mod form_ref_index;
-mod form_v85;
-mod form_v85_load;
-mod form_v85_order;
-mod form_v85_writer;
-pub(crate) use form_v85_load::{
-    compile_v85_form_body_in_v83_layout, compile_v85_native_form_body, down_convert_v85_form_xml,
-    is_v85_form_xml, up_convert_v85_chart_records, up_convert_v85_primitives_in_place,
+pub(crate) use form::load_8_5_1::{
+    compile_native_form_body_8_5_1, compile_xml_2_21_form_body_in_layout_8_3,
+    down_convert_xml_2_21_form, is_xml_2_21_form, up_convert_chart_records_8_5_1,
+    up_convert_primitives_8_5_1_in_place,
 };
 pub(crate) use refs::constant_row_always_used;
 pub(crate) use source_assets::declare_palette_namespace_beside_style;
@@ -3246,7 +3244,7 @@ fn dump_table_rows_with_options_mode(
                                                 &type_index,
                                                 &object_refs,
                                                 &form_refs,
-                                                V85_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
+                                                XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS && source_version == InfobaseConfigSourceVersion::V2_21,
                                             )
                                         } else {
                                             InformationRegisterMasterDimensionIndex::new()
@@ -4543,7 +4541,7 @@ fn dump_table_rows_streamed(
                 &type_index,
                 &object_refs,
                 &form_refs,
-                V85_PRESERVES_RAW_REGISTER_DATA_PATHS
+                XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS
                     && source_version == InfobaseConfigSourceVersion::V2_21,
             )
         } else {
@@ -6647,7 +6645,8 @@ fn parse_business_process_flowchart_blob(
     // An 8.5 flowchart differs from its 8.3.27 spelling only in its colour and
     // font tuples (BSP `BusinessProcesses/Задание`, member for member).
     let text = if source_version == InfobaseConfigSourceVersion::V2_21 {
-        form_v85::down_convert_v85_primitives_text(text.trim_start_matches('\u{feff}')).ok()?
+        form::layout_8_5_1::down_convert_primitives_8_5_1_text(text.trim_start_matches('\u{feff}'))
+            .ok()?
     } else {
         text
     };
@@ -12192,7 +12191,7 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
     } else if kind == "PaletteColor" {
         let color = metadata_object_fields(text)
             .and_then(|fields| fields.get(2).map(|field| field.trim().to_string()))?;
-        let color = form_v85::v85_palette_color(&color)
+        let color = form::layout_8_5_1::palette_color_8_5_1(&color)
             .map(ToOwned::to_owned)
             .or_else(|| form_body::parse_form_control_color(&color, object_refs))?;
         format_palette_color_source_xml(&header, &color, source_version).into_bytes()
@@ -16484,7 +16483,7 @@ fn parse_register_properties_from_text(
                 type_index,
                 object_refs,
                 form_refs,
-                V85_PRESERVES_RAW_REGISTER_DATA_PATHS
+                XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS
                     && source_version == InfobaseConfigSourceVersion::V2_21,
             );
             let tag = strict_tag
@@ -16502,7 +16501,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
+                    XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS
                         && source_version == InfobaseConfigSourceVersion::V2_21,
                 ) {
                     Some((value_types, properties)) => {
@@ -16529,7 +16528,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
+                    XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS
                         && source_version == InfobaseConfigSourceVersion::V2_21,
                 )
             {
@@ -16546,7 +16545,7 @@ fn parse_register_properties_from_text(
                     type_index,
                     object_refs,
                     form_refs,
-                    V85_PRESERVES_RAW_REGISTER_DATA_PATHS
+                    XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS
                         && source_version == InfobaseConfigSourceVersion::V2_21,
                 )
                 .or_else(|| {
@@ -21020,7 +21019,7 @@ fn classify_resolved_data_path_reference(
 /// `InformationRegister.ДополнительныеСведения.Dimension.Свойство`, ERP УХ
 /// 100 information and 39 accumulation registers), so the early assumption
 /// that it kept the raw spelling is switched off rather than guessed at.
-const V85_PRESERVES_RAW_REGISTER_DATA_PATHS: bool = false;
+const XML_2_21_PRESERVES_RAW_REGISTER_DATA_PATHS: bool = false;
 
 fn parse_information_register_data_path(
     fields: &[&str],
@@ -27024,8 +27023,8 @@ fn parse_report_properties_from_text(
     // 8.3.27 `19` record's 18: `<AuxiliaryVariantForm>`, a form reference
     // (8.5.1.1150 BSP: all 52 reports, member for member otherwise).
     let revision = fields.first()?.trim();
-    let v85_record = revision == "20" && fields.len() == 19;
-    let strict_layout = revision == "19" || v85_record;
+    let record_8_5_1 = revision == "20" && fields.len() == 19;
+    let strict_layout = revision == "19" || record_8_5_1;
     let child_templates = if strict_layout {
         parse_report_child_templates_from_text(text, &header, template_refs)?
     } else {
@@ -27064,7 +27063,7 @@ fn parse_report_properties_from_text(
         default_settings_form: parse_catalog_form_ref(fields.get(6).copied(), form_refs),
         auxiliary_settings_form: parse_catalog_form_ref(fields.get(17).copied(), form_refs),
         default_variant_form: parse_catalog_form_ref(fields.get(10).copied(), form_refs),
-        auxiliary_variant_form: v85_record
+        auxiliary_variant_form: record_8_5_1
             .then(|| parse_catalog_form_ref(fields.get(18).copied(), form_refs)),
         variants_storage: parse_metadata_object_ref(fields.get(8).copied(), object_refs),
         settings_storage: parse_metadata_object_ref(fields.get(9).copied(), object_refs),
@@ -31201,7 +31200,7 @@ fn enum_value_color_xml(color: &str) -> Option<String> {
     if color == "{3,4,{0}}" {
         return Some("auto".to_string());
     }
-    if let Some(name) = form_v85::v85_palette_color(color) {
+    if let Some(name) = form::layout_8_5_1::palette_color_8_5_1(color) {
         return Some(name.to_string());
     }
     form_body::parse_form_control_color(color, &BTreeMap::new())
@@ -35265,7 +35264,7 @@ fn parse_style_color_value(value: &str) -> Option<String> {
         return None;
     }
     // An 8.5 style item may name a palette colour (8.5.1.1150 BSP: 7 items).
-    if let Some(name) = form_v85::v85_palette_color(fields.get(3)?) {
+    if let Some(name) = form::layout_8_5_1::palette_color_8_5_1(fields.get(3)?) {
         return Some(name.to_owned());
     }
     let color_fields = split_1c_braced_fields(fields.get(3)?, 0)?;

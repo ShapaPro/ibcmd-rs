@@ -295,8 +295,9 @@ pub(crate) fn extract_form_body_xml(
     // the source export reads one (`source_assets`). What the members 8.5
     // appends say is only spelled by the 2.21 writer, which this 2.20 reading
     // is not.
-    if super::form_v85::is_v85_form_body(body.parsed()) {
-        let (converted, _) = super::form_v85::down_convert_v85_form_body(body.parsed()).ok()?;
+    if super::form::layout_8_5_1::is_form_body_8_5_1(body.parsed()) {
+        let (converted, _) =
+            super::form::layout_8_5_1::down_convert_form_body_8_5_1(body.parsed()).ok()?;
         return extract_form_body_xml_from_body(&converted, object_refs, object_refs);
     }
     extract_form_body_xml_from_body(body.parsed(), object_refs, object_refs)
@@ -16185,7 +16186,7 @@ pub(super) fn parse_form_label_field_text_color(
     field: &str,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
-    if let Some(name) = super::form_v85::v85_palette_color(field) {
+    if let Some(name) = super::form::layout_8_5_1::palette_color_8_5_1(field) {
         return Some(name.to_owned());
     }
     let fields = split_1c_braced_fields(field.trim(), 0)?;
@@ -16226,7 +16227,7 @@ pub(super) fn parse_form_control_color(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
     // An 8.5 palette colour keeps its own shape through the down-conversion.
-    if let Some(name) = super::form_v85::v85_palette_color(field) {
+    if let Some(name) = super::form::layout_8_5_1::palette_color_8_5_1(field) {
         return Some(name.to_owned());
     }
     let color = split_1c_braced_fields(field.trim(), 0)?;

@@ -556,13 +556,13 @@ const ENUM: &[&str] = &[
 ];
 
 /// Properties only the 2.21 dialect writes.
-const V85_ONLY: &[&str] = &["AuxiliaryVariantForm"];
+const XML_2_21_ONLY: &[&str] = &["AuxiliaryVariantForm"];
 
 /// Properties the 2.21 dialect writes although an older row does not store
 /// them.
 fn xml_only_default(kind: &str, property: &str, context: &ExportContext) -> Option<Element> {
     match (kind, property) {
-        ("Report", "AuxiliaryVariantForm") if context.is_v85() => Some(el(property)),
+        ("Report", "AuxiliaryVariantForm") if context.is_xml_2_21() => Some(el(property)),
         _ => None,
     }
 }
@@ -603,7 +603,7 @@ fn modern(compat: Compat) -> bool {
     compat >= Compat(8, 3, 27)
 }
 
-fn v851(compat: Compat) -> bool {
+fn since_8_5_1(compat: Compat) -> bool {
     compat >= Compat(8, 5, 1)
 }
 
@@ -618,8 +618,8 @@ fn slot_width(slot: &Slot, compat: Compat) -> usize {
                 0
             }
         }
-        Slot::Since851(inner) => {
-            if v851(compat) {
+        Slot::Since8_5_1(inner) => {
+            if since_8_5_1(compat) {
                 slot_width(inner, compat)
             } else {
                 0
@@ -712,7 +712,7 @@ pub(crate) fn decode(kind: &str, row: &Brace, context: &ExportContext) -> Result
             None if *name == "StandardAttributes" => {}
             None => match xml_only_default(kind, name, context) {
                 Some(element) => properties.children.push(element),
-                None if !context.is_v85() && V85_ONLY.contains(name) => {}
+                None if !context.is_xml_2_21() && XML_2_21_ONLY.contains(name) => {}
                 None => bail!("no slot decodes <{name}>"),
             },
         }
@@ -791,8 +791,8 @@ fn decode_slot(
             }
             return Ok(());
         }
-        Slot::Since851(inner) => {
-            if v851(compat) {
+        Slot::Since8_5_1(inner) => {
+            if since_8_5_1(compat) {
                 decode_slot(inner, record, position, walk, head, owner, context)?;
             }
             return Ok(());
@@ -817,7 +817,7 @@ fn decode_slot(
     };
     match *slot {
         Slot::Tag(old, new, latest) => {
-            let expected = if v851(compat) {
+            let expected = if since_8_5_1(compat) {
                 latest
             } else if modern(compat) {
                 new
@@ -923,7 +923,7 @@ fn decode_slot(
         // Constants and nil slots carry nothing the XML writes; the
         // lossless check compares them.
         Slot::Const(_) | Slot::Nil => {}
-        Slot::Generated(_) | Slot::Modern(_) | Slot::Since851(_) | Slot::ThisNode => {
+        Slot::Generated(_) | Slot::Modern(_) | Slot::Since8_5_1(_) | Slot::ThisNode => {
             unreachable!()
         }
     }
@@ -1100,7 +1100,7 @@ fn decode_child(
             let head = header(item(record, 1)?)?;
             let [name, synonym, comment] = header_elements(&head)?;
             let mut properties = el("Properties").child(name).child(synonym).child(comment);
-            if context.is_v85() {
+            if context.is_xml_2_21() {
                 let color = match record.get(2) {
                     Some(color) => enum_value_color(color)?,
                     None => "auto".to_string(),

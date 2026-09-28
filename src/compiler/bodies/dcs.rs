@@ -224,10 +224,10 @@ fn verify_schema_round_trip(
     }
     // A platform 8.5 source is written in dialect 2.21, which declares the
     // palette namespace beside the style one; it reads back under 2.21.
-    let exported_v85 =
+    let exported_xml_2_21 =
         crate::mssql_dump::declare_palette_namespace_beside_style(export("xml-2.21")?);
-    let actual_v85 = document_without_shell(&exported_v85);
-    if expected == actual_v85 {
+    let actual_xml_2_21 = document_without_shell(&exported_xml_2_21);
+    if expected == actual_xml_2_21 {
         return Ok(());
     }
     // Diagnostic: both readings of a refused schema, beside its source.
@@ -242,7 +242,7 @@ fn verify_schema_round_trip(
         let _ = std::fs::create_dir_all(dir);
         let _ = std::fs::write(dir.join(format!("{key}.source.xml")), expected);
         let _ = std::fs::write(dir.join(format!("{key}.v20.xml")), actual);
-        let _ = std::fs::write(dir.join(format!("{key}.v21.xml")), actual_v85);
+        let _ = std::fs::write(dir.join(format!("{key}.v21.xml")), actual_xml_2_21);
     }
     // The reading that got further is the one to report.
     let first_difference = |actual: &[u8]| {
@@ -252,7 +252,7 @@ fn verify_schema_round_trip(
             .position(|(left, right)| left != right)
             .unwrap_or_else(|| expected.len().min(actual.len()))
     };
-    let (at, actual) = [actual, actual_v85]
+    let (at, actual) = [actual, actual_xml_2_21]
         .into_iter()
         .map(|actual| (first_difference(actual), actual))
         .max_by_key(|(at, _)| *at)

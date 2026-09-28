@@ -1,6 +1,6 @@
 //! The 2.21 writer pass for platform 8.5 forms: what the members 8.5 appends
 //! say, applied to the XML the 8.3.27 codec wrote for the down-converted body
-//! (see `form_v85`).
+//! (see `layout_8_5_1`).
 //!
 //! Every rule below is a total function over the 8.5.1.1150 BSP native tree
 //! (`F:/ibcmd/lab/v85/tools/factfind.py`): for every attributable item of the
@@ -12,21 +12,21 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::form_v85::{FormV85Facts, FormV85ItemFacts, Node};
+use super::layout_8_5_1::{FormFactsV8_5_1, FormItemFactsV8_5_1, Node};
 
 /// One element of a written `Form.xml`, located by byte offsets. The writer
 /// puts every element on its own line, indented with tabs.
 #[derive(Debug, Clone)]
-pub(super) struct XmlElement {
-    pub(super) tag: String,
-    pub(super) id: Option<String>,
+pub(in crate::mssql_dump) struct XmlElement {
+    pub(in crate::mssql_dump) tag: String,
+    pub(in crate::mssql_dump) id: Option<String>,
     line_start: usize,
-    pub(super) open_start: usize,
+    pub(in crate::mssql_dump) open_start: usize,
     close_line_start: usize,
-    pub(super) line_end: usize,
-    pub(super) self_closing: bool,
-    pub(super) parent: Option<usize>,
-    pub(super) children: Vec<usize>,
+    pub(in crate::mssql_dump) line_end: usize,
+    pub(in crate::mssql_dump) self_closing: bool,
+    pub(in crate::mssql_dump) parent: Option<usize>,
+    pub(in crate::mssql_dump) children: Vec<usize>,
 }
 
 fn line_start_of(xml: &str, offset: usize) -> usize {
@@ -137,9 +137,9 @@ fn scan_elements(xml: &str) -> Result<Vec<XmlElement>> {
 }
 
 /// Pending text edits against one written XML, applied in one pass.
-pub(super) struct XmlEdits<'a> {
-    pub(super) xml: &'a str,
-    pub(super) elements: Vec<XmlElement>,
+pub(in crate::mssql_dump) struct XmlEdits<'a> {
+    pub(in crate::mssql_dump) xml: &'a str,
+    pub(in crate::mssql_dump) elements: Vec<XmlElement>,
     removed: BTreeSet<usize>,
     /// (start, end, replacement, child-order rank, sequence).
     edits: Vec<(usize, usize, String, usize, usize)>,
@@ -153,7 +153,7 @@ pub(super) struct XmlEdits<'a> {
 }
 
 impl<'a> XmlEdits<'a> {
-    pub(super) fn new(xml: &'a str) -> Result<Self> {
+    pub(in crate::mssql_dump) fn new(xml: &'a str) -> Result<Self> {
         Ok(Self {
             xml,
             elements: scan_elements(xml)?,
@@ -164,7 +164,7 @@ impl<'a> XmlEdits<'a> {
         })
     }
 
-    pub(super) fn new_lenient(xml: &'a str) -> Result<Self> {
+    pub(in crate::mssql_dump) fn new_lenient(xml: &'a str) -> Result<Self> {
         let mut edits = Self::new(xml)?;
         edits.lenient = true;
         Ok(edits)
@@ -172,7 +172,7 @@ impl<'a> XmlEdits<'a> {
 
     /// Replaces an element with `body` (CRLF-terminated lines) at its own
     /// place and indentation.
-    pub(super) fn replace(&mut self, element: usize, body: &str) {
+    pub(in crate::mssql_dump) fn replace(&mut self, element: usize, body: &str) {
         if self.removed.insert(element) {
             let start = self.elements[element].line_start;
             let end = self.elements[element].line_end;
@@ -192,7 +192,7 @@ impl<'a> XmlEdits<'a> {
         &self.xml[element.line_start..element.open_start]
     }
 
-    pub(super) fn direct_children(&self, parent: usize, tag: &str) -> Vec<usize> {
+    pub(in crate::mssql_dump) fn direct_children(&self, parent: usize, tag: &str) -> Vec<usize> {
         self.elements[parent]
             .children
             .iter()
@@ -201,7 +201,7 @@ impl<'a> XmlEdits<'a> {
             .collect()
     }
 
-    pub(super) fn remove(&mut self, element: usize) {
+    pub(in crate::mssql_dump) fn remove(&mut self, element: usize) {
         if self.removed.insert(element) {
             let start = self.elements[element].line_start;
             let end = self.elements[element].line_end;
@@ -216,7 +216,12 @@ impl<'a> XmlEdits<'a> {
 
     /// Adds `body` (CRLF-terminated lines, relative indentation) as a child of
     /// `parent`, at the place the 2.21 child order gives `tag`.
-    pub(super) fn insert_child(&mut self, parent: usize, tag: &str, body: &str) -> Result<()> {
+    pub(in crate::mssql_dump) fn insert_child(
+        &mut self,
+        parent: usize,
+        tag: &str,
+        body: &str,
+    ) -> Result<()> {
         self.inserts.push((parent, tag.to_owned(), body.to_owned()));
         Ok(())
     }
@@ -236,7 +241,7 @@ impl<'a> XmlEdits<'a> {
 
     fn place_child(&mut self, parent: usize, tag: &str, body: &str) -> Result<()> {
         let parent_tag = self.elements[parent].tag.clone();
-        let order = super::form_v85_order::child_order(&parent_tag);
+        let order = super::xml_2_21_order::child_order(&parent_tag);
         let order = match order {
             Some(order) => order,
             None if self.lenient => &[],
@@ -294,7 +299,7 @@ impl<'a> XmlEdits<'a> {
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> Result<String> {
+    pub(in crate::mssql_dump) fn finish(mut self) -> Result<String> {
         for (parent, tag, body) in std::mem::take(&mut self.inserts) {
             self.place_child(parent, &tag, &body)?;
         }
@@ -410,7 +415,7 @@ fn fact_object_xml(
             if text == "{3,4,{0}}" {
                 return Ok(None);
             }
-            let value = super::form_body::parse_form_control_color(&text, object_refs)
+            let value = super::super::form_body::parse_form_control_color(&text, object_refs)
                 .ok_or_else(|| anyhow!("<{element}>: unreadable 8.5 colour {text}"))?;
             Some(format!("<{element}>{value}</{element}>\r\n"))
         }
@@ -419,9 +424,9 @@ fn fact_object_xml(
                 return Ok(None);
             }
             if let Some((reference, load_transparent)) =
-                super::form_body::parse_form_child_item_picture_value(&text, object_refs)
+                super::super::form_body::parse_form_child_item_picture_value(&text, object_refs)
             {
-                return Ok(Some(super::form_body::format_form_picture_element(
+                return Ok(Some(super::super::form_body::format_form_picture_element(
                     element,
                     Some(&reference),
                     None,
@@ -433,9 +438,9 @@ fn fact_object_xml(
             // An inline picture: the element names the file the platform
             // writes beside the form (`Items/<item>/<element>.<ext>`).
             let (file_name, load_transparent, transparent_pixel, content) =
-                super::form_body::parse_form_embedded_picture_payload(&text, element)
+                super::super::form_body::parse_form_embedded_picture_payload(&text, element)
                     .ok_or_else(|| anyhow!("<{element}>: unreadable 8.5 picture {text}"))?;
-            let xml = super::form_body::format_form_picture_element(
+            let xml = super::super::form_body::format_form_picture_element(
                 element,
                 None,
                 Some(&file_name),
@@ -450,11 +455,11 @@ fn fact_object_xml(
             if text == "{1,0}" {
                 return Ok(None);
             }
-            let values = super::form_body::parse_form_localized_strings(&text);
+            let values = super::super::form_body::parse_form_localized_strings(&text);
             if values.is_empty() {
                 bail!("<{element}>: unreadable 8.5 localized string {text}");
             }
-            Some(super::form_body::format_form_localized_section(
+            Some(super::super::form_body::format_form_localized_section(
                 element, &values, 0,
             ))
         }
@@ -472,7 +477,7 @@ struct FactRule {
     values: &'static [(&'static str, Option<&'static str>)],
 }
 
-pub(super) const FIELD_TAGS: &[&str] = &[
+pub(in crate::mssql_dump) const FIELD_TAGS: &[&str] = &[
     "InputField",
     "LabelField",
     "CheckBoxField",
@@ -491,7 +496,7 @@ pub(super) const FIELD_TAGS: &[&str] = &[
     "PDFDocumentField",
 ];
 
-pub(super) const GROUPING: &[(&str, Option<&str>)] = &[
+pub(in crate::mssql_dump) const GROUPING: &[(&str, Option<&str>)] = &[
     ("0", Some("Vertical")),
     ("1", Some("Horizontal")),
     ("2", Some("HorizontalIfPossible")),
@@ -501,7 +506,7 @@ pub(super) const GROUPING: &[(&str, Option<&str>)] = &[
 ];
 
 /// `0` false, `1` true, `2` unset.
-pub(super) const TRI_STATE: &[(&str, Option<&str>)] =
+pub(in crate::mssql_dump) const TRI_STATE: &[(&str, Option<&str>)] =
     &[("0", Some("false")), ("1", Some("true")), ("2", None)];
 
 const FACT_RULES: &[FactRule] = &[
@@ -905,8 +910,8 @@ const FACT_RULES: &[FactRule] = &[
 
 fn fact_node<'f>(
     source: FactSource,
-    facts: &'f FormV85Facts,
-    item: Option<&'f FormV85ItemFacts>,
+    facts: &'f FormFactsV8_5_1,
+    item: Option<&'f FormItemFactsV8_5_1>,
     command: Option<&'f [Node]>,
 ) -> Result<Option<&'f Node>> {
     Ok(match source {
@@ -965,7 +970,7 @@ const COMPLEX_SETTINGS_VIEW_MODE_TYPE: &str = "2eb62aaa-e6c1-48b6-a047-435354d5a
 fn apply_complex_settings_view_mode(
     edits: &mut XmlEdits<'_>,
     table: usize,
-    item: &FormV85ItemFacts,
+    item: &FormItemFactsV8_5_1,
 ) -> Result<()> {
     let Some(Node::List(members)) = item.record.get(58 + item.prefix_offset) else {
         return Ok(());
@@ -992,7 +997,7 @@ fn apply_complex_settings_view_mode(
 
 /// The events 8.5 lets a usual group handle, by the identifier its event
 /// record stores (8.5.1.1150 BSP: three `Click` handlers).
-fn v85_group_event_name(id: &str) -> Option<&'static str> {
+fn group_event_name_8_5_1(id: &str) -> Option<&'static str> {
     match id {
         "a3da1388-983a-4d28-87f2-5096d7e3a4ef" => Some("Click"),
         _ => None,
@@ -1027,7 +1032,7 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
         let id = members[1 + 2 * index]
             .as_leaf()
             .ok_or_else(|| anyhow!("<UsualGroup> events: unreadable 8.5 event id"))?;
-        let name = v85_group_event_name(id)
+        let name = group_event_name_8_5_1(id)
             .ok_or_else(|| anyhow!("<UsualGroup> events: unknown 8.5 event {id}"))?;
         let handler = members[2 + 2 * index]
             .as_leaf()
@@ -1037,7 +1042,7 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
             .replace("\"\"", "\"");
         body.push_str(&format!(
             "\t<Event name=\"{name}\">{}</Event>\r\n",
-            super::escape_xml_text(&handler)
+            super::super::escape_xml_text(&handler)
         ));
     }
     body.push_str("</Events>\r\n");
@@ -1053,7 +1058,7 @@ fn apply_group_events(edits: &mut XmlEdits<'_>, group: usize, node: &Node) -> Re
 /// match one for one refuses rather than pairing them on a guess.
 fn apply_choice_value_pictures(
     edits: &mut XmlEdits<'_>,
-    facts: &FormV85Facts,
+    facts: &FormFactsV8_5_1,
     object_refs: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let is_empty = |node: &Node| node.to_text().starts_with("{4,0,{0},");
@@ -1090,14 +1095,14 @@ fn apply_choice_value_pictures(
         }
         let text = picture.to_text();
         let (reference, load_transparent) =
-            super::form_body::parse_form_child_item_picture_value(&text, object_refs)
+            super::super::form_body::parse_form_child_item_picture_value(&text, object_refs)
                 .ok_or_else(|| anyhow!("unreadable 8.5 choice-list value picture {text}"))?;
         let anchor = edits
             .direct_children(value, "Value")
             .last()
             .copied()
             .ok_or_else(|| anyhow!("a written choice-list value has no <Value>"))?;
-        let body = super::form_body::format_form_picture_element(
+        let body = super::super::form_body::format_form_picture_element(
             "Picture",
             Some(&reference),
             None,
@@ -1111,7 +1116,7 @@ fn apply_choice_value_pictures(
 }
 
 /// The `name` attribute of a written element's opening tag.
-pub(super) fn element_name(edits: &XmlEdits<'_>, element: usize) -> Option<String> {
+pub(in crate::mssql_dump) fn element_name(edits: &XmlEdits<'_>, element: usize) -> Option<String> {
     let open = edits.elements[element].open_start;
     let tag_end = edits.xml[open..].find('>')? + open;
     let inner = &edits.xml[open..tag_end];
@@ -1129,11 +1134,11 @@ pub(super) fn element_name(edits: &XmlEdits<'_>, element: usize) -> Option<Strin
 fn apply_rules(
     edits: &mut XmlEdits<'_>,
     element: usize,
-    facts: &FormV85Facts,
-    item: Option<&FormV85ItemFacts>,
+    facts: &FormFactsV8_5_1,
+    item: Option<&FormItemFactsV8_5_1>,
     command: Option<&[Node]>,
     object_refs: &std::collections::BTreeMap<String, String>,
-    assets: &mut Vec<super::FormItemAsset>,
+    assets: &mut Vec<super::super::FormItemAsset>,
 ) -> Result<()> {
     let tag = edits.elements[element].tag.clone();
     for rule in FACT_OBJECT_RULES {
@@ -1149,7 +1154,7 @@ fn apply_rules(
         if let Some((file_name, content)) = payload {
             let item_name = element_name(edits, element)
                 .ok_or_else(|| anyhow!("<{tag}> with an inline picture has no name"))?;
-            assets.push(super::FormItemAsset {
+            assets.push(super::super::FormItemAsset {
                 item_name,
                 file_name,
                 content,
@@ -1235,7 +1240,10 @@ fn apply_rules(
 }
 
 /// The value of a written one-line element `<Tag ...>value</Tag>`.
-pub(super) fn simple_text<'x>(edits: &XmlEdits<'x>, element: usize) -> Option<&'x str> {
+pub(in crate::mssql_dump) fn simple_text<'x>(
+    edits: &XmlEdits<'x>,
+    element: usize,
+) -> Option<&'x str> {
     let element = &edits.elements[element];
     if element.self_closing {
         return Some("");
@@ -1249,7 +1257,7 @@ pub(super) fn simple_text<'x>(edits: &XmlEdits<'x>, element: usize) -> Option<&'
 
 /// The value of the one direct child `tag` of `parent`, when it is a
 /// one-line element.
-pub(super) fn child_text<'x>(
+pub(in crate::mssql_dump) fn child_text<'x>(
     edits: &XmlEdits<'x>,
     parent: usize,
     tag: &str,
@@ -1284,7 +1292,7 @@ fn add_simple(edits: &mut XmlEdits<'_>, parent: usize, tag: &str, value: &str) -
 /// element against the 8.3.27 property it follows
 /// (`F:/ibcmd/lab/v85/tools/upg.py`). A value outside a rule's evidence
 /// refuses the form rather than guessing a spelling.
-pub(super) fn apply_v85_upgrade_defaults(xml: String) -> Result<String> {
+pub(in crate::mssql_dump) fn apply_xml_2_21_upgrade_defaults(xml: String) -> Result<String> {
     let mut edits = XmlEdits::new(&xml)?;
     for index in 0..edits.elements.len() {
         let tag = edits.elements[index].tag.clone();
@@ -1452,11 +1460,11 @@ fn upgrade_field(edits: &mut XmlEdits<'_>, field: usize, tag: &str) -> Result<()
 
 /// Applies to a written 8.5 `Form.xml` what the appended members say, and
 /// returns the inline pictures those members carry (files beside the form).
-pub(super) fn apply_v85_form_facts(
+pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
     xml: String,
-    facts: &FormV85Facts,
+    facts: &FormFactsV8_5_1,
     object_refs: &std::collections::BTreeMap<String, String>,
-) -> Result<(String, Vec<super::FormItemAsset>)> {
+) -> Result<(String, Vec<super::super::FormItemAsset>)> {
     let mut assets = Vec::new();
     let mut edits = XmlEdits::new(&xml)?;
     let root = edits

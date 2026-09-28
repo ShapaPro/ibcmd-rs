@@ -4967,7 +4967,7 @@ fn prepare_raw_template_body_row(
     let bytes = if matches!(
         kind,
         TemplateKind::DataCompositionSchema | TemplateKind::DataCompositionAppearanceTemplate
-    ) && crate::module_blob::V85_TREE_IN_V83_LAYOUT
+    ) && crate::module_blob::XML_2_21_TREE_IN_LAYOUT_8_3
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         palette_namespace_dropped(bytes)
@@ -5069,7 +5069,8 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
             open.contains("xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"")
         });
     if !root_declares_palette
-        || crate::module_blob::V85_TREE_IN_V83_LAYOUT.load(std::sync::atomic::Ordering::Relaxed)
+        || crate::module_blob::XML_2_21_TREE_IN_LAYOUT_8_3
+            .load(std::sync::atomic::Ordering::Relaxed)
     {
         return Ok(packed);
     }
@@ -5084,8 +5085,8 @@ fn spreadsheet_template_for_platform(xml: &[u8], packed: Vec<u8>) -> Result<Vec<
     let text = std::str::from_utf8(&plain[text_start + 3..])
         .context("a compiled spreadsheet template is not UTF-8 text")?;
     let mut converted = plain[..text_start + 3].to_vec();
-    let text = crate::mssql_dump::up_convert_v85_primitives_in_place(text);
-    let text = crate::mssql_dump::up_convert_v85_chart_records(&text)?;
+    let text = crate::mssql_dump::up_convert_primitives_8_5_1_in_place(text);
+    let text = crate::mssql_dump::up_convert_chart_records_8_5_1(&text)?;
     converted.extend_from_slice(text.as_bytes());
     crate::module_blob::deflate_raw(&converted)
 }

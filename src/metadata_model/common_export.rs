@@ -18,7 +18,7 @@ use super::{
     WEB_OPERATIONS, WEB_PARAMETERS, standard_namespace,
 };
 use crate::compiler::bodies::form_native::{
-    PLATFORM_STYLE_COLOR_CODES, PLATFORM_STYLE_FONT_CODES, V85_PALETTE_COLORS, WEB_COLOR_CODES,
+    PALETTE_COLORS_8_5_1, PLATFORM_STYLE_COLOR_CODES, PLATFORM_STYLE_FONT_CODES, WEB_COLOR_CODES,
     WINDOWS_COLOR_CODES,
 };
 use crate::metadata_model::brace::Brace;
@@ -215,7 +215,7 @@ fn color_text(node: &Brace, names: &NameIndex) -> Result<String> {
     };
     if version == "4" && kind == Some("5") {
         let index = number(item(value, 0)?)?;
-        let name = V85_PALETTE_COLORS
+        let name = PALETTE_COLORS_8_5_1
             .iter()
             .find_map(|(name, candidate)| (i64::from(*candidate) == index).then_some(*name))
             .ok_or_else(|| anyhow!("unknown palette colour {}", short(node)))?;

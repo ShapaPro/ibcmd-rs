@@ -237,7 +237,7 @@ fn form_record(node: &Brace, context: &ExportContext) -> Result<(Header, Element
         .child(coded("FormType", item(fields, 3)?, FORM_TYPES)?)
         .child(flag("IncludeHelpInContents", item(fields, 2)?)?)
         .child(purposes);
-    if context.is_v85() {
+    if context.is_xml_2_21() {
         let mode = match (version, fields.get(5)) {
             ("14", Some(mode)) => code_text(mode, INTERFACE_COMPATIBILITY_MODES)?,
             _ => "Any",
