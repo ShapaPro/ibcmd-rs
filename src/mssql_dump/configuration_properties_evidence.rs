@@ -40,6 +40,9 @@ static EVIDENCED_DEFAULT_REFERENCE_TEXT: LazyLock<String> = LazyLock::new(|| {
     String::from_utf8(bytes).expect("bundled evidenced-default config-body reference is UTF-8")
 });
 
+/// The tuple field of `<DefaultStyle>` (a style reference or the nil uuid).
+const CONFIGURATION_DEFAULT_STYLE_TUPLE_FIELD: usize = 9;
+
 /// The reference's own Configuration `<Properties>` tuple, split into its
 /// declared fields the same way every probe's is.
 static EVIDENCED_DEFAULT_REFERENCE_FIELDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -50,6 +53,13 @@ static EVIDENCED_DEFAULT_REFERENCE_FIELDS: LazyLock<Vec<&'static str>> = LazyLoc
     split_1c_braced_fields(text, start)
         .expect("the evidenced reference's Properties tuple is well-formed")
 });
+
+/// The all-default reference's fields from `from` on: what an older, shorter
+/// root tuple reads as for the members it does not store.
+pub(super) fn evidenced_default_reference_fields_from(from: usize) -> &'static [&'static str] {
+    let reference: &'static [&'static str] = EVIDENCED_DEFAULT_REFERENCE_FIELDS.as_slice();
+    reference.get(from..).unwrap_or_default()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConfigurationPropertiesEvidencedFields {
@@ -230,6 +240,14 @@ pub(crate) fn parse_configuration_properties_evidenced_default_block_on(
     )?;
 
     for &index in policy.unproven_tuple_fields() {
+        // Field 9 is `<DefaultStyle>`, decoded on its own
+        // (`parse_configuration_root_reference(.., 9, .., "Style.")`): a real
+        // configuration (compatibility 8.3.9) stores its style `Основной`
+        // there and the platform prints `<DefaultStyle>Style.Основной`,
+        // nothing else differing with it.
+        if index == CONFIGURATION_DEFAULT_STYLE_TUPLE_FIELD {
+            continue;
+        }
         let (Some(ours), Some(theirs)) = (fields.get(index), reference.get(index)) else {
             return Err(ConfigurationPropertiesEvidenceError::UnexpectedTupleArity {
                 found: fields.len(),
@@ -389,11 +407,11 @@ mod tests {
         // Vendor/Version/UpdateCatalogAddress, the four settings storages,
         // ConfigurationExtensionCompatibilityMode, the two ordinary-form
         // booleans, the three default report forms, UsePurposes, the three
-        // enum bytes, DefaultRoles, CompatibilityMode, the mobile
-        // functionalities and AllowedIncomingShareRequestTypes.
+        // enum bytes, DefaultSearchForm, DefaultRoles, CompatibilityMode, the
+        // mobile functionalities and AllowedIncomingShareRequestTypes.
         let decoded = [
             1usize, 2, 3, 4, 5, 6, 7, 8, 10, 13, 14, 15, 16, 22, 23, 24, 25, 26, 28, 29, 30, 31,
-            32, 33, 36, 38, 39, 41, 43, 53, 59,
+            32, 33, 36, 37, 38, 39, 41, 43, 53, 59,
         ];
         let mut seen = vec![0usize; 61];
         for index in decoded

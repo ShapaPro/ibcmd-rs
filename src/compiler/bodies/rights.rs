@@ -334,7 +334,12 @@ fn validate_native(root: &NativeValue) -> Result<RoleRightsSummary, RightsCodecE
         required_text(&template[1], "Role Rights restriction template condition")?;
     }
     let set_for_new_objects = parse_root_bool(&fields[3], "setForNewObjects")?;
-    let set_for_attributes_by_default = parse_root_bool(&fields[4], "setForAttributesByDefault")?;
+    // An extension's adopted role stores `2` (fixture `adopted/role`;
+    // 8.3.27.2214 dumps `false`).
+    let set_for_attributes_by_default = match required_token(&fields[4], "setForAttributesByDefault")? {
+        "2" => false,
+        _ => parse_root_bool(&fields[4], "setForAttributesByDefault")?,
+    };
     let independent_rights_of_child_objects =
         parse_root_bool(&fields[5], "independentRightsOfChildObjects")?;
     exact_token(&fields[6], "4294967295", "Role Rights trailing marker")?;
@@ -542,7 +547,8 @@ fn parse_root_bool(value: &NativeValue, field: &'static str) -> Result<bool, Rig
 
 fn parse_role_bool(value: &NativeValue) -> Result<bool, RightsCodecError> {
     match required_token(value, "Role right value")? {
-        "-1" | "0" => Ok(false),
+        // `2`: a right an adopted role leaves unset (fixture `adopted/role`).
+        "-1" | "0" | "2" => Ok(false),
         "1" => Ok(true),
         _ => Err(RightsCodecError::InvalidShape("Role right value")),
     }

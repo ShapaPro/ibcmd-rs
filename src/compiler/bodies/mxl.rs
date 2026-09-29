@@ -185,12 +185,25 @@ fn decode_plain(
     // has to read that declared count rather than assume a single language
     // (evidence: ERP UH `Web_Service`, two spreadsheets carry a two-language
     // record - `ru` and `en` - at 11 fields, `count=2`, still `count*3+5`).
+    //
+    // The older root revision `8` (`{8,1,8,…}`) stores the same record
+    // without its closing `0` (`{"ru","ru",1,1,"ru","Русский","Русский"}`,
+    // `count*3+4`). Two real configurations carry 87 such spreadsheets each;
+    // read with the closing member absent, 75 of one's 87 come out
+    // byte-identical to the platform's own dump. Revision `9` stores it the
+    // same way: 21 and 24 spreadsheets of the same two configurations, 19 of
+    // the first's 21 byte-identical read so.
     let language = required_list(&fields[3], "MOXCEL language descriptor")?;
+    let short_language_record = matches!(fields[2].as_token(), Some("8" | "9"));
     let language_shape_ok = language.len() >= 5
         && required_token(&language[3], "MOXCEL language count")
             .ok()
             .and_then(|token| token.parse::<usize>().ok())
-            .is_some_and(|count| count <= 64 && language.len() == count * 3 + 5);
+            .is_some_and(|count| {
+                count <= 64
+                    && (language.len() == count * 3 + 5
+                        || (short_language_record && language.len() == count * 3 + 4))
+            });
     if !language_shape_ok {
         return Err(MxlCodecError::InvalidShape(
             "MOXCEL language descriptor has an unknown layout".to_string(),
@@ -291,6 +304,28 @@ mod tests {
 	<defaultFormatIndex>1</defaultFormatIndex>
 	<format><width>72</width></format>
 </document>"#;
+
+    /// Root revisions `8` and `9` store the language record without its closing `0`;
+    /// the same record under revision `12` still has to carry it.
+    #[test]
+    fn revisions_8_and_9_read_the_short_language_record() {
+        let profile = MxlCodecProfile::fixture();
+        let compiled = compile_mxl(&profile, SIMPLE_SPREADSHEET, None, None).unwrap();
+        let plain = String::from_utf8(inflate(&compiled).unwrap()).unwrap();
+        let root = plain.find("{8,1,12,").unwrap();
+        let record_start = root + plain[root + 1..].find('{').unwrap() + 1;
+        let record_end = record_start + plain[record_start..].find('}').unwrap();
+        let record = &plain[record_start..record_end];
+        assert!(record.ends_with(",0"), "{record}");
+        let short = &record[..record.len() - 2];
+        let short_12 = format!("{}{}{}", &plain[..record_start], short, &plain[record_end..]);
+        assert!(decode_inflated_compatible_mxl(short_12.as_bytes()).is_err());
+        for revision in ["8", "9"] {
+            let short = short_12.replacen("{8,1,12,", &format!("{{8,1,{revision},"), 1);
+            let decoded = decode_inflated_compatible_mxl(short.as_bytes()).unwrap();
+            assert!(decoded.native_body_text().starts_with(&format!("{{8,1,{revision},")));
+        }
+    }
 
     #[test]
     fn spreadsheet_compiles_deterministically_and_roundtrips_semantically() {

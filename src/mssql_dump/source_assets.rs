@@ -195,10 +195,12 @@ pub(super) fn dynamic_source_asset(
         });
     }
 
+    // An empty interface (`{7,0,0,0,0,0,0}`) is named in ConfigDumpInfo.xml
+    // but never written (fixture `empty_root_interface`, 8.3.27.2214).
     if context.configuration_module_groups.contains(owner_uuid)
         && matches!(suffix, "9" | "a")
         && parse_command_interface_blob(bytes, context.command_refs, context.metadata_refs)
-            .is_some()
+            .is_some_and(|interface| !interface.is_empty())
     {
         let route = crate::compiler::families::assets::SourceAssetRegistry
             .route_by_suffix("Configuration", suffix)
@@ -398,7 +400,9 @@ pub(super) fn v8_container_element_names(bytes: &[u8]) -> Option<BTreeSet<String
     if read_le_u32(bytes, 0)? != V8_MAGIC_NUMBER {
         return None;
     }
-    if !matches!(read_le_u32(bytes, 8)?, 1 | 2) {
+    // Storage revision: 1 and 2 (ИТК), 0 in a delivery without source
+    // (MONITOR-TRIAL-2.cf, 204 closed and 28 open modules).
+    if !matches!(read_le_u32(bytes, 8)?, 0..=2) {
         return None;
     }
     let toc_header = read_v8_block_header(bytes, FILE_HEADER_SIZE)?;
@@ -2166,7 +2170,34 @@ pub(crate) fn source_xml_file_bytes(
     if source_version == InfobaseConfigSourceVersion::V2_21 {
         normalized = declare_palette_namespace_beside_style(normalized);
     }
-    normalized
+    self_close_empty_languages(normalized)
+}
+
+const EMPTY_LANGUAGE_PAIR: &[u8] = b"<v8:lang></v8:lang>";
+
+/// The platform writes an empty language as `<v8:lang/>` and never as a
+/// start/end pair (not once across the 8.3.27.2214 and 8.5 corpora; ИТК
+/// common module and common picture synonyms carry it), while several
+/// writers here format whatever language they hold between the tags.
+fn self_close_empty_languages(xml: Vec<u8>) -> Vec<u8> {
+    if !xml
+        .windows(EMPTY_LANGUAGE_PAIR.len())
+        .any(|window| window == EMPTY_LANGUAGE_PAIR)
+    {
+        return xml;
+    }
+    let mut out = Vec::with_capacity(xml.len());
+    let mut rest = xml.as_slice();
+    while let Some(at) = rest
+        .windows(EMPTY_LANGUAGE_PAIR.len())
+        .position(|window| window == EMPTY_LANGUAGE_PAIR)
+    {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(b"<v8:lang/>");
+        rest = &rest[at + EMPTY_LANGUAGE_PAIR.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
 }
 
 const STYLE_NAMESPACE_DECLARATION: &str = " xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\"";
@@ -2474,7 +2505,9 @@ fn write_source_asset_inner(
             .with_metadata_command_facts(context.metadata_command_facts)
             .with_metadata_field_declarations(context.metadata_field_declarations)
             .with_object_ref_index(context.form_object_ref_index)
-            .with_dcs_profiles(adapter.provider_id().clone(), dcs_target_profile);
+            .with_dcs_profiles(adapter.provider_id().clone(), dcs_target_profile)
+            .with_dcs_schema_namespace(context.forms_declare_dcs_schema_namespace)
+            .with_form_compatibility(context.form_compatibility);
             let extraction =
                 extract_form_body_xml_from_body_detailed_timed(body, &form_context, Some(timings))
                     .with_context(|| {
@@ -2493,6 +2526,13 @@ fn write_source_asset_inner(
                     // pass -- the XML a 2.21 load hands the 8.3.27 form writer.
                     let xml_2_21_pass_off = std::env::var("IBCMD_RS_XML_2_21_FORM_PASS")
                         .is_ok_and(|value| value == "off");
+                    // The 2.20 dialect is 8.3.27's reading of an 8.5 body: the
+                    // down-conversion alone, without the members only 8.5 has
+                    // (ИТК `_open`, saved by 8.5 and dumped by 8.3.27.2214:
+                    // no `ShowCommandBar`, `ButtonImportance`, and
+                    // `WindowOpeningMode LockOwnerWindow`; fixture `v85_form`).
+                    let xml_2_21_pass_off =
+                        xml_2_21_pass_off || context.source_version == InfobaseConfigSourceVersion::V2_20;
                     let (xml, item_assets_8_5_1) = match &facts_8_5_1 {
                         _ if xml_2_21_pass_off => (xml, Vec::new()),
                         Some(facts) => super::form::xml_2_21_writer::apply_form_facts_8_5_1(
@@ -2533,6 +2573,19 @@ fn write_source_asset_inner(
                         None => (xml, Vec::new()),
                     };
                     diagnostics = extraction_diagnostics;
+                    let xml = super::form_extension::with_adopted_form_parts(
+                        xml,
+                        body,
+                        &form_context,
+                        context.source_version,
+                        context.object_refs,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to write the adopted form parts of source asset {}",
+                            asset.primary_path.display()
+                        )
+                    })?;
                     let form_write_started = Instant::now();
                     let path = output_dir.join(&asset.primary_path);
                     if let Some(parent) = path.parent() {
@@ -3038,6 +3091,14 @@ fn write_source_asset_inner(
                     asset.primary_path.display()
                 )
             })?;
+            let extension =
+                parse_exchange_plan_content_extension(bytes, context.object_refs, context.type_index)
+                    .with_context(|| {
+                        format!(
+                            "failed to extract the extension's exchange plan content from source asset {}",
+                            asset.primary_path.display()
+                        )
+                    })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 context
@@ -3047,7 +3108,7 @@ fn write_source_asset_inner(
             }
             context.output.write_xml(
                 &path,
-                format_exchange_plan_content_xml(&items),
+                format_exchange_plan_content_xml_with_extension(&items, &extension),
                 context.source_version,
             )?;
         }
@@ -3177,6 +3238,11 @@ fn write_source_asset_inner(
                 context.moxel_generated_types,
                 &asset.primary_path,
             )?;
+            let xml = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
+                super::moxel::with_v85_style_fonts_by_code(xml, context.object_refs)
+            } else {
+                xml
+            };
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 context
@@ -3621,6 +3687,10 @@ pub(super) fn parse_help_blob(bytes: &[u8]) -> Option<HelpContent> {
     Some(HelpContent { pages, files })
 }
 
+/// The document id an HTML template's page is stored under; a help link to
+/// the template names it after the template's uuid.
+const HTML_TEMPLATE_DOCUMENT_UUID: &str = "8eb4fad1-1fa6-403e-970f-2c12dbb43e23";
+
 /// The file the exporter writes for a stored help or HTML template page.
 ///
 /// The loader's `html_page_storage_bytes` is its inverse and checks every page
@@ -3673,7 +3743,16 @@ pub(crate) fn rewrite_help_links(content: &[u8], refs: &BTreeMap<String, String>
         let quote_end = uuid_end + relative_quote_end;
         output.push_str(&text[offset..start]);
         output.push_str(reference);
-        output.push_str("/Help");
+        // The stored link names the target's document after the uuid: its
+        // help page, or -- for a link to an HTML template -- the template's own
+        // document (`8eb4fad1-…`), which the platform spells `/Template`. A
+        // real configuration's help pages hold 27 such links; the platform
+        // writes `<Reference>/Template` on every one.
+        if text[uuid_end + 1..quote_end].starts_with(HTML_TEMPLATE_DOCUMENT_UUID) {
+            output.push_str("/Template");
+        } else {
+            output.push_str("/Help");
+        }
         // A stored help link may address an anchor inside the target page
         // (`../id<uuid>/<page>#<anchor>`). The platform keeps that fragment on
         // the rewritten `<Reference>/Help` link; only the storage path in front

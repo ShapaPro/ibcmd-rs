@@ -967,9 +967,13 @@ mod config_rows;
 mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
+pub(crate) mod extension_types;
 mod fetch;
+#[cfg(test)]
+mod revision_mix_tests;
 mod form;
 mod form_body;
+mod form_extension;
 mod form_ref_index;
 pub(crate) use form::load_8_5_1::{
     compile_native_form_body_8_5_1, compile_xml_2_21_form_body_in_layout_8_3,
@@ -1003,6 +1007,7 @@ mod selected;
 mod source_asset_diagnostics;
 mod source_assets;
 mod timing;
+mod upgrade;
 
 pub(crate) fn fetch_main_activation_rows(
     sql: &crate::sql::SqlExec,
@@ -1062,6 +1067,7 @@ pub(crate) use command_interface::{
     client_application_panel_def_is_standard, command_interface_standard_command_for_code,
 };
 use config_dump_info::*;
+pub use config_dump_info::stored_config_versions;
 use config_rows::*;
 pub(crate) use dcs::*;
 use fetch::*;
@@ -2540,6 +2546,7 @@ pub fn export_storage_image_to_source(
         output_dir,
         overwrite,
         source_version,
+        None,
     )
 }
 
@@ -2553,11 +2560,45 @@ pub fn export_packed_cf_archive_to_source(
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<StorageImageSourceExportReport> {
     let (_, source_profile, entries) = archive.into_parts();
+    let entries = entries.into_iter().map(|entry| entry.into_parts()).collect();
+    export_packed_entries_to_source(
+        source_profile.as_str(),
+        entries,
+        output_dir,
+        overwrite,
+        source_version,
+        None,
+    )
+}
+
+/// References into a configuration that is not part of the exported
+/// storage: an external data processor/report names configuration objects
+/// and types through its `copyinfo` (`crate::external`). Merged into the
+/// reference and type indexes without overriding anything the storage
+/// itself defines.
+#[derive(Clone, Debug, Default)]
+pub struct ForeignReferences {
+    /// Metadata object uuid → `Kind.Name`.
+    pub objects: BTreeMap<String, String>,
+    /// Generated type id → (`cfg:Kind.Name`, InternalInfo category).
+    pub types: Vec<(String, String, String)>,
+}
+
+/// Same as [`export_packed_cf_archive_to_source`] for `(name, packed payload)`
+/// entries already taken out of a container: the external-object adapter
+/// (`crate::external`) rewrites a few of them before the export.
+pub fn export_packed_entries_to_source(
+    source_profile: &str,
+    entries: Vec<(String, Vec<u8>)>,
+    output_dir: &Path,
+    overwrite: bool,
+    source_version: InfobaseConfigSourceVersion,
+    foreign: Option<&ForeignReferences>,
+) -> Result<StorageImageSourceExportReport> {
     let physical_entries = entries.len();
     let mut rows = Vec::with_capacity(physical_entries);
     let mut records = Vec::with_capacity(physical_entries);
-    for entry in entries {
-        let (name, payload) = entry.into_parts();
+    for (name, payload) in entries {
         let packed_bytes = payload.len();
         let data_size = i64::try_from(packed_bytes)
             .with_context(|| format!("CF record `{name}` is too large for the row boundary"))?;
@@ -2578,11 +2619,12 @@ pub fn export_packed_cf_archive_to_source(
     export_direct_storage_rows_to_source(
         rows,
         records,
-        Some(source_profile.as_str().to_owned()),
+        Some(source_profile.to_owned()),
         physical_entries,
         output_dir,
         overwrite,
         source_version,
+        foreign,
     )
 }
 
@@ -2594,6 +2636,7 @@ fn export_direct_storage_rows_to_source(
     output_dir: &Path,
     overwrite: bool,
     source_version: InfobaseConfigSourceVersion,
+    foreign: Option<&ForeignReferences>,
 ) -> Result<StorageImageSourceExportReport> {
     prepare_output_dir(output_dir, overwrite)?;
     // Reuses the same eligibility rule the streamed MSSQL pipeline uses
@@ -2627,6 +2670,7 @@ fn export_direct_storage_rows_to_source(
         true,
         false,
         config_dump_info_plan.config_dump_info_eligible(),
+        foreign,
     )?;
     let successful = dumped
         .rows
@@ -2638,6 +2682,7 @@ fn export_direct_storage_rows_to_source(
         .into_iter()
         .map(|failure| (failure.file_name, failure.message))
         .collect::<BTreeMap<_, _>>();
+    let notes = export_entry_notes(&dumped.metadata_root_inventory, &dumped.source_assets);
 
     let mut entries = Vec::with_capacity(records.len());
     for record in &records {
@@ -2665,22 +2710,27 @@ fn export_direct_storage_rows_to_source(
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
+        let note = export_entry_note(notes.get(&record.logical_name), &outputs);
         if outputs.is_empty() {
             entries.push(StorageExportEntryReport::opaque_packed(
                 record.logical_name.clone(),
                 record.logical_key.clone(),
                 record.part_count,
                 record.packed_bytes,
-                "no legacy family decoder recognized this storage entry",
+                note.unwrap_or_else(|| {
+                    "no legacy family decoder recognized this storage entry".to_owned()
+                }),
             ));
         } else {
-            entries.push(StorageExportEntryReport::supported_packed(
+            let mut entry = StorageExportEntryReport::supported_packed(
                 record.logical_name.clone(),
                 record.logical_key.clone(),
                 record.part_count,
                 record.packed_bytes,
                 outputs,
-            ));
+            );
+            entry.message = note;
+            entries.push(entry);
         }
     }
 
@@ -2697,6 +2747,90 @@ fn export_direct_storage_rows_to_source(
             entries,
         ),
     })
+}
+
+/// What an export left out, by storage entry: a metadata object whose XML was
+/// not written and a source asset (a form's `Form.xml`) withheld as opaque.
+/// Without it the entry reads "supported" (its module was written) or carries
+/// the generic opaque message, and nothing says what is missing.
+fn export_entry_notes(
+    inventory: &RootMetadataInventoryReport,
+    source_assets: &SourceAssetCompletenessReport,
+) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut notes = BTreeMap::<String, Vec<(String, String)>>::new();
+    for entry in &inventory.entries {
+        if entry.emitted_path.is_some() {
+            continue;
+        }
+        let reason = entry.reason.map_or("unknown", MetadataExtractionMissReason::as_str);
+        let detail = entry
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| {
+                // The signature, and the collection and item it names, say
+                // which member stopped the reader.
+                let mut detail = format!(", {}: {}", diagnostic.code, diagnostic.structural_signature);
+                if let Some(role) = &diagnostic.collection_role {
+                    detail.push_str(&format!(", {role}"));
+                }
+                for (what, index) in [
+                    ("field", diagnostic.field_index),
+                    ("item", diagnostic.collection_index.or(diagnostic.item_index)),
+                ] {
+                    if let Some(index) = index {
+                        detail.push_str(&format!(" {what} {index}"));
+                    }
+                }
+                detail
+            })
+            .unwrap_or_default();
+        // An object whose header does not read has no name, so no path: name
+        // its kind and uuid instead.
+        let what = if entry.expected_path.is_empty() {
+            format!("{} {}", entry.family, entry.uuid)
+        } else {
+            entry.expected_path.clone()
+        };
+        notes.entry(entry.uuid.clone()).or_default().push((
+            entry.expected_path.clone(),
+            format!("{what} not written ({reason}{detail})"),
+        ));
+    }
+    // A diagnostic about an asset that was written anyway, or about no asset
+    // at all, is not an omission; `export_entry_note` drops the former.
+    let mut withheld = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for asset in &source_assets.affected_assets {
+        if asset.asset_path.is_empty() {
+            continue;
+        }
+        withheld
+            .entry((asset.source_row_id.clone(), asset.asset_path.clone()))
+            .or_default()
+            .insert(asset.code.clone());
+    }
+    for ((row, path), codes) in withheld {
+        let note = format!(
+            "{path} withheld ({})",
+            codes.into_iter().collect::<Vec<_>>().join(", ")
+        );
+        notes.entry(row).or_default().push((path, note));
+    }
+    notes
+}
+
+/// The notes of one entry about files it did not write.
+fn export_entry_note(notes: Option<&Vec<(String, String)>>, outputs: &[String]) -> Option<String> {
+    let written = |path: &str| {
+        outputs
+            .iter()
+            .any(|output| output.replace('\\', "/") == path.replace('\\', "/"))
+    };
+    let notes = notes?
+        .iter()
+        .filter(|(path, _)| !written(path))
+        .map(|(_, note)| note.as_str())
+        .collect::<Vec<_>>();
+    (!notes.is_empty()).then(|| notes.join("; "))
 }
 
 #[allow(dead_code)]
@@ -2728,6 +2862,7 @@ fn dump_table_rows_eager(
         false,
         false,
         inventory_plan.config_dump_info_eligible(),
+        None,
     )
 }
 
@@ -2833,6 +2968,11 @@ struct DumpRowContext<'a> {
     file_names: &'a BTreeSet<String>,
     body_owners: &'a BTreeMap<String, BodyOwnerSourceReference>,
     configuration_module_groups: &'a BTreeSet<String>,
+    /// Whether written forms declare `xmlns:dcssch` on their root; follows the
+    /// configuration's compatibility mode.
+    forms_declare_dcs_schema_namespace: bool,
+    /// What written forms spell by the configuration's compatibility mode.
+    form_compatibility: FormCompatibility,
 }
 
 #[allow(dead_code)]
@@ -2902,6 +3042,7 @@ fn dump_table_rows_with_options(
         false,
         false,
         false,
+        None,
     )
 }
 
@@ -2926,6 +3067,7 @@ fn dump_table_rows_with_collect_all_source_asset_diagnostics(
         false,
         true,
         false,
+        None,
     )
 }
 
@@ -2944,6 +3086,7 @@ fn dump_table_rows_with_options_mode(
     continue_on_row_error: bool,
     collect_all_source_asset_diagnostics: bool,
     generate_config_dump_info: bool,
+    foreign: Option<&ForeignReferences>,
 ) -> Result<DumpedTable> {
     let table_dir = output_dir.join(table);
     if write_binary_rows {
@@ -3103,6 +3246,11 @@ fn dump_table_rows_with_options_mode(
             },
         )
     })?;
+    let mut metadata_type_indexes = metadata_type_indexes;
+    if let Some(foreign) = foreign {
+        merge_foreign_type_references(&mut metadata_type_indexes, foreign);
+    }
+    respell_any_ib_ref_by_compatibility(&mut metadata_type_indexes, metadata_texts, source_version);
     let MetadataTypeIndexes {
         references: type_index,
         reference_collisions: type_index_collisions,
@@ -3114,7 +3262,13 @@ fn dump_table_rows_with_options_mode(
         references: object_refs,
         resolutions: object_ref_resolutions,
     } = if extract_metadata_xml || needs_source_layout_refs {
-        build_metadata_object_reference_indexes_from_texts(&metadata_texts)
+        let mut indexes = build_metadata_object_reference_indexes_from_texts(&metadata_texts);
+        if let Some(foreign) = foreign {
+            for (uuid, reference) in &foreign.objects {
+                indexes.or_insert(uuid.clone(), reference.clone());
+            }
+        }
+        indexes
     } else if needs_standalone_refs {
         MetadataObjectReferenceIndexes::from_legacy(
             &build_standalone_object_reference_index_from_texts(
@@ -3409,7 +3563,14 @@ fn dump_table_rows_with_options_mode(
         &mut metadata_object_refs,
         &metadata_value_predefined_item_refs,
     )?;
-    let configuration_module_groups = configuration_module_groups(&file_names_owned);
+    let mut configuration_module_groups = configuration_module_groups(&file_names_owned);
+    // An extension keeps only the root modules it extends; its configuration
+    // row names the header they hang off (see `module_body_paths_from_texts`).
+    configuration_module_groups.extend(
+        metadata_audit.rows
+            .iter()
+            .filter_map(|row| parse_configuration_header_uuid(&row.text)),
+    );
     // A path claimed by two storage entries is a refusal about those entries,
     // not about the export: both are withheld and named, and everything that
     // claims its path alone is still produced.
@@ -3495,6 +3656,10 @@ fn dump_table_rows_with_options_mode(
         file_names: &file_names_owned,
         body_owners: &body_owners,
         configuration_module_groups: &configuration_module_groups,
+        forms_declare_dcs_schema_namespace: forms_declare_dcs_schema_namespace(
+            configuration_compatibility_mode_from_texts(metadata_texts, source_version).as_deref(),
+        ),
+        form_compatibility: form_compatibility_from_texts(metadata_texts, source_version),
     };
     let dumped_rows = parallel::install(|| {
         rows.par_iter()
@@ -3599,6 +3764,20 @@ fn dump_table_rows_with_options_mode(
                     .into_owned(),
             );
         }
+        // An extension keeps its versions in `configinfo` instead.
+        let mut versions_origin = VersionsBlobOrigin::CfStorageImage;
+        if versions_blob.is_none()
+            && !rows.iter().any(|row| row.file_name == "root")
+            && let Some(row) = rows.iter().find(|row| row.file_name == "configinfo")
+            && row.part_no == 0
+        {
+            versions_blob = Some(
+                row.binary_bytes()
+                    .with_context(|| "configinfo row is not valid hex".to_string())?
+                    .into_owned(),
+            );
+            versions_origin = VersionsBlobOrigin::ExtensionConfigInfo;
+        }
 
         let mut emitted_source_asset_paths = BTreeMap::<String, PathBuf>::new();
         for manifest in &manifests {
@@ -3624,12 +3803,12 @@ fn dump_table_rows_with_options_mode(
         // `dump_table_rows_streamed` with `VersionsBlobOrigin::MssqlConfigTable`
         // and the `Fail` partial-inventory policy).
         if let Some(versions_blob) = versions_blob {
-            write_config_dump_info(
+            let written = write_config_dump_info(
                 &output,
                 output_dir,
                 source_version,
                 &versions_blob,
-                VersionsBlobOrigin::CfStorageImage,
+                versions_origin,
                 ConfigDumpInfoPartialInventoryPolicy::Skip,
                 ConfigDumpInfoInventory {
                     file_names: &file_names_owned,
@@ -3643,7 +3822,27 @@ fn dump_table_rows_with_options_mode(
                     emitted_source_asset_paths: &emitted_source_asset_paths,
                     configuration_module_groups: &configuration_module_groups,
                 },
-            )?;
+            );
+            match written {
+                // A versions record that does not describe its container
+                // costs ConfigDumpInfo.xml, reported on that entry, not the
+                // export (fixture `configinfo_mismatch`; 2.1.34.1.cf's
+                // versions failed the whole export once).
+                Err(error) => {
+                    let entry = if versions_origin == VersionsBlobOrigin::ExtensionConfigInfo {
+                        "configinfo"
+                    } else {
+                        "versions"
+                    };
+                    failed_rows.push(FailedDumpRow {
+                        file_name: entry.to_string(),
+                        message: format!("ConfigDumpInfo.xml not written: {error:#}"),
+                    });
+                }
+                written => {
+                    written?;
+                }
+            }
         }
     }
 
@@ -4211,17 +4410,23 @@ fn dump_table_rows_streamed(
     cpu_add(&mut timings, "prepare.metadata_refs", index_part_cpu);
     let index_part_started = Instant::now();
     let index_part_cpu = process_cpu_ms();
-    let MetadataTypeIndexes {
-        references: type_index,
-        reference_collisions: type_index_collisions,
-        dcs: dcs_type_index,
-    } = if (extract_metadata_xml || needs_source_layout_refs)
+    let mut metadata_type_indexes = if (extract_metadata_xml || needs_source_layout_refs)
         && (source_reference_needs.type_index || build_selected_local_refs)
     {
         build_metadata_type_indexes_from_texts(&index_metadata_texts)
     } else {
         MetadataTypeIndexes::default()
     };
+    respell_any_ib_ref_by_compatibility(
+        &mut metadata_type_indexes,
+        &index_metadata_texts,
+        source_version,
+    );
+    let MetadataTypeIndexes {
+        references: type_index,
+        reference_collisions: type_index_collisions,
+        dcs: dcs_type_index,
+    } = metadata_type_indexes;
     let moxel_generated_types =
         build_moxel_generated_type_index(&type_index, &type_index_collisions);
     timings.prepare_type_index_ms += elapsed_ms(index_part_started);
@@ -4747,7 +4952,14 @@ fn dump_table_rows_streamed(
         &mut metadata_object_refs,
         &metadata_value_predefined_item_refs,
     )?;
-    let configuration_module_groups = configuration_module_groups(&file_names);
+    let mut configuration_module_groups = configuration_module_groups(&file_names);
+    // An extension keeps only the root modules it extends; its configuration
+    // row names the header they hang off (see `module_body_paths_from_texts`).
+    configuration_module_groups.extend(
+        index_metadata_texts
+            .iter()
+            .filter_map(|row| parse_configuration_header_uuid(&row.text)),
+    );
     // A path claimed by two storage entries is a refusal about those entries,
     // not about the export: both are withheld and named, and everything that
     // claims its path alone is still produced.
@@ -4885,6 +5097,11 @@ fn dump_table_rows_streamed(
         file_names: &file_names,
         body_owners: &body_owners,
         configuration_module_groups: &configuration_module_groups,
+        forms_declare_dcs_schema_namespace: forms_declare_dcs_schema_namespace(
+            configuration_compatibility_mode_from_texts(&index_metadata_texts, source_version)
+                .as_deref(),
+        ),
+        form_compatibility: form_compatibility_from_texts(&index_metadata_texts, source_version),
     };
 
     let mut manifests = Vec::with_capacity(file_names.len());
@@ -5316,7 +5533,121 @@ fn build_metadata_text_rows_audited(rows: &[ConfigRow]) -> MetadataTextRowsAudit
             }
         }
     }
+    correct_metadata_kinds_from_root(&mut audit);
+    // With each row's kind settled by the root, records stored in an older
+    // version are upgraded before any index or reader sees them.
+    upgrade::upgrade_metadata_text_rows(&mut audit.rows);
     audit
+}
+
+/// The kind of every top-level object as the configuration root lists it:
+/// each family `{<class>,<count>,<uuids>…}` names the kind of its members.
+/// A row's own kind is guessed from its record's version code, which older
+/// editions share across kinds (an exchange plan stored as `{35,…}` read as
+/// a chart of calculation types in БСП 3.1 and ДО; an unreadable common form
+/// as a common picture) -- the root is the configuration's own statement.
+fn correct_metadata_kinds_from_root(audit: &mut MetadataTextRowsAudit) {
+    let Some(root) = audit
+        .rows
+        .iter()
+        .find(|row| is_configuration_root_row(&row.text, &row.file_name))
+    else {
+        return;
+    };
+    let mut kinds = BTreeMap::<String, &'static str>::new();
+    collect_root_family_kinds(&root.text, &mut kinds);
+    for row in &mut audit.rows {
+        let Some(kind) = kinds.get(&row.file_name) else {
+            continue;
+        };
+        if row.kind.as_deref() == Some(kind) {
+            continue;
+        }
+        let Some(folder) = root_family_folder(kind) else {
+            continue;
+        };
+        row.kind = Some((*kind).to_string());
+        row.folder = Some(folder);
+        if audit.misses.get(&row.file_name) == Some(&MetadataExtractionMissReason::Family) {
+            audit.misses.remove(&row.file_name);
+        }
+    }
+}
+
+fn collect_root_family_kinds(text: &str, kinds: &mut BTreeMap<String, &'static str>) {
+    let Some(fields) = split_1c_braced_fields(text.trim(), 0) else {
+        return;
+    };
+    if fields.len() >= 2
+        && let Some(kind) = crate::compiler::root::configuration_family_kind(fields[0].trim())
+        && fields[1].trim().parse::<usize>().ok() == Some(fields.len() - 2)
+    {
+        for child in &fields[2..] {
+            if let Some(uuid) = parse_non_zero_uuid(child.trim()) {
+                kinds.entry(uuid).or_insert(kind);
+            }
+        }
+        return;
+    }
+    for field in &fields {
+        let field = field.trim();
+        if field.starts_with('{') {
+            collect_root_family_kinds(field, kinds);
+        }
+    }
+}
+
+/// The folder of a root family's kind (the plural the platform lays out).
+pub(crate) fn root_family_folder(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "Role" => "Roles",
+        "CommonTemplate" => "CommonTemplates",
+        "CommonModule" => "CommonModules",
+        "HTTPService" => "HTTPServices",
+        "ScheduledJob" => "ScheduledJobs",
+        "CommonAttribute" => "CommonAttributes",
+        "SessionParameter" => "SessionParameters",
+        "FunctionalOptionsParameter" => "FunctionalOptionsParameters",
+        "Subsystem" => "Subsystems",
+        "Style" => "Styles",
+        "FilterCriterion" => "FilterCriteria",
+        "SettingsStorage" => "SettingsStorages",
+        "EventSubscription" => "EventSubscriptions",
+        "StyleItem" => "StyleItems",
+        "Bot" => "Bots",
+        "CommonPicture" => "CommonPictures",
+        "ExchangePlan" => "ExchangePlans",
+        "WebService" => "WebServices",
+        "Language" => "Languages",
+        "FunctionalOption" => "FunctionalOptions",
+        "DefinedType" => "DefinedTypes",
+        "XDTOPackage" => "XDTOPackages",
+        "WSReference" => "WSReferences",
+        "Constant" => "Constants",
+        "Document" => "Documents",
+        "CommonForm" => "CommonForms",
+        "InformationRegister" => "InformationRegisters",
+        "CommandGroup" => "CommandGroups",
+        "CommonCommand" => "CommonCommands",
+        "DocumentNumerator" => "DocumentNumerators",
+        "DocumentJournal" => "DocumentJournals",
+        "Report" => "Reports",
+        "ChartOfCharacteristicTypes" => "ChartsOfCharacteristicTypes",
+        "AccumulationRegister" => "AccumulationRegisters",
+        "Sequence" => "Sequences",
+        "DataProcessor" => "DataProcessors",
+        "Catalog" => "Catalogs",
+        "Enum" => "Enums",
+        "ChartOfAccounts" => "ChartsOfAccounts",
+        "AccountingRegister" => "AccountingRegisters",
+        "ChartOfCalculationTypes" => "ChartsOfCalculationTypes",
+        "CalculationRegister" => "CalculationRegisters",
+        "Task" => "Tasks",
+        "BusinessProcess" => "BusinessProcesses",
+        "ExternalDataSource" => "ExternalDataSources",
+        "IntegrationService" => "IntegrationServices",
+        _ => return None,
+    })
 }
 
 fn normalize_direct_form_metadata(metadata: &mut MetadataTextRow) -> bool {
@@ -7591,7 +7922,78 @@ fn exchange_plan_auto_record_xml(value: &str) -> &'static str {
     }
 }
 
+/// An extension's adopted exchange plan lists, after its own content, the
+/// objects of the extension it changes: `N,(metadata id,state)×N`, in stored
+/// order, printed as `<ExtensionProperty>` (state 2 `Modify`; fixture
+/// `adopted/exchange_plan`). Nothing after the content: none.
+fn parse_exchange_plan_content_extension(
+    bytes: &[u8],
+    object_refs: &BTreeMap<String, String>,
+    type_index: &BTreeMap<String, String>,
+) -> Result<Vec<(String, &'static str)>> {
+    let inflated = inflate_raw_deflate(bytes).context("failed to inflate ExchangePlanContent")?;
+    let text = String::from_utf8(inflated).context("ExchangePlanContent is not valid UTF-8")?;
+    let fields = split_1c_braced_fields(text.trim_start_matches('\u{feff}'), 0)
+        .context("ExchangePlanContent body is not a braced 1C value")?;
+    let count = fields
+        .get(1)
+        .and_then(|field| field.trim().parse::<usize>().ok())
+        .context("ExchangePlanContent item count is not numeric")?;
+    let at = 2 + 2 * count;
+    let Some(extension_count) = fields.get(at) else {
+        return Ok(Vec::new());
+    };
+    let extension_count = extension_count
+        .trim()
+        .parse::<usize>()
+        .context("ExchangePlanContent extension count is not numeric")?;
+    if fields.len() != at + 1 + 2 * extension_count {
+        bail!("ExchangePlanContent extension list does not close the body");
+    }
+    // The platform's order is not the stored one: listed members follow the
+    // content's own stored order, the others come after in stored order
+    // (fixture `adopted/exchange_plan`; a real extension, eleven members).
+    // One plan of that extension prints its three in reverse, which no rule
+    // tried here explains (ruling: best fit, two plans of three).
+    let content_ids = fields[2..at]
+        .iter()
+        .step_by(2)
+        .filter_map(|field| parse_uuid_field(field.trim()))
+        .collect::<Vec<_>>();
+    let mut pairs = fields[at + 1..].chunks_exact(2).collect::<Vec<_>>();
+    pairs.sort_by_key(|pair| {
+        parse_uuid_field(pair[0].trim())
+            .and_then(|id| content_ids.iter().position(|content| *content == id))
+            .unwrap_or(usize::MAX)
+    });
+    let mut out = Vec::with_capacity(extension_count);
+    for pair in pairs {
+        let id = parse_uuid_field(pair[0].trim()).context("ExchangePlanContent extension id")?;
+        let state = match pair[1].trim() {
+            "2" => "Modify",
+            // Seen only in a real extension's own plan (beside a `2`), which
+            // prints no list: nothing is printed then.
+            "1" => return Ok(Vec::new()),
+            other => bail!("ExchangePlanContent extension state {other} is not known"),
+        };
+        let metadata = object_refs
+            .get(&id)
+            .or_else(|| type_index.get(&id))
+            .cloned()
+            .with_context(|| format!("ExchangePlanContent extension id {id} names nothing"))?;
+        out.push((metadata, state));
+    }
+    Ok(out)
+}
+
 fn format_exchange_plan_content_xml(items: &[ExchangePlanContentItem]) -> String {
+    format_exchange_plan_content_xml_with_extension(items, &[])
+}
+
+fn format_exchange_plan_content_xml_with_extension(
+    items: &[ExchangePlanContentItem],
+    extension: &[(String, &'static str)],
+) -> String {
     let mut xml = String::from(
         "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\
 <ExchangePlanContent xmlns=\"http://v8.1c.ru/8.3/xcf/extrnprops\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"2.20\">\r\n",
@@ -7605,6 +8007,16 @@ fn format_exchange_plan_content_xml(items: &[ExchangePlanContentItem]) -> String
             escape_xml_text(&item.metadata),
             item.auto_record
         ));
+    }
+    if !extension.is_empty() {
+        xml.push_str("\t<ExtensionProperty>\r\n");
+        for (metadata, state) in extension {
+            xml.push_str(&format!(
+                "\t\t<Item>\r\n\t\t\t<Metadata>{}</Metadata>\r\n\t\t\t<State>{state}</State>\r\n\t\t</Item>\r\n",
+                escape_xml_text(metadata)
+            ));
+        }
+        xml.push_str("\t</ExtensionProperty>\r\n");
     }
     xml.push_str("</ExchangePlanContent>");
     xml
@@ -8098,6 +8510,14 @@ fn module_body_paths_from_texts_with_forms(
         .map(|row| row.file_name.as_str())
         .collect::<BTreeSet<_>>();
     let mut paths = configuration_module_body_paths(&file_names);
+    // An extension keeps only the root modules it extends, never the full set
+    // the file-name heuristic above recognises; its configuration row names
+    // the header they hang off (ИТК: `<header>.6` alone).
+    for row in metadata_texts {
+        if let Some(header_uuid) = parse_configuration_header_uuid(&row.text) {
+            paths.extend(configuration_module_body_paths_of(&header_uuid, &file_names));
+        }
+    }
 
     // Read in parallel, added in row order.
     let per_row = |row: &MetadataTextRow| {
@@ -8142,17 +8562,27 @@ fn configuration_module_body_paths(file_names: &BTreeSet<&str>) -> BTreeMap<Stri
         if file_names.contains(metadata_id) || !is_configuration_module_group(&suffixes) {
             continue;
         }
-        for route in
-            crate::compiler::families::assets::SourceAssetRegistry.module_routes("Configuration")
-        {
-            let suffix = route.suffix().trim_start_matches('.');
-            let body_id = format!("{metadata_id}.{suffix}");
-            if file_names.contains(body_id.as_str()) {
-                paths.insert(body_id, PathBuf::from(route.relative_path()));
-            }
-        }
+        paths.extend(configuration_module_body_paths_of(metadata_id, file_names));
     }
 
+    paths
+}
+
+/// The root module rows `<header>.<suffix>` present among `file_names`.
+fn configuration_module_body_paths_of(
+    header_uuid: &str,
+    file_names: &BTreeSet<&str>,
+) -> BTreeMap<String, PathBuf> {
+    let mut paths = BTreeMap::new();
+    for route in
+        crate::compiler::families::assets::SourceAssetRegistry.module_routes("Configuration")
+    {
+        let suffix = route.suffix().trim_start_matches('.');
+        let body_id = format!("{header_uuid}.{suffix}");
+        if file_names.contains(body_id.as_str()) {
+            paths.insert(body_id, PathBuf::from(route.relative_path()));
+        }
+    }
     paths
 }
 
@@ -9763,7 +10193,9 @@ struct BusinessProcessProperties {
     autonumbering: bool,
     based_on: Vec<String>,
     number_periodicity: &'static str,
-    task: String,
+    /// `None`: an extension's adopted process stores no task (fixture
+    /// `adopted/kinds`); `<Task/>`, and the extension writer drops it.
+    task: Option<String>,
     create_task_in_privileged_mode: bool,
     data_lock_fields: Vec<String>,
     data_lock_control_mode: &'static str,
@@ -10277,6 +10709,8 @@ struct ConfigurationProperties {
     default_report_form: Option<ConfigurationRootReference>,
     default_report_variant_form: Option<ConfigurationRootReference>,
     default_report_settings_form: Option<ConfigurationRootReference>,
+    /// `<DefaultSearchForm>`, decoded from tuple field 37 on the same terms.
+    default_search_form: Option<ConfigurationRootReference>,
     used_mobile_application_functionalities: Vec<ConfigurationMobileApplicationFunctionality>,
     used_mobile_application_permission_messages:
         Vec<ConfigurationMobileApplicationPermissionMessage>,
@@ -11394,6 +11828,63 @@ fn parse_indexed_generated_types_from_source_xml_text(
     }
 }
 
+/// Adds the foreign generated types (never overriding a storage-defined id).
+/// Below compatibility 8.3.23 the platform writes the AnyIBRef type set as
+/// cfg:AnyRef (see `compatibility_mode_spells_any_ref`) -- a .cf export and an
+/// infobase export alike (the streamed path used to skip it).
+fn respell_any_ib_ref_by_compatibility(
+    indexes: &mut MetadataTypeIndexes,
+    texts: &[MetadataTextRow],
+    source_version: InfobaseConfigSourceVersion,
+) {
+    if compatibility_mode_spells_any_ref(
+        configuration_compatibility_mode_from_texts(texts, source_version).as_deref(),
+    ) {
+        merge_foreign_type_references(
+            indexes,
+            &ForeignReferences {
+                objects: BTreeMap::new(),
+                types: vec![(
+                    ANY_IB_REF_TYPE_ID.to_owned(),
+                    "cfg:AnyRef".to_owned(),
+                    "TypeSet".to_owned(),
+                )],
+            },
+        );
+    }
+}
+
+fn merge_foreign_type_references(indexes: &mut MetadataTypeIndexes, foreign: &ForeignReferences) {
+    for (type_id, reference, category) in &foreign.types {
+        let type_id = type_id.to_ascii_lowercase();
+        if indexes.references.contains_key(&type_id) {
+            continue;
+        }
+        indexes.references.insert(type_id.clone(), reference.clone());
+        // "TypeSet" names a platform type set the foreign context spells
+        // differently from the built-in table (`AnyIBRef` → `AnyRef`).
+        if category == "TypeSet" {
+            indexes.dcs.insert(
+                type_id,
+                DcsTypeResolution::TypeSet {
+                    qname: reference.clone(),
+                },
+            );
+            continue;
+        }
+        let resolution = match generated_type_dcs_policy(Some(category)) {
+            GeneratedTypeDcsPolicy::KeepId => DcsTypeResolution::KeepId,
+            GeneratedTypeDcsPolicy::Type => DcsTypeResolution::Type {
+                qname: reference.clone(),
+            },
+            GeneratedTypeDcsPolicy::TypeSet => DcsTypeResolution::TypeSet {
+                qname: reference.clone(),
+            },
+        };
+        indexes.dcs.entry(type_id).or_insert(resolution);
+    }
+}
+
 fn generated_type_dcs_policy(category: Option<&str>) -> GeneratedTypeDcsPolicy {
     match category {
         Some("DefinedType") => GeneratedTypeDcsPolicy::KeepId,
@@ -12356,6 +12847,25 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
         let typed = parse_typed_metadata_properties_from_text(text, uuid, type_index)?;
         format_typed_metadata_source_xml(kind, &header, &typed, source_version).into_bytes()
     } else {
+        // A kind whose own reader (above, keyed by the record's version code)
+        // did not take the record is stored in a version no reader knows --
+        // its XML carries far more than the header (a real configuration in
+        // 8.3.9 mode: 514 constants `{14,…}`, event subscriptions). Printing
+        // the header-only frame would write a wrong file; fail closed.
+        if matches!(
+            kind,
+            "Constant"
+                | "CommonModule"
+                | "DefinedType"
+                | "CommandGroup"
+                | "CommonCommand"
+                | "StyleItem"
+                | "ScheduledJob"
+                | "EventSubscription"
+                | "FunctionalOption"
+        ) {
+            return None;
+        }
         // The frame every metadata root the platform writes carries: a
         // byte-order mark, the full seventeen-namespace `MetaDataObject`
         // header, a self-closed empty `Comment` and no trailing newline. The
@@ -15082,19 +15592,37 @@ fn parse_information_register_owner_header(value: &str) -> Option<MetadataHeader
     // `0b69b382-479d-4709-bd5d-bc499e5b3bf5`, owner_header_slot 9 of the
     // Catalog owner-graph layout): an 8-member wrapper with no counterpart
     // to what used to be the hardcoded `fields.len() != 9` check below.
-    let has_trailing_default = match fields.len() {
+    // An extension's adopted object records its adoption where an own object
+    // writes `0,0,<nil uuid>`: `1,N,(property uuid,state)xN,<extended object
+    // uuid>` (ИТК `Catalogs/ДополнительныеОтчетыИОбработки`; see
+    // `crate::extension::adoption`). Only the header's shape changes.
+    let adopted = match fields.get(5)?.trim() {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    let controlled: usize = fields.get(6)?.trim().parse().ok()?;
+    // Every adopted header seen controls at least one property (ИТК x3, the
+    // extension probes); an own one controls none.
+    if adopted != (controlled != 0) {
+        return None;
+    }
+    let target_index = 7 + 2 * controlled;
+    let has_trailing_default = match fields.len().checked_sub(2 * controlled)? {
         9 => true,
         8 => false,
         _ => return None,
     };
+    let target = parse_information_register_uuid(fields.get(target_index)?)?;
     if fields.first()?.trim() != (if has_trailing_default { "3" } else { "2" })
-        || fields.get(5)?.trim() != "0"
-        || fields.get(6)?.trim() != "0"
-        || !parse_information_register_uuid(fields.get(7)?)
-            .is_some_and(|uuid| information_register_uuid_is_zero(&uuid))
-        || (has_trailing_default && fields.get(8)?.trim() != "0")
+        || (!adopted && !information_register_uuid_is_zero(&target))
+        || (has_trailing_default && fields.get(target_index + 1)?.trim() != "0")
     {
         return None;
+    }
+    for pair in 0..controlled {
+        parse_information_register_uuid(fields.get(7 + 2 * pair)?)?;
+        fields.get(8 + 2 * pair)?.trim().parse::<u8>().ok()?;
     }
     let identity = split_information_register_braced_fields(fields.get(1)?)?;
     if identity.len() != 3 || identity.first()?.trim() != "1" || identity.get(1)?.trim() != "0" {
@@ -15443,7 +15971,10 @@ fn parse_information_register_standard_attribute_bag(
         fields.len(),
     ) {
         (Some("13"), Some("24"), 50) => false,
-        (Some("14"), Some("25"), 52) => true,
+        // Revision 13 with the type-reduction key already present: a real
+        // extension's tabular sections (8.3.27.2214 prints its
+        // `TypeReductionMode` as for revision 14).
+        (Some("14" | "13"), Some("25"), 52) => true,
         _ => return None,
     };
     let expected_keys = INFORMATION_REGISTER_STANDARD_ATTRIBUTE_KEYS
@@ -16002,9 +16533,14 @@ fn parse_exchange_plan_standard_attributes(value: &str) -> Option<Vec<RegisterSt
         return None;
     }
     let payload = split_information_register_braced_fields(outer.get(1)?)?;
-    if payload.len() != 26 || payload.first()?.trim() != "1" || payload.get(1)?.trim() != "8" {
-        return None;
-    }
+    // A plan in 8.3.21 mode and below keeps no ExchangeDate: seven entries
+    // (every plan of five real configurations in 8.3.21 mode and below --
+    // also once re-saved by 8.3.27; the platform dumps the seven).
+    let skip = match (payload.first()?.trim(), payload.get(1)?.trim(), payload.len()) {
+        ("1", "8", 26) => 0,
+        ("1", "7", 23) => 1,
+        _ => return None,
+    };
     let definitions = [
         ("-14", "ExchangeDate"),
         ("-13", "ThisNode"),
@@ -16017,7 +16553,11 @@ fn parse_exchange_plan_standard_attributes(value: &str) -> Option<Vec<RegisterSt
     ];
     let mut attributes = Vec::with_capacity(definitions.len());
     let mut bag_shape = None;
-    for ((marker, name), fields) in definitions.into_iter().zip(payload[2..].chunks_exact(3)) {
+    for ((marker, name), fields) in definitions
+        .into_iter()
+        .skip(skip)
+        .zip(payload[2..].chunks_exact(3))
+    {
         let marker_fields = split_information_register_braced_fields(fields[0])?;
         if marker_fields.len() != 1
             || marker_fields.first()?.trim() != marker
@@ -16079,8 +16619,12 @@ fn parse_information_register_owner_properties(
         // `КатегорииЗакупокТоварныхКатегорий`, flag `1`) is `Nonperiodical`
         // and exports `false`; all 3 576 other non-periodical registers carry
         // flag `0`.
+        // A recorder-subordinate register exports `false` too, whatever the
+        // flag (fixture `main_filter`: stored set, dumped false by
+        // 8.3.27.2214; a real extension, nine such registers).
         main_filter_on_period: information_register_bool(fields.get(9)?)?
-            && periodicity != "Nonperiodical",
+            && periodicity != "Nonperiodical"
+            && information_register_write_mode_xml(fields.get(5)?)? != "RecorderSubordinate",
         data_lock_control_mode: information_register_data_lock_control_mode_xml(fields.get(10)?)?,
         full_text_search: information_register_full_text_search(fields.get(11)?)?,
         standard_attributes: parse_information_register_standard_attributes(fields.get(12)?)?,
@@ -21041,7 +21585,7 @@ fn parse_catalog_child_properties(
     }
     let (payload, wrapper, wrapper_code, _) = layouts.pop()?;
     let nested = wrapper_code == 8;
-    if wrapper_code != expected_wrapper_code
+    if !catalog_wrapper_code_matches(wrapper_code, expected_wrapper_code)
         || candidates
             .iter()
             .filter(|fields| {
@@ -21698,11 +22242,11 @@ fn parse_document_choice_parameter_links(
         index = index.checked_add(1)?;
         let path_count = fields.get(index)?.trim().parse::<usize>().ok()?;
         index = index.checked_add(1)?;
-        if if nested {
-            !matches!(path_count, 1 | 2)
-        } else {
-            path_count != 1
-        } {
+        // A direct attribute links to another document's tabular-section
+        // attribute with two segments too (a real extension); `nested` no
+        // longer narrows the count.
+        let _ = nested;
+        if !matches!(path_count, 1 | 2) {
             return None;
         }
         let path_end = index.checked_add(path_count)?;
@@ -21757,13 +22301,26 @@ fn parse_document_link_by_type(
         return None;
     }
     let path_end = 2usize.checked_add(path_count)?;
+    // A link to another object's attribute is printed raw, as a choice
+    // parameter link's is (a real extension: `0:<tabular section>/0:<its
+    // attribute>` of another document); a bare code is not.
     let data_path = resolve_document_data_path(
         fields.get(2..path_end)?,
         owner_name,
         object_refs,
         data_path_owner_proof,
-        false,
-    )?;
+        true,
+    )
+    .filter(|path| path.contains(':'))
+    .or_else(|| {
+        resolve_document_data_path(
+            fields.get(2..path_end)?,
+            owner_name,
+            object_refs,
+            data_path_owner_proof,
+            false,
+        )
+    })?;
     Some((
         false,
         Some(MetadataChildLinkByType {
@@ -22199,6 +22756,14 @@ fn catalog_attribute_full_text_search_xml(value: &str) -> Option<&'static str> {
         "1" => Some("Use"),
         _ => None,
     }
+}
+
+/// A catalog attribute's wrapper `actual` where the catalog's revision writes
+/// `expected`: a revision-57 catalog (wrapper 6) keeps an attribute not saved
+/// since revision 56 at wrapper 5 (a real extension: `Catalog` root 57, one
+/// attribute at 5, printed by 8.3.27.2214 like any other).
+fn catalog_wrapper_code_matches(actual: u32, expected: u32) -> bool {
+    actual == expected || (expected == 6 && actual == 5)
 }
 
 fn catalog_direct_attribute_wrapper_code(root_code: &str) -> Option<u32> {
@@ -25015,6 +25580,11 @@ fn parse_cct_standard_attributes(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<RegisterStandardAttribute>> {
     let outer = split_information_register_braced_fields(value)?;
+    // An extension's adopted chart stores no standard attributes (`{0}`,
+    // fixture `adopted/kinds`); the extension writer prints none of them.
+    if matches!(outer.as_slice(), [marker] if marker.trim() == "0") {
+        return Some(Vec::new());
+    }
     if outer.len() != 2 || outer.first()?.trim() != "1" {
         return None;
     }
@@ -26212,7 +26782,7 @@ fn parse_catalog_attribute_collection_indexed(
                 owner_graph::OwnerGraphOwnedChildReason::HeaderMismatch,
             ));
         };
-        if wrapper_code != expected_code {
+        if !catalog_wrapper_code_matches(wrapper_code, expected_code) {
             return Err(owner_collection_item_failure(
                 owner_graph::OwnerCollectionRole::DirectAttribute,
                 item_index,
@@ -26890,20 +27460,20 @@ fn parse_report_properties_from_text(
     Some(ReportProperties {
         generated_types,
         use_standard_commands: parse_1c_bool_field(fields.get(7).copied()).unwrap_or(true),
-        default_form: parse_catalog_form_ref(fields.get(4).copied(), form_refs),
+        default_form: parse_owner_form_ref(fields.get(4).copied(), form_refs, object_refs),
         // `<AuxiliaryForm>` rides field 14 and `<AuxiliarySettingsForm>` field
         // 17; both used to be printed as the empty element. Perepis of the
         // 1 833 reports of the stand: 1 832 hold the nil UUID in both slots and
         // export both elements empty, and the one that does not (`uh`
         // `Reports/ДеревоПоказателей`) exports each as the form its slot names.
-        auxiliary_form: parse_catalog_form_ref(fields.get(14).copied(), form_refs),
+        auxiliary_form: parse_owner_form_ref(fields.get(14).copied(), form_refs, object_refs),
         main_data_composition_schema: parse_metadata_template_ref(
             fields.get(5).copied(),
             template_refs,
         ),
-        default_settings_form: parse_catalog_form_ref(fields.get(6).copied(), form_refs),
-        auxiliary_settings_form: parse_catalog_form_ref(fields.get(17).copied(), form_refs),
-        default_variant_form: parse_catalog_form_ref(fields.get(10).copied(), form_refs),
+        default_settings_form: parse_owner_form_ref(fields.get(6).copied(), form_refs, object_refs),
+        auxiliary_settings_form: parse_owner_form_ref(fields.get(17).copied(), form_refs, object_refs),
+        default_variant_form: parse_owner_form_ref(fields.get(10).copied(), form_refs, object_refs),
         auxiliary_variant_form: record_8_5_1
             .then(|| parse_catalog_form_ref(fields.get(18).copied(), form_refs)),
         variants_storage: parse_metadata_object_ref(fields.get(8).copied(), object_refs),
@@ -28672,7 +29242,7 @@ fn parse_business_process_properties_from_text(
             "1" => "Nonperiodical",
             _ => return None,
         },
-        task: parse_owner_optional_reference(fields.get(25)?, object_refs, "Task.")??,
+        task: parse_owner_optional_reference(fields.get(25)?, object_refs, "Task.")?,
         create_task_in_privileged_mode: information_register_bool(fields.get(29)?)?,
         data_lock_fields,
         data_lock_control_mode: parse_business_process_data_lock_control_mode(fields)?,
@@ -29955,6 +30525,11 @@ fn parse_task_standard_attributes(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<MetadataStandardAttribute>> {
     let outer = split_information_register_braced_fields(value)?;
+    // An extension's adopted task stores no standard attributes (`{0}`,
+    // fixture `adopted/kinds`); the extension writer prints none of them.
+    if matches!(outer.as_slice(), [marker] if marker.trim() == "0") {
+        return Some(Vec::new());
+    }
     if outer.len() != 2 || outer.first()?.trim() != "1" {
         return None;
     }
@@ -30881,8 +31456,8 @@ fn parse_data_processor_properties_from_text(
     Some(DataProcessorProperties {
         generated_types,
         use_standard_commands: parse_1c_bool_field(fields.get(5).copied()).unwrap_or(true),
-        default_form: parse_catalog_form_ref(fields.get(4).copied(), form_refs),
-        auxiliary_form: parse_catalog_form_ref(fields.get(9).copied(), form_refs),
+        default_form: parse_owner_form_ref(fields.get(4).copied(), form_refs, object_refs),
+        auxiliary_form: parse_owner_form_ref(fields.get(9).copied(), form_refs, object_refs),
         include_help_in_contents: parse_1c_bool_field(fields.get(6).copied()).unwrap_or(false),
         extended_presentation: parse_1c_synonyms(fields.get(10).copied().unwrap_or("{0}")),
         explanation: parse_1c_synonyms(fields.get(11).copied().unwrap_or("{0}")),
@@ -31048,8 +31623,11 @@ fn enum_value_color_xml(color: &str) -> Option<String> {
 }
 
 fn parse_enum_value_header(text: &str) -> Option<MetadataHeader> {
-    let marker = "{1,0,";
-    let uuid_start = text.find(marker)? + marker.len();
+    // Both header-tuple spellings `parse_metadata_header_from_text` reads:
+    // `{1,0,<uuid>}` and the older `{0,0,<uuid>}`.
+    let uuid_start = ["{1,0,", "{0,0,"]
+        .into_iter()
+        .find_map(|marker| text.find(marker).map(|start| start + marker.len()))?;
     let uuid_end = uuid_start + 36;
     let uuid = text.get(uuid_start..uuid_end)?;
     if !is_uuid_text(uuid) {
@@ -31173,6 +31751,24 @@ fn parse_catalog_form_ref(
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
     form_refs.get(&uuid).and_then(form_source_reference_name)
+}
+
+/// An owner's form slot: its own form, or else a common form known only
+/// through foreign references (an external report/processor naming its
+/// configuration's common form). In a configuration every common form is in
+/// `form_refs`, so the fallback never applies there.
+fn parse_owner_form_ref(
+    field: Option<&str>,
+    form_refs: &BTreeMap<String, FormSourceReference>,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<String> {
+    parse_catalog_form_ref(field, form_refs).or_else(|| {
+        let uuid = parse_non_zero_uuid(field?)?;
+        object_refs
+            .get(&uuid)
+            .filter(|reference| reference.starts_with("CommonForm."))
+            .cloned()
+    })
 }
 
 fn parse_default_list_form_ref(
@@ -33644,7 +34240,9 @@ fn parse_defined_type_properties_from_text(
     let defined_type_start = text[..marker_start].rfind("{0,")?;
     let fields = split_1c_braced_fields(text, defined_type_start)?;
     let value_types = parse_metadata_type_pattern(fields.get(4)?, type_index)?;
-    if value_types.is_empty() {
+    // An empty type is `<Type/>`: an extension adopting a defined type
+    // without widening it stores `{"Pattern"}` (a real extension's dump).
+    if value_types.is_empty() && fields.get(4)?.trim() != r#"{"Pattern"}"# {
         return None;
     }
     let header = parse_metadata_header_from_text(text, uuid)?;
@@ -34477,6 +35075,14 @@ const STANDARD_PICTURES: &[(&str, &str)] = &[
     ("f3c1376a-d2ee-46c4-9e44-aa2f7dae31c4", "StdPicture.Chart"), // 5
     ("d6eefec0-792a-4720-8933-e2a57f9e312c", "StdPicture.Resource"), // 2
     ("da0c4924-973c-4ef0-9dcf-f1fc3307e5e2", "StdPicture.ChangeListItem"), // 19
+    // ИТК query-wizard and editor forms (8.3.27.2214 dumps of three
+    // extensions, counts over them); each identity has one native spelling.
+    ("a119150f-6c0c-4a94-97b0-5f08d7ebd6f5", "StdPicture.HierarchicalView"), // 3
+    ("18bca3d7-a7a5-41df-a180-4dff9c217f43", "StdPicture.QueryWizardCreateNestedQuery"), // 33
+    ("7604cff7-5cc6-4f88-8d16-504f01b92a3c", "StdPicture.QueryWizardCreateTempTableDescription"), // 30
+    ("270de5f0-f2df-4845-9fde-30b1ec486217", "StdPicture.QueryWizardShowChangesTables"), // 30
+    ("c8a269ff-5b6d-4f42-9fa6-369d7b492aa7", "StdPicture.Rename"), // 36
+    ("fafe4c1f-c265-4220-a0e1-8f82af26b72e", "StdPicture.SortList"), // 33
 ];
 
 static STANDARD_PICTURE_NAMES: LazyLock<HashMap<&'static str, &'static str>> =
@@ -34749,15 +35355,22 @@ fn parse_event_subscription_properties_from_text(
         .to_string();
     let source_types = parse_event_subscription_type_pattern(fields.get(2)?, type_index)?;
     let module_uuid = parse_uuid_field(fields.get(4)?.trim())?;
-    let module_ref = object_refs.get(&module_uuid)?;
     let method = fields
         .get(5)
         .and_then(|field| parse_1c_quoted_string(field.trim()))?;
+    // An extension's adopted subscription stores no handler (the nil module,
+    // an empty method, event `_`; fixture `adopted/subscription`): the
+    // extension writer prints neither.
+    let handler = if module_uuid == "00000000-0000-0000-0000-000000000000" && method.is_empty() {
+        String::new()
+    } else {
+        format!("{}.{method}", object_refs.get(&module_uuid)?)
+    };
 
     Some(EventSubscriptionProperties {
         source_types,
         event,
-        handler: format!("{module_ref}.{method}"),
+        handler,
     })
 }
 
@@ -36885,7 +37498,14 @@ fn format_configuration_source_xml(
         ] {
             push_optional_root_reference_xml(&mut insert, name, reference.as_ref());
         }
-        insert.push_str(policy.default_forms_and_permissions_segment());
+        let segment = policy.default_forms_and_permissions_segment();
+        let mut search_form = String::new();
+        push_optional_root_reference_xml(
+            &mut search_form,
+            "DefaultSearchForm",
+            properties.default_search_form.as_ref(),
+        );
+        insert.push_str(&segment.replacen("\t\t\t<DefaultSearchForm/>\r\n", &search_form, 1));
         push_used_mobile_application_functionalities_xml(
             &mut insert,
             &properties.used_mobile_application_functionalities,
@@ -36896,7 +37516,20 @@ fn format_configuration_source_xml(
             &mut insert,
             &properties.allowed_incoming_share_request_types,
         );
-        insert.push_str(policy.main_window_through_default_style_segment());
+        // The segment ends in the empty `<DefaultStyle/>`; a configuration
+        // naming its default style (root tuple field 9) prints it there.
+        let mut default_style = String::new();
+        push_optional_simple_property_xml(
+            &mut default_style,
+            "DefaultStyle",
+            properties.default_style.as_deref(),
+        );
+        let segment = policy.main_window_through_default_style_segment();
+        if default_style.is_empty() {
+            insert.push_str(segment);
+        } else {
+            insert.push_str(&segment.replacen("\t\t\t<DefaultStyle/>\r\n", &default_style, 1));
+        }
         push_optional_simple_property_xml(
             &mut insert,
             "DefaultLanguage",
@@ -38859,7 +39492,9 @@ fn format_report_source_xml(
     // 2.21 always writes the element: a report record still in the 8.3.27
     // `{19,...}` shape has no slot for it and prints it empty (all 1 329
     // reports of the 8.5.1.1150 ERP УХ export).
+    // 8.3.27.2214 reads an 8.5 report record without it (fixture `v85_form`).
     match &report.auxiliary_variant_form {
+        Some(_) if source_version == InfobaseConfigSourceVersion::V2_20 => {}
         Some(auxiliary_variant_form) => push_optional_text_element(
             &mut xml,
             "\t\t\t",
@@ -38921,6 +39556,10 @@ fn format_report_source_xml(
             push_metadata_child_command_xml(&mut xml, command);
         }
         xml.push_str("\t\t</ChildObjects>\r\n");
+    } else {
+        // A report with no children still writes the element (fixture
+        // `v85_form`: an extension's own report, dumped by 8.3.27.2214).
+        xml.push_str("\t\t<ChildObjects/>\r\n");
     }
 
     xml.push_str("\t</Report>\r\n</MetaDataObject>");
@@ -39213,12 +39852,15 @@ fn format_business_process_source_xml(
             xml_bool(business_process.autonumbering),
         ));
         push_task_based_on_xml(&mut properties, &business_process.based_on);
+        let task = match &business_process.task {
+            Some(task) => format!("\t\t\t<Task>{}</Task>\r\n", escape_xml_element_text(task)),
+            None => "\t\t\t<Task/>\r\n".to_owned(),
+        };
         properties.push_str(&format!(
             "\t\t\t<NumberPeriodicity>{}</NumberPeriodicity>\r\n\
-\t\t\t<Task>{}</Task>\r\n\
+{task}\
 \t\t\t<CreateTaskInPrivilegedMode>{}</CreateTaskInPrivilegedMode>\r\n",
             business_process.number_periodicity,
-            escape_xml_element_text(&business_process.task),
             xml_bool(business_process.create_task_in_privileged_mode),
         ));
         push_exchange_plan_field_collection_xml(
@@ -41997,7 +42639,11 @@ fn format_defined_type_source_xml(
             xml.insert_str(index, &internal);
         }
     }
-    let insert = format_metadata_types_xml(&defined_type.value_types);
+    let insert = if defined_type.value_types.is_empty() {
+        "\t\t\t<Type/>\r\n".to_owned()
+    } else {
+        format_metadata_types_xml(&defined_type.value_types)
+    };
     let marker = "\t\t</Properties>\r\n";
     if let Some(index) = xml.find(marker) {
         xml.insert_str(index, &insert);

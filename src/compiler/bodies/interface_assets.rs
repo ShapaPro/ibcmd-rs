@@ -17,13 +17,17 @@ use crate::compiler::families::native::{
 
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
-/// `{1,<template>,<left count>,<items>,<right count>,<items>,2}`.
+/// `{1,<template>,<left count>,<items>,<right count>,<items>,<displays>}`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HomePageWorkAreaModel {
-    /// The stored template code; `2` is `TwoColumnsVariableWidth`.
+    /// The stored template code: `0` OneColumn (its items in the left
+    /// column), `1` TwoColumnsEqualWidth, `2` TwoColumnsVariableWidth.
     pub template: &'static str,
     pub left_column: Vec<HomePageWorkAreaItem>,
     pub right_column: Vec<HomePageWorkAreaItem>,
+    /// `MACommandInterfaceDisplays`: `0` Top, `1` Bottom, `2` None (the
+    /// element absent).
+    pub ma_command_interface_displays: &'static str,
 }
 
 /// `{0,{0,<form uuid>},<height>,<visibility>}`.
@@ -51,9 +55,8 @@ pub(crate) fn home_page_work_area_plaintext(
             ]));
         }
     }
-    // Every stored record of both corpora closes on `2`; the exporter does
-    // not read it and the source has no element for it.
-    fields.push(token("2"));
+    // `2` (None) unless the source names a placement (fixtures `home_page`).
+    fields.push(token(model.ma_command_interface_displays));
     serialize(&platform_list(fields))
 }
 

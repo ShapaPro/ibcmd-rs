@@ -548,8 +548,12 @@ fn child_objects(
 
 /// `Version8_3_24` -> `80324`.
 fn compatibility_of(properties: &Element) -> Result<u32> {
+    // An extension's root has no CompatibilityMode; its objects follow its
+    // own ConfigurationExtensionCompatibilityMode (`cf load` of an object
+    // added to an extension).
     let text = properties
         .child_text("CompatibilityMode")
+        .or_else(|| properties.child_text("ConfigurationExtensionCompatibilityMode"))
         .ok_or_else(|| anyhow!("Configuration has no <CompatibilityMode>"))?
         .trim();
     pack_version(text)

@@ -247,7 +247,9 @@ mod tests {
         for expected in [
             "<Width>480</Width>",
             "<Height>320</Height>",
-            "<Command name=\"Do\" id=\"1\">",
+            // A command carrying nothing is an empty element (fixture
+            // `empty_command`), so only the opening is pinned.
+            "<Command name=\"Do\" id=\"1\"",
             "<UsualGroup name=\"Main\" id=\"10\">",
             "<Button name=\"Run\" id=\"11\">",
             "<CommandName>Form.Command.Do</CommandName>",

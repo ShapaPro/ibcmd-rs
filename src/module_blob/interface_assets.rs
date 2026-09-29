@@ -884,13 +884,33 @@ fn home_page_work_area_model(
         .ok_or_else(|| {
             anyhow!("the writer has no code for the work area template `{template_name}`")
         })?;
-    let left_column = home_page_work_area_column(children.required("LeftColumn")?, resolver)?;
-    let right_column = home_page_work_area_column(children.required("RightColumn")?, resolver)?;
+    // A one-column page keeps its items in the left column and an empty
+    // right one (fixtures `home_page/one_column*`).
+    let (left_column, right_column) = if template == "0" {
+        (home_page_work_area_column(children.required("Column")?, resolver)?, Vec::new())
+    } else {
+        (
+            home_page_work_area_column(children.required("LeftColumn")?, resolver)?,
+            home_page_work_area_column(children.required("RightColumn")?, resolver)?,
+        )
+    };
+    let ma_command_interface_displays = match children.optional("MACommandInterfaceDisplays") {
+        None => "2",
+        Some(displays) => {
+            displays.only_attributes(&[])?;
+            match displays.leaf()?.trim() {
+                "Top" => "0",
+                "Bottom" => "1",
+                other => bail!("no stored code for MACommandInterfaceDisplays `{other}`"),
+            }
+        }
+    };
     children.finish()?;
     Ok(HomePageWorkAreaModel {
         template,
         left_column,
         right_column,
+        ma_command_interface_displays,
     })
 }
 

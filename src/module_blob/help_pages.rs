@@ -150,9 +150,20 @@ fn storage_attribute_value(
             "../../mdpicture/id{uuid}/{PICTURE_VARIANT_ID}"
         )));
     }
-    let (reference, fragment) = match value.split_once("/Help") {
-        Some((reference, "")) => (reference, ""),
-        Some((reference, fragment)) if fragment.starts_with('#') => (reference, fragment),
+    // A link to an HTML template names the template's own document
+    // (`<Reference>/Template`), any other its help page.
+    let (reference, fragment, document) = match value
+        .split_once("/Help")
+        .map(|split| (split, HELP_DOCUMENT_ID))
+        .or_else(|| {
+            value
+                .split_once("/Template")
+                .map(|split| (split, HTML_TEMPLATE_DOCUMENT_ID))
+        }) {
+        Some(((reference, ""), document)) => (reference, "", document),
+        Some(((reference, fragment), document)) if fragment.starts_with('#') => {
+            (reference, fragment, document)
+        }
         _ => return Ok(None),
     };
     if !is_stored_link_anchor(text, value_start) || !is_help_link_reference(reference) {
@@ -165,7 +176,7 @@ fn storage_attribute_value(
     match help_reference(source, reference, "help link")? {
         HelpReference::Resolved(uuid) => {
             names.insert(uuid.clone(), reference.to_string());
-            Ok(Some(format!("../id{uuid}/{HELP_DOCUMENT_ID}{fragment}")))
+            Ok(Some(format!("../id{uuid}/{document}{fragment}")))
         }
         HelpReference::Absent => Ok(None),
     }
