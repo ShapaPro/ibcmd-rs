@@ -5,8 +5,8 @@ Config"), track "trace", 0.4 «Своё применение конфигура�
 of `restructuring.md` (#341, track "ddl": the DDL and the `SchemaStorage` protocol, **not repeated here**).
 
 Scope of the measurements: platform `ibcmd` 8.3.27.2214, Microsoft SQL Server 2025 (17.0.1135.8), the БСП demo
-configuration (1761 main tables, 4 extensions) restored from the lab corpus, 2026-09-29. Every number is
-**measured** unless the text says **hypothesis**. Not measured yet (Phase 3, after the coordinator's go): ERP УХ,
+configuration with its extensions (2 234 tables in the database) restored from the lab corpus, 2026-09-29. Every number is
+**measured** unless the text says **hypothesis**. Not measured yet (planned as the next phase of the track): ERP УХ,
 platform 8.5, multi-part rows (> 10 MB), extensions being changed by the apply, `--dynamic=auto`.
 
 The traces were made with the capture kit `scripts/apply-trace/` (commits `b3f2bb11` .. `41dc713e` of this branch):
@@ -72,7 +72,7 @@ on the created infobase (no users). The wrappers took the lab locks (`heavy`, an
 | 2c | case 2, apply of that stage | native | `--dynamic=disable` | `_c2_attr` | 157.3 s | 52 077 | `20260929-113311-c2b2-native-apply-new-catalog` |
 | 3 | **case 3**, the whole tree into a created infobase: our import 37.2 s, apply, retry, export | ours (base-free by itself) | `--dynamic=disable` | `_c3_new` | 123.5 s (exit -1) + 6.7 s | 87 128 + 416 | `20260929-114021-c3-ours-import`, `-114151-c3-native-apply`, `-115512-c3-native-apply-retry` |
 
-Staging mode of case 2 (asked by the coordinator): the attribute and the new catalog were staged with the **native**
+Staging mode of case 2: the attribute and the new catalog were staged with the **native**
 partial import, because our **patch mode drops a new attribute silently** (2n: all 9 staged rows identical to
 `Config` but for `versions`; the apply saw no structure change and took the short path of section 6.4). The
 `--base-free` mode of our import was not run for case 2 (track ddl staged its structural cases that way and native
@@ -116,8 +116,9 @@ Tables are read with `SELECT Creation,Modified,Attributes,DataSize,BinaryData FR
 
 ### 3.2 The phases
 
-Times are from 1x (108.8 s) with the steady state 1x' (30.2 s) in brackets. The command opens ~12 connections; the
-writes of phase A come from the first, the rest from a second one (spid changes at 11.4 s).
+Times are from 1x (108.8 s) with the steady state 1x' (30.2 s) in brackets. The command opens about a dozen
+connections, most of which only run `SET` statements; the writes of phase A come from one connection, everything
+from B on from another (the session id changes at 11.4 s).
 `write-phases.md` of each capture (in the evidence) lists the same blocks in order.
 
 | # | phase | writes (table: row name, size, format) | tx |
@@ -197,7 +198,7 @@ The complete matrix (statements / rows / bytes per family and case) is `write-fa
 | `<guid>.ui` ×3 | fixed | 9 B, 24 301 B, 94 B | `54ba7662-...` is rewritten with the same 9 bytes (`Modified` only). `789702c6-...` and `97f2c291-...` are Base64 text (lines of 64 characters) whose content changes on every apply with the same size (**hypothesis**: re-encrypted with a fresh IV); decoding belongs to track ui |
 | `DBNames`, `DBNames-Ext-1`, `DBNames-Ext-<guid>` ×2 | content | stored 143 619 B, 20 B, 954 B, 17 817 B (inflated 347 167 B, 18 B, 2 309 B, 40 882 B) | raw deflate of `{<max>,{<count>,{<guid>,"<kind>",<number>},...}}`: the numbering of metadata objects and fields (`Fld`) and of platform tables (nil guid: `WebSocketClients`, `DbCopies...`). **Append-only**; the number counter is global over the main and all extension `DBNames`: 2a: `{4e84d26f-...,"Fld",11034}` (11034 = max over `DBNames-Ext-b3fa0ef0-...` (11033) + 1; the main header said 10824), 2c: `a51bda0b-...` "Reference" 11035 (the new table `_Reference11035`) and the three new platform tables 11036 - 11038 (header 11039). Rewritten only when an entry was added (module edits: identical, `.New` thrown away) |
 | `DBNamesVersion-DBNames` | content | 43 B | `{0,<guid>}`, a new random (v4) guid whenever `DBNames` changed; the `-Ext-` rows never changed |
-| `<guid>.sinew` -> `<guid>.si` ×16 | fixed | 295 B .. 3.0 MB | raw deflate of `{2,{1,<guid>,5,...}}` / `{0,{27,...}}`: an index of the types used by the metadata (rows `{"Pattern",{"#",<type guid>}}`), 16 rows with fixed names (the same 16 in the created infobase). **Content is identical to the previous apply when only modules change** (1x: 16 of 16 "same content, other metadata"); 2 of 16 changed for the attribute (2a; `1a621f0f-....si` grew by 41 B) and 9 of 16 for the new catalog with the removed attribute (2c). The rows are rebuilt and written on every apply |
+| `<guid>.sinew` -> `<guid>.si` ×16 | fixed | 295 B .. 3.0 MB | raw deflate of `{2,{1,<guid>,5,...}}` / `{0,{27,...}}`: indexes of the metadata (type patterns `{"Pattern",{"#",<type guid>}}`; `1a621f0f-....si` is the list of all metadata objects, entries `<guid> <parent guid> <kind code> "<name>" {1,1,{"ru","<synonym>"}} 0 0` with the entry count in the header: the added attribute made `10807 -> 10808` and one entry `4e84d26f-... eeaa0c4f-... 36 "ТрассаРеквизит" ...`), 16 rows with fixed names (the same 16 in the created infobase). **Content is identical to the previous apply when only modules change** (1x: 16 of 16 "same content, other metadata"); 2 of 16 changed for the attribute (2a; `1a621f0f-....si` grew by 41 B) and 9 of 16 for the new catalog with the removed attribute (2c). The rows are rebuilt and written on every apply |
 | `siVersions` | fixed | 1 273 B | `{0,16,"<guid>.si",<guid>,...}`: **a new random (v4) guid for every one of the 16 entries on every apply**, entries reordered |
 | `DynamicallyUpdated` | fixed (deleted; written in a dynamic apply) | 82 B .. 119 B | section 5 |
 | `evlogparams.inf`, `ibparams.inf`, `locale.inf`, `log.inf` | not touched | | written by `infobase create` only |
@@ -218,13 +219,18 @@ The complete matrix (statements / rows / bytes per family and case) is `write-fa
 * **`_ConfigChngR` (+ `_ConfigChngR_ExtProps`)**: rebuilt **on every apply**, also with no change and also in a
   dynamic apply (B1, C2). `_IDRRef` of all rows is new (a sequential run from a fresh base value, e.g.
   `8F5B00E04C68009311F1BBDB32A05000`, `...05001`, ...); `(_NodeTRef, _NodeRRef, _MDObjID)` is the key and does not
-  change; the `..NG` DDL is `restructuring.md` section 3.3. `_MessageNo` (NULL = "changed, not sent to the node") is
-  **not** changed by an exclusive apply in the steady state (1x', 1d': 0 changes). Transitions seen on first applies:
-  1x/1d/2a `NULL -> 0` for 17 279 / 17 279 / 17 321 rows (the state the clone was made in), 2c `0 -> NULL` for
-  17 321 rows and three new rows `NULL` for the new object `0BDA1BA5-1C1B-3149-80D4-6AB10522DE81` at three of the
-  register's nodes. The dynamic apply runs `UPDATE T2 SET _MessageNo = CAST(NULL AS NUMERIC(38,8)) FROM _ConfigChngR
-  T2 WHERE _MDObjID IN (<the 14 changed objects>) AND _IDRRef IN (SELECT RS_FIELD FROM #tt6)` (49 rows). What
-  decides the direction is not decoded.
+  change; the `..NG` DDL is `restructuring.md` section 3.3. **`_MessageNo` after the rebuild is NULL exactly for the
+  objects whose descriptor row `<guid>` was in the staged set of this apply, and 0 for all others** (measured in
+  six applies, the counts match to the row: the register has five nodes; per large node 1x has 14 NULL = the 14
+  staged descriptors, 2a 2 NULL, 2c 4 930 NULL = the 4 930 staged descriptors; the two small nodes hold the subset
+  of those objects they register: 3, 0, 1 270; in the steady state 1x'/1d' nothing flips because the same objects
+  are staged again). The clone's registers came with NULL for 17 279 objects, so the first apply shows `NULL -> 0`
+  for them (1x, 1d, 2a: 17 279 / 17 279 / 17 321 rows) and 2c, which staged nearly everything, `0 -> NULL`
+  (17 321 rows). A **new object** is registered by the apply at three of the five nodes with `_MessageNo = NULL`
+  (2c: `0BDA1BA5-1C1B-3149-80D4-6AB10522DE81` = `a51bda0b-...`, three new rows in `_ConfigChngR`, none in
+  `_ExtProps`); which objects and nodes a register holds beyond that is not decoded. The dynamic apply also
+  runs `UPDATE T2 SET _MessageNo = CAST(NULL AS NUMERIC(38,8)) FROM _ConfigChngR T2 WHERE _MDObjID IN (<the 14
+  changed objects>) AND _IDRRef IN (SELECT RS_FIELD FROM #tt6)` (49 rows), which the rebuild rule already implies.
 * **`_ExtensionsRestruct`, `_ExtensionsRestructNGS`**: bookkeeping of the extensions' restructure state: DELETE and
   INSERT of 1 - 3 rows per step (`_ExtDataID` = the extension, `_RestructData` a blob of 444 - 13 890 B); after the
   apply `_ExtensionsRestructNGS` holds three rows.
@@ -370,8 +376,9 @@ native `config export` and `infobase config check`.
    restructure"), (b) no module text changed. 1x' differs from 2n by five module edits (long path), 2a by an
    attribute (long). Proposed test: on a fresh clone stage (i) one module edit only, (ii) a descriptor edit with
    no structure effect, (iii) nothing; apply each natively and read the log lines.
-2. **`_ConfigChngR._MessageNo`**: what sets NULL -> 0 (17 279 rows on a clone's first apply) and 0 -> NULL (17 321
-   rows in 2c), and at which nodes a new object is registered (3 of the register's node refs).
+2. **`_ConfigChngR`**: the `_MessageNo` rule of section 4.4 is exact on six applies (1x, 1d, 1x', 1d', 2a, 2c); open: which objects and nodes a
+   register holds at all (20 685 rows, five nodes; a new object went to three nodes), and the generator of the
+   row ids.
 3. **`DBNames` header** after 2c (11039 with entries up to 11038); the allocation order of the three platform tables.
 4. **`.si`**: which metadata property changes which of the 16 rows; whether a stale `.si` set is tolerated.
 5. **Help index**: what feeds it. Its size is the same in four applies that moved 38 rows, but tiny (E01) or empty (2c)
@@ -391,7 +398,10 @@ hypotheses of section 7 by dropping the cache writes one at a time.
 ## 10. Evidence and how to repeat
 
 * Condensed evidence: `docs/apply/evidence/native-apply-8.3.27/write-families.md` (the matrix: every family of
-  writes, per case), `write-phases-*.md` (the blocks of consecutive writes per case, in order).
+  writes, per case; the `Config` copies `<n>.new` are left out with `--skip-config-copies`; columns E01,
+  modules-excl = 1x, modules-dyn = 1d, modules-excl-2 = 1x', modules-dyn-2 = 1d', no-change = 2n, attribute = 2a,
+  new-catalog = 2c, new-infobase = the first apply of 3; a cell is "statements / rows affected / payload bytes"),
+  `write-phases-*.md` (the blocks of consecutive writes per case, in order).
 * Captures (lab, not in the repository): `F:\ibcmd\lab\04\trace\captures\<id>\` with `trace\{summary,write-phases,
   timeline,groups}.md`, `service-writes.tsv` (every write in order), `payloads.jsonl`, `ddl.sql`, `diff\diff.md`,
   `before\`, `after\`; blobs in `F:\ibcmd\lab\04\trace\blobs`.

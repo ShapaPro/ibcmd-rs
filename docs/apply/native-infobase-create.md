@@ -16,7 +16,7 @@ The verbatim material a re-implementation needs is in `docs/apply/evidence/nativ
 
 Nothing else needs to exist before the call: no login, no database option. `--create-database` was not used
 (the database was made by `restore-clone.ps1 -Corpus empty`); `--date-offset` (default 2000) was not varied.
-Not covered here (Phase 3 of the plan, after the coordinator's go): platform 8.5, other locales.
+Not covered here (planned, not measured yet): platform 8.5, other locales.
 
 ## 1. What the platform does, in order
 
@@ -172,7 +172,7 @@ and prove it equal to the replay by the same diff. Do not try to derive the rand
 the platform itself draws them fresh for each infobase.
 
 **Open questions** (not blocking): which locale names map to which collations besides the two tested; the same
-capture on 8.5 (Phase 3); whether a database created with `--create-database` differs from a pre-made one (file
+capture on 8.5 (planned); whether a database created with `--create-database` differs from a pre-made one (file
 placement only, by the platform's documentation; not run).
 
 ## 7. What follows a create (case 3 of `native-apply-trace.md`)
