@@ -20,6 +20,7 @@ trace).  No sqlcmd, no bcp, no pip packages.
 | `capture.ps1 -Database <db> -Tag <t> -Exe <path> -ArgumentList ...` (or `-Command { ... }`) | snapshot before, trace of the command, snapshot after, diff, one report folder |
 | `trace_report.py` | the trace analysis used by `trace.ps1` (also usable on its own on `events.xml.gz` / `events.tsv.gz`) |
 | `export-xel.ps1 -Pattern <.xel files> -OutDir <dir> [-Report]` | recovers a trace from the `.xel` files when a run's report step failed |
+| `compare_traces.py --capture <label>=<dir> ...` | the writes of several captured runs side by side, one line per (table, operation, row-name shape): statements / rows / bytes per run, and the DDL verbs |
 | `blobstore.py rebuild\|merge\|verify\|stats <dir>` | maintenance of the content-addressed blob store shared by snapshots (see "Blob store") |
 | `tests/` | offline unit tests: `python -m unittest discover -s scripts/apply-trace/tests` |
 

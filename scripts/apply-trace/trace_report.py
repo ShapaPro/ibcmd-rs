@@ -290,17 +290,30 @@ def lit_value(tok):
 
 
 _EXEC_RE = re.compile(r"^\s*exec(?:ute)?\s+(?P<proc>sp_\w+)\s*(?P<rest>.*)$", re.I | re.S)
+# the driver's prepared statement: `declare @p1 int ... exec sp_prepexec @p1 output,N'<decl>',N'<sql>',<values>` + `select @p1, ...`
+_PREPEXEC_RE = re.compile(r"\bexec(?:ute)?\s+sp_prepexec\s+(?P<rest>.*?)\s*(?:\r?\n\s*select\s+@p1\b[^\r\n]*)?\s*$", re.I | re.S)
 
 
 def parse_rpc(text):
-    """-> (proc, sql, params) for sp_executesql-like calls, or (proc, None, []) otherwise."""
+    """-> (proc, sql, params) for sp_executesql-like calls, or (proc, None, []) otherwise.
+
+    `sp_prepexec` (prepare + execute) is reported as `sp_executesql`: same SQL, same parameters."""
+    pm = _PREPEXEC_RE.search(text or "")
+    if pm:
+        pargs = split_args(pm.group("rest"))
+        if len(pargs) >= 3:
+            # (@handle OUTPUT, <decl>, <sql>, <values>) -> (<sql>, <decl>, <values>)
+            return _sp_executesql_args("sp_executesql", [pargs[2], pargs[1]] + pargs[3:])
     m = _EXEC_RE.match(text or "")
     if not m:
         return None, None, []
     proc = m.group("proc").lower()
     if proc != "sp_executesql":
         return proc, None, []
-    args = split_args(m.group("rest"))
+    return _sp_executesql_args(proc, split_args(m.group("rest")))
+
+
+def _sp_executesql_args(proc, args):
     if not args:
         return proc, None, []
     k0, v0 = lit_value(args[0])
@@ -571,6 +584,8 @@ def dml_detail(op, table, stmt, params):
                         sets[am.group(1).lower()] = am.group(2).strip()
                 conds = _where_conds(m.group("where"))
                 for c, o, v in conds:
+                    if c == "filename" and o in ("<>", "!="):
+                        continue   # an exclusion (`AND FileName <> 'x'`), not the row that is written
                     if c == "filename":
                         pv = resolve(v, params)
                         d["name"] = pv.value if pv and pv.kind == "str" else v
@@ -592,6 +607,11 @@ def dml_detail(op, table, stmt, params):
             m = re.match(r"^\s*DELETE\s+(?:FROM\s+)?\S+(?:\s+WHERE\s+(?P<where>.*))?$", s, re.I | re.S)
             if m and m.group("where"):
                 for c, o, v in _where_conds(m.group("where")):
+                    if c == "filename" and o in ("<>", "!="):
+                        # `DELETE ... WHERE FileName = 'a' AND FileName <> 'b'`: the row is `a`; `b` only excludes
+                        pv = resolve(v, params)
+                        d["note"] = "excluding " + (pv.value if pv and pv.kind == "str" else v)
+                        continue
                     if c == "filename":
                         pv = resolve(v, params)
                         val = pv.value if pv and pv.kind == "str" else v
@@ -637,6 +657,17 @@ class Group:
         self.errors = 0
 
 
+def inline_params(text, params):
+    """Put the values of @Pn parameters into a (short) statement: `exec sp_rename @P2, @P3` -> `exec sp_rename 'a', 'b'`."""
+    def sub(m):
+        for p in params:
+            if p.name == m.group(0) and p.kind in ("str", "num"):
+                return "'" + p.value.replace("'", "''") + "'" if p.kind == "str" else str(p.value)
+        return m.group(0)
+    out = re.sub(r"@P\d+\b", sub, text)
+    return re.sub(r"^exec\s+@P1\s*=\s*", "exec ", out, flags=re.I)
+
+
 def analyze(events):
     stmts = []
     groups = collections.OrderedDict()
@@ -647,13 +678,15 @@ def analyze(events):
         s.ev = e
         s.proc, s.sql, s.params = (None, None, [])
         # the platform sends `exec sp_executesql N'...',N'...',<values>` both as RPC and as batch text
-        if e.kind == "rpc" or _EXEC_RE.match(e.stmt or ""):
+        if e.kind == "rpc" or _EXEC_RE.match(e.stmt or "") or _PREPEXEC_RE.search(e.stmt or ""):
             s.proc, s.sql, s.params = parse_rpc(e.stmt)
         text = s.sql if s.sql is not None else e.stmt
         s.cut = e.stmt_chars > len(e.stmt)
         s.trunc = e.kind == "rpc" and e.stmt_chars >= SQL_RPC_TRUNCATION
         s.sql = text
         s.ops = statement_facts(text) if text else []
+        if s.params and any(op == "RENAME" for op, _t, _s in s.ops):
+            s.ops = [(op, t, inline_params(st, s.params) if op == "RENAME" else st) for op, t, st in s.ops]
         s.verb = verb_of(s.ops)
         if s.proc and s.proc != "sp_executesql":
             s.norm = f"exec {s.proc} ..."
@@ -1021,6 +1054,10 @@ def write_ddl(out, stmts, t0):
             fh.write(f"\n-- seq={e.seq} t={rel(e.start_us, t0)} spid={e.spid} tx={s.tx.tid if s.tx else 0} dur={fmt_dur(e.dur)} rows={e.rows}"
                      f"{' [text cut]' if s.cut else ''}\n")
             text = e.stmt if e.kind == "batch" else e.stmt
+            renames = [st for v, _t, st in s.ops if v == "RENAME"]
+            if renames and all(v == "RENAME" for v, _ in ddl) and e.kind == "rpc":
+                # a prepared `exec @P1 = sp_rename @P2, @P3, ...`: show it with the values in place
+                text = "-- prepared statement, values inlined\n" + "\n".join(renames)
             if len(text) > 200000:
                 text = text[:200000] + "\n-- ... (cut at 200000 chars)"
             fh.write(text.rstrip() + "\n" + ("GO\n" if e.kind == "batch" else ""))

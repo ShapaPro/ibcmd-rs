@@ -58,6 +58,18 @@ class ParseRpc(unittest.TestCase):
         self.assertEqual([p.type for p in params], ["numeric(38,8)", "int"])
         self.assertEqual(params[0].value, "1.5")
 
+    def test_prepared_statement_is_read_like_sp_executesql(self):
+        text = ("declare @p1 int\nset @p1=1\ndeclare @p4 int\nset @p4=0\n"
+                "exec sp_prepexec @p1 output,N'@P1 int OUTPUT,@P2 nvarchar(1035),@P3 nvarchar(128)',"
+                "N'exec @P1 = sp_rename @P2, @P3, ''object''',@p4 output,N'_ConfigChngRNG',N'_ConfigChngR'\nselect @p1, @p4")
+        proc, sql, params = tr.parse_rpc(text)
+        self.assertEqual(proc, "sp_executesql")
+        self.assertEqual(sql, "exec @P1 = sp_rename @P2, @P3, 'object'")
+        self.assertEqual([(p.name, p.value) for p in params[1:]], [("@P2", "_ConfigChngRNG"), ("@P3", "_ConfigChngR")])
+        ops = tr.statement_facts(sql)
+        self.assertEqual([v for v, _, _ in ops], ["RENAME"])
+        self.assertEqual(tr.inline_params(ops[0][2], params), "exec sp_rename '_ConfigChngRNG', '_ConfigChngR', 'object'")
+
 
 class Normalize(unittest.TestCase):
     def test_literals(self):
@@ -143,6 +155,14 @@ class Dml(unittest.TestCase):
         ops = tr.statement_facts("DELETE FROM Config WHERE FileName = 'dynamicCommit'")
         d = tr.dml_detail(ops[0][0], ops[0][1], ops[0][2], [])
         self.assertEqual(d["name"], "dynamicCommit")
+
+    def test_delete_with_an_exclusion_names_the_first_row(self):
+        # the platform sends `... WHERE FileName = 'a' AND FileName <> 'b'`: the row is `a`
+        sql = "DELETE FROM Params WHERE FileName = 'DBNames.New' AND FileName <> 'Params/DBNamesVersion-DBNames'"
+        ops = tr.statement_facts(sql)
+        d = tr.dml_detail(ops[0][0], ops[0][1], ops[0][2], [])
+        self.assertEqual(d["name"], "DBNames.New")
+        self.assertIn("Params/DBNamesVersion-DBNames", d["note"])
 
 
 class Shapes(unittest.TestCase):
