@@ -47,7 +47,8 @@ pub(super) fn build_metadata_command_reference_index_from_texts(
 /// at the same slot the kind's own properties parser uses -- offset 31 of the
 /// normalized owner fields for `Catalog`, offset 23 for `Document`, logical
 /// field 7 for `InformationRegister`, and slot 7 of the object fields for
-/// `Report`. `None` for every other kind, or when the decode fails: the caller
+/// `Report` and `Constant`. `None` for every other kind, or when the decode
+/// fails: the caller
 /// then keeps the pre-existing `true` assumption rather than a guessed offset,
 /// per the project's fail-closed rule on unevidenced field positions.
 ///
@@ -85,6 +86,20 @@ fn metadata_use_standard_commands(kind: &str, text: &str, header: &MetadataHeade
         // read blind.
         let fields = metadata_object_fields(text)?;
         if !matches!(fields.first().map(|value| value.trim()), Some("19" | "20")) {
+            return None;
+        }
+        return parse_1c_bool_field(fields.get(7).copied());
+    }
+    if kind == "Constant" {
+        // Slot 7 of the record `{16,<body>,<4 ids>,<DataLockControlMode>,
+        // <UseStandardCommands>,...}`, the slot the model export writes the
+        // constant's own `Constants/<name>.xml` from. The platform keeps the
+        // raw `100:<uuid>` sentinel for such a constant: measured on a
+        // database whose staged constant `ИспользоватьКонтрольТарификации` has
+        // `<UseStandardCommands>false`, where the subsystem that hides its
+        // `Open` command prints the sentinel and this export printed the name.
+        let fields = metadata_object_fields(text)?;
+        if fields.first().map(|value| value.trim()) != Some("16") {
             return None;
         }
         return parse_1c_bool_field(fields.get(7).copied());
