@@ -669,6 +669,8 @@ mod tests {
             dynamic: None,
             gate: None,
             new_objects: None,
+            structure: None,
+            backup: None,
             tables_touched: Vec::new(),
             not_written: Vec::new(),
             warnings: Vec::new(),
