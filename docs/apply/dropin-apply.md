@@ -25,6 +25,14 @@ Contents: [the platform's command](#the-platforms-command) -
 | `--session-terminate-message=<message>` | the text a terminated session shows | none |
 | `--user`, `-u`, `--password`, `-P` (of `config`) | the infobase user | none |
 
+What `--force` confirms: the warnings of an apply that restructures data, such as
+`[WARN] Код справочника стал неуникальным: _ДемоКонтрагенты (0)` or `[WARN] Номер документа стал
+неуникальным в заданном периоде ЭлектронноеПисьмоИсходящее (00000000001)` (printed and gone past
+in the lab's structural applies with `--force`, `restructure-check/runs/probe_auto_a`). A clean
+module apply prints the same with and without it (n10 against n30). What the platform does
+*without* `--force` when such a warning comes was not measured; the own apply never restructures,
+so it has nothing to confirm.
+
 The words are case-sensitive; a wrong or missing word is `Некорректное значение параметра: dynamic`
 (or `session-terminate`) on stderr and exit 2 (cases p01-p03, p08, p10, p11). A flag given a value
 (`--force=yes`) is `Ошибка разбора параметра: force` (exit 2, the name without dashes; the same for
@@ -196,14 +204,21 @@ text matching (open point 2).
 
 ## Tests and lab evidence
 
-* Unit tests (`src/dropin/parse.rs`, `apply.rs`, `mod.rs`, `help.rs`): the platform's line of
-  the lab scripts, the defaults, every word, the errors as measured, what is not served, the
-  mapping of options and platform, the messages (sessions, structural reasons), the generation
-  as the platform prints it, the report file.
-* `tests/dropin_cli.rs`: the process, without a database: the words and refusals before anything
-  runs (exit codes and streams), the accepted spellings, the failure shape and the `--report`.
-* Lab: the drop-in against БСП clones, next to the platform's own apply on the same stage
-  (`evidence/dropin-apply/lab-runs.md`).
+* Unit tests (`src/dropin/parse.rs`, `apply.rs`, `mod.rs`, `help.rs`; `cargo test --lib dropin`,
+  34 tests): the platform's line of the lab scripts, the defaults, every word, the errors as
+  measured, what is not served, the mapping of options and platform, the messages (sessions,
+  structural reasons), the generation as the platform prints it, the report file.
+* `tests/dropin_cli.rs` (9 tests): the process, without a database: every native command served
+  or refused by name, the words and refusals before anything runs (exit codes and streams), the
+  accepted spellings, the failure shape and the `--report`.
+* Lab, [`evidence/dropin-apply/lab-runs.md`](evidence/dropin-apply/lab-runs.md): the drop-in on
+  БСП 8.3.27 clones with the platform's command line. Nothing staged (0.9 s, "не требуется");
+  a module change applied (exit 0), and the platform's own apply right after finds nothing
+  to update; a descriptor change refused by the conservative gate (exit 1, nothing written);
+  a connected cluster session refused with the list (exit -1), `--session-terminate=force`
+  refused by name (exit 1), `--exclusivity=assumed` applied; a stage written by the platform's
+  own import refused read-only (exit 1).
+* The platform's help of the command: [`evidence/dropin-apply/native-help-apply.txt`](evidence/dropin-apply/native-help-apply.txt).
 
 ## Open points
 
