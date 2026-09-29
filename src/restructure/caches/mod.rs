@@ -22,3 +22,5 @@ pub mod xdto_types;
 mod tests_cases;
 #[cfg(test)]
 mod tests_corpus;
+#[cfg(test)]
+mod tests_unit;

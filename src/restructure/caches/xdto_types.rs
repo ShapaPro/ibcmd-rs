@@ -52,6 +52,14 @@ pub struct CatalogShape {
 }
 
 impl XdtoModel {
+    /// A model of the given XML text (without BOM; CRLF line ends like the platform's).
+    pub fn from_xml(xml: impl Into<String>) -> Self {
+        Self {
+            bom: true,
+            xml: xml.into(),
+        }
+    }
+
     /// Reads an inflated row.
     pub fn parse(row_text: &[u8]) -> Result<Self> {
         let (bom, text) = match row_text.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
