@@ -269,6 +269,26 @@ pub fn prepare_main_activation(
         ));
     }
 
+    let no_op = staged.iter().all(|(key, row)| {
+        active
+            .get(key)
+            .is_some_and(|current| current.binary_data == row.binary_data)
+    });
+    // #408 (finding F-4 of #344): an ordinary promotion replaces only the staged rows and
+    // deletes both markers, so what earlier online generations published (their
+    // `_dynupdate_` rows) silently stops being the configuration. Refuse it before anything
+    // is written until the aliases are folded (`mssql-config-apply`, or the native apply).
+    if !no_op
+        && mode != MainActivationMode::Online
+        && (snapshot.config_dynamically_updated.is_some()
+            || snapshot.params_dynamically_updated.is_some())
+    {
+        return Err(MainActivationError::SafetyGate(online_history_refusal(
+            mode,
+            "Config/Params `DynamicallyUpdated` markers are present",
+        )));
+    }
+
     let ordinary_generation =
         generation_from_versions(&active[&("versions".to_owned(), 0)].binary_data)?;
     let (old_generation, dynamic_history) = active_generation_from_markers(
@@ -278,11 +298,6 @@ pub fn prepare_main_activation(
     )?;
     let new_generation =
         generation_from_versions(&staged[&("versions".to_owned(), 0)].binary_data)?;
-    let no_op = staged.iter().all(|(key, row)| {
-        active
-            .get(key)
-            .is_some_and(|current| current.binary_data == row.binary_data)
-    });
     if !no_op && old_generation == new_generation {
         return Err(MainActivationError::Versions(
             "changed payload reuses the active generation UUID".to_owned(),
@@ -364,6 +379,9 @@ pub fn render_main_activation_sql(
     render_selected_assertion(&mut sql, "Config", "ExpectedActive", 57202);
     render_marker_assertion(&mut sql, "Config", plan.config_marker.as_ref(), 57203);
     render_marker_assertion(&mut sql, "Params", plan.params_marker.as_ref(), 57204);
+    if !plan.no_op && plan.mode != MainActivationMode::Online {
+        render_online_history_assertion(&mut sql, plan.mode, 57208);
+    }
 
     if plan.no_op {
         writeln!(sql, "DELETE FROM dbo.ConfigSave;").unwrap();
@@ -510,6 +528,39 @@ fn render_marker_assertion(
         Some(row) => writeln!(sql, "IF (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated') <> 1 OR (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 AND CONVERT(bigint,DataSize)={} AND HASHBYTES('SHA2_256',BinaryData)=0x{}) <> 1 THROW {code}, '{table}.DynamicallyUpdated drifted', 1;", row.data_size, hex(&row.sha256())).unwrap(),
         None => writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated') THROW {code}, 'unexpected {table}.DynamicallyUpdated row', 1;").unwrap(),
     }
+}
+
+/// #408: no `_dynupdate_` row may exist in `Config` when an ordinary promotion (which
+/// deletes the markers and leaves such rows orphaned) is about to write. Checked inside
+/// the serializable transaction, before the first write, so it also covers alias rows
+/// that no marker names.
+fn render_online_history_assertion(sql: &mut String, mode: MainActivationMode, code: u32) {
+    let message = quote_string(&online_history_refusal(
+        mode,
+        "`_dynupdate_` rows are present in Config",
+    ));
+    writeln!(
+        sql,
+        "IF EXISTS (SELECT 1 FROM dbo.Config WITH (HOLDLOCK) WHERE FileName LIKE N'%[_]dynupdate[_]%') THROW {code}, '{message}', 1;"
+    )
+    .unwrap();
+}
+
+fn mode_name(mode: MainActivationMode) -> &'static str {
+    match mode {
+        MainActivationMode::Exclusive => "exclusive",
+        MainActivationMode::Online => "online",
+        MainActivationMode::Live => "live",
+        MainActivationMode::Worker => "worker",
+    }
+}
+
+fn online_history_refusal(mode: MainActivationMode, evidence: &str) -> String {
+    format!(
+        "{} promotion refused before any write: this database holds online (dynamic) generations ({evidence}).          A {} promotion replaces only the staged rows and deletes the markers, so the earlier online changes          would be lost. Use `mssql-config-apply`, which folds them as the native apply does, or the native          apply; the staged ConfigSave is left as it is",
+        mode_name(mode),
+        mode_name(mode)
+    )
 }
 
 fn render_marker_upsert(sql: &mut String, table: &str, payload: &[u8], code: u32) {
@@ -1023,7 +1074,9 @@ mod tests {
                 .sql
                 .contains("DELETE FROM dbo.Config WHERE FileName=N'root'")
         );
-        assert!(!script.sql.contains("_dynupdate_"));
+        // No alias row is written (the #408 assertion only reads for them).
+        assert!(!script.sql.contains(&format!("{BODY}_dynupdate_")));
+        assert!(!script.sql.contains(&format!("_dynupdate_{NEW}")));
         assert!(!script.sql.contains("Files.MobileVersions"));
         assert!(!script.sql.contains("_ConfigChngR"));
         assert!(!script.sql.contains(".ui"));
@@ -1332,45 +1385,133 @@ mod tests {
         assert!(script.sql.contains(&expected_params));
     }
 
-    #[test]
-    fn exclusive_normalizes_both_dynamic_markers_with_exact_counts() {
+    // The database of the #344 evidence (clone a1): ordinary generation `848a0a59-...`, two
+    // online generations `4832dd20-...` and `96eee589-...`; the promotion stages an unrelated
+    // module. The markers are exactly the ones the tool wrote there.
+    const EVIDENCE_ORDINARY: &str = "848a0a59-8803-445f-b89d-3cfae4f98bbd";
+    const EVIDENCE_G1: &str = "4832dd20-0b9e-45e3-a3e7-095525bf9b3f";
+    const EVIDENCE_G2: &str = "96eee589-ca6c-4269-8b14-1ca1ee9b69ed";
+
+    fn database_with_online_generations(
+        mode: MainActivationMode,
+        staged_is_noop: bool,
+    ) -> Result<MainActivationPlan, MainActivationError> {
         let base = fixture(MainActivationMode::Exclusive);
-        let current = "a05f2e61-a8a0-4d85-999b-663afc575ced";
-        let plan = prepare_main_activation(
-            MainActivationMode::Exclusive,
-            base.staged_rows,
+        let mut active = base.active_rows.clone();
+        // Ordinary `versions` of that database carries the ordinary generation.
+        let versions_row = active
+            .iter_mut()
+            .find(|r| r.file_name == "versions")
+            .unwrap();
+        versions_row.binary_data = versions(EVIDENCE_ORDINARY);
+        versions_row.data_size = versions_row.binary_data.len() as u64;
+        let staged = if staged_is_noop {
+            active.clone()
+        } else {
+            base.staged_rows.clone()
+        };
+        prepare_main_activation(
+            mode,
+            staged,
             MainActivationSnapshot {
-                config_rows: base.active_rows,
+                config_rows: active,
                 config_dynamically_updated: Some(row(
                     "DynamicallyUpdated",
-                    utf8_bom(&format!("{{1,1,{current}}}")),
+                    utf8_bom(&format!("{{1,2,{EVIDENCE_G1},{EVIDENCE_G2}}}")),
                 )),
                 params_dynamically_updated: Some(row(
                     "DynamicallyUpdated",
-                    utf8_bom(&format!("{{0,2,{OLD},{current}}}")),
+                    utf8_bom(&format!(
+                        "{{0,3,{EVIDENCE_ORDINARY},{EVIDENCE_G1},{EVIDENCE_G2}}}"
+                    )),
                 )),
             },
             &[BODY.to_owned(), format!("{BODY}.0")],
             true,
         )
-        .unwrap();
-        let script = render_main_activation_sql("lab", &plan, None).unwrap();
-        assert!(
-            script
+    }
+
+    #[test]
+    fn ordinary_promotion_refuses_a_database_with_online_generations() {
+        // #408 / F-4: exclusive, live and worker deleted both markers and left the
+        // `_dynupdate_` rows behind, so the earlier online changes vanished (measured on a
+        // session: the original module text and no function of the second generation).
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let error = database_with_online_generations(mode, false).unwrap_err();
+            let MainActivationError::SafetyGate(message) = &error else {
+                panic!("{mode:?}: expected a safety-gate refusal, got {error}");
+            };
+            assert!(
+                message.contains("refused before any write"),
+                "{mode:?}: {message}"
+            );
+            assert!(
+                message.contains("earlier online changes"),
+                "{mode:?}: {message}"
+            );
+            assert!(message.contains("would be lost"), "{mode:?}: {message}");
+            assert!(
+                message.contains("mssql-config-apply"),
+                "{mode:?}: {message}"
+            );
+            assert!(message.contains("native"), "{mode:?}: {message}");
+            assert!(message.contains(mode_name(mode)), "{mode:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn online_still_extends_the_history_and_a_noop_is_never_refused() {
+        let online = database_with_online_generations(MainActivationMode::Online, false).unwrap();
+        assert_eq!(online.old_generation().to_string(), EVIDENCE_G2);
+        let script = render_main_activation_sql("lab", &online, None).unwrap();
+        assert!(!script.sql.contains("57208"));
+        assert!(script.sql.contains(&hex(&utf8_bom(&format!(
+            "{{1,3,{EVIDENCE_G1},{EVIDENCE_G2},{NEW}}}"
+        )))));
+        // Nothing is promoted when the stage equals the active rows, so nothing is lost.
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let plan = database_with_online_generations(mode, true).unwrap();
+            assert!(plan.is_no_op(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_promotion_checks_for_alias_rows_in_the_transaction_before_any_write() {
+        // Alias rows that no marker names (orphans of an earlier promotion, a native leftover)
+        // are found by the script itself, inside the serializable transaction.
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let tail = (mode == MainActivationMode::Live).then_some(r"C:\tail.trn");
+            let script = render_main_activation_sql("lab", &fixture(mode), tail).unwrap();
+            let check = script
                 .sql
-                .contains("DELETE FROM dbo.Config WHERE FileName=N'DynamicallyUpdated'")
-        );
-        assert!(
-            script
-                .sql
-                .contains("DELETE FROM dbo.Params WHERE FileName=N'DynamicallyUpdated'")
-        );
-        assert!(script.sql.contains(
-            "IF @@ROWCOUNT <> 1 THROW 57215, 'Config.DynamicallyUpdated cleanup drifted'"
-        ));
-        assert!(script.sql.contains(
-            "IF @@ROWCOUNT <> 1 THROW 57216, 'Params.DynamicallyUpdated cleanup drifted'"
-        ));
+                .find("FileName LIKE N'%[_]dynupdate[_]%') THROW 57208")
+                .unwrap_or_else(|| panic!("{mode:?}: no alias-row assertion"));
+            let first_write = script.sql.find("DELETE FROM dbo.Config WHERE").unwrap();
+            let markers = script.sql.find("THROW 57204").unwrap();
+            let begin = script.sql.find("BEGIN TRANSACTION").unwrap();
+            assert!(
+                begin < markers && markers < check && check < first_write,
+                "{mode:?}"
+            );
+            assert!(script.sql.contains("earlier online changes"), "{mode:?}");
+            assert!(script.sql.contains("mssql-config-apply"), "{mode:?}");
+        }
+        let online =
+            render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None).unwrap();
+        assert!(!online.sql.contains("57208"));
+        assert!(!online.sql.contains("LIKE N'%[_]dynupdate[_]%'"));
     }
 
     #[test]
