@@ -90,6 +90,7 @@ refused every one of them ("declares 9834 pairs but contains 19674 fields").
 | ERP УХ 8.3.27 offline, the 234 rows around its 156 superseded aliases, old against new | 255 of 255 identical |
 | УХ, the constants: the native tree names 126 distinct `Constant.<n>.StandardCommand.<x>` and all belong to constants with `UseStandardCommands=true` | the constant rule cannot move a УХ file |
 | the drop-in export of `ibcmd_rs_04_rcheck_nat_a2` (a native stage) | 12 196 of 12 198 identical; the two others are listed under "What is left" |
+| a clean native stage: `ibcmd_rs_04_exdg_c` (the БСП corpus, one module edited in the tree, imported by the native `config import` until `ConfigSave` held the 9 842 rows of a full stage), native export against ours | 12 196 of 12 198 identical; the edited module is among them, the two others are the same two as on `nat_a2` |
 
 No full УХ tree was written (lab rule); the УХ tables have no `DynamicallyUpdated`
 row and no staged rows, so `install_storage_overlay` returns their headers
@@ -97,33 +98,36 @@ unchanged and every statement is built on the bare table name.
 
 ## Time
 
-The small БСП database with the active generation, alternating runs on a
-machine other tracks were loading:
+The small БСП database with the active generation, three alternating pairs of
+runs on a machine other tracks were also loading (wall time follows that load):
 
 | | wall | process CPU | SQL statements | SQL CPU | logical reads |
 |---|---|---|---|---|---|
-| old, run 1 / 2 | 67.1 s / 25.2 s | 22.5 s / 20.8 s | 18 | 1 096 ms / 924 ms | 110 644 / 108 784 |
-| new, run 1 / 2 | 25.2 s / 35.9 s | 22.3 s / 21.3 s | 20 | 1 187 ms / 1 045 ms | 193 584 / 190 054 |
+| old, runs 1-3 | 48.6 / 27.6 / 19.2 s | 21.2 / 23.9 / 20.5 s | 18 | 1 406 / 952 / 859 ms | about 108 000 |
+| new, runs 1-3 | 50.4 / 14.2 / 14.9 s | 22.5 / 18.8 / 19.6 s | 20 | 1 251 / 1 267 / 1 188 ms | about 186 000 |
 
-The two extra statements read the `ConfigSave` headers and its `versions`
-row. The wall time follows the load of the machine; the client CPU is the
-same and the server CPU is 0.1 s more on a 25 s export.
+The two extra statements read the `ConfigSave` headers and its `versions` row.
+The client CPU is the same, the server CPU is 0.3 s more on a 15-25 s export,
+and the wall time is not longer.
 
 `ibcmd_rs_04_rcheck_bsp_a`: 20 statements, 16 of them the range slices of the
-row fetch, 21.0 s of server CPU in total (each slice reads the narrow columns
-of the table once), 1.15 million logical reads; process CPU 22.1 s; 89 s on
-the loaded machine. The old expression does not run at all.
+row fetch, 21.0 s of server CPU in total on a loaded machine (each slice reads
+the narrow columns of the table once), 1.15 million logical reads; process CPU
+19-22 s; 24 s wall on a quiet machine, 89 s on a loaded one. The old
+expression does not run at all (12 s to the error).
 
 ## What is left
 
-- `nat_a2`, `Configuration.xml`: `ConfigurationExtensionCompatibilityMode` is
+The same two files differ on `nat_a2` and on the clean stage `exdg_c`.
+
+- `Configuration.xml`: `ConfigurationExtensionCompatibilityMode` is
   `Version8_3_27` in the native export and `Version8_3_24` in ours. The stage
   rewrites the Configuration row from the `{67}` to the `{68}` shape with the
   compatibility mode 80324 and the extension compatibility 80327; the model
   refuses that row and the legacy converter reads the wrong slot. The native
   export tells which one the platform prints: 80327 (field 43).
-- `nat_a2`, `ConfigDumpInfo.xml`: the native export omits the entries of
-  `Catalog.НастройкиАвторизацииИнтернетСервисов.ObjectModule` and
-  `.ManagerModule` (`ffd14055-….0` and `.3`), which the staged `versions` lists
-  and whose files it writes. The staged descriptor of that catalog is in the
+- `ConfigDumpInfo.xml`: after a native stage the native export omits the entry
+  of `Catalog.НастройкиАвторизацииИнтернетСервисов.ManagerModule`
+  (`ffd14055-….3`; on `nat_a2` also `.ObjectModule`, `.0`), which the staged
+  `versions` lists and whose file it writes. The staged descriptor of that catalog is in the
   record format 57.
