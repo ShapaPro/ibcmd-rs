@@ -125,8 +125,6 @@ const PRESENTATION: &[&str] = &[
     "AuxiliaryListForm",
     "AuxiliaryChoiceForm",
     "AuxiliaryFolderChoiceForm",
-    "AuxiliaryRecordForm",
-    "AuxiliaryForm",
     "QuickChoice",
     "ChoiceMode",
     "EditType",
@@ -147,6 +145,7 @@ const SAFE_BY_KIND: &[(&str, &[&str])] = &[
             "UseStandardCommands",
             "Autonumbering",
             "CheckUnique",
+            "InputByString",
             "PredefinedDataUpdate",
             "UpdateDataHistoryImmediatelyAfterWrite",
             "ExecuteAfterWriteDataHistoryVersionProcessing",
@@ -461,6 +460,9 @@ mod tests {
             "Explanation",
             "QuickChoice",
             "DefaultObjectForm",
+            "AuxiliaryListForm",
+            "ExtendedObjectPresentation",
+            "InputByString",
             "CheckUnique",
         ] {
             assert_eq!(
@@ -477,6 +479,7 @@ mod tests {
             "CodeType",
             "DataHistory",
             "Owners",
+            "AuxiliaryRecordForm",
         ] {
             assert_eq!(
                 class("Catalog", &["Properties", tag], modified()),
