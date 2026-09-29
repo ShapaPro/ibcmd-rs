@@ -121,14 +121,19 @@ def short_cell(entry):
     return "%d row(s): %s%s" % (len(labels), "; ".join(shown), more)
 
 
+def md_safe(text):
+    """`<uuid>`, `<Version>` and the like stay visible in Markdown: put them in code spans."""
+    return re.sub(r"(<[^<>\s]+>)", r"`\1`", text)
+
+
 def doc_table(data):
     import edits
     lines = ["| change | what | patch | base-free | native |", "|---|---|---|---|---|"]
     for change in [c for c in ORDER if c in data] + [c for c in data if c not in ORDER]:
         if change not in edits.CHANGES:
             continue
-        summary = edits.CHANGES[change]["summary"].replace("|", "/")
-        cells = [short_cell(data[change].get(m)) for m in MODES]
+        summary = md_safe(edits.CHANGES[change]["summary"].replace("|", "/"))
+        cells = [md_safe(short_cell(data[change].get(m))) for m in MODES]
         lines.append("| `%s` | %s | %s |" % (change, summary, " | ".join(cells)))
     return "\n".join(lines)
 

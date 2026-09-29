@@ -32,17 +32,18 @@ switch ($Mode) {
     'bf' { $r = Invoke-OursImport -Db $Database -Tree $Tree -Tag "$Tag-stage" -BaseFree -Exe $Exe }
 }
 if ($Mode -eq 'native') {
-    Invoke-WithNativeLock {
-        # A native import can stage a partial set (9 597-9 635 of 9 842 rows were seen under load): repeat it
-        # until the set is complete, as the ddl track did, before the apply.
-        foreach ($attempt in 1..3) {
-            $script:r = Invoke-NativeImport -Db $Database -Tree $Tree -Tag "$Tag-stage$attempt"
-            "stage (native) #${attempt}: exit=$($script:r.Exit) rows=$($script:r.Rows) $($script:r.Seconds)s $($script:r.Tail)"
-            if ($script:r.Exit -eq 0 -and $script:r.Rows -ge $MinRows) { break }
-        }
-        if ($script:r.Exit -eq 0 -and $script:r.Rows -ge $MinRows) { $script:a = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag }
+    # One command per hold of the native lock (the lock is a FIFO queue since 14:15): the import, then the apply.
+    # A native import can stage a partial set (9 597-9 635 rows were seen under load): it is repeated until
+    # `native_complete.py` finds ConfigSave complete (the lab's criterion), as the ddl track did.
+    $complete = $false
+    foreach ($attempt in 1..3) {
+        $r = Invoke-NativeImport -Db $Database -Tree $Tree -Tag "$Tag-stage$attempt"
+        $check = (python "$here\native_complete.py" $Database) -join ' '
+        "stage (native) #${attempt}: exit=$($r.Exit) rows=$($r.Rows) $($r.Seconds)s | $check"
+        if ($r.Exit -eq 0 -and $check -like 'complete*') { $complete = $true; break }
     }
-    $r = $script:r; $a = $script:a
+    $r.Check = $check
+    if ($complete) { $a = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag }
 } elseif ($r.Exit -eq 0) {
     $a = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag
 }
