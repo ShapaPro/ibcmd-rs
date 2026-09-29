@@ -37,6 +37,17 @@ pub struct SectionFacts {
 
 /// The collection of a catalog's tabular sections.
 pub const TABULAR_SECTIONS: &str = "932159f9-95b2-4e76-a8dd-8849fe5c5ded";
+/// The collection of a document's tabular sections.
+pub const DOCUMENT_TABULAR_SECTIONS: &str = "21c53e09-8950-4b5e-a6a0-1054f1bbc274";
+
+/// The class of the tabular-section collection of a kind (and of its section in `2203278d`).
+pub fn tabular_class(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Catalog" => Some(TABULAR_SECTIONS),
+        "Document" => Some(DOCUMENT_TABULAR_SECTIONS),
+        _ => None,
+    }
+}
 
 impl ObjectFacts {
     /// Reads the row of a `kind` object (`Catalog`, `Document`, ...).
@@ -54,7 +65,9 @@ impl ObjectFacts {
         let mut sections = Vec::new();
         for collection in items.iter().skip(3).take(count) {
             let list = collection.as_list().context("a collection is not a list")?;
-            if list.first().and_then(Brace::as_atom) == Some(TABULAR_SECTIONS) {
+            if tabular_class(kind).is_some()
+                && list.first().and_then(Brace::as_atom) == tabular_class(kind)
+            {
                 for item in list.iter().skip(2) {
                     sections.push(section_facts(item).with_context(|| format!("{kind} {name}"))?);
                 }

@@ -115,8 +115,9 @@ impl XdtoModel {
             .context("an unterminated line in the model")
     }
 
-    fn value_type_line(&self, name: &str) -> Option<(usize, usize)> {
-        let needle = format!("<valueType xmlns:d3p1=\"{ENTERPRISE}\" name=\"CatalogRef.{name}\"");
+    fn value_type_line(&self, family: Family, name: &str) -> Option<(usize, usize)> {
+        let reference = family.reference();
+        let needle = format!("<valueType xmlns:d3p1=\"{ENTERPRISE}\" name=\"{reference}.{name}\"");
         let at = self.xml.find(&needle)?;
         let start = self.xml[..at].rfind('\n').map_or(0, |n| n + 1);
         Some((start, self.line_end(at).ok()?))
@@ -131,7 +132,7 @@ impl XdtoModel {
     }
 
     // -----------------------------------------------------------------------------------------
-    // a catalog
+    // a catalog or a document
     // -----------------------------------------------------------------------------------------
 
     /// Adds the types of a new catalog. `predecessor` / `successor` are the catalogs the root lists
@@ -147,40 +148,85 @@ impl XdtoModel {
         attribute_lines: &[String],
         section_blocks: &[String],
     ) -> Result<()> {
-        if self.value_type_line(name).is_some()
-            || self.object_type(&format!("CatalogObject.{name}")).is_some()
+        self.add_object(
+            Family::Catalog,
+            name,
+            &standard_properties(name, shape),
+            predecessor,
+            successor,
+            attribute_lines,
+            section_blocks,
+        )
+    }
+
+    /// Adds the types of a new document (the same layout as a catalog's).
+    pub fn add_document(
+        &mut self,
+        name: &str,
+        shape: DocumentShape,
+        predecessor: Option<&str>,
+        successor: Option<&str>,
+        attribute_lines: &[String],
+        section_blocks: &[String],
+    ) -> Result<()> {
+        self.add_object(
+            Family::Document,
+            name,
+            &document_standard_properties(name, shape),
+            predecessor,
+            successor,
+            attribute_lines,
+            section_blocks,
+        )
+    }
+
+    /// The types of a new object of a family: the value type after the one of the predecessor and the
+    /// block (row types of the sections, then the object) after the block of the predecessor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_object(
+        &mut self,
+        family: Family,
+        name: &str,
+        standard_lines: &[String],
+        predecessor: Option<&str>,
+        successor: Option<&str>,
+        attribute_lines: &[String],
+        section_blocks: &[String],
+    ) -> Result<()> {
+        let object = family.object();
+        if self.value_type_line(family, name).is_some()
+            || self.object_type(&format!("{object}.{name}")).is_some()
         {
-            bail!("the model has the types of catalog {name} already");
+            bail!("the model has the types of {object}.{name} already");
         }
         // the block: row types, then the object
         let mut block = String::new();
         for section in section_blocks {
             block.push_str(section);
         }
-        block.push_str(&format!(
-            "\t\t<objectType name=\"CatalogObject.{name}\">\r\n"
-        ));
-        for line in standard_properties(name, shape) {
-            block.push_str(&line);
+        block.push_str(&format!("\t\t<objectType name=\"{object}.{name}\">\r\n"));
+        for line in standard_lines {
+            block.push_str(line);
         }
         for line in attribute_lines {
             block.push_str(line);
         }
         block.push_str("\t\t</objectType>\r\n");
+        let reference = family.reference();
         let value_type = format!(
-            "\t\t<valueType xmlns:d3p1=\"{ENTERPRISE}\" name=\"CatalogRef.{name}\" base=\"d3p1:AnyDBRef\"/>\r\n"
+            "\t\t<valueType xmlns:d3p1=\"{ENTERPRISE}\" name=\"{reference}.{name}\" base=\"d3p1:AnyDBRef\"/>\r\n"
         );
 
         // positions are computed on the unchanged text; insert the later one first
-        let block_at = self.block_position(predecessor, successor)?;
+        let block_at = self.block_position(family, predecessor, successor)?;
         let value_at = if let Some(predecessor) = predecessor {
-            self.value_type_line(predecessor)
-                .with_context(|| format!("the model has no CatalogRef.{predecessor}"))?
+            self.value_type_line(family, predecessor)
+                .with_context(|| format!("the model has no {reference}.{predecessor}"))?
                 .1
         } else {
-            let successor = successor.context("the new catalog has neither neighbour")?;
-            self.value_type_line(successor)
-                .with_context(|| format!("the model has no CatalogRef.{successor}"))?
+            let successor = successor.context("the new object has neither neighbour")?;
+            self.value_type_line(family, successor)
+                .with_context(|| format!("the model has no {reference}.{successor}"))?
                 .0
         };
         if value_at > block_at {
@@ -191,21 +237,28 @@ impl XdtoModel {
         Ok(())
     }
 
-    /// Where the block of a new catalog goes: after the block of the predecessor (the end of its
-    /// `CatalogObject`), or before the first type of the successor's block.
-    fn block_position(&self, predecessor: Option<&str>, successor: Option<&str>) -> Result<usize> {
+    /// Where the block of a new object goes: after the block of the predecessor (the end of its
+    /// object type), or before the first type of the successor's block.
+    fn block_position(
+        &self,
+        family: Family,
+        predecessor: Option<&str>,
+        successor: Option<&str>,
+    ) -> Result<usize> {
+        let object = family.object();
         if let Some(predecessor) = predecessor {
             let (_, end) = self
-                .object_type(&format!("CatalogObject.{predecessor}"))
-                .with_context(|| format!("the model has no CatalogObject.{predecessor}"))?;
+                .object_type(&format!("{object}.{predecessor}"))
+                .with_context(|| format!("the model has no {object}.{predecessor}"))?;
             return Ok(end);
         }
-        let successor = successor.context("the new catalog has neither neighbour")?;
+        let successor = successor.context("the new object has neither neighbour")?;
         let (mut start, _) = self
-            .object_type(&format!("CatalogObject.{successor}"))
-            .with_context(|| format!("the model has no CatalogObject.{successor}"))?;
+            .object_type(&format!("{object}.{successor}"))
+            .with_context(|| format!("the model has no {object}.{successor}"))?;
         // step back over the row types of the successor's sections
-        let prefix = format!("\t\t<objectType name=\"CatalogTabularSectionRow.{successor}.");
+        let row = family.row();
+        let prefix = format!("\t\t<objectType name=\"{row}.{successor}.");
         loop {
             let before = &self.xml[..start];
             let Some(previous) = before.rfind("\t\t<objectType name=\"") else {
@@ -232,18 +285,41 @@ impl XdtoModel {
         after: Option<&str>,
         row_lines: &[String],
     ) -> Result<()> {
-        let row_name = format!("CatalogTabularSectionRow.{catalog}.{section}");
-        let object_name = format!("CatalogObject.{catalog}");
+        self.add_section(Family::Catalog, catalog, section, after, row_lines)
+    }
+
+    /// The same for a document.
+    pub fn add_document_section(
+        &mut self,
+        document: &str,
+        section: &str,
+        after: Option<&str>,
+        row_lines: &[String],
+    ) -> Result<()> {
+        self.add_section(Family::Document, document, section, after, row_lines)
+    }
+
+    fn add_section(
+        &mut self,
+        family: Family,
+        owner: &str,
+        section: &str,
+        after: Option<&str>,
+        row_lines: &[String],
+    ) -> Result<()> {
+        let row = family.row();
+        let row_name = format!("{row}.{owner}.{section}");
+        let object_name = format!("{}.{owner}", family.object());
         if self.object_type(&row_name).is_some() {
             bail!("the model has {row_name} already");
         }
         if after.is_none()
-            && self.xml.contains(&format!(
-                "<objectType name=\"CatalogTabularSectionRow.{catalog}."
-            ))
+            && self
+                .xml
+                .contains(&format!("<objectType name=\"{row}.{owner}."))
         {
             bail!(
-                "{catalog} has tabular sections in the model: say which one the new section follows"
+                "{owner} has tabular sections in the model: say which one the new section follows"
             );
         }
         let (object_start, object_end) = self
@@ -255,9 +331,7 @@ impl XdtoModel {
             "\t\t\t<property xmlns:d4p1=\"{CURRENT_CONFIG}\" name=\"{section}\" type=\"d4p1:{row_name}\" lowerBound=\"0\" upperBound=\"99999\"/>\r\n"
         );
         let property_at = if let Some(after) = after {
-            let anchor = format!(
-                "name=\"{after}\" type=\"d4p1:CatalogTabularSectionRow.{catalog}.{after}\""
-            );
+            let anchor = format!("name=\"{after}\" type=\"d4p1:{row}.{owner}.{after}\"");
             let at = self.xml[object_start..object_end]
                 .find(&anchor)
                 .with_context(|| format!("{object_name} has no property {after}"))?
@@ -274,10 +348,8 @@ impl XdtoModel {
         }
         block.push_str("\t\t</objectType>\r\n");
         let block_at = if let Some(after) = after {
-            self.object_type(&format!("CatalogTabularSectionRow.{catalog}.{after}"))
-                .with_context(|| {
-                    format!("the model has no CatalogTabularSectionRow.{catalog}.{after}")
-                })?
+            self.object_type(&format!("{row}.{owner}.{after}"))
+                .with_context(|| format!("the model has no {row}.{owner}.{after}"))?
                 .1
         } else {
             // before the object's own block, after the sections of nothing
@@ -290,6 +362,60 @@ impl XdtoModel {
         self.xml.insert_str(block_at, &block);
         Ok(())
     }
+}
+
+/// The families of objects the model treats alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    Catalog,
+    Document,
+}
+
+impl Family {
+    fn reference(self) -> &'static str {
+        match self {
+            Family::Catalog => "CatalogRef",
+            Family::Document => "DocumentRef",
+        }
+    }
+
+    fn object(self) -> &'static str {
+        match self {
+            Family::Catalog => "CatalogObject",
+            Family::Document => "DocumentObject",
+        }
+    }
+
+    fn row(self) -> &'static str {
+        match self {
+            Family::Catalog => "CatalogTabularSectionRow",
+            Family::Document => "DocumentTabularSectionRow",
+        }
+    }
+}
+
+/// The property line of a tabular section in its owner's object type.
+pub fn section_property_line(family: Family, owner: &str, section: &str) -> String {
+    let row = family.row();
+    format!(
+        "\t\t\t<property xmlns:d4p1=\"{CURRENT_CONFIG}\" name=\"{section}\" type=\"d4p1:{row}.{owner}.{section}\" lowerBound=\"0\" upperBound=\"99999\"/>\r\n"
+    )
+}
+
+/// The row type block of a tabular section (`row_lines` are the property lines of its attributes).
+pub fn section_row_block(
+    family: Family,
+    owner: &str,
+    section: &str,
+    row_lines: &[String],
+) -> String {
+    let row = family.row();
+    let mut block = format!("\t\t<objectType name=\"{row}.{owner}.{section}\">\r\n");
+    for line in row_lines {
+        block.push_str(line);
+    }
+    block.push_str("\t\t</objectType>\r\n");
+    block
 }
 
 /// `<property name="<name>" type="<type>"[ lowerBound="0"]/>` at the indent of an object type.
@@ -345,4 +471,27 @@ pub fn standard_properties(name: &str, shape: CatalogShape) -> Vec<String> {
     }
     lines.push(primitive_property("PredefinedDataName", "xs:string", true));
     lines
+}
+
+/// What decides the standard properties of `DocumentObject.X`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentShape {
+    /// 0 number, 1 string. Only the string number is measured (all 25 documents of the corpus).
+    pub number_type: i64,
+}
+
+/// The standard property lines of `DocumentObject.<name>`: `Ref`, `DeletionMark`, `Date`, `Number`, `Posted`.
+pub fn document_standard_properties(name: &str, shape: DocumentShape) -> Vec<String> {
+    let number_type = if shape.number_type == 0 {
+        "xs:decimal"
+    } else {
+        "xs:string"
+    };
+    vec![
+        reference_property("Ref", &format!("DocumentRef.{name}"), false),
+        primitive_property("DeletionMark", "xs:boolean", false),
+        primitive_property("Date", "xs:dateTime", false),
+        primitive_property("Number", number_type, false),
+        primitive_property("Posted", "xs:boolean", false),
+    ]
 }

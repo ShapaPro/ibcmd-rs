@@ -98,6 +98,17 @@ pub fn collection_of<'a>(collections: &'a [Collection], class: &str) -> Result<&
 
 /// The collection of the catalogs.
 pub const CATALOG_CLASS: &str = "cf4abea6-37b2-11d4-940f-008048da11f9";
+/// The collection of the documents.
+pub const DOCUMENT_CLASS: &str = "061d872a-5787-460e-95ac-ed74ea3a3e84";
+
+/// The root collection of a kind (the inverse of [`kind_of_class`] for the kinds the caches know).
+pub fn class_of_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Catalog" => Some(CATALOG_CLASS),
+        "Document" => Some(DOCUMENT_CLASS),
+        _ => None,
+    }
+}
 
 /// The kind of the objects a root collection lists (the same table the export uses).
 pub fn kind_of_class(class: &str) -> Option<&'static str> {

@@ -1,4 +1,5 @@
-//! The cache rows a new catalog (and a new tabular section) rewrites, from the rows as they are.
+//! The cache rows a new catalog or document (and a new tabular section of one) rewrites, from the rows
+//! as they are.
 //!
 //! The functions take the **inflated** text of the `Params` rows and return the inflated text of the
 //! changed ones; deflating, the `siVersions` guids and the write (`ParamsRewrite`) are the caller's.
@@ -8,17 +9,17 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::metadata_model::brace::Brace;
-use crate::restructure::caches::facts::{ObjectFacts, TABULAR_SECTIONS};
+use crate::restructure::caches::facts::{ObjectFacts, SectionFacts, tabular_class};
 use crate::restructure::caches::help_props::HelpProps;
 use crate::restructure::caches::names_tables::{NamesTables, NewTable};
 use crate::restructure::caches::owner_map::OwnerMap;
 use crate::restructure::caches::root::{
-    CATALOG_CLASS, Collection, collection_of, collections, kind_of_class,
+    Collection, class_of_kind, collection_of, collections, kind_of_class,
 };
 use crate::restructure::caches::synonyms::Synonyms;
 use crate::restructure::caches::type_index::{Entry, TypeIndex, TypeSlot};
 use crate::restructure::caches::type_sets::TypeSets;
-use crate::restructure::caches::xdto_types::{CatalogShape, XdtoModel};
+use crate::restructure::caches::xdto_types::{CatalogShape, DocumentShape, XdtoModel};
 
 /// The names of the cache rows (`Params` `FileName`).
 pub mod rows {
@@ -43,7 +44,7 @@ pub struct CacheRow {
     pub exact: bool,
 }
 
-/// The index of a catalog's generated types: the categories of a reference object and their index.
+/// The index of a reference object's generated types: the categories and their index.
 pub(crate) fn reference_type_slots(facts: &ObjectFacts) -> Result<Vec<TypeSlot>> {
     facts
         .generated
@@ -66,58 +67,79 @@ pub(crate) fn reference_type_slots(facts: &ObjectFacts) -> Result<Vec<TypeSlot>>
         .collect()
 }
 
-/// What a new catalog needs besides its own row.
-pub struct NewCatalog<'a> {
-    /// The catalog's descriptor row.
+/// What a new catalog or document needs besides its own row.
+pub struct NewObject<'a> {
+    /// `Catalog` or `Document`.
+    pub kind: &'a str,
+    /// The object's descriptor row.
     pub descriptor: &'a Brace,
-    /// The configuration's root row **after** the change (the catalog is in its collection).
+    /// The configuration's root row **after** the change (the object is in its collection).
     pub root: &'a Brace,
-    /// The number `DBNames` gave the catalog's table (`_Reference11036` -> 11036).
+    /// The number `DBNames` gave the object's table (`_Reference11036` -> 11036).
     pub table_number: u64,
-    /// Whether the catalog has a help page (a `Config` row `<uuid>.1`).
+    /// Whether the object has a help page (a `Config` row `<uuid>.1`).
     pub has_help: bool,
-    /// The property lines of the catalog's attributes in the XDTO model (see
+    /// The property lines of the object's attributes in the XDTO model (see
     /// [`crate::restructure::caches::xdto_types::primitive_property`]), and the row types of its
     /// tabular sections.
     pub xdto_attribute_lines: &'a [String],
     pub xdto_section_blocks: &'a [String],
     /// The inflated cache rows by name.
     pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
-    /// The name of a catalog by its uuid (the neighbours of the new one in the root).
+    /// The name of an object of the kind by its uuid (the neighbours of the new one in the root).
     pub name_of: &'a dyn Fn(&str) -> Option<String>,
+    /// The descriptor rows of the objects of the kind **after** the change, by uuid (the new object
+    /// included): read only when the new object has tabular sections, whose entries in `2203278d`
+    /// follow the traversal of all of them.
+    pub descriptors: &'a dyn Fn(&str) -> Option<Brace>,
 }
 
 fn cached(cache: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> Result<Vec<u8>> {
     cache(name).with_context(|| format!("Params has no row {name}"))
 }
 
-/// The rows a new catalog rewrites: `2203278d`, `a07b62f0`, `42ed49cc`, `facbfffe`, `fe8acd6a`,
-/// `c4629235` and the XDTO model `ea13a2c9`.
-pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
-    let facts = ObjectFacts::parse("Catalog", input.descriptor)?;
+/// The rows a new catalog or document rewrites: `2203278d`, `a07b62f0`, `42ed49cc` (catalogs),
+/// `facbfffe`, `fe8acd6a`, `c4629235` and the XDTO model `ea13a2c9`.
+pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
+    let kind = input.kind;
+    if !["Catalog", "Document"].contains(&kind) {
+        bail!("the caches of a new {kind} are not measured (Catalog and Document are)");
+    }
+    let class = class_of_kind(kind).context("no root class for the kind")?;
+    let facts = ObjectFacts::parse(kind, input.descriptor)?;
     let collections = collections(input.root);
-    let catalogs = collection_of(&collections, CATALOG_CLASS)?;
-    let position = catalogs
+    let members = collection_of(&collections, class)?;
+    let position = members
         .objects
         .iter()
         .position(|object| *object == facts.uuid)
-        .with_context(|| format!("the root does not list catalog {}", facts.name))?;
+        .with_context(|| format!("the root does not list {kind} {}", facts.name))?;
     let predecessor = position
         .checked_sub(1)
-        .map(|index| catalogs.objects[index].as_str());
-    let successor = catalogs.objects.get(position + 1).map(String::as_str);
+        .map(|index| members.objects[index].as_str());
+    let successor = members.objects.get(position + 1).map(String::as_str);
     let mut out = Vec::new();
 
     // 2203278d: the type index
     let mut index = TypeIndex::parse(&cached(input.cache, rows::TYPE_INDEX)?)?;
     index.refill_section(
-        CATALOG_CLASS,
-        &catalogs.objects,
+        class,
+        &members.objects,
         vec![Entry {
             object: facts.uuid.clone(),
             types: reference_type_slots(&facts)?,
         }],
     )?;
+    if !facts.sections.is_empty() {
+        let section_class = tabular_class(kind).context("the kind has no tabular sections")?;
+        let traversal = section_traversal(&collections, class, input.descriptors)?;
+        let added = facts
+            .sections
+            .iter()
+            .map(section_entry)
+            .collect::<Vec<Entry>>();
+        index.refill_section(section_class, &traversal, added)?;
+    }
     out.push(CacheRow {
         name: rows::TYPE_INDEX,
         text: index.render(),
@@ -127,7 +149,7 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
     // a07b62f0: names -> tables
     let mut names = NamesTables::parse(&cached(input.cache, rows::NAMES_TABLES)?)?;
     names.add_object(&NewTable {
-        kind: "Catalog",
+        kind,
         name: &facts.name,
         object: &facts.uuid,
         table_number: input.table_number,
@@ -141,14 +163,16 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
         exact: true,
     });
 
-    // 42ed49cc: owners
-    let mut owner_map = OwnerMap::parse(&cached(input.cache, rows::OWNER_MAP)?)?;
-    owner_map.add_catalog(&catalogs.objects, &facts.uuid, &facts.references("Owners")?)?;
-    out.push(CacheRow {
-        name: rows::OWNER_MAP,
-        text: owner_map.render(),
-        exact: true,
-    });
+    // 42ed49cc: owners of catalogs
+    if kind == "Catalog" {
+        let mut owner_map = OwnerMap::parse(&cached(input.cache, rows::OWNER_MAP)?)?;
+        owner_map.add_catalog(&members.objects, &facts.uuid, &facts.references("Owners")?)?;
+        out.push(CacheRow {
+            name: rows::OWNER_MAP,
+            text: owner_map.render(),
+            exact: true,
+        });
+    }
 
     // facbfffe: presentations
     let mut synonyms = Synonyms::parse(&cached(input.cache, rows::SYNONYMS)?)?;
@@ -177,7 +201,7 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
         .into_iter()
         .map(|slot| (slot.index, slot.type_id))
         .collect();
-    sets.add_object("Catalog", &types)?;
+    sets.add_object(kind, &types)?;
     out.push(CacheRow {
         name: rows::TYPE_SETS,
         text: sets.render(),
@@ -186,7 +210,12 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
 
     // c4629235: properties (entry exact, position approximate)
     let mut help = HelpProps::parse(&cached(input.cache, rows::HELP_PROPS)?)?;
-    help.add_entry_approximately(HelpProps::catalog_entry(&facts, input.has_help)?)?;
+    let entry = if kind == "Catalog" {
+        HelpProps::catalog_entry(&facts, input.has_help)?
+    } else {
+        HelpProps::document_entry(&facts, input.has_help)?
+    };
+    help.add_entry_approximately(entry)?;
     out.push(CacheRow {
         name: rows::HELP_PROPS,
         text: help.render(),
@@ -196,21 +225,32 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
     // ea13a2c9: the XDTO model
     let neighbour = |uuid: Option<&str>| -> Result<Option<String>> {
         uuid.map(|uuid| {
-            (input.name_of)(uuid).with_context(|| format!("the name of catalog {uuid} is unknown"))
+            (input.name_of)(uuid).with_context(|| format!("the name of {kind} {uuid} is unknown"))
         })
         .transpose()
     };
     let predecessor_name = neighbour(predecessor)?;
     let successor_name = neighbour(successor)?;
     let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
-    model.add_catalog(
-        &facts.name,
-        catalog_shape(&facts)?,
-        predecessor_name.as_deref(),
-        successor_name.as_deref(),
-        input.xdto_attribute_lines,
-        input.xdto_section_blocks,
-    )?;
+    if kind == "Catalog" {
+        model.add_catalog(
+            &facts.name,
+            catalog_shape(&facts)?,
+            predecessor_name.as_deref(),
+            successor_name.as_deref(),
+            input.xdto_attribute_lines,
+            input.xdto_section_blocks,
+        )?;
+    } else {
+        model.add_document(
+            &facts.name,
+            document_shape(&facts)?,
+            predecessor_name.as_deref(),
+            successor_name.as_deref(),
+            input.xdto_attribute_lines,
+            input.xdto_section_blocks,
+        )?;
+    }
     out.push(CacheRow {
         name: rows::XDTO,
         text: model.render(),
@@ -231,8 +271,15 @@ pub fn catalog_shape(facts: &ObjectFacts) -> Result<CatalogShape> {
     })
 }
 
+/// The shape of a document for the XDTO standard properties.
+pub fn document_shape(facts: &ObjectFacts) -> Result<DocumentShape> {
+    Ok(DocumentShape {
+        number_type: facts.number("NumberType")?,
+    })
+}
+
 /// The tabular sections of every object of the root that has some, in the root's order
-/// (`(section uuid)`), for the `932159f9-...` collection of `owner_class` objects.
+/// (`(section uuid)`), for the tabular-section collection of `owner_class` objects.
 pub fn section_traversal(
     collections: &[Collection],
     owner_class: &str,
@@ -259,58 +306,65 @@ pub fn section_traversal(
     Ok(out)
 }
 
-/// What a new tabular section of a catalog needs.
+/// The `2203278d` entry of a tabular section: its own type and the type of its row.
+fn section_entry(section: &SectionFacts) -> Entry {
+    let [(section_type, section_value), (row_type, row_value)] = section.types.clone();
+    Entry {
+        object: section.uuid.clone(),
+        types: vec![
+            TypeSlot {
+                type_id: section_type,
+                value_id: section_value,
+                index: 0,
+            },
+            TypeSlot {
+                type_id: row_type,
+                value_id: row_value,
+                index: 1,
+            },
+        ],
+    }
+}
+
+/// What a new tabular section of a catalog or document needs.
 pub struct NewSection<'a> {
-    /// The root row (its catalogs are the ones to traverse).
+    /// `Catalog` or `Document`.
+    pub kind: &'a str,
+    /// The root row (its objects of the kind are the ones to traverse).
     pub root: &'a Brace,
-    /// The descriptors of the catalogs **after** the change, by uuid.
+    /// The descriptors of the objects **after** the change, by uuid.
     pub descriptor: &'a dyn Fn(&str) -> Option<Brace>,
-    /// The catalog that gets the section, and the section (uuid).
-    pub catalog: &'a str,
+    /// The object that gets the section, and the section (uuid).
+    pub owner: &'a str,
     pub section: &'a str,
     /// The property lines of the section's attributes in the XDTO model.
     pub xdto_row_lines: &'a [String],
     pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
-/// The rows a new tabular section of a catalog rewrites: `2203278d` and the XDTO model.
+/// The rows a new tabular section rewrites: `2203278d` and the XDTO model.
 pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
+    let kind = input.kind;
+    let class =
+        class_of_kind(kind).with_context(|| format!("the caches of {kind} are not measured"))?;
+    let section_class = tabular_class(kind).context("the kind has no tabular sections")?;
     let collections = collections(input.root);
-    let row = (input.descriptor)(input.catalog)
-        .with_context(|| format!("the descriptor of {} is not available", input.catalog))?;
-    let owner = ObjectFacts::parse("Catalog", &row)?;
+    let row = (input.descriptor)(input.owner)
+        .with_context(|| format!("the descriptor of {} is not available", input.owner))?;
+    let owner = ObjectFacts::parse(kind, &row)?;
     let position = owner
         .sections
         .iter()
         .position(|section| section.uuid == input.section)
-        .with_context(|| format!("catalog {} has no section {}", owner.name, input.section))?;
+        .with_context(|| format!("{kind} {} has no section {}", owner.name, input.section))?;
     let section = &owner.sections[position];
     let after = position
         .checked_sub(1)
         .map(|index| owner.sections[index].name.as_str());
 
-    let traversal = section_traversal(&collections, CATALOG_CLASS, input.descriptor)?;
+    let traversal = section_traversal(&collections, class, input.descriptor)?;
     let mut index = TypeIndex::parse(&cached(input.cache, rows::TYPE_INDEX)?)?;
-    let [(section_type, section_value), (row_type, row_value)] = section.types.clone();
-    index.refill_section(
-        TABULAR_SECTIONS,
-        &traversal,
-        vec![Entry {
-            object: section.uuid.clone(),
-            types: vec![
-                TypeSlot {
-                    type_id: section_type,
-                    value_id: section_value,
-                    index: 0,
-                },
-                TypeSlot {
-                    type_id: row_type,
-                    value_id: row_value,
-                    index: 1,
-                },
-            ],
-        }],
-    )?;
+    index.refill_section(section_class, &traversal, vec![section_entry(section)])?;
     let mut out = vec![CacheRow {
         name: rows::TYPE_INDEX,
         text: index.render(),
@@ -318,7 +372,11 @@ pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
     }];
 
     let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
-    model.add_tabular_section(&owner.name, &section.name, after, input.xdto_row_lines)?;
+    if kind == "Catalog" {
+        model.add_tabular_section(&owner.name, &section.name, after, input.xdto_row_lines)?;
+    } else {
+        model.add_document_section(&owner.name, &section.name, after, input.xdto_row_lines)?;
+    }
     out.push(CacheRow {
         name: rows::XDTO,
         text: model.render(),

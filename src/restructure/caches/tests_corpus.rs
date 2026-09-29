@@ -48,8 +48,18 @@ fn parts_of(svc: &Value, table: &str) -> Parts {
     out
 }
 
+/// The snapshots of the `trace` track (`IBCMD_RS_TRACE_LAB`, default `F:\ibcmd\lab\05\s1g\store`):
+/// case d, made by the kit `scripts/apply-trace/lab/s1g-caches/`.
+fn trace_store() -> Option<PathBuf> {
+    let root = std::env::var_os("IBCMD_RS_TRACE_LAB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"F:\ibcmd\lab\05\s1g\store"));
+    root.join("snap").is_dir().then_some(root)
+}
+
 impl Snap {
-    /// One of `pristine`, `c2`, `m`, `t1_before`, `t1_nat`.
+    /// One of `pristine`, `c2`, `m`, `t1_before`, `t1_nat` (the `ddl` lab) or `d_staged`, `d_after`
+    /// (the `trace` store).
     pub(super) fn open(name: &str) -> Option<Self> {
         let (db, label) = match name {
             "pristine" => ("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
@@ -57,9 +67,14 @@ impl Snap {
             "m" => ("ibcmd_rs_04_ddl_bsp8327_m", "m_now"),
             "t1_before" => ("ibcmd_rs_04_ddl_s1_base", "t1_staged"),
             "t1_nat" => ("ibcmd_rs_04_ddl_s1_t1_nat", "nat_after"),
+            "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base", name),
             other => panic!("unknown snapshot {other}"),
         };
-        let root = lab()?;
+        let root = if name.starts_with("d_") {
+            trace_store()?
+        } else {
+            lab()?
+        };
         let text = std::fs::read_to_string(root.join("snap").join(db).join(label).join("svc.json"))
             .ok()?;
         let svc: Value = serde_json::from_str(&text).ok()?;

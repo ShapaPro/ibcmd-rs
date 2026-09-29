@@ -34,6 +34,16 @@ use crate::restructure::caches::order::{bucket_count, uuid_hash};
 const TYPE_REF_CLASS: &str = "fc01b5df-97fe-449b-83d4-218a090e681e";
 const HELP_PAGE: &str = "038b5c85-fb1c-4082-9c4c-e69f8928bf3a";
 
+/// `{"S","v8config://v8cfgHelp/mdobject/id<uuid>/038b5c85-..."}`
+fn help_reference(uuid: &str) -> Brace {
+    Brace::List(vec![
+        Brace::str("S"),
+        Brace::str(format!(
+            "v8config://v8cfgHelp/mdobject/id{uuid}/{HELP_PAGE}"
+        )),
+    ])
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub key: String,
@@ -129,16 +139,36 @@ impl HelpProps {
             props.push(("10".to_owned(), tagged("B", 1)));
         }
         if has_help {
-            props.push((
-                "0".to_owned(),
-                Brace::List(vec![
-                    Brace::str("S"),
-                    Brace::str(format!(
-                        "v8config://v8cfgHelp/mdobject/id{}/{HELP_PAGE}",
-                        facts.uuid
-                    )),
-                ]),
-            ));
+            props.push(("0".to_owned(), help_reference(&facts.uuid)));
+        }
+        props.push((
+            "3".to_owned(),
+            Brace::List(vec![
+                Brace::str("#"),
+                Brace::atom(TYPE_REF_CLASS),
+                Brace::atom(&facts.generated_type("Ref")?.type_id),
+            ]),
+        ));
+        Ok(Entry {
+            key: facts.uuid.clone(),
+            props,
+        })
+    }
+
+    /// The entry of a document as the platform writes it, without property 24: `19` the `Posting`
+    /// code, `20` the `RealTimePosting` code, `0` the help reference, `3` the `Ref` type
+    /// (measured on all 25 documents of the БСП corpus).
+    pub fn document_entry(facts: &ObjectFacts, has_help: bool) -> Result<Entry> {
+        let tagged = |tag: &str, value: i64| Brace::List(vec![Brace::str(tag), Brace::num(value)]);
+        let mut props = vec![
+            ("19".to_owned(), tagged("N", facts.number("Posting")?)),
+            (
+                "20".to_owned(),
+                tagged("N", facts.number("RealTimePosting")?),
+            ),
+        ];
+        if has_help {
+            props.push(("0".to_owned(), help_reference(&facts.uuid)));
         }
         props.push((
             "3".to_owned(),
