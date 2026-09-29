@@ -139,8 +139,7 @@ pub struct FilesRewrite {
     pub new_bytes: Vec<u8>,
 }
 
-/// A `Params` row the script rewrites (the search information, and the `.ui`
-/// hook).
+/// A `Params` row the script rewrites (the search information of new objects).
 #[derive(Debug, Clone)]
 pub struct ParamsRewrite {
     pub file_name: String,
@@ -148,7 +147,7 @@ pub struct ParamsRewrite {
     pub old_sha256_hex: String,
     pub new_bytes: Vec<u8>,
     /// The platform writes the search-information rows anew (`Creation` moves
-    /// too); `siVersions` and the `.ui` rows only change `Modified`.
+    /// too); `siVersions` only changes `Modified`.
     pub set_creation: bool,
 }
 

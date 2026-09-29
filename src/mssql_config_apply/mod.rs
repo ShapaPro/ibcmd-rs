@@ -72,34 +72,6 @@ pub enum RecoveryBlobs {
     None,
 }
 
-/// What a provider of the `Params` `.ui` rows is told.
-///
-/// The native apply re-encrypts two `<uuid>.ui` rows on every apply; the 8.5
-/// platform needs them, 8.3.27 sessions do not. The ui-codec track plugs its
-/// writer in here (it owns the codec); until then the 8.5 profile is refused.
-pub struct UiRowsContext<'a> {
-    pub client: &'a dyn SqlClient,
-    pub database: &'a str,
-    /// The generation the staged `versions` row names.
-    pub new_generation: Uuid,
-    pub staged: &'a [RowMeta],
-}
-
-/// The hook for the `.ui` rows: the rows to write, guarded by the digest of
-/// the row they replace like every `Params` rewrite of the script.
-pub trait UiRowsProvider: Send + Sync {
-    fn ui_rows(&self, context: &UiRowsContext<'_>) -> Result<Vec<sqlgen::ParamsRewrite>>;
-}
-
-#[derive(Clone)]
-pub struct UiHook(pub std::sync::Arc<dyn UiRowsProvider>);
-
-impl std::fmt::Debug for UiHook {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("UiHook(..)")
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ConfigApplyOptions {
     pub database: String,
@@ -116,8 +88,6 @@ pub struct ConfigApplyOptions {
     pub script_output: Option<PathBuf>,
     /// See [`ConservativeGate::admit_unverified_roles`].
     pub admit_unverified_roles: bool,
-    /// The `.ui` rows writer (track ui); required for the 8.5 profile.
-    pub ui_rows: Option<UiHook>,
 }
 
 impl ConfigApplyOptions {
@@ -138,7 +108,6 @@ impl ConfigApplyOptions {
             recovery_blobs: RecoveryBlobs::Changed,
             script_output: None,
             admit_unverified_roles: false,
-            ui_rows: None,
         }
     }
 }
@@ -384,11 +353,9 @@ pub fn plan_with_gate(
         database,
     )?;
     timings.storage_check_ms = ms(started);
-    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150
-        && options.ui_rows.is_none()
-    {
+    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
         bail!(
-            "the 8.5 platform needs the Params .ui rows an apply writes and no provider of them is plugged in (ConfigApplyOptions::ui_rows, track ui): run the native `ibcmd infobase config apply`"
+            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`"
         );
     }
 
@@ -701,29 +668,10 @@ pub fn plan_with_gate(
         _ => bail!("Files.MobileVersions.dat has several parts"),
     }
 
-    // The `Params` rows to rewrite: the search information of new objects and
-    // the `.ui` rows of the provider that is plugged in, if any.
-    let mut params_rewrites = new.search_info.clone();
-    if let Some(hook) = &options.ui_rows {
-        let rows = hook.0.ui_rows(&UiRowsContext {
-            client,
-            database,
-            new_generation: staged_versions.generation,
-            staged: &staged,
-        })?;
-        for row in rows {
-            if params_rewrites
-                .iter()
-                .any(|known| known.file_name.eq_ignore_ascii_case(&row.file_name))
-            {
-                bail!(
-                    "the .ui provider rewrites {}, which the search-information edit rewrites too",
-                    row.file_name
-                );
-            }
-            params_rewrites.push(row);
-        }
-    }
+    // The `Params` rows to rewrite: the search information of new objects.
+    // The `.ui` rows (the platform's configuration-licensing records) are never
+    // written.
+    let params_rewrites = new.search_info.clone();
 
     let mut touched = vec!["Config", "ConfigSave"];
     if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
@@ -790,12 +738,9 @@ pub fn plan_with_gate(
             reference_hex: node.reference.clone(),
         })
         .collect::<Vec<_>>();
-    report.not_written = Vec::new();
-    if options.ui_rows.is_none() {
-        report.not_written.push(
-            "Params .ui generation-selection rows (native re-encrypts two; the ui codec track owns them; 8.3.27 sessions do not need them)".to_owned(),
-        );
-    }
+    report.not_written = vec![
+        "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written; the native apply re-encrypts two of them on every apply".to_owned(),
+    ];
     report.not_written.extend([
         "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
