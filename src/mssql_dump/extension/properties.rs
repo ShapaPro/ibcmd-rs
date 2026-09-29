@@ -39,7 +39,7 @@ const SYNONYM_PROPERTY: &str = "cf4abea3-37b2-11d4-940f-008048da11f9";
 /// The meaning of property `guid` on an element called `element`
 /// (`Catalog`, `Attribute`, `CommonModule`, ...), if it is known.
 pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
-    use Meaning::{Block, ExtendedObject, Group, Hidden, Multi, Property};
+    use Meaning::{Block, ExtendedObject, Group, Multi, Property};
     match guid {
         "9595ddd6-e72c-47ad-a156-672db811628c" => return Some(ExtendedObject),
         // `Type` of an attribute, resource, dimension, defined type, ...
