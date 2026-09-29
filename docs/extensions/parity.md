@@ -301,6 +301,98 @@ database once, when a value first needs them (`extension::base_index_provider`),
 and resolves type ids and object ids through them. If the rows cannot be read,
 the reference stays an id.
 
+## Load and activation round trip (bounded module change)
+
+`mssql-load-extension` compiles the source tree of an extension into an
+overlay on the extension's active rows: every metadata row is kept, the bodies
+the tree carries replace theirs. Its metadata compile is the strict
+`cf bootstrap` one, which refuses what a native export writes for an extension
+(the document of an adopted object lists only the properties the extension
+records; the root carries `DefaultRoles`), so none of the four БСП 8.3.27
+extensions loaded from its own native tree (`Missing("Synonym")` on the
+adopted language, `business object property inventory is not exact` on an
+adopted common module, `DefaultRoles ... has no proven base-free projection`).
+A bounded load (`--path-prefix`, which `mssql-apply-source-change
+--extension` always passes) whose selection holds nothing but module bodies now
+skips that compile: `compile_extension_module_overlay` reads the family and
+uuid off each owner's document, consumes it unread, and compiles the `.bsl`
+files (`compiler::bootstrap`). A body must replace an existing row (adding one
+to an object that has none is a structural change and is refused); a form,
+picture or template in the selection takes the full compile as before.
+
+Measured 2026-09-29 on БСП 8.3.27 clones, extension `_ДемоРасширение`, module
+of the adopted common module `ОбщегоНазначенияПереопределяемый` (one comment
+line added):
+
+| step | result |
+|---|---|
+| `mssql-load-extension --path-prefix CommonModules/...` | 1 compiled row, 170 staged rows, root `28c928ac...` |
+| our export of the staged image | equal to the changed tree in 184 of 185 files; `ConfigDumpInfo.xml` differs in the module's `configVersion` only |
+| native `config export --extension` of the staged state | 185 of 185 files equal to ours, `ConfigDumpInfo.xml` included |
+| native `config apply --extension` (39 s) | "Создано поколение расширения конфигурации: 28c928ac..." = our root |
+| native and our export after the apply | 185 of 185 equal; our active image root `28c928ac...` |
+| second change, staged on two clones | root `19eb4a58...` on both |
+| clone X: native apply (51 s) / clone Y: `mssql-activate-staged-extension --mode online` (6 s) | both end at `19eb4a58...`; native and our export of both 185 of 185 equal |
+
+The two clones differ only in what their history makes different: Y keeps two
+more immutable `ConfigCAS` rows (the first change's `configinfo` and module),
+and bytes 32-34 of the registry blob carry a row version (our publisher writes
+the version the row had before its update; the platform wrote `18 5f` on both
+clones, which is the version of the untouched row of the same database; the
+versions are the databases' own counters, so no two histories agree on them).
+
+Two findings on the publisher: it refuses an extension whose registry blob has
+byte 30 set (`_ДемоПустоеРасширение` and `_ДемоРасширение` are stored that way in
+the corpus, until the platform has applied them once; `ServiceDesk` and
+`VAExtension` have it clear), and `--mode exclusive` refuses while the cluster
+holds sessions of the database (a clone registered with `register-ib.ps1`
+does), so `--mode online` is the one that runs on a registered clone.
+
+## Cross-check against the platform fixtures of upstream PR 387
+
+Upstream PR 387 carries platform-made extension fixtures
+(`tests/fixtures/external/{extension_roots,adopted}`): an extension as a `.cfe`
+container beside the tree the 8.3.27.2214 platform dumped, each set apart by a
+probe that changes one value. The test
+`the_export_equals_the_platform_dumps_of_the_upstream_fixtures` runs the
+extension export over them (skipped where the fixtures are absent; point
+`IBCMD_UPSTREAM_FIXTURES` at the directory). The first pass over them found six
+readings the БСП corpus could not tell apart and the probes show wrong; all
+are corrected and equal the platform now:
+
+| reading | first pass | probes |
+|---|---|---|
+| catalog `37f2fa9d` / `37f2fa9e` | code type / code length | code length / code type |
+| information register `09c412e0` / `13134205` | periodicity / write mode | write mode / periodicity |
+| root `6a447e3f` / `d22e852a` | managed application module / hidden | `DefaultRoles` / managed application module |
+| root tuple member 3 | default run mode | `ScriptVariant` (0 English, 1 Russian) |
+| root tuple member 21 | not read | `DefaultRunMode` (0, 1, 2 auto) |
+| root tuple member 49 (41 before) | keep mapping to the extended objects | keep mapping (0, 1); member 41 is 2 everywhere |
+
+The extension corpus agreed with every wrong reading (both members of a pair
+always listed together; the run mode and the script variant both `1`). What the
+export equals now: the five root cases (`values`, `spellings`, `modules`,
+`roles`, `values_v85`) and the adopted-object cases `props_all`, `props_b0`,
+`props_b1`, `props_b2`, `module_all`, `module_b0..b2`, `catalog_modules`,
+`catalog_object_module`, `document_children`. Ids the export did not know were
+added from the same probes (owners, hierarchy, number properties, object and
+manager modules, `ReturnValuesReuse`, `Value` of a style item, `Group` of a
+common command, event subscription `Source`, filter criterion `Content`,
+form type of an adopted form; the root's modules, `ModalityUseMode`,
+`CompatibilityMode`), an adopted register prints `<ChildObjects/>` and a
+subsystem `<Content/>` when empty, the states of an object's modules are
+written in the platform's fixed order, and the `80327` storage format of the
+extensions the 8.3.27.2214 platform creates itself is readable.
+
+Still different (fail closed unless noted): adopted forms with interceptors
+(`form_events`, `form_events_shared`; the export writes `callType="Before"`
+on every handler, which was read off one sample, and drops the interceptor
+events that are not the first handler of their event: **silent**), predefined
+items and exchange plan content of an adopted object (`<ExtensionState>`,
+`<ExtensionProperty>`), a widened type with a check value, roles and tasks and
+business processes of the minimal fixtures (no legacy decoder), event
+subscriptions.
+
 ## Inferences from one sample
 
 These are read off a single native sample; the evidence is in the lab folder
@@ -326,7 +418,8 @@ These are read off a single native sample; the evidence is in the lab folder
 * the ERP УХ 8.5 corpus for the 8.5 readers (no such clone was made);
 * the load of an 8.5 extension (the 8.5 form loader has the planner bag entry
   and the empty-source characteristic compiles, but no 8.5 extension was loaded);
-* the load and activation round trip of an exported extension;
+* the load of a whole native-format tree (only the bounded module change loads;
+  forms, pictures and templates of an extension still take the strict compile);
 * the drop-in `ibcmd infobase config export --extension=<name>` route.
 
 ## Reproducing
