@@ -70,6 +70,20 @@ Every native write goes through the lab `native` lock (`native_lock.ps1`), one c
 `ConfigSave` has a `versions` row, no `commit` and no `*.new` rows, and every staged `versions` entry that differs from `Config`'s has its
 row (a complete stage of the БСП is about 9 618 rows in a full import, 4 rows with `--partial`; the row count alone is not the test).
 
+## S1: the same run through the apply (issue #391)
+
+```powershell
+# the S1 gate lets the stage through and the apply runs ONE transaction: the structure phase, then the promotion
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --dry-run                 # plan and check, write nothing
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --rehearse               # run everything, roll it back
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --report r.json --script-output t.sql --recovery-dir rec
+# compare with the native twin (docs/apply/restructuring.md, 12.6)
+pwsh -NoProfile -File scripts/restructure-lab/compare_tables.ps1 -A <nat> -B <ours> -Tables _Reference20,_Document39
+pwsh -NoProfile -File scripts/restructure-lab/compare_config.ps1 -A <nat> -B <ours>
+python scripts/restructure-lab/dbschema_cmp.py <nat> <label> <ours> <label>
+python scripts/restructure-lab/si_diff.py <nat> <label> <ours> <label>
+```
+
 ## The prototype's twin run (checkpoint 2)
 
 ```powershell

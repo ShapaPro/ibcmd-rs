@@ -17,16 +17,16 @@ const NATIVE_SCHEMA: &[u8] = include_bytes!(
 );
 const NAMES: &[u8] =
     include_bytes!("../../tests/fixtures/native-evidence/restructure/dbnames-a2-excerpt.txt");
-const OLD_ROW: &[u8] = include_bytes!(
+pub(super) const OLD_ROW: &[u8] = include_bytes!(
     "../../tests/fixtures/native-evidence/restructure/catalog-reference20-old.deflate"
 );
-const NEW_ROW: &[u8] = include_bytes!(
+pub(super) const NEW_ROW: &[u8] = include_bytes!(
     "../../tests/fixtures/native-evidence/restructure/catalog-reference20-new.deflate"
 );
 const STATEMENTS: &str =
     include_str!("../../docs/apply/evidence/restructuring/a2-structure-statements.sql");
 
-const CATALOG: &str = "5eab8a1b-070f-4dcf-bdcc-a259c62c3693";
+pub(super) const CATALOG: &str = "5eab8a1b-070f-4dcf-bdcc-a259c62c3693";
 const VERSION: &str = "d516886c-0000-4000-8000-00000000abcd";
 
 fn names_row(max: u64) -> Vec<u8> {
@@ -38,7 +38,7 @@ fn names_row(max: u64) -> Vec<u8> {
     .unwrap()
 }
 
-fn inputs(old: &[u8], new: &[u8]) -> Inputs {
+pub(super) fn inputs(old: &[u8], new: &[u8]) -> Inputs {
     let files: BTreeSet<String> = [CATALOG.to_owned()].into();
     let mut new_files = files.clone();
     new_files.insert("deleted".to_owned());
@@ -53,6 +53,7 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
         ],
         predefined_tables: BTreeSet::new(),
         cache_rows: Vec::new(),
+        cache_sizes: Default::default(),
         root_row: Vec::new(),
         staged: StagedImage {
             old_files: files,
@@ -64,7 +65,7 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
     }
 }
 
-fn options() -> PlanOptions {
+pub(super) fn options() -> PlanOptions {
     PlanOptions {
         names_version: Some(VERSION.to_owned()),
         // the fixtures hold no cache rows (the corpus test has the real ones)

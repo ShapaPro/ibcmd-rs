@@ -67,6 +67,9 @@ pub struct Inputs {
     pub predefined_tables: BTreeSet<String>,
     /// The `Params` rows `*.si` (derived caches) and `siVersions`, as stored: name and bytes.
     pub cache_rows: Vec<(String, Vec<u8>)>,
+    /// The `DataSize` column of those rows (the guard of a rewrite compares it); a row without an
+    /// entry has the size of its bytes.
+    pub cache_sizes: BTreeMap<String, i64>,
     /// The `root` row of `Config`, as stored: it names the configuration whose descriptor lists the
     /// objects in the order the platform walks them.
     pub root_row: Vec<u8>,
@@ -530,15 +533,20 @@ fn insert_order(table: &PhysicalTable) -> Vec<&Column> {
 const ROOT_CATALOGS: &str = "cf4abea6-37b2-11d4-940f-008048da11f9";
 const ROOT_DOCUMENTS: &str = "061d872a-5787-460e-95ac-ed74ea3a3e84";
 
-/// The position of every catalog and document in the configuration's own lists.
-fn configuration_order(inputs: &Inputs) -> Result<HashMap<String, usize>> {
-    let root = parse_row(&row_bytes(&inputs.root_row)).context("the root row")?;
-    let configuration = root
+/// The uuid of the configuration's own descriptor, which the `root` row names.
+pub fn configuration_uuid(root_row: &[u8]) -> Result<String> {
+    let root = parse_row(&row_bytes(root_row)).context("the root row")?;
+    Ok(root
         .as_list()
         .and_then(|items| items.get(1))
         .and_then(Brace::as_atom)
         .context("the root row names no configuration")?
-        .to_ascii_lowercase();
+        .to_ascii_lowercase())
+}
+
+/// The position of every catalog and document in the configuration's own lists.
+fn configuration_order(inputs: &Inputs) -> Result<HashMap<String, usize>> {
+    let configuration = configuration_uuid(&inputs.root_row)?;
     let descriptor = inputs
         .staged
         .old_descriptors

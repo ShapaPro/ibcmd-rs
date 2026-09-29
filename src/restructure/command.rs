@@ -61,6 +61,20 @@ pub struct MssqlRestructureArgs {
     /// Write the new DBSchema text, the new DBNames text and the statements into this folder.
     #[arg(long)]
     pub dump_plan: Option<PathBuf>,
+    /// Run as the structural gate of the own config apply (docs/apply/restructuring.md, section 12): one
+    /// SERIALIZABLE transaction rebuilds the tables, publishes the schema and moves the staged rows.
+    /// With --dry-run it plans and checks and writes nothing.
+    #[arg(long)]
+    pub through_apply: bool,
+    /// With --through-apply: run the whole script and roll it back.
+    #[arg(long)]
+    pub rehearse: bool,
+    /// With --through-apply: write the T-SQL of the transaction here.
+    #[arg(long)]
+    pub script_output: Option<PathBuf>,
+    /// With --through-apply: the folder of the apply's recovery artifact.
+    #[arg(long)]
+    pub recovery_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +111,7 @@ pub struct ObjectReport {
     pub tables: Vec<TableReport>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct RestructureReport {
     pub database: String,
     pub mode: String,
@@ -109,6 +123,8 @@ pub struct RestructureReport {
     pub new_names_sha256: String,
     pub statements: Vec<StatementReport>,
     pub execution: Option<ExecReport>,
+    /// `--through-apply`: the apply's report (its structure phase, gate verdict, timings).
+    pub through_apply: Option<serde_json::Value>,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -147,6 +163,9 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
             args.sql_user.as_deref().unwrap_or_default(),
             args.sql_pwd_env
         );
+    }
+    if args.through_apply {
+        return run_through_apply(args, password.as_deref());
     }
     let target = SqlTarget {
         server: args.server.clone(),
@@ -205,20 +224,110 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
     Ok(report)
 }
 
-fn make_plan(inputs: &Inputs, args: &MssqlRestructureArgs) -> Result<Plan> {
-    plan(
-        inputs,
-        &PlanOptions {
-            names_version: args.names_version.clone(),
-            skip_xdto: args.skip_xdto,
-            skip_registry: args.skip_registry,
-            method: if args.alter_add {
-                Method::AlterAdd
-            } else {
-                Method::Rebuild
-            },
+fn plan_options(args: &MssqlRestructureArgs) -> PlanOptions {
+    PlanOptions {
+        names_version: args.names_version.clone(),
+        skip_xdto: args.skip_xdto,
+        skip_registry: args.skip_registry,
+        method: if args.alter_add {
+            Method::AlterAdd
+        } else {
+            Method::Rebuild
         },
-    )
+    }
+}
+
+fn make_plan(inputs: &Inputs, args: &MssqlRestructureArgs) -> Result<Plan> {
+    plan(inputs, &plan_options(args))
+}
+
+/// `--through-apply`: the own config apply with the S1 gate. The apply reads the stage, asks the gate,
+/// and runs ONE script: locks, assertions, the structure phase, the promotion of the rows, the caches.
+fn run_through_apply(
+    args: &MssqlRestructureArgs,
+    password: Option<&str>,
+) -> Result<RestructureReport> {
+    use crate::mssql_config_apply::{
+        ConfigApplyOptions, Exclusivity, StructuralRefusal, apply_with_gate,
+    };
+    use crate::mssql_platform_profile::MssqlNativePlatformProfile;
+    use crate::restructure::s1::S1Gate;
+    use crate::sql::{SqlExec, SqlOptions};
+
+    if args.alter_add {
+        bail!("--alter-add is a research switch of the direct command, not of the apply");
+    }
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: None,
+        bcp: None,
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password,
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: true,
+    })?;
+    let mut options = ConfigApplyOptions::new(
+        args.database.clone(),
+        MssqlNativePlatformProfile::Platform8_3_27_2214,
+    );
+    options.dry_run = args.dry_run;
+    options.rehearse = args.rehearse;
+    options.exclusivity = if args.skip_session_check {
+        Exclusivity::Assumed
+    } else {
+        Exclusivity::SqlSessions
+    };
+    options.recovery_dir = args.recovery_dir.clone();
+    options.script_output = args.script_output.clone();
+    let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args));
+    let mode = if args.dry_run {
+        "through-apply, dry-run"
+    } else if args.rehearse {
+        "through-apply, rehearsal"
+    } else {
+        "through-apply"
+    };
+    let write_report = |json: &str| -> Result<()> {
+        if let Some(path) = &args.report {
+            std::fs::write(path, json)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    };
+    match apply_with_gate(&sql, &options, &gate) {
+        Ok(applied) => {
+            let report = RestructureReport {
+                database: args.database.clone(),
+                mode: mode.to_owned(),
+                summary: applied
+                    .structure
+                    .as_ref()
+                    .map(|phase| phase.objects.join("; "))
+                    .unwrap_or_else(|| "no restructuring in the stage".to_owned()),
+                caches: applied
+                    .structure
+                    .as_ref()
+                    .map(|phase| phase.caches.clone())
+                    .unwrap_or_default(),
+                through_apply: Some(serde_json::to_value(&applied)?),
+                ..RestructureReport::default()
+            };
+            write_report(&serde_json::to_string_pretty(&report)?)?;
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
+                let json = serde_json::to_string_pretty(&serde_json::json!({
+                    "refused": "needs_native_apply",
+                    "database": args.database,
+                    "gate": refusal.verdict,
+                }))?;
+                write_report(&json)?;
+                println!("{json}");
+            }
+            Err(error)
+        }
+    }
 }
 
 fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
@@ -292,6 +401,7 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
             })
             .collect(),
         execution: None,
+        through_apply: None,
     }
 }
 

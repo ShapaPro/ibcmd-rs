@@ -16,7 +16,9 @@
 //! - [`reader`] -- the database side of the plan's input;
 //! - [`exec`] -- the plan run in **one transaction**, verified before it commits;
 //! - [`script`] -- the same plan as T-SQL text with assertions, to run inside another transaction (the
-//!   own apply's).
+//!   own apply's);
+//! - [`s1`] -- the structural gate of the own apply: which reasons of the restructuring check are S1
+//!   operations, and the structure phase the apply runs in its transaction.
 //!
 //! The brace text is `metadata_model::brace`, shared with the model export. Findings and measurements:
 //! `docs/apply/restructuring.md`.
@@ -29,6 +31,7 @@ pub mod object;
 pub mod plan;
 pub mod reader;
 pub mod registry;
+pub mod s1;
 pub mod schema;
 pub mod script;
 pub mod storage;
@@ -38,5 +41,7 @@ pub mod xdto;
 mod tests_corpus;
 #[cfg(test)]
 mod tests_plan;
+#[cfg(test)]
+mod tests_s1;
 #[cfg(test)]
 mod tests_schema;
