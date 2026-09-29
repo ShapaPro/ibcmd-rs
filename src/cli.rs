@@ -2033,6 +2033,16 @@ pub enum MssqlConfigApplyExclusivityArg {
     Assumed,
 }
 
+/// Which structural gate judges the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyGateArg {
+    /// The restructure check (`mssql-apply-check`): refuses on a
+    /// restructuring and on anything it cannot place.
+    ApplyCheck,
+    /// Modules, forms, templates, pictures and help pages only.
+    Conservative,
+}
+
 /// Which overwritten rows the recovery artifact keeps the bytes of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MssqlConfigApplyRecoveryArg {
@@ -2080,9 +2090,14 @@ pub struct MssqlConfigApplyArgs {
     pub recovery_dir: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = MssqlConfigApplyRecoveryArg::Changed)]
     pub recovery_blobs: MssqlConfigApplyRecoveryArg,
-    /// Pass changed body rows of command-interface, rights, package and
-    /// similar roles without proving their text unchanged: for a stage made
-    /// by `infobase config import` of a tree exported from this database.
+    /// The structural gate: the restructure check of `mssql-apply-check`
+    /// (default), or the conservative rule.
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyGateArg::ApplyCheck)]
+    pub gate: MssqlConfigApplyGateArg,
+    /// With `--gate conservative`: pass changed body rows of
+    /// command-interface, rights, package and similar roles without proving
+    /// their text unchanged (a stage made by `infobase config import` of a
+    /// tree exported from this database).
     #[arg(long)]
     pub admit_unverified_roles: bool,
     /// Write the rendered SQL transaction here.

@@ -52,6 +52,20 @@ pub struct GateStats {
     pub new_objects: usize,
     /// Changed body rows by the role the registry gives them.
     pub bodies_by_role: BTreeMap<String, usize>,
+    /// What the restructure check looked at (the `apply-check` gate only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restructure_check: Option<RestructureCheckStats>,
+}
+
+/// The figures of the restructure check's verdict that a report keeps.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RestructureCheckStats {
+    pub staged_rows: usize,
+    pub descriptors_compared: usize,
+    pub body_rows_compared: usize,
+    /// Objects whose descriptor differs, harmless or not.
+    pub objects_changed: usize,
+    pub notes: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -64,9 +78,14 @@ pub struct GateVerdict {
     pub blockers_omitted: usize,
     pub stats: GateStats,
     pub gate: String,
+    /// The refusal in the words the gate has for it (the restructure check
+    /// speaks Russian: «требуется штатный config apply: ...»); the
+    /// conservative gate leaves it to the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
-const MAX_LISTED_BLOCKERS: usize = 200;
+pub(super) const MAX_LISTED_BLOCKERS: usize = 200;
 
 impl GateVerdict {
     pub(super) fn block(&mut self, row: &str, reason: impl Into<String>) {
@@ -101,6 +120,10 @@ pub struct GateInput<'a> {
     /// The kind of every accepted new object, by uuid, for the role check of
     /// its bodies.
     pub new_object_kinds: &'a HashMap<String, &'static str>,
+    /// Staged rows the caller consumes without moving them into `Config`
+    /// (lower-cased names): the `deleted` list, when it is empty or names
+    /// only the rows of a dynamic update. A gate does not judge them.
+    pub consumed_rows: &'a HashSet<String>,
 }
 
 pub trait StructuralGate {
@@ -140,6 +163,9 @@ impl StructuralGate for ConservativeGate {
         let mut multi_part: HashSet<String> = HashSet::new();
         for row in input.staged {
             let name = row.name.to_ascii_lowercase();
+            if input.consumed_rows.contains(&name) {
+                continue;
+            }
             if row.part == 0 {
                 first_parts.insert(name.clone());
             } else {
@@ -162,6 +188,9 @@ impl StructuralGate for ConservativeGate {
             let active = input.active.get(&row.key());
             let identical = active.is_some_and(|active| active.sha256 == row.sha256);
             let name_key = row.name.to_ascii_lowercase();
+            if input.consumed_rows.contains(&name_key) {
+                continue;
+            }
             match classify_name(&row.name) {
                 RowName::Service(name) => {
                     verdict.stats.service_rows += 1;

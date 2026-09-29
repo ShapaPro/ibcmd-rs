@@ -21,6 +21,8 @@
 //! - the recovery artifact ([`recovery`]) keeps the rows the apply overwrites;
 //! - [`apply_staged_configuration`] runs the script and checks the result.
 
+pub mod check_gate;
+pub mod errors;
 pub mod gate;
 pub mod model;
 pub mod objects;
@@ -41,6 +43,10 @@ use uuid::Uuid;
 use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 
+use check_gate::ApplyCheckGate;
+pub use errors::{
+    ExclusiveAccessRefused, ExclusiveAccessUnprovable, NativeCommand, NeedsNativeApply,
+};
 use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate};
 use model::{RowMeta, hex_lower, quote_ident, quote_string};
 use sqlgen::{
@@ -72,6 +78,19 @@ pub enum RecoveryBlobs {
     None,
 }
 
+/// Which structural gate judges the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateChoice {
+    /// The restructure check of track rcheck (`apply_check::check_staged`):
+    /// the default. It refuses on a restructuring and on anything it cannot
+    /// place.
+    ApplyCheck,
+    /// The conservative rule of [`gate::ConservativeGate`]: modules, forms,
+    /// templates, pictures and help pages, nothing else.
+    Conservative,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigApplyOptions {
     pub database: String,
@@ -86,8 +105,36 @@ pub struct ConfigApplyOptions {
     pub recovery_dir: Option<PathBuf>,
     pub recovery_blobs: RecoveryBlobs,
     pub script_output: Option<PathBuf>,
-    /// See [`ConservativeGate::admit_unverified_roles`].
+    /// The gate; [`GateChoice::ApplyCheck`] unless asked otherwise.
+    pub gate: GateChoice,
+    /// See [`ConservativeGate::admit_unverified_roles`]; only with
+    /// [`GateChoice::Conservative`].
     pub admit_unverified_roles: bool,
+}
+
+/// The XML dialect the restructure check decodes descriptors with.
+fn xml_version_of(profile: MssqlNativePlatformProfile) -> Option<&'static str> {
+    match profile {
+        MssqlNativePlatformProfile::Platform8_3_27_1989
+        | MssqlNativePlatformProfile::Platform8_3_27_2214 => Some("2.20"),
+        MssqlNativePlatformProfile::Platform8_5_1_1150 => Some("2.21"),
+    }
+}
+
+/// The ONE place that picks the structural gate. Callers that need another
+/// (a test, a caller with its own check) use [`plan_with_gate`] and
+/// [`apply_with_gate`].
+pub fn structural_gate<'a>(
+    sql: &'a SqlExec,
+    options: &ConfigApplyOptions,
+) -> Box<dyn StructuralGate + 'a> {
+    match options.gate {
+        GateChoice::ApplyCheck => Box::new(ApplyCheckGate::new(
+            sql,
+            xml_version_of(options.platform_profile),
+        )),
+        GateChoice::Conservative => Box::new(options.conservative_gate()),
+    }
 }
 
 impl ConfigApplyOptions {
@@ -107,6 +154,7 @@ impl ConfigApplyOptions {
             recovery_dir: None,
             recovery_blobs: RecoveryBlobs::Changed,
             script_output: None,
+            gate: GateChoice::ApplyCheck,
             admit_unverified_roles: false,
         }
     }
@@ -136,6 +184,9 @@ pub struct StageSummary {
     pub identical_rows: usize,
     pub replaced_rows: usize,
     pub replaced_parts_dropped: usize,
+    /// Staged rows consumed without being moved into `Config` (an empty or
+    /// dynamic-only `deleted` list).
+    pub consumed_rows: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +245,10 @@ pub struct StructuralRefusal {
 
 impl std::fmt::Display for StructuralRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // a gate with words of its own (the restructure check) speaks first
+        if let Some(refusal) = &self.verdict.refusal {
+            return write!(formatter, "{refusal}");
+        }
         write!(
             formatter,
             "the staged configuration needs the platform's own config apply (a restructuring or a change this apply does not do): {} blocker(s)",
@@ -268,43 +323,70 @@ fn read_blob(
     }
 }
 
-/// What a stage's `deleted` row lists, for the refusal that names it. The row
-/// is `<count>,"<row name>",<flag>,...` (a byte order mark first; `0` when
-/// nothing is removed).
-fn describe_removals(plain: &[u8]) -> String {
+/// The list in a stage's `deleted` row: `<BOM><count>,"<row name>",<flag>,...`
+/// (`0` when nothing is removed), as (name, flag) pairs. `None` when the text
+/// is no such list.
+fn parse_removals(plain: &[u8]) -> Option<Vec<(String, String)>> {
     let text = String::from_utf8_lossy(versions::strip_bom(plain)).into_owned();
-    let mut tokens = text.trim().split(',');
-    let count = tokens
-        .next()
-        .and_then(|token| token.trim().parse::<usize>().ok());
-    let names: Vec<&str> = tokens
-        .filter_map(|token| {
-            token
-                .trim()
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-        })
-        .collect();
-    match count {
-        Some(0) if names.is_empty() => {
+    let mut tokens = text.trim().split(',').map(str::trim);
+    let count: usize = tokens.next()?.parse().ok()?;
+    let rest: Vec<&str> = tokens.collect();
+    if rest.len() != count * 2 {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(count);
+    for pair in rest.chunks(2) {
+        let name = pair[0].strip_prefix('"')?.strip_suffix('"')?;
+        entries.push((name.to_owned(), pair[1].to_owned()));
+    }
+    Some(entries)
+}
+
+/// A row of an online (dynamic) update: an alias, `versions_dynupdate_<g>`,
+/// or the marker.
+fn is_dynamic_update_row(name: &str) -> bool {
+    name == "DynamicallyUpdated" || name.contains("_dynupdate_")
+}
+
+/// Whether a `deleted` list asks for nothing this apply does not do already:
+/// no entry, or entries that all name (flag 0) a row of a dynamic update that
+/// `Config` carries now (`overlay_rows`, lower-cased). The fold removes those
+/// rows whether or not the stage lists them.
+fn removals_ask_for_nothing(
+    entries: &[(String, String)],
+    overlay_rows: &std::collections::HashSet<String>,
+) -> bool {
+    entries.iter().all(|(name, flag)| {
+        flag == "0"
+            && is_dynamic_update_row(name)
+            && !name.to_ascii_lowercase().starts_with("deleted_dynupdate_")
+            && overlay_rows.contains(&name.to_ascii_lowercase())
+    })
+}
+
+/// What a stage's `deleted` row lists, for the message that names it.
+fn describe_removals(plain: &[u8]) -> String {
+    match parse_removals(plain) {
+        None => "a list this apply cannot read".to_owned(),
+        Some(entries) if entries.is_empty() => {
             "it is empty (the platform's own import writes one to every stage)".to_owned()
         }
-        Some(count) if count == names.len() => {
-            let overlay = names
+        Some(entries) => {
+            let count = entries.len();
+            let overlay = entries
                 .iter()
-                .filter(|name| **name == "DynamicallyUpdated" || name.contains("_dynupdate_"))
+                .filter(|(name, _)| is_dynamic_update_row(name))
                 .count();
-            let first = names
+            let first = entries
                 .iter()
-                .find(|name| **name != "DynamicallyUpdated" && !name.contains("_dynupdate_"))
-                .map(|name| format!(", the first of them {name}"))
+                .find(|(name, _)| !is_dynamic_update_row(name))
+                .map(|(name, _)| format!(", the first of them {name}"))
                 .unwrap_or_default();
             format!(
                 "{count} row name(s), {overlay} of them rows of a dynamic update and {} others{first}",
                 count - overlay
             )
         }
-        _ => "a list this apply cannot read".to_owned(),
     }
 }
 
@@ -333,9 +415,10 @@ pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<Othe
         "SELECT CONVERT(bigint, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER STATE'))",
     )?;
     if permitted != 1 {
-        bail!(
-            "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible"
-        );
+        return Err(ExclusiveAccessUnprovable {
+            reason: "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible".to_owned(),
+        }
+        .into());
     }
     let pid = i64::from(std::process::id());
     let mut sessions = Vec::new();
@@ -370,11 +453,11 @@ pub struct ConfigApplyPlan {
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
-    plan_with_gate(sql, options, &options.conservative_gate())
+    let gate = structural_gate(sql, options);
+    plan_with_gate(sql, options, gate.as_ref())
 }
 
-/// [`plan`] with another structural gate (the restructure-check track's
-/// `check_staged` plugs in here).
+/// [`plan`] with another structural gate.
 pub fn plan_with_gate(
     sql: &SqlExec,
     options: &ConfigApplyOptions,
@@ -382,9 +465,10 @@ pub fn plan_with_gate(
 ) -> Result<ConfigApplyPlan> {
     let total = Instant::now();
     if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
-        bail!(
-            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`"
-        );
+        return Err(NeedsNativeApply::apply(
+            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`",
+        )
+        .into());
     }
     let client = require_client(sql)?;
     let database = options.database.as_str();
@@ -477,27 +561,77 @@ pub fn plan_with_gate(
         ),
     )?;
     if left_over != 0 {
-        bail!(
+        return Err(NeedsNativeApply::repair(format!(
             "{left_over} row(s) of an unfinished operation (commit / dynamicCommit / dbStruFinal / convertPhase / erase_save / deleted / *.new) are recorded in Config or ConfigSave; run the native `ibcmd infobase config repair` first"
-        );
+        ))
+        .into());
     }
-    // Removals are not honored: this apply deletes no row that a staged row
-    // does not replace, as the native apply does not, and a `deleted` list is
-    // how a stage asks for more (docs/apply/own-apply.md, "Removals").
+    // The stage's list of removals (`deleted`). This apply deletes no row that a
+    // staged row does not replace, as the native apply does not. A list that
+    // asks for nothing more -- empty, or naming only rows of a dynamic update
+    // that `Config` carries, which the fold removes anyway -- is consumed the
+    // way the native apply does it: not moved into `Config`, dropped with the
+    // rest of `ConfigSave`. Any other list is a removal and is refused
+    // (docs/apply/own-apply.md, "Removals").
+    let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut consumed_note = None;
+    // the dynamic-update rows the list names: dropped, not folded
+    let mut dropped_rows: Vec<String> = Vec::new();
     if staged
         .iter()
         .any(|row| row.name.eq_ignore_ascii_case("deleted"))
     {
-        let description = match read_blob(client, database, "ConfigSave", "deleted")? {
-            Some(bytes) => match versions::inflate_row(&bytes) {
-                Ok(plain) => describe_removals(&plain),
-                Err(_) => "a list this apply cannot read".to_owned(),
-            },
-            None => "a list this apply cannot read".to_owned(),
+        let several_parts = staged
+            .iter()
+            .any(|row| row.name.eq_ignore_ascii_case("deleted") && row.part != 0);
+        let plain = if several_parts {
+            None
+        } else {
+            read_blob(client, database, "ConfigSave", "deleted")?
+                .and_then(|bytes| versions::inflate_row(&bytes).ok())
         };
-        bail!(
-            "the stage carries a `deleted` row, the list of removals: {description}. This apply takes the stage of this repository's `infobase config import`, which writes no such row yet, and removes nothing that a staged row does not replace; the stage of the platform's own `config import` and any removal need the native `ibcmd infobase config apply`"
-        );
+        let overlay_rows: std::collections::HashSet<String> = special
+            .iter()
+            .map(|row| row.name.to_ascii_lowercase())
+            .collect();
+        let entries = plain.as_deref().and_then(parse_removals);
+        match entries {
+            Some(entries) if removals_ask_for_nothing(&entries, &overlay_rows) => {
+                // A list that names dynamic-update rows must name every one that
+                // `Config` carries: the native apply then deletes them without
+                // folding (measured on E3 of docs/apply/own-apply.md), and what a
+                // list that names only some of them does is not measured.
+                let named: std::collections::HashSet<String> = entries
+                    .iter()
+                    .map(|(name, _)| name.to_ascii_lowercase())
+                    .collect();
+                if !entries.is_empty() && named != overlay_rows {
+                    return Err(NeedsNativeApply::apply(format!(
+                        "the stage's `deleted` list names {} of the {} rows of the dynamic update that Config carries; the native apply's answer to a partial list is not measured: run the native `ibcmd infobase config apply`",
+                        named.len(),
+                        overlay_rows.len()
+                    ))
+                    .into());
+                }
+                dropped_rows = entries.iter().map(|(name, _)| name.clone()).collect();
+                let mut note = describe_removals(plain.as_deref().unwrap_or_default());
+                if !dropped_rows.is_empty() {
+                    note.push_str("; the dynamic-update rows it names are deleted, not folded");
+                }
+                consumed_note = Some(note);
+                consumed.insert("deleted".to_owned());
+            }
+            _ => {
+                let description = plain
+                    .as_deref()
+                    .map(describe_removals)
+                    .unwrap_or_else(|| "a list this apply cannot read".to_owned());
+                return Err(NeedsNativeApply::apply(format!(
+                    "the stage carries a `deleted` row, the list of removals: {description}. This apply consumes an empty list and a list of the rows of a dynamic update, takes the stage of this repository's `infobase config import`, and removes nothing that a staged row does not replace; any other removal, and the stage of the platform's own `config import`, need the native `ibcmd infobase config apply`"
+                ))
+                .into());
+            }
+        }
     }
     // An overlay of a dynamic update in Params (a `.si` row under an alias name)
     // is folded by the native apply's `.si` promotion; this apply only folds
@@ -510,9 +644,10 @@ pub fn plan_with_gate(
         ),
     )?;
     if params_overlays != 0 {
-        bail!(
+        return Err(NeedsNativeApply::apply(format!(
             "Params holds {params_overlays} dynamic-update overlay row(s) (names with _dynupdate_): run the native `ibcmd infobase config apply`"
-        );
+        ))
+        .into());
     }
     // The schema storage of a settled infobase is at Status 100; the native apply
     // walks it through 200, 400 and 500 and back, so any other value is an
@@ -522,9 +657,10 @@ pub fn plan_with_gate(
         &format!("SELECT COUNT_BIG(*) FROM {db}.dbo.SchemaStorage WHERE Status <> 100"),
     )?;
     if unsettled != 0 {
-        bail!(
+        return Err(NeedsNativeApply::repair(format!(
             "SchemaStorage is not settled ({unsettled} row(s) with Status other than 100): an interrupted restructuring or apply; run the native `ibcmd infobase config repair` first"
-        );
+        ))
+        .into());
     }
     timings.inventory_ms = ms(started);
 
@@ -544,6 +680,7 @@ pub fn plan_with_gate(
         identical_rows: 0,
         replaced_rows: replaced.len(),
         replaced_parts_dropped: 0,
+        consumed_rows: 0,
     };
     for row in &staged {
         match model::classify_name(&row.name) {
@@ -551,6 +688,10 @@ pub fn plan_with_gate(
             model::RowName::Descriptor(_) => stage.descriptors += 1,
             model::RowName::Body { .. } => stage.bodies += 1,
             model::RowName::Other => {}
+        }
+        if consumed.contains(&row.name.to_ascii_lowercase()) {
+            stage.consumed_rows += 1;
+            continue;
         }
         match active.get(&row.key()) {
             None => stage.new_rows += 1,
@@ -600,7 +741,11 @@ pub fn plan_with_gate(
         .collect();
     let unlisted = staged
         .iter()
-        .filter(|row| row.part == 0 && !listed.contains(&row.name.to_lowercase()))
+        .filter(|row| {
+            row.part == 0
+                && !listed.contains(&row.name.to_lowercase())
+                && !consumed.contains(&row.name.to_ascii_lowercase())
+        })
         .count();
     if unlisted > 0 {
         report.warnings.push(format!(
@@ -612,9 +757,10 @@ pub fn plan_with_gate(
             .to_ascii_lowercase()
             .starts_with("deleted_dynupdate_")
     }) {
-        bail!(
-            "a deleted_dynupdate_* row records deleted objects of a dynamic generation; the own apply cannot fold deletions"
-        );
+        return Err(NeedsNativeApply::apply(
+            "a deleted_dynupdate_* row records deleted objects of a dynamic generation; the own apply cannot fold deletions: run the native `ibcmd infobase config apply`",
+        )
+        .into());
     }
     let alias_rows = special
         .iter()
@@ -655,6 +801,11 @@ pub fn plan_with_gate(
             .collect(),
         alias_rows,
     });
+    if let Some(description) = consumed_note {
+        report.warnings.push(format!(
+            "the stage's `deleted` list asks for nothing this apply does not do ({description}); the row is consumed, not moved into Config, as the native apply does"
+        ));
+    }
     report.stage = Some(stage);
 
     // The change registrations exist with their file lists or not at all.
@@ -675,6 +826,30 @@ pub fn plan_with_gate(
         has_change_registrations,
     })?;
     let new = analysis.new;
+    let mut analysis_blockers = analysis.blockers;
+    // A new object on a change register that has no rows at all (the ERP УХ
+    // corpus): the native apply writes nothing there for existing objects and
+    // what it does for a new one is not measured, so the apply does not guess.
+    if !new.is_empty() && has_change_registrations {
+        let register_has_rows = scalar_i64(
+            client,
+            &format!(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM {db}.dbo._ConfigChngR) THEN 1 ELSE 0 END"
+            ),
+        )? == 1;
+        if !register_has_rows {
+            let first = new
+                .objects
+                .first()
+                .map(|object| object.uuid.clone())
+                .or_else(|| new.bodies.first().map(|body| body.file_name.clone()))
+                .unwrap_or_default();
+            analysis_blockers.push(gate::GateBlocker {
+                row: first,
+                reason: "the change register has no rows: how the native apply registers a new form, template or body there is not measured (docs/apply/own-apply.md)".to_owned(),
+            });
+        }
+    }
 
     // The structural gate.
     let mut verdict = structural_gate.check(&GateInput {
@@ -685,9 +860,10 @@ pub fn plan_with_gate(
         accepted_new_rows: &new.rows,
         accepted_owner_descriptors: &new.owners,
         new_object_kinds: &new.kinds,
+        consumed_rows: &consumed,
     })?;
     timings.gate_ms = ms(started);
-    for blocker in analysis.blockers {
+    for blocker in analysis_blockers {
         verdict.block(&blocker.row, blocker.reason);
     }
     if verdict.restructuring_required {
@@ -829,6 +1005,12 @@ pub fn plan_with_gate(
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
     ]);
 
+    let consumed_row_count = staged
+        .iter()
+        .filter(|row| consumed.contains(&row.name.to_ascii_lowercase()))
+        .count() as i64;
+    let mut consumed_names = consumed.iter().cloned().collect::<Vec<_>>();
+    consumed_names.sort();
     let inputs = ScriptInputs {
         database: options.database.clone(),
         client_pid: std::process::id(),
@@ -850,6 +1032,9 @@ pub fn plan_with_gate(
         nodes,
         nodes_seen,
         appended_files,
+        consumed_names,
+        consumed_row_count,
+        dropped_rows,
     };
     let script = render_apply_script(&inputs)?;
     let script_sha = hex_lower(&Sha256::digest(script.as_bytes()));
@@ -873,7 +1058,8 @@ pub fn apply_staged_configuration(
     sql: &SqlExec,
     options: &ConfigApplyOptions,
 ) -> Result<ConfigApplyReport> {
-    apply_with_gate(sql, options, &options.conservative_gate())
+    let gate = structural_gate(sql, options);
+    apply_with_gate(sql, options, gate.as_ref())
 }
 
 pub fn apply_with_gate(
@@ -898,26 +1084,12 @@ pub fn apply_with_gate(
     if options.exclusivity == Exclusivity::SqlSessions {
         let sessions = other_sessions(client, &options.database)?;
         if !sessions.is_empty() {
-            let listing = sessions
-                .iter()
-                .take(5)
-                .map(|session| {
-                    format!(
-                        "  session {} ({}, {}, {}, {})",
-                        session.session_id,
-                        session.login,
-                        session.host,
-                        session.program,
-                        session.status
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!(
-                "exclusive access is not established: {} other session(s) are connected to {}:\n{listing}\nclose them (or, when a working process merely keeps a pooled connection, stop it) and retry",
-                sessions.len(),
-                options.database
-            );
+            return Err(ExclusiveAccessRefused {
+                database: options.database.clone(),
+                sessions,
+                in_transaction: false,
+            }
+            .into());
         }
     }
     if options.dry_run {
@@ -963,9 +1135,19 @@ pub fn apply_with_gate(
     plan.report.timings.recovery_ms = ms(started);
 
     let started = Instant::now();
-    client
-        .run_script(&script, ScriptVariables::Refuse)
-        .context("the config apply transaction failed; the database is unchanged")?;
+    if let Err(error) = client.run_script(&script, ScriptVariables::Refuse) {
+        // the refusals of the transaction's own checks are typed; a drifted
+        // fingerprint or a failed postcondition stays an ordinary failure
+        if let Some((number, message)) = errors::server_error_of(&error)
+            && let Some(typed) =
+                errors::from_transaction_code(number, &message, &options.database, || {
+                    other_sessions(client, &options.database).unwrap_or_default()
+                })
+        {
+            return Err(typed);
+        }
+        return Err(error.context("the config apply transaction failed; the database is unchanged"));
+    }
     plan.report.timings.sql_ms = ms(started);
     plan.report.executed = !options.rehearse;
 
@@ -1022,6 +1204,15 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         MssqlConfigApplyRecoveryArg::None => RecoveryBlobs::None,
     };
     options.script_output = args.script_output.clone();
+    options.gate = match args.gate {
+        crate::cli::MssqlConfigApplyGateArg::ApplyCheck => GateChoice::ApplyCheck,
+        crate::cli::MssqlConfigApplyGateArg::Conservative => GateChoice::Conservative,
+    };
+    if args.admit_unverified_roles && options.gate != GateChoice::Conservative {
+        bail!(
+            "--admit-unverified-roles is a switch of the conservative gate: add --gate conservative"
+        );
+    }
     options.admit_unverified_roles = args.admit_unverified_roles;
     match apply_staged_configuration(&sql, &options) {
         Ok(report) => {
@@ -1034,12 +1225,8 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
             Ok(())
         }
         Err(error) => {
-            if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
-                let json = serde_json::to_string_pretty(&serde_json::json!({
-                    "refused": "needs_native_apply",
-                    "database": args.database,
-                    "gate": refusal.verdict,
-                }))?;
+            if let Some(refusal) = refusal_report(&error, &args.database) {
+                let json = serde_json::to_string_pretty(&refusal)?;
                 if let Some(path) = &args.report {
                     std::fs::write(path, &json)
                         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -1049,6 +1236,45 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
             Err(error)
         }
     }
+}
+
+/// What the command prints when the apply refuses by type: the same fields
+/// whatever the refusal, `refused` naming the kind.
+fn refusal_report(error: &anyhow::Error, database: &str) -> Option<serde_json::Value> {
+    if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
+        return Some(serde_json::json!({
+            "refused": "needs_native_apply",
+            "database": database,
+            "gate": refusal.verdict,
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<NeedsNativeApply>() {
+        return Some(serde_json::json!({
+            "refused": "needs_native_apply",
+            "database": database,
+            "native_command": match refusal.command {
+                NativeCommand::Apply => "apply",
+                NativeCommand::Repair => "repair",
+            },
+            "reason": refusal.reason,
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<ExclusiveAccessRefused>() {
+        return Some(serde_json::json!({
+            "refused": "exclusive_access",
+            "database": database,
+            "in_transaction": refusal.in_transaction,
+            "sessions": refusal.sessions,
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<ExclusiveAccessUnprovable>() {
+        return Some(serde_json::json!({
+            "refused": "exclusive_access_unprovable",
+            "database": database,
+            "reason": refusal.reason,
+        }));
+    }
+    None
 }
 
 fn safe_stem(value: &str) -> String {
@@ -1125,5 +1351,77 @@ mod tests {
         // a count that disagrees with the names, and text that is no list
         assert!(describe_removals(b"2,\"a\",0").contains("cannot read"));
         assert!(describe_removals(b"{1,2}").contains("cannot read"));
+    }
+
+    #[test]
+    fn a_deleted_list_asks_for_nothing_when_it_is_empty_or_only_a_dynamic_update() {
+        let alias =
+            "ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let versions = "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let carried: std::collections::HashSet<String> = [alias, versions, "DynamicallyUpdated"]
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        let ask = |text: &str| {
+            parse_removals(text.as_bytes())
+                .map(|entries| removals_ask_for_nothing(&entries, &carried))
+        };
+        // empty
+        assert_eq!(ask("\u{feff}0"), Some(true));
+        // the rows of a dynamic update that Config carries
+        let overlay = format!("\u{feff}3,\"{alias}\",0,\"DynamicallyUpdated\",0,\"{versions}\",0");
+        assert_eq!(ask(&overlay), Some(true));
+        // a dynamic-update row Config does not carry now
+        let other = "\u{feff}1,\"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0";
+        assert_eq!(ask(other), Some(false));
+        // an ordinary row: a removal
+        assert_eq!(
+            ask("\u{feff}1,\"5ff28850-03db-4a0f-b95e-c2ea4d8c516d\",0"),
+            Some(false)
+        );
+        // a name with flag 1 (a nested object, not a row)
+        let flagged = format!("\u{feff}1,\"{alias}\",1");
+        assert_eq!(ask(&flagged), Some(false));
+        // the removal list of a dynamic update itself is never folded
+        let mut with_removals = carried.clone();
+        with_removals.insert("deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b".to_owned());
+        let entries =
+            parse_removals(b"1,\"deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0")
+                .unwrap();
+        assert!(!removals_ask_for_nothing(&entries, &with_removals));
+        // text that is no list
+        assert_eq!(ask("{1,2}"), None);
+        assert_eq!(ask("2,\"a\",0"), None);
+    }
+
+    #[test]
+    fn a_refusal_is_reported_by_its_type() {
+        let structural = anyhow::Error::new(StructuralRefusal {
+            verdict: GateVerdict::default(),
+        });
+        assert_eq!(
+            refusal_report(&structural, "db").unwrap()["refused"],
+            "needs_native_apply"
+        );
+        let native = anyhow::Error::new(NeedsNativeApply::repair("unfinished"));
+        let report = refusal_report(&native, "db").unwrap();
+        assert_eq!(report["native_command"], "repair");
+        assert_eq!(report["reason"], "unfinished");
+        let sessions = anyhow::Error::new(ExclusiveAccessRefused {
+            database: "db".to_owned(),
+            sessions: Vec::new(),
+            in_transaction: true,
+        });
+        let report = refusal_report(&sessions, "db").unwrap();
+        assert_eq!(report["refused"], "exclusive_access");
+        assert_eq!(report["in_transaction"], true);
+        let blind = anyhow::Error::new(ExclusiveAccessUnprovable {
+            reason: "cannot prove".to_owned(),
+        });
+        assert_eq!(
+            refusal_report(&blind, "db").unwrap()["refused"],
+            "exclusive_access_unprovable"
+        );
+        assert!(refusal_report(&anyhow::anyhow!("plain"), "db").is_none());
     }
 }

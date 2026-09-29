@@ -209,6 +209,44 @@ pub struct ScriptInputs {
     /// the nodes, asserted again under the lock).
     pub nodes_seen: usize,
     pub appended_files: Vec<AppendedFile>,
+    /// Staged rows that are consumed, not moved (an empty or dynamic-only
+    /// `deleted` list): their names, and how many `ConfigSave` rows they are.
+    pub consumed_names: Vec<String>,
+    pub consumed_row_count: i64,
+    /// Dynamic-update rows the stage's `deleted` list names: deleted outright,
+    /// not folded (the native apply deletes what the list names). Empty: the
+    /// generations, if any, are folded.
+    pub dropped_rows: Vec<String>,
+}
+
+/// The consumed names as a SQL list (`N'a', N'b'`); `None` when nothing is
+/// consumed.
+fn consumed_list(input: &ScriptInputs) -> Option<String> {
+    if input.consumed_names.is_empty() {
+        return None;
+    }
+    Some(
+        input
+            .consumed_names
+            .iter()
+            .map(|name| format!("N'{}'", quote_string(name)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// ` WHERE <column> NOT IN (<consumed>)`, or nothing.
+fn where_not_consumed(input: &ScriptInputs, column: &str) -> String {
+    consumed_list(input)
+        .map(|names| format!(" WHERE {column} NOT IN ({names})"))
+        .unwrap_or_default()
+}
+
+/// ` AND <column> NOT IN (<consumed>)`, or nothing.
+fn and_not_consumed(input: &ScriptInputs, column: &str) -> String {
+    consumed_list(input)
+        .map(|names| format!(" AND {column} NOT IN ({names})"))
+        .unwrap_or_default()
 }
 
 /// The `_ConfigChngR` rows (alias `r`) of every object that owns a staged
@@ -315,16 +353,26 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         );
     }
 
-    // The unfinished-operation markers must be absent.
-    let unfinished = UNFINISHED_NAMES
-        .iter()
-        .map(|name| format!("N'{}'", quote_string(name)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // The unfinished-operation markers must be absent. A staged row the plan
+    // consumes (the `deleted` list) is not one: in `ConfigSave` it is input.
+    let names_of = |skip: &[String]| {
+        UNFINISHED_NAMES
+            .iter()
+            .filter(|name| {
+                !skip
+                    .iter()
+                    .any(|skipped| skipped.eq_ignore_ascii_case(name))
+            })
+            .map(|name| format!("N'{}'", quote_string(name)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let unfinished = names_of(&[]);
+    let unfinished_in_save = names_of(&input.consumed_names);
     throw(
         &mut sql,
         &format!(
-            "EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new') OR EXISTS (SELECT 1 FROM dbo.ConfigSave WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new')"
+            "EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new') OR EXISTS (SELECT 1 FROM dbo.ConfigSave WHERE FileName IN ({unfinished_in_save}) OR FileName LIKE N'%.new')"
         ),
         code::UNFINISHED_OPERATION,
         "an unfinished operation is recorded in Config or ConfigSave; run the native config repair first",
@@ -384,9 +432,26 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     )
     .unwrap();
 
-    // Fold the dynamic generations into the ordinary rows, oldest first: the
-    // alias row of an object replaces its ordinary row.
-    if !input.generations.is_empty() {
+    // The dynamic rows a `deleted` list names are deleted, and the ordinary rows
+    // stay as they are (measured: the native apply keeps the text from before
+    // the online update when the list names the alias). Otherwise the dynamic
+    // generations are folded into the ordinary rows, oldest first: the alias
+    // row of an object replaces its ordinary row.
+    if !input.dropped_rows.is_empty() {
+        let names = input
+            .dropped_rows
+            .iter()
+            .map(|name| format!("N'{}'", quote_string(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(sql, "DELETE FROM dbo.Config WHERE FileName IN ({names});").unwrap();
+        throw(
+            &mut sql,
+            &format!("EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({names}))"),
+            code::ALIAS_LEFT,
+            "a dynamic-update row that the stage's deleted list names is left",
+        );
+    } else if !input.generations.is_empty() {
         for generation in &input.generations {
             let g = generation.hyphenated().to_string();
             // `<x>_dynupdate_<g>[.<suffix>]` -> `<x>[.<suffix>]`: cut the marker
@@ -447,17 +512,22 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     // The move: the staged rows replace every part of the rows they name.
     writeln!(
         sql,
-        "DELETE FROM dbo.Config WHERE FileName IN (SELECT FileName FROM dbo.ConfigSave);"
+        "DELETE FROM dbo.Config WHERE FileName IN (SELECT FileName FROM dbo.ConfigSave{});",
+        where_not_consumed(input, "FileName")
     )
     .unwrap();
     writeln!(
         sql,
-        "INSERT dbo.Config (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo) SELECT FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo FROM dbo.ConfigSave;"
+        "INSERT dbo.Config (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo) SELECT FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo FROM dbo.ConfigSave{};",
+        where_not_consumed(input, "FileName")
     )
     .unwrap();
     throw(
         &mut sql,
-        &format!("@@ROWCOUNT <> {}", input.staged.rows),
+        &format!(
+            "@@ROWCOUNT <> {}",
+            input.staged.rows - input.consumed_row_count
+        ),
         code::REPLACE_COUNT,
         "the number of rows moved into Config differs from the staged count",
     );
@@ -558,16 +628,31 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     // other part of it is.
     throw(
         &mut sql,
-        "EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE NOT EXISTS (SELECT 1 FROM dbo.Config c WHERE c.FileName = s.FileName AND c.PartNo = s.PartNo AND c.DataSize = s.DataSize AND c.Creation = s.Creation AND c.Modified = s.Modified AND c.Attributes = s.Attributes AND c.BinaryData = s.BinaryData))",
+        &format!(
+            "EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE NOT EXISTS (SELECT 1 FROM dbo.Config c WHERE c.FileName = s.FileName AND c.PartNo = s.PartNo AND c.DataSize = s.DataSize AND c.Creation = s.Creation AND c.Modified = s.Modified AND c.Attributes = s.Attributes AND c.BinaryData = s.BinaryData){})",
+            and_not_consumed(input, "s.FileName")
+        ),
         code::POSTCONDITION,
         "a staged row is missing or differs in Config after the move",
     );
     throw(
         &mut sql,
-        "EXISTS (SELECT 1 FROM dbo.Config c WHERE EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE s.FileName = c.FileName) AND NOT EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE s.FileName = c.FileName AND s.PartNo = c.PartNo))",
+        &format!(
+            "EXISTS (SELECT 1 FROM dbo.Config c WHERE EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE s.FileName = c.FileName{}) AND NOT EXISTS (SELECT 1 FROM dbo.ConfigSave s WHERE s.FileName = c.FileName AND s.PartNo = c.PartNo))",
+            and_not_consumed(input, "s.FileName")
+        ),
         code::POSTCONDITION,
         "Config keeps a part the staged row does not have",
     );
+    // A consumed row must not have reached Config.
+    if let Some(names) = consumed_list(input) {
+        throw(
+            &mut sql,
+            &format!("EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({names}))"),
+            code::POSTCONDITION,
+            "a consumed staged row reached Config",
+        );
+    }
 
     // ConfigSave is consumed.
     writeln!(sql, "DELETE FROM dbo.ConfigSave;").unwrap();
@@ -790,6 +875,9 @@ mod tests {
             nodes: Vec::new(),
             nodes_seen: 0,
             appended_files: Vec::new(),
+            consumed_names: Vec::new(),
+            consumed_row_count: 0,
+            dropped_rows: Vec::new(),
         }
     }
 
@@ -999,5 +1087,59 @@ mod tests {
         );
         assert!(Fingerprint::from_values(&[1, 2]).is_err());
         assert!(fingerprint_select("dbo.Config s").contains("FROM dbo.Config s) t"));
+    }
+
+    #[test]
+    fn a_consumed_row_is_left_out_of_the_move_and_must_not_reach_config() {
+        let mut consumed = inputs();
+        consumed.consumed_names = vec!["deleted".to_owned()];
+        consumed.consumed_row_count = 1;
+        let sql = render_apply_script(&consumed).unwrap();
+        // the move, the count and the postconditions leave the row out
+        assert!(sql.contains(
+            "DELETE FROM dbo.Config WHERE FileName IN (SELECT FileName FROM dbo.ConfigSave WHERE FileName NOT IN (N'deleted'));"
+        ));
+        assert!(sql.contains("FROM dbo.ConfigSave WHERE FileName NOT IN (N'deleted');"));
+        assert!(sql.contains("@@ROWCOUNT <> 2"));
+        assert!(sql.contains("AND s.FileName NOT IN (N'deleted')"));
+        assert!(sql.contains("a consumed staged row reached Config"));
+        // in ConfigSave a consumed `deleted` is input, not an unfinished marker; in Config it still is one
+        assert!(sql.contains(
+            "FROM dbo.ConfigSave WHERE FileName IN (N'commit', N'dynamicCommit', N'dbStruFinal', N'convertPhase', N'erase_save') OR"
+        ));
+        assert!(sql.contains(
+            "FROM dbo.Config WHERE FileName IN (N'commit', N'dynamicCommit', N'dbStruFinal', N'convertPhase', N'erase_save', N'deleted') OR"
+        ));
+        // ConfigSave is still emptied whole: the count there is every staged row
+        let cleanup = sql.find("DELETE FROM dbo.ConfigSave;").unwrap();
+        assert!(sql[cleanup..].contains("@@ROWCOUNT <> 3"));
+        // without a consumed row the script is the ordinary one
+        let plain = render_apply_script(&inputs()).unwrap();
+        assert!(!plain.contains("NOT IN (N'deleted')"));
+        assert!(plain.contains("@@ROWCOUNT <> 3"));
+        assert!(!plain.contains("a consumed staged row reached Config"));
+        assert!(plain.contains(
+            "FROM dbo.ConfigSave WHERE FileName IN (N'commit', N'dynamicCommit', N'dbStruFinal', N'convertPhase', N'erase_save', N'deleted') OR"
+        ));
+    }
+
+    #[test]
+    fn rows_a_deleted_list_names_are_dropped_and_not_folded() {
+        let generation = Uuid::parse_str("719baa18-69ed-439a-8962-1de53d98e05e").unwrap();
+        let mut folded = inputs();
+        folded.generations = vec![generation];
+        let fold = render_apply_script(&folded).unwrap();
+        assert!(fold.contains("UPDATE dbo.Config SET FileName = LEFT(FileName"));
+        let mut dropped = folded;
+        dropped.dropped_rows = vec![
+            "ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e"
+                .to_owned(),
+            "versions_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e".to_owned(),
+            "DynamicallyUpdated".to_owned(),
+        ];
+        let drop = render_apply_script(&dropped).unwrap();
+        assert!(!drop.contains("UPDATE dbo.Config SET FileName = LEFT(FileName"));
+        assert!(drop.contains("DELETE FROM dbo.Config WHERE FileName IN (N'ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e', N'versions_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e', N'DynamicallyUpdated');"));
+        assert!(drop.contains("that the stage''s deleted list names is left"));
     }
 }
