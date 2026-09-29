@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crate::metadata_model::brace::parse_row;
 use crate::restructure::names::{DbNames, deflate, inflate};
 use crate::restructure::plan::{Inputs, Phase, PlanOptions, StagedImage, plan};
-use crate::restructure::schema::DbSchema;
+use crate::restructure::schema::{DbSchema, SqlType};
 
 const FIXTURES: &str = "tests/fixtures/native-evidence/restructure";
 
@@ -17,16 +17,16 @@ const NATIVE_SCHEMA: &[u8] = include_bytes!(
 );
 const NAMES: &[u8] =
     include_bytes!("../../tests/fixtures/native-evidence/restructure/dbnames-a2-excerpt.txt");
-const OLD_ROW: &[u8] = include_bytes!(
+pub(super) const OLD_ROW: &[u8] = include_bytes!(
     "../../tests/fixtures/native-evidence/restructure/catalog-reference20-old.deflate"
 );
-const NEW_ROW: &[u8] = include_bytes!(
+pub(super) const NEW_ROW: &[u8] = include_bytes!(
     "../../tests/fixtures/native-evidence/restructure/catalog-reference20-new.deflate"
 );
 const STATEMENTS: &str =
     include_str!("../../docs/apply/evidence/restructuring/a2-structure-statements.sql");
 
-const CATALOG: &str = "5eab8a1b-070f-4dcf-bdcc-a259c62c3693";
+pub(super) const CATALOG: &str = "5eab8a1b-070f-4dcf-bdcc-a259c62c3693";
 const VERSION: &str = "d516886c-0000-4000-8000-00000000abcd";
 
 fn names_row(max: u64) -> Vec<u8> {
@@ -38,7 +38,7 @@ fn names_row(max: u64) -> Vec<u8> {
     .unwrap()
 }
 
-fn inputs(old: &[u8], new: &[u8]) -> Inputs {
+pub(super) fn inputs(old: &[u8], new: &[u8]) -> Inputs {
     let files: BTreeSet<String> = [CATALOG.to_owned()].into();
     let mut new_files = files.clone();
     new_files.insert("deleted".to_owned());
@@ -53,6 +53,8 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
         ],
         predefined_tables: BTreeSet::new(),
         cache_rows: Vec::new(),
+        cache_sizes: Default::default(),
+        root_row: Vec::new(),
         staged: StagedImage {
             old_files: files,
             new_files,
@@ -63,11 +65,12 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
     }
 }
 
-fn options() -> PlanOptions {
+pub(super) fn options() -> PlanOptions {
     PlanOptions {
         names_version: Some(VERSION.to_owned()),
-        // the fixtures hold no XDTO model row (the corpus test has the real one)
+        // the fixtures hold no cache rows (the corpus test has the real ones)
         skip_xdto: true,
+        skip_registry: true,
         ..PlanOptions::default()
     }
 }
@@ -93,9 +96,10 @@ fn the_fixtures_are_where_the_tests_expect_them() {
 #[test]
 fn plans_case_a2_like_the_platform_did() {
     let plan = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
-    assert_eq!(plan.object, "Reference20");
-    assert_eq!(plan.additions.len(), 1);
-    let addition = &plan.additions[0];
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(plan.objects[0].object, "Reference20");
+    assert_eq!(plan.objects[0].additions.len(), 1);
+    let addition = &plan.objects[0].additions[0];
     assert_eq!(addition.uuid, "c60cdc87-198a-4f6e-8f17-76bcb1b1914b");
     assert_eq!(addition.name, "ДемоНовыйРеквизит");
     // The counter is shared with the extensions: 11033 there, 10824 here.
@@ -197,6 +201,384 @@ fn the_statements_are_the_platforms_for_the_object() {
 }
 
 #[test]
+fn the_phase_text_is_the_statements_with_assertions() {
+    let plan = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let text = plan.phase_sql("@now").unwrap();
+    let trace = lf(STATEMENTS);
+    // The DDL is the platform's, verbatim, in the platform's order.
+    let mut from = 0;
+    for statement in plan
+        .statements()
+        .iter()
+        .filter(|s| matches!(s.phase, Phase::Create | Phase::Indexes | Phase::DropOld))
+    {
+        assert!(trace.contains(&statement.sql), "{}", statement.sql);
+        let at = text[from..]
+            .find(&statement.sql)
+            .unwrap_or_else(|| panic!("not in the phase text, in order:\n{}", statement.sql));
+        from += at + statement.sql.len();
+    }
+    // Every rename, table and index.
+    assert_eq!(text.matches("EXEC sp_rename").count(), 13);
+    // No parameter marker: the values are literals.
+    assert!(!text.contains("@P1"), "a parameter marker");
+    // The guards and the assertions.
+    for number in [57400, 57401, 57402, 57403, 57404, 57405] {
+        assert!(text.contains(&format!("THROW {number},")), "{number}");
+    }
+    // The publication uses the caller's timestamp and touches neither Config nor the caches.
+    assert!(text.contains("Modified = @now WHERE FileName = N'DBNames'"));
+    assert!(!text.contains("dbo.Config"));
+    assert!(!text.contains(".si"));
+    // The old rows the guards compare with are the plan's inputs.
+    assert!(text.contains(&plan.old_schema_sha256.to_ascii_uppercase()));
+    assert!(text.contains(&plan.old_names_sha256.to_ascii_uppercase()));
+    // The alter method is not for the apply.
+    let mut alter = plan.clone();
+    alter.method = crate::restructure::plan::Method::AlterAdd;
+    assert!(alter.phase_sql("@now").is_err());
+}
+
+/// The state after case a2 (the attribute is there) and the stage that removes it again.
+fn removing_a2() -> Inputs {
+    let added = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let mut back = inputs(NEW_ROW, OLD_ROW);
+    back.schema = added.new_schema.clone();
+    back.main_names = added.new_names_row.clone();
+    back
+}
+
+#[test]
+fn removing_the_attribute_of_case_a2_gives_the_stored_entry_back() {
+    let plan = plan(&removing_a2(), &options()).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    let object = &plan.objects[0];
+    assert_eq!(object.object, "Reference20");
+    assert!(object.additions.is_empty());
+    assert_eq!(object.removals.len(), 1);
+    let removal = &object.removals[0];
+    assert_eq!(removal.name, "ДемоНовыйРеквизит");
+    assert_eq!(removal.field.name, "Fld11034");
+    assert_eq!(removal.number, 11034);
+    assert!(removal.indexes.is_empty());
+    assert!(
+        object
+            .changes()
+            .contains("removed attributes Fld11034 = ДемоНовыйРеквизит")
+    );
+
+    // The entry is the one the schema had before the attribute: adding and removing are inverse.
+    let ours = DbSchema::parse(&plan.new_schema).unwrap();
+    let before = DbSchema::parse(STAGED_SCHEMA).unwrap();
+    assert_eq!(
+        ours.tables()[ours.position("Reference20").unwrap()],
+        before.tables()[before.position("Reference20").unwrap()]
+    );
+    // Every table of the schema before is there unchanged (the rebuilt one moved before ConfigChngR).
+    assert_eq!(ours.len(), before.len());
+    for position in 0..before.len() {
+        let name = before.view(position).unwrap().name().to_owned();
+        assert_eq!(
+            ours.tables()[ours.position(&name).unwrap()],
+            before.tables()[position],
+            "{name}"
+        );
+    }
+    // The names keep the entry and the number: DBNames is what it was.
+    let added = super::plan::plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    assert_eq!(plan.new_names_text, added.new_names_text);
+
+    // The rebuilt table has no column of the attribute, and the copy does not read it.
+    let table = &plan.objects[0].tables[0];
+    assert!(
+        table
+            .table
+            .columns
+            .iter()
+            .all(|column| column.name != "_Fld11034")
+    );
+    assert!(
+        table
+            .old_columns
+            .iter()
+            .any(|column| column.name == "_Fld11034")
+    );
+    assert!(
+        table
+            .insert_columns
+            .iter()
+            .all(|column| column != "_Fld11034")
+    );
+    assert!(
+        table
+            .insert_values
+            .iter()
+            .all(|value| !value.contains("_Fld11034"))
+    );
+    // The statements are the platform's for the rebuild: create, copy, indexes, drop, rename.
+    let statements = plan.statements();
+    assert_eq!(
+        statements.iter().filter(|s| s.phase == Phase::Load).count(),
+        3
+    );
+    assert!(!statements.iter().any(|s| s.sql.contains("_Fld11034NG")));
+}
+
+#[test]
+fn a_retyped_attribute_is_refused_in_a_removal_stage() {
+    // The removal of one attribute and a change of another one's type is refused.
+    let text = String::from_utf8(inflate(NEW_ROW).unwrap()).unwrap();
+    let start = text.find("\"Клиент\"").unwrap();
+    let pattern = start + text[start..].find("{\"Pattern\"").unwrap();
+    let mut changed = text.clone();
+    changed.replace_range(
+        pattern..pattern + "{\"Pattern\",\r\n{\"B\"}".len(),
+        "{\"Pattern\",\r\n{\"S\",10,1}",
+    );
+    let mut back = removing_a2();
+    back.staged.new_descriptors =
+        [(CATALOG.to_owned(), deflate(changed.as_bytes()).unwrap())].into();
+    assert!(error_of(&back).contains("changes its type"));
+}
+
+#[test]
+fn the_deleted_row_of_a_removal_names_the_removed_attribute() {
+    let mut back = removing_a2();
+    // The platform's row for the removal: the id of the attribute, flag 1.
+    let list = "\u{feff}1,\"c60cdc87-198a-4f6e-8f17-76bcb1b1914b\",1";
+    back.staged.deleted = Some(deflate(list.as_bytes()).unwrap());
+    assert!(plan(&back, &options()).is_ok());
+    // Uppercase ids, several parts of the list, the same result; another id is refused.
+    back.staged.deleted = Some(
+        deflate(
+            list.to_uppercase()
+                .replace("\u{feff}", "\u{feff}")
+                .as_bytes(),
+        )
+        .unwrap(),
+    );
+    assert!(plan(&back, &options()).is_ok());
+    back.staged.deleted =
+        Some(deflate("\u{feff}1,\"c60cdc87-198a-4f6e-8f17-76bcb1b1914c\",1".as_bytes()).unwrap());
+    assert!(error_of(&back).contains("deletes c60cdc87-198a-4f6e-8f17-76bcb1b1914c"));
+    back.staged.deleted =
+        Some(deflate("\u{feff}1,\"c60cdc87-198a-4f6e-8f17-76bcb1b1914b\",0".as_bytes()).unwrap());
+    assert!(error_of(&back).contains("the flag 0"));
+    // An empty list is fine for any stage.
+    back.staged.deleted = Some(deflate("\u{feff}0".as_bytes()).unwrap());
+    assert!(plan(&back, &options()).is_ok());
+    assert_eq!(
+        crate::restructure::plan::parse_deleted(&deflate(list.as_bytes()).unwrap()).unwrap(),
+        [("c60cdc87-198a-4f6e-8f17-76bcb1b1914b".to_owned(), 1)]
+    );
+}
+
+/// The row with the type pattern `from` that follows the first `marker` replaced by `to`.
+pub(super) fn retype_after(row: &[u8], marker: &str, from: &str, to: &str) -> Vec<u8> {
+    let text = String::from_utf8(inflate(row).unwrap()).unwrap();
+    let needle = format!("{{\"Pattern\",\r\n{from}");
+    let start = text.find(marker).unwrap();
+    let at = start + text[start..].find(&needle).unwrap();
+    let mut changed = text.clone();
+    changed.replace_range(at..at + needle.len(), &format!("{{\"Pattern\",\r\n{to}"));
+    assert!(parse_row(changed.as_bytes()).is_ok());
+    deflate(changed.as_bytes()).unwrap()
+}
+
+/// The attribute of case a2 named "Клиент" (a boolean, `Fld151`, in the main table) as a variable string of
+/// `limit` characters: the fixtures hold no limited string among the own attributes of the catalog, and
+/// the stored schema has to agree, so it changes with the row.
+pub(super) fn client_as_string(row: &[u8], limit: u64) -> Vec<u8> {
+    retype_after(
+        row,
+        "\"Клиент\"",
+        "{\"B\"}",
+        &format!("{{\"S\",{limit},1}}"),
+    )
+}
+
+pub(super) fn widen_client(row: &[u8], from: &str, to: &str) -> Vec<u8> {
+    retype_after(row, "\"Клиент\"", from, to)
+}
+
+/// The inputs of case a2 with "Клиент" a string of 50 characters in the stored state; the staged row is `new`.
+pub(super) fn string_client_inputs(new: &[u8]) -> Inputs {
+    let mut base = inputs(&client_as_string(OLD_ROW, 50), new);
+    let schema = String::from_utf8(STAGED_SCHEMA.to_vec()).unwrap();
+    let at = schema.find("\"Fld151\"").unwrap();
+    let boolean = at + schema[at..].find("{\"L\",0,0,\"\",0}").unwrap();
+    let mut text = schema.clone();
+    text.replace_range(
+        boolean..boolean + "{\"L\",0,0,\"\",0}".len(),
+        &format!("{{\"S\",{},0,\"\",0}}", 0x8000_0000u64 | 50),
+    );
+    base.schema = text.into_bytes();
+    base
+}
+
+fn widened_client() -> Vec<u8> {
+    widen_client(
+        &client_as_string(OLD_ROW, 50),
+        "{\"S\",50,1}",
+        "{\"S\",200,1}",
+    )
+}
+
+#[test]
+fn widening_a_string_changes_the_type_of_its_field_only() {
+    let staged = string_client_inputs(&widened_client());
+    let plan = plan(&staged, &options()).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    let object = &plan.objects[0];
+    assert_eq!(object.object, "Reference20");
+    assert!(object.additions.is_empty() && object.removals.is_empty());
+    assert_eq!(object.widenings.len(), 1);
+    let widening = &object.widenings[0];
+    assert_eq!(widening.name, "Клиент");
+    assert_eq!(widening.after.name, "Fld151");
+    assert_eq!((widening.from, widening.to), (50, 200));
+    assert_eq!(widening.before.types[0].a, 0x8000_0000 | 50);
+    assert_eq!(widening.after.types[0].a, 0x8000_0000 | 200);
+    assert_eq!(
+        object.changes(),
+        "widened attributes Fld151 = Клиент (50 -> 200)"
+    );
+
+    // The entry is the stored one with that one type entry replaced: the fields keep their places, the
+    // indexes stay, DBNames is what it was, no cache is touched.
+    let ours = DbSchema::parse(&plan.new_schema).unwrap();
+    let before = DbSchema::parse(&staged.schema).unwrap();
+    let fields = |schema: &DbSchema| {
+        schema
+            .view(schema.position("Reference20").unwrap())
+            .unwrap()
+            .fields()
+            .unwrap()
+    };
+    let (stored, now) = (fields(&before), fields(&ours));
+    assert_eq!(stored.len(), now.len());
+    for (was, is) in stored.iter().zip(&now) {
+        if was.name == "Fld151" {
+            assert_eq!(is, &widening.after);
+            assert_ne!(was, is);
+        } else {
+            assert_eq!(was, is);
+        }
+    }
+    assert_eq!(
+        plan.new_names_text,
+        DbNames::parse(NAMES).unwrap().to_text(),
+        "DBNames does not change"
+    );
+    assert!(plan.caches.is_empty());
+
+    // The rebuilt tables: the column is longer, the copy reads it as it is, the indexes are the same.
+    let rebuilt = &object.tables[0];
+    let (was, is) = (
+        rebuilt
+            .old_columns
+            .iter()
+            .find(|c| c.name == "_Fld151")
+            .unwrap(),
+        rebuilt
+            .table
+            .columns
+            .iter()
+            .find(|c| c.name == "_Fld151")
+            .unwrap(),
+    );
+    assert_eq!(was.sql_type, SqlType::NVarChar(50));
+    assert_eq!(is.sql_type, SqlType::NVarChar(200));
+    assert!(rebuilt.insert_values.contains(&"T1._Fld151".to_owned()));
+    let statements = plan.statements();
+    assert_eq!(
+        statements.iter().filter(|s| s.phase == Phase::Load).count(),
+        3
+    );
+    assert!(
+        statements
+            .iter()
+            .any(|s| s.sql.contains("_Fld151 nvarchar(200)"))
+    );
+}
+
+#[test]
+fn a_widening_can_come_with_a_new_attribute() {
+    // The staged row is the one of case a2 (a new attribute) with "Клиент" widened.
+    let new = widen_client(
+        &client_as_string(NEW_ROW, 50),
+        "{\"S\",50,1}",
+        "{\"S\",60,1}",
+    );
+    let plan = plan(&string_client_inputs(&new), &options()).unwrap();
+    let object = &plan.objects[0];
+    assert_eq!((object.additions.len(), object.widenings.len()), (1, 1));
+    assert_eq!(
+        object.changes(),
+        "new attributes Fld11034 = ДемоНовыйРеквизит; widened attributes Fld151 = Клиент (50 -> 60)"
+    );
+}
+
+#[test]
+fn only_a_longer_limit_of_a_variable_string_is_a_widening() {
+    let refusal = |to: &str| {
+        let staged = widen_client(&client_as_string(OLD_ROW, 50), "{\"S\",50,1}", to);
+        error_of(&string_client_inputs(&staged))
+    };
+    // A shorter limit, an unlimited string, a fixed one, a string that becomes another type: every one is
+    // refused with its reason, and every reason says that the type changes.
+    for (to, why) in [
+        ("{\"S\",20,1}", "the limit is shorter"),
+        ("{\"S\"}", "an unlimited string"),
+        ("{\"S\",50,0}", "a fixed string"),
+        ("{\"S\",200,0}", "a fixed string"),
+        ("{\"N\",10,2,0}", "not a string"),
+        ("{\"B\"}", "not a string"),
+    ] {
+        let text = refusal(to);
+        assert!(text.contains(why), "{to}: {text}");
+        assert!(
+            text.contains("attribute Клиент changes its type"),
+            "{to}: {text}"
+        );
+    }
+    // The stored limit is the same but the text differs (a fixed string of the same length is not this
+    // either): the refusal names it.
+    let same = widen_client(
+        &client_as_string(OLD_ROW, 50),
+        "{\"S\",50,1}",
+        "{\"S\",50,0}",
+    );
+    assert!(error_of(&string_client_inputs(&same)).contains("a fixed string"));
+    // A string that was unlimited: the widening does not apply.
+    let unlimited = widen_client(&client_as_string(OLD_ROW, 50), "{\"S\",50,1}", "{\"S\"}");
+    assert!(error_of(&string_client_inputs(&unlimited)).contains("an unlimited string"));
+}
+
+#[test]
+fn a_widening_is_refused_when_the_stored_field_disagrees() {
+    // The schema holds a field of another length than the metadata says.
+    let mut tampered = string_client_inputs(&widened_client());
+    let schema = String::from_utf8(tampered.schema.clone()).unwrap();
+    let wrong = schema.replacen(
+        &format!("{{\"S\",{},0,\"\",0}}", 0x8000_0000u64 | 50),
+        &format!("{{\"S\",{},0,\"\",0}}", 0x8000_0000u64 | 51),
+        1,
+    );
+    assert_ne!(wrong, schema);
+    tampered.schema = wrong.into_bytes();
+    assert!(error_of(&tampered).contains("differs from what the generator makes"));
+}
+
+#[test]
+fn a_widening_of_a_tabular_section_attribute_is_refused() {
+    // The first limited string of the fixture sits in a tabular section: not supported (the section is
+    // its own case).
+    let staged = retype_after(OLD_ROW, "", "{\"S\",50,1}", "{\"S\",60,1}");
+    assert!(error_of(&inputs(OLD_ROW, &staged)).contains("changes a tabular section"));
+}
+
+#[test]
 fn a_partial_stage_is_planned_like_a_whole_one() {
     // `import files --partial` stages the changed descriptor and root, version, versions only.
     let mut partial = inputs(OLD_ROW, NEW_ROW);
@@ -220,8 +602,8 @@ fn refuses_what_it_cannot_prove() {
     // No attribute is new.
     assert!(error_of(&inputs(OLD_ROW, OLD_ROW)).contains("adds no attribute"));
 
-    // An attribute is removed (the images swapped).
-    assert!(error_of(&inputs(NEW_ROW, OLD_ROW)).contains("removed"));
+    // An attribute is removed that DBNames has no number for (the images swapped).
+    assert!(error_of(&inputs(NEW_ROW, OLD_ROW)).contains("has no number"));
 
     // An object is added.
     let mut more = base.clone();
@@ -230,10 +612,14 @@ fn refuses_what_it_cannot_prove() {
         .insert("aaaaaaaa-0000-4000-8000-000000000000".to_owned());
     assert!(error_of(&more).contains("adds 1"));
 
-    // The deleted marker has content.
+    // The deleted marker names something that is not an attribute the stage removes.
     let mut deleting = base.clone();
+    deleting.staged.deleted =
+        Some(deflate("\u{feff}1,\"aaaaaaaa-0000-4000-8000-000000000000\",1".as_bytes()).unwrap());
+    assert!(error_of(&deleting).contains("deletes aaaaaaaa"));
+    // ... or has a list that does not parse.
     deleting.staged.deleted = Some(deflate("\u{feff}1".as_bytes()).unwrap());
-    assert!(error_of(&deleting).contains("deletes"));
+    assert!(error_of(&deleting).contains("deleted row"));
 
     // A stored attribute changes its type.
     let text = String::from_utf8(inflate(NEW_ROW).unwrap()).unwrap();
