@@ -63,7 +63,13 @@ pub fn base_free_patch(
     root: &Path,
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<(StoragePatch, usize)> {
-    let mut entries = base_free_entries(root, source_version)?;
+    let mut entries = if std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_FROM").is_some()
+        && std::env::var_os("IBCMD_RS_BASE_FREE_KEEP_OURS").is_none()
+    {
+        BTreeMap::new()
+    } else {
+        base_free_entries(root, source_version)?
+    };
     // Diagnostics: IBCMD_RS_BASE_FREE_ENTRIES_FROM=<file.cf> takes every
     // entry from that file instead, except those whose name contains one of
     // the comma-separated IBCMD_RS_BASE_FREE_KEEP_OURS substrings; bisects
@@ -76,8 +82,17 @@ pub fn base_free_patch(
         let profile = ibcmd_core::artifact::StorageProfileId::parse("storage:cf-cli")?;
         let archive = ibcmd_cf::archive::decode_packed_archive(source, limits, profile)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
+        // IBCMD_RS_BASE_FREE_ENTRIES_ONLY=<file>: only the entries it names,
+        // one per line.
+        let only = std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_ONLY")
+            .map(std::fs::read_to_string)
+            .transpose()?
+            .map(|text| text.lines().map(str::trim).map(str::to_owned).collect::<std::collections::BTreeSet<_>>());
         let mut theirs = BTreeMap::new();
         for (name, payload) in crate::external::export::entries_of(&archive) {
+            if only.as_ref().is_some_and(|only| !only.contains(&name)) {
+                continue;
+            }
             if keep.iter().any(|part| name.contains(part)) {
                 if let Some(ours) = entries.get(&name) {
                     theirs.insert(name, ours.clone());

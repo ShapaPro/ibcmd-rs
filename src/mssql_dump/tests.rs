@@ -71389,15 +71389,27 @@ fn walks_a_chain_segment_through_a_common_attribute_reference() {
 /// The remaining 1 526, across nine other main-table families, carry none.
 #[test]
 fn marks_a_default_picture_the_declared_main_table_cannot_hold() {
-    let owner_for = |main_table: Option<&str>, dynamic_list: bool| {
+    let owner_with = |main_table: Option<&str>, dynamic_list: bool, manual_query: bool| {
         let mut attribute = data_path_form_attribute("1", "Список", None);
         if dynamic_list {
             let mut settings = data_path_dynamic_list_settings(Vec::new());
             settings.main_table = main_table.map(ToOwned::to_owned);
+            settings.manual_query = manual_query;
             attribute.settings = Some(settings);
         }
         form_attribute_metadata_owner(&attribute)
     };
+    let owner_for = |main_table: Option<&str>, dynamic_list: bool| {
+        owner_with(main_table, dynamic_list, true)
+    };
+    // An Enum list under the platform's own query reads its default picture
+    // from the table: 1C:Документооборот's `Enums/СтатусыПриглашений` list
+    // forms (`ManualQuery` false) are dumped without `~`.
+    assert!(!form_dynamic_list_default_picture_is_out_of_main_table(&owner_with(
+        Some("Enum.СтатусыПриглашений"),
+        true,
+        false
+    )));
 
     for (main_table, expected) in [
         (None, true),
