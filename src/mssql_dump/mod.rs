@@ -45631,6 +45631,7 @@ fn install_dynamic_generation_overlay(
     if overlay.is_empty() {
         return Ok(headers);
     }
+    let overlay = std::sync::Arc::new(drop_unlisted_names(sql, database, table, overlay, names)?);
     dynamic_generation::install_storage_generation_overlay(table, overlay.clone());
 
     Ok(headers
@@ -45650,6 +45651,38 @@ fn install_dynamic_generation_overlay(
         .collect())
 }
 
+/// Leaves out the published names the active `versions` row does not list.
+///
+/// An online update that removes an object leaves its rows in the table: the
+/// plain ones, or the aliases of the generation that wrote them. The `versions`
+/// row of the newer generation no longer lists the object and the platform,
+/// and so its own export, publishes nothing for it -- while this export would
+/// publish the stale rows and then refuse the whole run, because the manifest
+/// has names the inventory does not.
+///
+/// The row is read by its stored name before the overlay is installed, on the
+/// clustered key of the table itself. A table without a readable `versions`
+/// row keeps its overlay as it is; the export reports that row where it needs
+/// it.
+fn drop_unlisted_names(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    overlay: dynamic_generation::StorageGenerationOverlay,
+    stored: &[ConfigRowHeader],
+) -> Result<dynamic_generation::StorageGenerationOverlay> {
+    let versions_row = BTreeSet::from([overlay.stored_name("versions").to_owned()]);
+    let rows = fetch_binary_rows(sql, database, table, &versions_row, false)?;
+    let Some(versions) = rows.iter().find(|row| row.part_no == 0) else {
+        return Ok(overlay);
+    };
+    let published = overlay.published_names(stored.iter().map(|row| row.file_name.as_str()));
+    let Ok(unlisted) = config_dump_info::unlisted_entries(&versions.binary, published) else {
+        return Ok(overlay);
+    };
+    Ok(overlay.dropping(unlisted))
+}
+
 /// The storage row an online update records its generation history in.
 const DYNAMIC_UPDATE_MARKER_ROW: &str = "DynamicallyUpdated";
 
@@ -45662,7 +45695,7 @@ fn qualified_storage_table(database: &str, table: &str) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
     dynamic_generation::storage_table_expression(
         &qualified,
-        dynamic_generation::storage_generation_overlay_for(table).as_ref(),
+        dynamic_generation::storage_generation_overlay_for(table).as_deref(),
     )
 }
 

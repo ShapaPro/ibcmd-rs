@@ -549,25 +549,56 @@ fn without_unstored_nil_versions(
         .collect()
 }
 
-fn validate_versions_inventory(
-    versions: &[ConfigVersionEntry],
-    file_names: &BTreeSet<String>,
-    origin: VersionsBlobOrigin,
-) -> Result<()> {
-    let version_names = versions
+/// The names the `versions` row accounts for: its own entries and the service
+/// rows every image of its origin holds beside them.
+fn listed_names(versions: &[ConfigVersionEntry], origin: VersionsBlobOrigin) -> BTreeSet<&str> {
+    versions
         .iter()
         .map(|entry| entry.id.as_str())
         .chain(origin.service_names().iter().copied())
-        .collect::<BTreeSet<_>>();
-    let manifest_names = file_names
-        .iter()
-        .map(String::as_str)
+        .collect()
+}
+
+/// The stored rows the `versions` row is compared with: every name but the
+/// stamped entries and the service records that take no part in it.
+fn manifest_names<'a>(file_names: impl IntoIterator<Item = &'a str>) -> BTreeSet<&'a str> {
+    file_names
+        .into_iter()
         .filter(|name| {
             !is_dynamic_update_entry(name)
                 && *name != OPTIONAL_SERVICE_NAME
                 && *name != DYNAMIC_UPDATE_SERVICE_NAME
         })
-        .collect::<BTreeSet<_>>();
+        .collect()
+}
+
+/// The published rows the `versions` row of the same table does not list.
+///
+/// After an online update removed an object, the rows an earlier generation
+/// wrote for it stay in the table; the platform's inventory no longer lists
+/// them and its own export publishes nothing for them. This is the same
+/// comparison [`validate_versions_inventory`] makes, its "missing versions"
+/// half.
+pub(super) fn unlisted_entries<'a>(
+    versions_blob: &[u8],
+    published: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>> {
+    let origin = VersionsBlobOrigin::MssqlConfigTable;
+    let versions = parse_versions_blob(versions_blob, origin)?;
+    let listed = listed_names(&versions, origin);
+    Ok(manifest_names(published)
+        .difference(&listed)
+        .map(|name| (*name).to_owned())
+        .collect())
+}
+
+fn validate_versions_inventory(
+    versions: &[ConfigVersionEntry],
+    file_names: &BTreeSet<String>,
+    origin: VersionsBlobOrigin,
+) -> Result<()> {
+    let version_names = listed_names(versions, origin);
+    let manifest_names = manifest_names(file_names.iter().map(String::as_str));
     if version_names == manifest_names {
         return Ok(());
     }
@@ -996,5 +1027,53 @@ mod tests {
         let kept = without_unstored_nil_versions(versions, &names);
         assert_eq!(kept.len(), 1);
         validate_versions_inventory(&kept, &names, VersionsBlobOrigin::CfStorageImage).unwrap();
+    }
+
+    /// A `versions` row as the `Config` table holds it: the generation entry,
+    /// the three service entries and one entry per name.
+    fn versions_row(names: &[&str]) -> Vec<u8> {
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+
+        let version = "00000000-0000-0000-0000-000000000001";
+        let mut text = format!("{{1,{},\"\",{version}", names.len() + 4);
+        for name in ["root", "version", "versions"].iter().chain(names) {
+            text.push_str(&format!(",\"{name}\",{version}"));
+        }
+        text.push('}');
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn the_names_the_versions_row_does_not_list_are_the_unlisted_ones() {
+        let row = versions_row(&["kept", "kept.0"]);
+        let published = [
+            "kept",
+            "kept.0",
+            "removed",
+            "removed.0",
+            "root",
+            "version",
+            "versions",
+            // Service records take no part in the comparison.
+            "DynamicallyUpdated",
+            "deleted",
+        ];
+        assert_eq!(
+            unlisted_entries(&row, published).unwrap(),
+            BTreeSet::from(["removed".to_owned(), "removed.0".to_owned()])
+        );
+        assert!(
+            unlisted_entries(&row, ["kept", "kept.0"])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_row_that_is_not_a_versions_list_lists_nothing() {
+        assert!(unlisted_entries(b"not a deflate stream", ["a"]).is_err());
     }
 }

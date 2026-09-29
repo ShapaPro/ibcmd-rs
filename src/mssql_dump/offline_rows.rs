@@ -81,7 +81,7 @@ pub(super) struct OfflineRows {
 #[derive(Debug)]
 struct OverlayView {
     table: String,
-    overlay: StorageGenerationOverlay,
+    overlay: Arc<StorageGenerationOverlay>,
     published: BTreeMap<String, String>,
 }
 
