@@ -89,8 +89,8 @@ const CONFIGURATION: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// What the two registers' dimensions and resources name: the catalog of the
 /// extended configuration the extension adopts, reduced to the one generated
 /// type they refer to.
-const NOMENCLATURE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"2.20\"><Catalog uuid=\"2cb40f25-2c61-41e9-9689-e1e4c639e8cb\"><InternalInfo><xr:GeneratedType name=\"CatalogRef._ДемоНоменклатура\" category=\"Ref\"><xr:TypeId>5aa1e03d-4e6c-466a-b4d0-e7acaa599773</xr:TypeId><xr:ValueId>f7e76c5c-892b-4146-972e-8231cdd9763c</xr:ValueId></xr:GeneratedType></InternalInfo><Properties><Name>_ДемоНоменклатура</Name></Properties></Catalog></MetaDataObject>";
+const NOMENCLATURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20"><Catalog uuid="2cb40f25-2c61-41e9-9689-e1e4c639e8cb"><InternalInfo><xr:GeneratedType name="CatalogRef._ДемоНоменклатура" category="Ref"><xr:TypeId>5aa1e03d-4e6c-466a-b4d0-e7acaa599773</xr:TypeId><xr:ValueId>f7e76c5c-892b-4146-972e-8231cdd9763c</xr:ValueId></xr:GeneratedType></InternalInfo><Properties><Name>_ДемоНоменклатура</Name></Properties></Catalog></MetaDataObject>"#;
 
 fn fixture(kind: &str) -> &'static Fixture {
     FIXTURES
@@ -266,7 +266,7 @@ fn the_stored_rows_export_to_the_native_properties() {
         let end = text.find("</Properties>").unwrap();
         text[start..end]
             .lines()
-            .filter(|line| line.starts_with("			<") && !line.starts_with("				"))
+            .filter(|line| line.starts_with("\t\t\t<") && !line.starts_with("\t\t\t\t"))
             .map(|line| line.trim_end().to_string())
             .filter(|line| line.ends_with("/>") || line.contains("</"))
             .collect()
@@ -494,5 +494,56 @@ fn calculation_register_properties_ride_their_stored_slots() {
             ("DataLockControlMode", "Managed", "Automatic", 26, "0"),
             ("FullTextSearch", "DontUse", "Use", 27, "1"),
         ],
+    );
+}
+
+/// A characteristic can name no source: `from=""` on both groups, stored as two
+/// nil uuids with sentinel fields only. This is the item the БСП 8.5 extension
+/// catalog `_ДемоСегментыПартнеровРасширение` carries (row
+/// `263857ac-f92c-4902-8a66-d632472a7c30`); the model used to refuse the empty
+/// `from` while compiling it.
+#[test]
+fn a_characteristic_without_a_source_compiles_to_nil_sources_and_reads_back() {
+    const BLOCK: &str = r#"<Characteristics>
+				<xr:Characteristic>
+					<xr:CharacteristicTypes from="">
+						<xr:KeyField>0</xr:KeyField>
+						<xr:TypesFilterField>0</xr:TypesFilterField>
+						<xr:TypesFilterValue xsi:nil="true"/>
+						<xr:DataPathField>-1</xr:DataPathField>
+						<xr:MultipleValuesUseField>-1</xr:MultipleValuesUseField>
+					</xr:CharacteristicTypes>
+					<xr:CharacteristicValues from="">
+						<xr:ObjectField>0</xr:ObjectField>
+						<xr:TypeField>0</xr:TypeField>
+						<xr:ValueField>0</xr:ValueField>
+						<xr:MultipleValuesKeyField>-1</xr:MultipleValuesKeyField>
+						<xr:MultipleValuesOrderField>-1</xr:MultipleValuesOrderField>
+					</xr:CharacteristicValues>
+				</xr:Characteristic>
+			</Characteristics>"#;
+    const STORED: &str = r##"{0,{1,{"#",fe839d42-d094-40ba-b903-75bccc21ba30,{4,{1,00000000-0000-0000-0000-000000000000},{1,00000000-0000-0000-0000-000000000000},{1,{0},0},{1,{0},0},{1,{0},0},{1,{0},0},{"U"},{1,{0},0},{1,{-1},0},{1,{-1},0},{1,{-1},0},{1,{-1},0}}}}}"##;
+    let tree = Tree::new();
+    let row = tree.compile(
+        "ChartOfCharacteristicTypes",
+        &[("<Characteristics/>", BLOCK)],
+    );
+    let holders = owner(&row)
+        .into_iter()
+        .filter(|slot| slot == STORED)
+        .count();
+    assert_eq!(holders, 1, "the owner record holds the stored item once");
+
+    let context = tree.context();
+    let export = ExportContext {
+        names: NameIndex::from_config_index(&context.index),
+        version: "2.20".to_string(),
+        compat: compatibility(&context),
+    };
+    let xml = export_descriptor("ChartOfCharacteristicTypes", &row, &export).unwrap();
+    assert_eq!(xml.matches("from=\"\"").count(), 2, "{xml}");
+    assert!(
+        xml.contains("<xr:TypesFilterValue xsi:nil=\"true\"/>"),
+        "{xml}"
     );
 }
