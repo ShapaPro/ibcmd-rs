@@ -2286,6 +2286,29 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
     })
 }
 
+/// The rows an active dynamic generation of the Config table publishes under
+/// another name, published name -> the alias row that holds its current
+/// content (`versions` -> `versions_dynupdate_<generation>`). `marker` is the
+/// payload of the `DynamicallyUpdated` row, `None` when the table has none.
+/// A stage bases the rows it patches on these, so the ids it keeps are the
+/// ones the storage now publishes.
+pub(crate) fn dynamic_generation_aliases<'a>(
+    marker: Option<&[u8]>,
+    file_names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>> {
+    let Some(marker) = marker else {
+        return Ok(BTreeMap::new());
+    };
+    let history = dynamic_generation::dynamic_generation_history(marker)
+        .ok_or_else(|| anyhow!("{} is not a generation history", DYNAMIC_UPDATE_MARKER_ROW))?;
+    let overlay = dynamic_generation::storage_generation_overlay(&history, file_names);
+    Ok(overlay
+        .renames()
+        .iter()
+        .map(|(alias, published)| (published.clone(), alias.clone()))
+        .collect())
+}
+
 /// The rows a state export starts from.
 pub(crate) enum StateBase<'a> {
     /// Nothing is stored: the staged rows are the whole configuration (a
@@ -2304,7 +2327,7 @@ pub(crate) enum StateBase<'a> {
     /// again, for their other parts -- the read of the whole table took
     /// 195 s on ERP УХ.
     Prefetched {
-        part0: &'a std::collections::HashMap<String, Vec<u8>>,
+        part0: &'a std::collections::HashMap<String, Arc<Vec<u8>>>,
         sql: &'a crate::sql::SqlExec,
         database: &'a str,
     },
@@ -2361,7 +2384,7 @@ pub(crate) fn export_staged_state(
         } => {
             let mut rows = part0
                 .iter()
-                .map(|(file_name, bytes)| (file_name.clone(), Arc::new(bytes.clone())))
+                .map(|(file_name, bytes)| (file_name.clone(), Arc::clone(bytes)))
                 .collect::<BTreeMap<_, _>>();
             for row in fetch_multi_part_config_rows(sql, database)? {
                 rows.insert(row.file_name, Arc::new(row.binary));

@@ -167,7 +167,7 @@ fn state_base<'a>(
     base_dir: Option<&'a Path>,
     sql: Option<&'a SqlExec>,
     database: &'a str,
-    prefetched: Option<&'a HashMap<String, Vec<u8>>>,
+    prefetched: Option<&'a HashMap<String, Arc<Vec<u8>>>>,
 ) -> StateBase<'a> {
     match (base_dir, sql, prefetched) {
         (Some(dir), _, _) => StateBase::Folder(dir),

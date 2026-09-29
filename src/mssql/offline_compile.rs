@@ -47,6 +47,10 @@ pub fn compile_source_rows_offline(
             Some((key.clone(), String::from_utf8(plain).ok()?))
         })
         .collect::<std::collections::HashMap<_, _>>();
+    let base = base
+        .into_iter()
+        .map(|(name, packed)| (name, std::sync::Arc::new(packed)))
+        .collect();
     if PREFETCHED_BASE_ROWS
         .set((OFFLINE_DATABASE.to_string(), base))
         .is_err()

@@ -3451,7 +3451,19 @@ pub fn stage_source_objects(
             crate::mssql_dump::fetch_config_part0_rows(&sql, &args.database)
                 .context("failed to read the target's Config rows in bulk")
         })?;
-        let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), rows));
+        // The rows an online update of the target left pending are what the
+        // storage now publishes (`versions` first among them): the rows a
+        // stage patches start from those.
+        let aliases = crate::mssql_dump::dynamic_generation_aliases(
+            rows.get("DynamicallyUpdated").map(Vec::as_slice),
+            rows.keys().map(String::as_str),
+        )?;
+        let _ = BASE_ROW_ALIASES.set((args.database.clone(), aliases));
+        let shared = rows
+            .into_iter()
+            .map(|(file_name, bytes)| (file_name, std::sync::Arc::new(bytes)))
+            .collect();
+        let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), shared));
     }
     // Every object that cannot be built is collected, so that one refusal
     // names them all (see `patch_refusal`).
@@ -7459,18 +7471,23 @@ fn fetch_config_blobs_for_files(
 /// `--bulk` stage; `fetch_config_blob` answers from it first.
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
     String,
-    std::collections::HashMap<String, Vec<u8>>,
+    std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>,
 )> = std::sync::OnceLock::new();
 
 /// The rows a bulk stage has read of `database`, when it has.
 fn prefetched_base_rows(
     database: &str,
-) -> Option<&'static std::collections::HashMap<String, Vec<u8>>> {
+) -> Option<&'static std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>> {
     PREFETCHED_BASE_ROWS
         .get()
         .filter(|(prefetched, _)| prefetched == database)
         .map(|(_, rows)| rows)
 }
+
+/// Published name -> alias row, for the rows of `PREFETCHED_BASE_ROWS`' database
+/// that an active dynamic generation publishes under another name.
+static BASE_ROW_ALIASES: std::sync::OnceLock<(String, std::collections::BTreeMap<String, String>)> =
+    std::sync::OnceLock::new();
 
 /// Set by a stage that must not reach SQL Server: `--script-only` with its
 /// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
@@ -7530,9 +7547,16 @@ fn fetch_config_blob(sql: &SqlExec, database: &str, file_name: &str) -> Result<V
     if let Some((prefetched_database, rows)) = PREFETCHED_BASE_ROWS.get()
         && prefetched_database == database
     {
+        // What the storage publishes under this name: an active dynamic
+        // generation's alias when it has one.
+        let stored = BASE_ROW_ALIASES
+            .get()
+            .filter(|(aliased_database, _)| aliased_database == database)
+            .and_then(|(_, aliases)| aliases.get(file_name))
+            .map_or(file_name, String::as_str);
         return rows
-            .get(file_name)
-            .cloned()
+            .get(stored)
+            .map(|bytes| bytes.as_ref().clone())
             .ok_or_else(|| anyhow!("Config row not found: {file_name}"));
     }
     // A dry run over a large tree fetches thousands of base rows one query

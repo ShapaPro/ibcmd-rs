@@ -771,6 +771,21 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_online_update_publishes_its_versions_row_under_the_plain_name() {
+        use crate::mssql_dump::dynamic_generation_aliases;
+        let generation = "06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let marker = format!("\u{feff}{{1,1,{generation}}}");
+        let alias = format!("versions_dynupdate_{generation}");
+        let names = ["versions", alias.as_str(), "a", "a.0"];
+        let aliases = dynamic_generation_aliases(Some(marker.as_bytes()), names).unwrap();
+        assert_eq!(aliases.get("versions"), Some(&alias));
+        assert_eq!(aliases.len(), 1);
+        // No marker, no aliases; a marker nobody can read is an error.
+        assert!(dynamic_generation_aliases(None, names).unwrap().is_empty());
+        assert!(dynamic_generation_aliases(Some(b"{1,2,x}"), names).is_err());
+    }
+
+    #[test]
     fn a_predefined_difference_is_built_and_other_failures_are_not() {
         let differ = anyhow!("{PREDEFINED_ITEMS_DIFFER}added: x; removed: ")
             .context("failed to build the object");
