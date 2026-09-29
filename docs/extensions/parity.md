@@ -267,7 +267,9 @@ three БСП 8.5 extensions, `src/mssql_dump/extension/`):
   extension); they are a group and appear whole or not at all. The logo is an
   extension picture and goes out as such.
 * **Home page work area.** Template `0` is `OneColumn` and prints one `<Column>`;
-  the stored row still closes with an empty right column.
+  the stored row still closes with an empty right column (the reader and writer
+  are upstream PR 387's, measured on its `home_page/one_column*` fixtures and on
+  the ServiceDesk extension).
 * **Styles.** The body is revision `2`, colours `{4,...}`, fonts `{8,...}`, and it
   ends with one record `{1,{0,<colour>}}` that the platform prints as the last
   item `FirstBrand`.
@@ -278,8 +280,10 @@ three БСП 8.5 extensions, `src/mssql_dump/extension/`):
 * **Characteristics.** An item may name no source: both sources are the nil uuid
   and the fields sentinels; the platform prints `from=""`.
 * **Forms.** The base form of an adopted form is a record of its own in the 8.5
-  layout: its items number the same ids as the form's, so it is converted and
-  completed with its own facts and written after the form's tree. A planner field
+  layout: its items number the same ids as the form's, so the form's
+  down-conversion leaves it as it is (`adopted_base_record_slot`) and
+  `form_extension::with_adopted_form_parts` converts and completes it with its
+  own facts and writes it after the form's tree. A planner field
   keeps its 8.3.27 property bag. The appended importance member of a button is
   `0` (`Main`) exactly for the default button (88 of 88 on ServiceDesk), so the
   writer adds `DefaultButton` there; the 8.3.27 slot that also says so is set on
@@ -374,7 +378,10 @@ always listed together; the run mode and the script variant both `1`). What the
 export equals now: the five root cases (`values`, `spellings`, `modules`,
 `roles`, `values_v85`) and the adopted-object cases `props_all`, `props_b0`,
 `props_b1`, `props_b2`, `module_all`, `module_b0..b2`, `catalog_modules`,
-`catalog_object_module`, `document_children`. Ids the export did not know were
+`catalog_object_module`, `document_children`, and, with the adopted-form writer
+of upstream PR 387 (`form_extension`, one implementation for the `.cfe` and the
+SQL export), `form_events`, `form_events_shared`, `role`, `subscription`,
+`kinds` and `foreign_links` (22 cases in all). Ids the export did not know were
 added from the same probes (owners, hierarchy, number properties, object and
 manager modules, `ReturnValuesReuse`, `Value` of a style item, `Group` of a
 common command, event subscription `Source`, filter criterion `Content`,
@@ -384,14 +391,10 @@ subsystem `<Content/>` when empty, the states of an object's modules are
 written in the platform's fixed order, and the `80327` storage format of the
 extensions the 8.3.27.2214 platform creates itself is readable.
 
-Still different (fail closed unless noted): adopted forms with interceptors
-(`form_events`, `form_events_shared`; the export writes `callType="Before"`
-on every handler, which was read off one sample, and drops the interceptor
-events that are not the first handler of their event: **silent**), predefined
-items and exchange plan content of an adopted object (`<ExtensionState>`,
-`<ExtensionProperty>`), a widened type with a check value, roles and tasks and
-business processes of the minimal fixtures (no legacy decoder), event
-subscriptions.
+Still different (fail closed unless noted): predefined items and exchange plan
+content of an adopted object (`<ExtensionState>`, `<ExtensionProperty>`), a
+widened type with a check value, and the container `extension_roots/unknown_property`
+(its CAS content is missing). The test prints them (`open upstream case ...`).
 
 ## Inferences from one sample
 
@@ -407,8 +410,8 @@ These are read off a single native sample; the evidence is in the lab folder
   the dynamic list defaults); other kinds of items (pages, groups) that an older
   platform completed may exist;
 * 8.5: the asset ids (one extension), `Version8_5EnableTaxi` (the one
-  combination `3` + `6` on record), the `OneColumn` work area (one row) and the
-  brand colour of a style (one style body) are read off single samples;
+  combination `3` + `6` on record) and the brand colour of a style (one style
+  body) are read off single samples;
 * `OnBasePeriod` for `DependenceOnCalculationTypes` `2` and the values other than
   `0`/`1` of the accounting register's lock mode and full-text search are the
   enumeration order, not observed.
