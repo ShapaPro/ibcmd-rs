@@ -143,6 +143,10 @@ pub struct GateInput<'a> {
 pub struct StructurePhase {
     #[serde(skip)]
     pub sql: String,
+    /// Staged rows the phase answers for (the stage's `deleted` row, which lists the attributes the
+    /// stage removes): the apply consumes them like an empty `deleted` list -- they are not moved into
+    /// `Config` and go with the rest of `ConfigSave` -- but only when a phase says it has judged them.
+    pub consumed_staged_rows: usize,
     #[serde(skip)]
     pub params_rewrites: Vec<ParamsRewrite>,
     /// The tables the phase rebuilds or creates.
@@ -162,6 +166,14 @@ pub trait StructuralGate {
     /// restructurings (the conservative one, the restructure check) has none.
     fn take_structure(&self) -> Option<StructurePhase> {
         None
+    }
+
+    /// Whether the gate judges a stage's `deleted` row itself. The apply consumes an empty list and a list
+    /// of the rows of a dynamic update and refuses every other; a gate that lets attribute deletions
+    /// through says `true` and must then hand over a phase whose `consumed_staged_rows` is not 0, or the
+    /// apply refuses the list after all.
+    fn judges_deleted_row(&self) -> bool {
+        false
     }
 }
 

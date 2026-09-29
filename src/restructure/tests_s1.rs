@@ -1,39 +1,108 @@
-//! The S1 gate: which reasons of the restructuring check are operations, and what the gate lets through
-//! (the fixtures of case a2 stand in for the database).
+//! The S1 gate: what the gate lets through of the classification of the restructuring check
+//! (`apply_check::s1::classify`), and what it refuses (the fixtures of case a2 stand in for the database).
 
 use super::tests_plan::{
     CATALOG, NEW_ROW, OLD_ROW, client_as_string, inputs, options, string_client_inputs,
     widen_client,
 };
-use crate::apply_check::{Reason, ReasonClass, Verdict};
+use crate::apply_check::{ChangeOp, Reason, ReasonClass, RuleId, Seg, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
-use crate::restructure::s1::{Operation, classify, classify_reason, decide};
+use crate::restructure::s1::decide;
 
-fn reason(class: ReasonClass, object: &str, property: &str, change: &str) -> Reason {
-    Reason {
-        class,
-        object: object.to_owned(),
-        file_name: CATALOG.to_owned(),
-        property: property.to_owned(),
-        change: change.to_owned(),
+fn seg(name: &str, label: Option<&str>) -> Seg {
+    Seg {
+        name: name.to_owned(),
+        label: label.map(str::to_owned),
     }
 }
 
-fn structure(object: &str, property: &str, change: &str) -> Reason {
-    reason(ReasonClass::Structure, object, property, change)
+/// A typed reason of class `structure` on the descriptor of the catalog of case a2.
+fn structure(
+    rule: RuleId,
+    kind: &str,
+    object: &str,
+    path: Vec<Seg>,
+    op: Option<ChangeOp>,
+) -> Reason {
+    Reason {
+        class: ReasonClass::Structure,
+        object: object.to_owned(),
+        file_name: CATALOG.to_owned(),
+        property: path
+            .iter()
+            .map(|seg| seg.name.clone())
+            .collect::<Vec<_>>()
+            .join("/"),
+        change: "x".to_owned(),
+        rule,
+        kind: kind.to_owned(),
+        path,
+        op,
+    }
+}
+
+fn check_of(reasons: Vec<Reason>) -> Verdict {
+    let mut verdict = Verdict::new("rows");
+    for reason in reasons {
+        verdict.push_reason(reason);
+    }
+    verdict
+}
+
+const OBJECT: &str = "Catalog._ДемоПартнеры";
+
+fn attribute_path(name: &str) -> Vec<Seg> {
+    vec![seg("ChildObjects", None), seg("Attribute", Some(name))]
+}
+
+fn attribute(name: &str, op: ChangeOp) -> Reason {
+    structure(
+        RuleId::ColumnAddedOrDropped,
+        "Catalog",
+        OBJECT,
+        attribute_path(name),
+        Some(op),
+    )
+}
+
+fn length(name: &str, from: &str, to: &str) -> Reason {
+    let mut path = attribute_path(name);
+    path.extend([
+        seg("Properties", None),
+        seg("Type", None),
+        seg("StringQualifiers", None),
+        seg("Length", None),
+    ]);
+    structure(
+        RuleId::AttributePropertyNotCovered,
+        "Catalog",
+        OBJECT,
+        path,
+        Some(ChangeOp::Modified {
+            old: from.to_owned(),
+            new: to.to_owned(),
+        }),
+    )
+}
+
+fn indexing(name: &str) -> Reason {
+    let mut path = attribute_path(name);
+    path.extend([seg("Properties", None), seg("Indexing", None)]);
+    structure(
+        RuleId::AttributePropertyNotCovered,
+        "Catalog",
+        OBJECT,
+        path,
+        Some(ChangeOp::Modified {
+            old: "DontIndex".to_owned(),
+            new: "Index".to_owned(),
+        }),
+    )
 }
 
 /// The check's verdict for case a2: one new attribute.
 fn check_of_a2() -> Verdict {
-    Verdict {
-        needs_restructuring: true,
-        reasons: vec![structure(
-            "Catalog._ДемоПартнеры",
-            "ChildObjects/Attribute[ДемоНовыйРеквизит]",
-            "added (a column is added or dropped)",
-        )],
-        ..Verdict::default()
-    }
+    check_of(vec![attribute("ДемоНовыйРеквизит", ChangeOp::Added)])
 }
 
 /// The conservative gate's verdict: the descriptors that differ are blockers.
@@ -52,139 +121,11 @@ fn conservative(rows: &[&str]) -> GateVerdict {
     }
 }
 
-#[test]
-fn the_reasons_of_the_check_are_s1_operations_or_refusals() {
-    let attribute = |property: &str, change: &str| {
-        classify_reason(&structure(
-            "Catalog._ДемоПартнеры",
-            &format!("ChildObjects/Attribute[Х]{property}"),
-            change,
-        ))
-    };
-    // Built.
-    assert_eq!(
-        attribute("", "added (a column is added or dropped)"),
-        Ok(Operation::AddAttribute("Х".to_owned()))
-    );
-    assert_eq!(
-        classify_reason(&structure(
-            "Document._ДемоЗаказПокупателя",
-            "ChildObjects/Attribute[Х]",
-            "added (a column is added or dropped)"
-        )),
-        Ok(Operation::AddAttribute("Х".to_owned()))
-    );
-    // Designed, not built: named as such.
-    let not_built = |result: Result<Operation, String>| match result {
-        Ok(Operation::NotBuilt { operation, .. }) => operation,
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(
-        attribute("", "removed (a column is added or dropped)"),
-        Ok(Operation::RemoveAttribute("Х".to_owned()))
-    );
-    assert_eq!(
-        attribute(
-            "/Properties/Type/StringQualifiers/Length",
-            "50 -> 100 (a property of an attribute no rule covers)"
-        ),
-        Ok(Operation::WidenString("Х".to_owned()))
-    );
-    assert_eq!(
-        not_built(attribute(
-            "/Properties/Indexing",
-            "DontIndex -> Index (a property of an attribute no rule covers)"
-        )),
-        "switch the index of an attribute"
-    );
-    assert_eq!(
-        not_built(classify_reason(&structure(
-            "Catalog._ДемоКонтрагенты",
-            "ChildObjects/TabularSection[ДемоНоваяТЧ]",
-            "added (a tabular section is added, dropped or moved)"
-        ))),
-        "add a tabular section"
-    );
-    assert_eq!(
-        not_built(classify_reason(&structure(
-            "Catalog.ДемоНовыйСправочник",
-            "",
-            "added (Catalog; an object that owns tables or stored data is added or dropped)"
-        ))),
-        "add an object"
-    );
-    assert_eq!(
-        not_built(classify_reason(&structure(
-            "Configuration",
-            "ChildObjects/Catalog[ДемоНовыйСправочник]",
-            "added (an object that owns tables or stored data is added or dropped)"
-        ))),
-        "add an object"
-    );
-
-    // Refused: another class, another kind, another property.
-    let data = classify_reason(&reason(
-        ReasonClass::Data,
-        "Catalog.X",
-        "Predefined",
-        "row changed",
-    ));
-    assert!(data.unwrap_err().contains("data change"));
-    let unknown = classify_reason(&reason(
-        ReasonClass::Unknown,
-        "Enum.X",
-        "",
-        "the Enum row differs (5190 -> 5444 bytes) but both sides decode to the same XML",
-    ));
-    assert!(unknown.unwrap_err().contains("unknown change"));
-    let register = classify_reason(&structure(
-        "AccumulationRegister.X",
-        "ChildObjects/Resource[Р]",
-        "added (a column is added or dropped)",
-    ));
-    assert!(register.unwrap_err().contains("not in S1"));
-    let length = classify_reason(&structure(
-        "Catalog.X",
-        "Properties/CodeLength",
-        "9 -> 12 (a property no rule covers)",
-    ));
-    assert!(length.unwrap_err().contains("no S1 operation covers it"));
-    let column_property = classify_reason(&structure(
-        "Catalog.X",
-        "ChildObjects/Attribute[А]/Properties/Type/NumberQualifiers/Precision",
-        "10 -> 12",
-    ));
-    assert!(column_property.is_err());
-}
-
-#[test]
-fn a_verdict_is_split_into_objects_and_refusals() {
-    let mut verdict = check_of_a2();
-    let (objects, refusals) = classify(&verdict);
-    assert!(refusals.is_empty());
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].object, "Catalog._ДемоПартнеры");
-    assert_eq!(
-        objects[0].operations,
-        [Operation::AddAttribute("ДемоНовыйРеквизит".to_owned())]
-    );
-
-    // One built and one not built: the stage is refused as a whole, and says which.
-    verdict.reasons.push(structure(
-        "Catalog._ДемоПартнеры",
-        "ChildObjects/Attribute[Х]/Properties/Indexing",
-        "DontIndex -> Index (a property of an attribute no rule covers)",
-    ));
-    let (_, refusals) = classify(&verdict);
-    assert_eq!(refusals.len(), 1);
-    assert!(refusals[0].reason.contains("designed"), "{refusals:?}");
-
-    // A check that needs a restructuring and names nothing is refused too.
-    let silent = Verdict {
-        needs_restructuring: true,
-        ..Verdict::default()
-    };
-    assert_eq!(classify(&silent).1.len(), 1);
+fn blocked_with(verdict: &GateVerdict, text: &str) -> bool {
+    verdict
+        .blockers
+        .iter()
+        .any(|blocker| blocker.reason.starts_with("S1: ") && blocker.reason.contains(text))
 }
 
 #[test]
@@ -209,6 +150,8 @@ fn a_planned_attribute_is_let_through_and_its_blocker_withdrawn() {
     assert!(phase.sql.contains("Modified = @now"));
     // The fixtures hold no cache rows and the options leave the caches alone.
     assert!(phase.params_rewrites.is_empty());
+    // The fixture stage has the `deleted` row of a native import (an empty list): the phase answers for it.
+    assert_eq!(phase.consumed_staged_rows, 1);
 }
 
 #[test]
@@ -219,15 +162,7 @@ fn a_widened_string_is_let_through_and_narrowing_is_not() {
         "{\"S\",200,1}",
     );
     let staged = string_client_inputs(&widened);
-    let check = Verdict {
-        needs_restructuring: true,
-        reasons: vec![structure(
-            "Catalog._ДемоПартнеры",
-            "ChildObjects/Attribute[Клиент]/Properties/Type/StringQualifiers/Length",
-            "50 -> 200 (a property of an attribute no rule covers)",
-        )],
-        ..Verdict::default()
-    };
+    let check = check_of(vec![length("Клиент", "50", "200")]);
     let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &staged, &options());
     assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
     let phase = phase.expect("a structure phase");
@@ -237,21 +172,21 @@ fn a_widened_string_is_let_through_and_narrowing_is_not() {
     assert!(phase.sql.contains("create table dbo._Reference20NG"));
 
     // The check names another attribute than the plan widens: the decoders disagree.
-    let mut other = check.clone();
-    other.reasons[0].property =
-        "ChildObjects/Attribute[Другой]/Properties/Type/StringQualifiers/Length".to_owned();
+    let other = check_of(vec![length("Другой", "50", "200")]);
     let (verdict, phase) = decide(conservative(&[CATALOG]), &other, &staged, &options());
     assert!(verdict.restructuring_required && phase.is_none());
+    assert!(blocked_with(&verdict, "disagree"), "{:?}", verdict.blockers);
+
+    // The check itself refuses a limit that shrank (a typed refusal of the classification) ...
+    let shrank = check_of(vec![length("Клиент", "50", "20")]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &shrank, &staged, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        verdict
-            .blockers
-            .iter()
-            .any(|blocker| blocker.reason.contains("disagree")),
+        blocked_with(&verdict, "length-not-widened"),
         "{:?}",
         verdict.blockers
     );
-
-    // A shorter limit: the check names it the same way, the plan refuses it.
+    // ... and when it names it as a widening the plan refuses it.
     let narrowed = widen_client(
         &client_as_string(OLD_ROW, 50),
         "{\"S\",50,1}",
@@ -265,10 +200,58 @@ fn a_widened_string_is_let_through_and_narrowing_is_not() {
     );
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        verdict
-            .blockers
-            .iter()
-            .any(|blocker| blocker.reason.contains("the limit is shorter")),
+        blocked_with(&verdict, "the limit is shorter"),
+        "{:?}",
+        verdict.blockers
+    );
+}
+
+#[test]
+fn a_deleted_attribute_is_let_through_with_the_deleted_row_the_phase_answers_for() {
+    // The reverse of case a2: the images swapped is not a removal the fixtures can hold (DBNames has no
+    // number for the attribute), so the removal is exercised on the state after the addition.
+    let added = crate::restructure::plan::plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let mut back = inputs(NEW_ROW, OLD_ROW);
+    back.schema = added.new_schema.clone();
+    back.main_names = added.new_names_row.clone();
+    back.staged.deleted = Some(
+        crate::restructure::names::deflate(
+            "\u{feff}1,\"c60cdc87-198a-4f6e-8f17-76bcb1b1914b\",1".as_bytes(),
+        )
+        .unwrap(),
+    );
+    let check = check_of(vec![attribute("ДемоНовыйРеквизит", ChangeOp::Removed)]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert!(phase.objects[0].contains("removed attributes Fld11034"));
+    assert_eq!(phase.consumed_staged_rows, 1);
+
+    // The check calls the `deleted` list unknown: the gate lets that one reason through, no other.
+    let mut with_deleted = check.clone();
+    with_deleted.push_reason(Reason {
+        class: ReasonClass::Unknown,
+        object: "deleted".to_owned(),
+        file_name: "deleted".to_owned(),
+        rule: RuleId::DeletedRowNotEmpty,
+        ..Reason::default()
+    });
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &with_deleted, &back, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    assert!(phase.is_some());
+
+    // A list that names anything but the attributes the stage removes is the plan's refusal.
+    let mut wrong = back.clone();
+    wrong.staged.deleted = Some(
+        crate::restructure::names::deflate(
+            "\u{feff}1,\"aaaaaaaa-0000-4000-8000-000000000000\",1".as_bytes(),
+        )
+        .unwrap(),
+    );
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &with_deleted, &wrong, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "deletes aaaaaaaa"),
         "{:?}",
         verdict.blockers
     );
@@ -296,36 +279,70 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
         "ffffffff-0000-4000-8000-000000000000"
     );
 
-    // An operation that is not built.
-    let mut check = check_of_a2();
-    check.reasons.push(structure(
-        "Catalog._ДемоПартнеры",
-        "ChildObjects/Attribute[Х]/Properties/Indexing",
-        "DontIndex -> Index (a property of an attribute no rule covers)",
-    ));
+    // An operation of S1 that is designed but not built (the index flag, a tabular section, an object).
+    let check = check_of(vec![
+        attribute("ДемоНовыйРеквизит", ChangeOp::Added),
+        indexing("Х"),
+    ]);
     let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        verdict.blockers.iter().any(
-            |blocker| blocker.reason.starts_with("S1: ") && blocker.reason.contains("designed")
-        ),
+        blocked_with(&verdict, "designed") && blocked_with(&verdict, "switch-index"),
+        "{:?}",
+        verdict.blockers
+    );
+    let section = check_of(vec![structure(
+        RuleId::TabularSectionAddedDroppedMoved,
+        "Catalog",
+        OBJECT,
+        vec![
+            seg("ChildObjects", None),
+            seg("TabularSection", Some("ДемоНоваяТЧ")),
+        ],
+        Some(ChangeOp::Added),
+    )]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &section, &base, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "add-tabular-section"),
         "{:?}",
         verdict.blockers
     );
 
+    // A reason the classification refuses: a data change, an unknown row, another kind of object.
+    for (class, rule, kind, object) in [
+        (ReasonClass::Data, RuleId::Unspecified, "Catalog", OBJECT),
+        (ReasonClass::Unknown, RuleId::RowUnknown, "", "Enum.X"),
+        (
+            ReasonClass::Structure,
+            RuleId::ColumnAddedOrDropped,
+            "AccumulationRegister",
+            "AccumulationRegister.X",
+        ),
+    ] {
+        let mut check = check_of_a2();
+        check.push_reason(Reason {
+            class,
+            object: object.to_owned(),
+            file_name: CATALOG.to_owned(),
+            rule,
+            kind: kind.to_owned(),
+            path: vec![seg("ChildObjects", None), seg("Resource", Some("Р"))],
+            op: Some(ChangeOp::Added),
+            ..Reason::default()
+        });
+        let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &base, &options());
+        assert!(
+            verdict.restructuring_required && phase.is_none(),
+            "{rule:?}"
+        );
+    }
+
     // The check and the plan disagree about the attribute.
-    let mut check = check_of_a2();
-    check.reasons[0].property = "ChildObjects/Attribute[ДругойРеквизит]".to_owned();
+    let check = check_of(vec![attribute("ДругойРеквизит", ChangeOp::Added)]);
     let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
-    assert!(
-        verdict
-            .blockers
-            .iter()
-            .any(|blocker| blocker.reason.contains("disagree")),
-        "{:?}",
-        verdict.blockers
-    );
+    assert!(blocked_with(&verdict, "disagree"), "{:?}", verdict.blockers);
 
     // A conservative verdict with more blockers than it lists.
     let mut crowded = conservative(&[CATALOG]);
@@ -333,7 +350,7 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
     let (verdict, phase) = decide(crowded, &check_of_a2(), &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
 
-    // The plan refuses (the images are the same: no attribute is new).
+    // The plan refuses (the images are the same: nothing is new, removed or retyped).
     let (verdict, phase) = decide(
         conservative(&[CATALOG]),
         &check_of_a2(),
@@ -342,11 +359,16 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
     );
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        verdict
-            .blockers
-            .iter()
-            .any(|blocker| blocker.reason.contains("adds no attribute")),
+        blocked_with(&verdict, "adds no attribute"),
         "{:?}",
         verdict.blockers
     );
+
+    // A check that needs a restructuring and names no reason is refused: nothing is an operation.
+    let silent = Verdict {
+        needs_restructuring: true,
+        ..Verdict::default()
+    };
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &silent, &base, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
 }

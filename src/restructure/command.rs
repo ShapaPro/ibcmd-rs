@@ -253,25 +253,6 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
     Ok(report)
 }
 
-/// `BACKUP DATABASE ... TO DISK = <path> WITH COPY_ONLY, COMPRESSION, INIT` on the server.
-fn take_backup(sql: &crate::sql::SqlExec, database: &str, path: &std::path::Path) -> Result<()> {
-    use crate::mssql_config_apply::model::quote_ident;
-    let client = sql
-        .client()
-        .context("the backup needs the built-in SQL client")?;
-    let path = path.to_string_lossy().replace('\'', "''");
-    client
-        .execute(
-            &format!(
-                "BACKUP DATABASE {} TO DISK = N'{path}' WITH COPY_ONLY, COMPRESSION, INIT",
-                quote_ident(database)?
-            ),
-            &[],
-        )
-        .with_context(|| format!("the backup into {path} failed: nothing was restructured"))?;
-    Ok(())
-}
-
 fn plan_options(args: &MssqlRestructureArgs) -> PlanOptions {
     PlanOptions {
         names_version: args.names_version.clone(),
@@ -296,7 +277,7 @@ fn run_through_apply(
     password: Option<&str>,
 ) -> Result<RestructureReport> {
     use crate::mssql_config_apply::{
-        ConfigApplyOptions, Exclusivity, StructuralRefusal, apply_with_gate,
+        BackupPolicy, ConfigApplyOptions, Exclusivity, StructuralRefusal, apply_with_gate,
     };
     use crate::mssql_platform_profile::MssqlNativePlatformProfile;
     use crate::restructure::s1::S1Gate;
@@ -327,21 +308,15 @@ fn run_through_apply(
     };
     options.recovery_dir = args.recovery_dir.clone();
     options.script_output = args.script_output.clone();
-    // A run that writes needs a backup; a dry run and a rehearsal write nothing.
-    let writes = !args.dry_run && !args.rehearse;
-    let have_backup = args.i_have_a_backup || args.recovery_backup.is_some();
+    // The apply owns the backup policy: a structural apply that writes refuses unless it has a
+    // `--recovery-backup` (it takes the COPY_ONLY backup first) or an `--i-have-a-backup`.
+    options.backup = match (&args.recovery_backup, args.i_have_a_backup) {
+        (Some(file), _) => BackupPolicy::File(file.clone()),
+        (None, true) => BackupPolicy::Acknowledged,
+        (None, false) => BackupPolicy::None,
+    };
     let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args))
-        .backup_missing(writes && !have_backup);
-    if let (true, Some(path)) = (writes, &args.recovery_backup) {
-        // Plan first: a stage without a restructuring needs no backup.
-        let mut probe = options.clone();
-        probe.dry_run = true;
-        probe.script_output = None;
-        let planned = apply_with_gate(&sql, &probe, &gate)?;
-        if planned.structure.is_some() {
-            take_backup(&sql, &args.database, path)?;
-        }
-    }
+        .xml_version(Some("2.20"));
     let mode = if args.dry_run {
         "through-apply, dry-run"
     } else if args.rehearse {
