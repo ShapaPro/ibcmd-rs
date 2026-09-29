@@ -2,9 +2,9 @@ use super::*;
 use uuid::Uuid;
 
 const CONFIG_DUMP_INFO_FILE_NAME: &str = "ConfigDumpInfo.xml";
-/// Service names the streamed MSSQL `Config` table's `versions` row embeds
-/// inside its own blob content, and which are therefore stripped from the
-/// parsed entry list.
+/// Service names a `Config` table's `versions` row may embed inside its own
+/// blob content (see [`VersionsBlobOrigin`]), and which are therefore stripped
+/// from the parsed entry list.
 const VERSIONS_EMBEDDED_SERVICE_NAMES: [&str; 3] = ["root", "version", "versions"];
 
 /// Storage records that stand beside the per-object ones and carry no
@@ -60,17 +60,25 @@ const CONFIGURATION_COMMAND_INTERFACE_UUID: &str = "00000000-0000-0000-0000-0000
 /// manifest-membership check (are `root`/`version`/`versions` present as
 /// their own rows/records alongside the per-object ids?) holds for both.
 ///
-/// The streamed MSSQL `Config` table's `versions` row embeds `root`,
-/// `version`, and `versions` as extra name/uuid pairs *inside* its own
-/// blob content, in addition to those three existing as separate rows.
-/// A CF archive's `versions` storage element does not: confirmed by
-/// decoding the `versions` element's content against three independent
-/// native-evidence corpora (T1/T2/T3, `scratchpad/evidence-batch/session12`)
-/// — each has `root`/`version`/`versions` as their own top-level storage
-/// records (verified via `cf inspect`), but the `versions` element's own
-/// parsed pairs are exclusively per-object uuid keys, never those three
-/// names. Requiring them unconditionally would fail-closed a completely
-/// well-formed CF export.
+/// The `versions` row of a `Config` table (and of `ConfigSave`) comes in two
+/// shapes. The one a configuration loaded from a distribution carries embeds
+/// `root`, `version`, and `versions` as extra name/uuid pairs *inside* its own
+/// blob content, in addition to those three existing as separate rows, and
+/// declares the number of its pairs. The one the platform's own import stages,
+/// and an apply of it leaves behind, has no such pairs and a declared count
+/// that is not kept up to date: 9 834 for 9 836 pairs in a native stage of the
+/// БСП demo, 9 835 or 9 836 for 9 836 or 9 837 in the databases an apply left
+/// (measured on the 0.4 lab databases). The platform reads the pairs and pays
+/// no attention to the count, so neither does a `Config` row's reader.
+///
+/// A CF archive's `versions` storage element embeds no service pairs either --
+/// confirmed by decoding the `versions` element's content against three
+/// independent native-evidence corpora (T1/T2/T3,
+/// `scratchpad/evidence-batch/session12`): each has `root`/`version`/`versions`
+/// as their own top-level storage records (verified via `cf inspect`), but the
+/// `versions` element's own parsed pairs are exclusively per-object uuid keys,
+/// never those three names -- and states its count exactly, which a CF
+/// reader still checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum VersionsBlobOrigin {
     MssqlConfigTable,
@@ -82,8 +90,9 @@ pub(super) enum VersionsBlobOrigin {
 }
 
 impl VersionsBlobOrigin {
-    const fn embeds_service_entries(self) -> bool {
-        matches!(self, Self::MssqlConfigTable)
+    /// Whether the declared pair count is part of what the source guarantees.
+    const fn states_its_count(self) -> bool {
+        matches!(self, Self::CfStorageImage)
     }
 
     /// The service entries the storage keeps beside the versioned ones.
@@ -412,16 +421,23 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
         .get(1)
         .and_then(|field| field.trim().parse::<usize>().ok())
         .ok_or_else(|| anyhow!("Config versions row has no valid pair count"))?;
-    let expected_fields = 2usize
-        .checked_add(
-            count
-                .checked_mul(2)
-                .ok_or_else(|| anyhow!("Config versions pair count overflows"))?,
-        )
-        .ok_or_else(|| anyhow!("Config versions field count overflows"))?;
-    if fields.len() != expected_fields {
+    if origin.states_its_count() {
+        let expected_fields = 2usize
+            .checked_add(
+                count
+                    .checked_mul(2)
+                    .ok_or_else(|| anyhow!("Config versions pair count overflows"))?,
+            )
+            .ok_or_else(|| anyhow!("Config versions field count overflows"))?;
+        if fields.len() != expected_fields {
+            bail!(
+                "Config versions row declares {count} pairs but contains {} fields",
+                fields.len()
+            );
+        }
+    } else if fields.len() % 2 != 0 {
         bail!(
-            "Config versions row declares {count} pairs but contains {} fields",
+            "Config versions row has {} fields, not two header fields and name/version pairs",
             fields.len()
         );
     }
@@ -449,13 +465,6 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
         bail!("Config versions row has no generation entry");
     }
 
-    if origin.embeds_service_entries() {
-        for service_name in VERSIONS_EMBEDDED_SERVICE_NAMES {
-            if !named.contains_key(service_name) {
-                bail!("Config versions row has no service entry {service_name}");
-            }
-        }
-    }
     Ok(named
         .into_iter()
         .filter(|(name, _)| !VERSIONS_EMBEDDED_SERVICE_NAMES.contains(&name.as_str()))
@@ -1075,5 +1084,56 @@ mod tests {
     #[test]
     fn a_row_that_is_not_a_versions_list_lists_nothing() {
         assert!(unlisted_entries(b"not a deflate stream", ["a"]).is_err());
+    }
+
+    /// A `versions` row as the platform's import stages it: the generation entry
+    /// and one entry per name, no service pairs, and a declared count that is
+    /// two less than the pairs it holds.
+    fn staged_versions_row(names: &[&str]) -> Vec<u8> {
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+
+        let version = "00000000-0000-0000-0000-000000000001";
+        let mut text = format!("{{1,{},\"\",{version}", names.len() - 1);
+        for name in names {
+            text.push_str(&format!(",\"{name}\",{version}"));
+        }
+        text.push('}');
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn a_config_row_the_platform_staged_is_read_by_its_pairs() {
+        let row = staged_versions_row(&["kept", "kept.0", "other"]);
+        let entries = parse_versions_blob(&row, VersionsBlobOrigin::MssqlConfigTable).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kept", "kept.0", "other"]
+        );
+        // A CF archive states its count exactly and is still held to it.
+        assert!(parse_versions_blob(&row, VersionsBlobOrigin::CfStorageImage).is_err());
+        assert_eq!(
+            unlisted_entries(&row, ["kept", "removed", "root", "versions"]).unwrap(),
+            BTreeSet::from(["removed".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_row_with_an_odd_number_of_fields_is_refused() {
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        let version = "00000000-0000-0000-0000-000000000001";
+        encoder
+            .write_all(format!("{{1,2,\"\",{version},\"a\"}}").as_bytes())
+            .unwrap();
+        let row = encoder.finish().unwrap();
+        assert!(parse_versions_blob(&row, VersionsBlobOrigin::MssqlConfigTable).is_err());
     }
 }

@@ -297,6 +297,7 @@ fn dump_args(
         output_dir,
         overwrite: false,
         include_config_save: false,
+        main_configuration: true,
         file_names,
         file_name_lists: Vec::new(),
         inflate: false,

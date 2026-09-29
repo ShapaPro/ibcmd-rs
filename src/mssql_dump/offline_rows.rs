@@ -436,7 +436,8 @@ impl OfflineRows {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
     use super::{OfflineRows, parse_part_file_name, read_parts};
 
@@ -584,5 +585,124 @@ mod tests {
             error.to_string().contains("generation history"),
             "{error:#}"
         );
+    }
+
+    /// One test at a time may hold a folder active.
+    static FOLDER: Mutex<()> = Mutex::new(());
+
+    const BASE_GENERATION: &str = "848a0a59-8803-445f-b89d-3cfae4f98bbd";
+
+    fn versions_row(names: &[&str], generation: &str) -> Vec<u8> {
+        let version = "00000000-0000-0000-0000-000000000001";
+        let mut text = format!("{{1,{},\"\",{generation}", names.len());
+        for name in names {
+            text.push_str(&format!(",\"{name}\",{version}"));
+        }
+        text.push('}');
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn folder_of(rows: &[(String, Vec<u8>)]) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ibcmd-rs-offline-rows-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in rows {
+            std::fs::write(dir.join(format!("{name}__part0.bin")), bytes).unwrap();
+        }
+        dir
+    }
+
+    fn owned_rows(names: &[(&str, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
+        names
+            .iter()
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.clone()))
+            .collect()
+    }
+
+    fn published_by(dir: &std::path::Path, main_configuration: bool) -> BTreeSet<String> {
+        // Each run resolves the overlay of the rows it was given.
+        crate::mssql_dump::dynamic_generation::clear_storage_generation_overlays();
+        let _active = super::activate(dir).unwrap();
+        let sql = crate::sql::SqlExec::detached("the rows come from a folder");
+        let headers =
+            crate::mssql_dump::fetch::fetch_row_headers(&sql, "db", "Config", &BTreeSet::new())
+                .unwrap();
+        crate::mssql_dump::install_storage_overlay(
+            &sql,
+            "db",
+            "Config",
+            &BTreeSet::new(),
+            headers,
+            main_configuration,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|header| header.file_name)
+        .collect()
+    }
+
+    /// A folder of rows takes the generation overlay and never looks for staged
+    /// rows, whether or not the run asks for the main configuration.
+    #[test]
+    fn a_folder_of_rows_takes_the_generation_overlay_and_no_staged_rows() {
+        let _one = FOLDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let alias = format!("a_dynupdate_{GENERATION}");
+        let published_versions = format!("versions_dynupdate_{GENERATION}");
+        let dir = folder_of(&owned_rows(&[
+            ("a", vec![1]),
+            (&alias, vec![2]),
+            ("b", vec![3]),
+            ("gone", vec![4]),
+            (
+                "versions",
+                versions_row(&["a", "b", "gone"], BASE_GENERATION),
+            ),
+            (&published_versions, versions_row(&["a", "b"], GENERATION)),
+            (
+                "DynamicallyUpdated",
+                format!("\u{feff}{{1,1,{GENERATION}}}").into_bytes(),
+            ),
+        ]));
+        for main_configuration in [false, true] {
+            assert_eq!(
+                published_by(&dir, main_configuration),
+                names(&["DynamicallyUpdated", "a", "b", "versions"]),
+                "the alias is published; its plain row and the unlisted `gone` are not"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No marker: nothing moves, aliases of unlisted generations included.
+    #[test]
+    fn a_folder_of_rows_without_a_marker_keeps_every_row() {
+        let _one = FOLDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let alias = format!("a_dynupdate_{GENERATION}");
+        let dir = folder_of(&owned_rows(&[
+            ("a", vec![1]),
+            (&alias, vec![2]),
+            ("gone", vec![4]),
+            ("versions", versions_row(&["a"], BASE_GENERATION)),
+        ]));
+        for main_configuration in [false, true] {
+            assert_eq!(
+                published_by(&dir, main_configuration),
+                names(&["a", &alias, "gone", "versions"])
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

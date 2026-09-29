@@ -1621,6 +1621,12 @@ pub struct MssqlDumpConfigArgs {
     /// Include pending ConfigSave rows in addition to Config.
     #[arg(long)]
     pub include_config_save: bool,
+    /// Publish the main configuration, as the platform's export does: the rows
+    /// a completed import staged in ConfigSave in place of the Config rows of
+    /// the same names, and the staged `versions` (default: the Config table
+    /// alone).
+    #[arg(long, conflicts_with_all = ["include_config_save", "rows_dir"])]
+    pub main_configuration: bool,
     /// Dump only selected Config/ConfigSave FileName values. Can be repeated.
     #[arg(long = "file-name")]
     pub file_names: Vec<String>,

@@ -27,8 +27,16 @@
 //! what the active `versions` row lists, so a published name it does not list
 //! is dropped ([`StorageGenerationOverlay::dropping`]).
 //!
-//! A table with no `DynamicallyUpdated` row has no overlay and every query is
-//! byte-for-byte the query this export built before.
+//! The platform's export publishes the *main* configuration, which is not
+//! always the one `Config` holds: a completed import stages it in `ConfigSave`
+//! -- a `versions` row that lists all of it and the rows of the objects that
+//! changed -- and it stays there until an apply moves it into `Config`. The
+//! export reads a name from the staged rows when they hold it and from `Config`
+//! (as the generations above publish it) when they do not
+//! ([`StorageGenerationOverlay::staging`]).
+//!
+//! A table with no `DynamicallyUpdated` row and no staged rows has no overlay
+//! and every query is byte-for-byte the query this export built before.
 //!
 //! # How the queries read it
 //!
@@ -51,7 +59,8 @@
 //! 3. the parts of that stored row are read back by its name, on the clustered
 //!    key;
 //! 4. the names the overlay drops -- a short list, one entry per removed object
-//!    -- leave after the aggregate, once per published name.
+//!    -- and the names the staged rows hold leave after the aggregate, once per
+//!    published name; the staged rows are appended (`UNION ALL`).
 //!
 //! The published name leaves the aggregate as `MAX(...)`, so a filter on it
 //! (`IN` lists, ranges, `LIKE`) runs once per name on a materialised column
@@ -70,24 +79,61 @@ const GENERATION_LEN: usize = 36;
 /// The most row constructors one `VALUES` list may hold.
 const VALUES_ROWS_MAX: usize = 1000;
 
+/// The rows a completed import staged in `ConfigSave`, which the platform's
+/// export publishes instead of the rows of `Config` that carry the same names.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct StagedRows {
+    /// The qualified `ConfigSave` table.
+    table: String,
+    /// The names it holds a row for.
+    names: BTreeSet<String>,
+}
+
 /// How an active dynamic generation renames what a storage table publishes.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct StorageGenerationOverlay {
     /// The generations of the table's history, oldest first.
     history: Vec<String>,
+    /// Whether some alias of a listed generation exists, so the rows have to be
+    /// picked generation by generation.
+    aliased: bool,
     /// Alias row -> the name it is published under.
     renames: BTreeMap<String, String>,
-    /// Plain rows that are not published: those an alias replaces and those
-    /// of a dropped name.
+    /// Plain rows that are not published: those an alias replaces, those a
+    /// staged row replaces and those of a dropped name.
     hidden: BTreeSet<String>,
     /// Published names left out although a row carries them: what the active
     /// `versions` row does not list ([`Self::dropping`]).
     dropped: BTreeSet<String>,
+    /// The staged main configuration, when the export publishes it
+    /// ([`Self::staging`]).
+    staged: Option<StagedRows>,
 }
 
 impl StorageGenerationOverlay {
     pub(super) fn is_empty(&self) -> bool {
-        self.renames.is_empty() && self.dropped.is_empty()
+        !self.aliased && self.dropped.is_empty() && self.staged.is_none()
+    }
+
+    /// The names of the staged rows this overlay publishes.
+    #[cfg(test)]
+    pub(super) fn staged_names(&self) -> Option<&BTreeSet<String>> {
+        self.staged.as_ref().map(|staged| &staged.names)
+    }
+
+    /// The overlay that publishes the rows staged in `table` (`ConfigSave`)
+    /// instead of the rows of the table it reads that carry the same names.
+    ///
+    /// A completed import stages the main configuration there: `versions` lists
+    /// all of it and the table holds the rows of the objects that changed. The
+    /// platform's export publishes that configuration, so a name the staged
+    /// rows hold is read from them and every other name from the table.
+    pub(super) fn staging(mut self, table: String, names: BTreeSet<String>) -> Self {
+        self.renames
+            .retain(|_, published| !names.contains(published));
+        self.hidden.extend(names.iter().cloned());
+        self.staged = Some(StagedRows { table, names });
+        self
     }
 
     /// The name `file_name` is published under, when this overlay moves it.
@@ -236,6 +282,7 @@ pub(super) fn storage_generation_overlay<'a>(
     }
     let mut overlay = StorageGenerationOverlay {
         history: history.to_vec(),
+        aliased: !best.is_empty(),
         ..StorageGenerationOverlay::default()
     };
     for (published, (_, alias)) in best {
@@ -314,16 +361,38 @@ fn dropped_names(dropped: &BTreeSet<String>) -> String {
         .join(" UNION ALL ")
 }
 
-/// The table expression every query reads from: the table itself when no
-/// generation is active, and otherwise a derived table that publishes, for
-/// every name, the row of the newest generation that carries it (or the plain
-/// row when none does) under that name and drops every other row.
+/// The columns of the storage table every expression publishes.
+const COLUMNS: [&str; 7] = [
+    "FileName",
+    "PartNo",
+    "DataSize",
+    "BinaryData",
+    "Attributes",
+    "Creation",
+    "Modified",
+];
+
+/// The columns of one table alias, in the order of [`COLUMNS`].
+fn columns_of(alias: &str) -> String {
+    COLUMNS
+        .iter()
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The table expression every query reads from: the table itself when nothing
+/// is overlaid, and otherwise a derived table that publishes, for every name,
+/// the row of the newest generation that carries it (or the plain row when none
+/// does) under that name, drops every other row, and takes the staged rows in
+/// place of the rows of the same names.
 ///
-/// The text depends on the generation history and on the names the overlay
-/// drops -- the objects an update removed -- and not on the number of rows or
-/// aliases; see the module documentation for the reading it implements. It has
-/// the columns of the storage table -- `FileName`, `PartNo`, `DataSize`,
-/// `BinaryData`, `Attributes`, `Creation`, `Modified`.
+/// The text depends on the generation history, on the names the overlay drops
+/// -- the objects an update removed -- and on the staged table; it does not
+/// depend on the number of rows or aliases. See the module documentation for
+/// the reading it implements. It has the columns of the storage table:
+/// `FileName`, `PartNo`, `DataSize`, `BinaryData`, `Attributes`, `Creation`,
+/// `Modified`.
 pub(super) fn storage_table_expression(
     qualified_table: &str,
     overlay: Option<&StorageGenerationOverlay>,
@@ -331,6 +400,57 @@ pub(super) fn storage_table_expression(
     let Some(overlay) = overlay.filter(|overlay| !overlay.is_empty()) else {
         return qualified_table.to_owned();
     };
+    let bin = "COLLATE Latin1_General_BIN2";
+    // What leaves the table's own side: the names a staged row replaces, and
+    // the dropped names. Both leave once per published name.
+    let leaving = |name: &str| {
+        let mut conditions = Vec::new();
+        if let Some(staged) = &overlay.staged {
+            conditions.push(format!(
+                "NOT EXISTS (SELECT 1 FROM {} k WHERE k.FileName = {name})",
+                staged.table
+            ));
+        }
+        if !overlay.dropped.is_empty() {
+            conditions.push(format!(
+                "NOT EXISTS (SELECT 1 FROM ({}) d WHERE d.Name {bin} = {name} {bin})",
+                dropped_names(&overlay.dropped)
+            ));
+        }
+        if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("\n\x20 WHERE {}", conditions.join(" AND "))
+        }
+    };
+    let own_side = if overlay.aliased {
+        generation_table(qualified_table, overlay, &leaving("w.FileName"))
+    } else {
+        format!(
+            "(SELECT {} FROM {qualified_table} p{})",
+            columns_of("p"),
+            leaving("p.FileName")
+        )
+    };
+    match &overlay.staged {
+        None => format!("{own_side} AS storage"),
+        Some(staged) => format!(
+            "(SELECT {} FROM {own_side} x\n\x20 UNION ALL SELECT {} FROM {} s) AS storage",
+            columns_of("x"),
+            columns_of("s"),
+            staged.table
+        ),
+    }
+}
+
+/// The rows of the newest generation that carries each name, as a parenthesised
+/// table expression; `leaving` is the `WHERE` that takes names out after the
+/// aggregate.
+fn generation_table(
+    qualified_table: &str,
+    overlay: &StorageGenerationOverlay,
+    leaving: &str,
+) -> String {
     let infix = quote(DYNAMIC_UPDATE_INFIX);
     let strip = DYNAMIC_UPDATE_INFIX.len() + GENERATION_LEN;
     let after_infix = DYNAMIC_UPDATE_INFIX.len();
@@ -339,15 +459,6 @@ pub(super) fn storage_table_expression(
     let zeros = "0".repeat(width);
     let ranks = generation_ranks(&overlay.history);
     let bin = "COLLATE Latin1_General_BIN2";
-    // The dropped names leave after the aggregate, once per published name.
-    let dropped = if overlay.dropped.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n\x20 WHERE NOT EXISTS (SELECT 1 FROM ({}) d WHERE d.Name {bin} = w.FileName {bin})",
-            dropped_names(&overlay.dropped)
-        )
-    };
     format!(
         "(SELECT w.FileName, t.PartNo, t.DataSize, t.BinaryData, t.Attributes, t.Creation, t.Modified\n\
          \x20  FROM (SELECT MAX(y.Pub) AS FileName, SUBSTRING(MAX(y.Tag), {tag_start}, 4000) AS Src\n\
@@ -361,7 +472,7 @@ pub(super) fn storage_table_expression(
          \x20                            ON a.Pos > 0 AND g.Gen {bin} = SUBSTRING(c.FileName, a.Pos + {after_infix}, {GENERATION_LEN}) {bin}) x\n\
          \x20                 WHERE x.Rk IS NOT NULL) y\n\
          \x20         GROUP BY y.Pub {bin}) w\n\
-         \x20  JOIN {qualified_table} t ON t.FileName = w.Src{dropped}) AS storage",
+         \x20  JOIN {qualified_table} t ON t.FileName = w.Src{leaving})",
         tag_start = width + 1,
     )
 }
@@ -674,6 +785,94 @@ mod tests {
         assert_eq!(text.matches("UNION ALL").count(), 2);
     }
 
+    const SAVED: &str = "[db].dbo.[ConfigSave]";
+
+    #[test]
+    fn staged_rows_replace_the_rows_of_their_names() {
+        let names = [
+            "a".to_owned(),
+            alias("a", G1, ""),
+            "b".to_owned(),
+            alias("b", G1, ".0"),
+            "c".to_owned(),
+        ];
+        let staged = BTreeSet::from(["a".to_owned(), "b.0".to_owned(), "new".to_owned()]);
+        let overlay = overlay_of(&[G1], &names).staging(SAVED.to_owned(), staged.clone());
+
+        assert_eq!(overlay.published_name(&alias("a", G1, "")), None);
+        assert_eq!(overlay.published_name(&alias("b", G1, ".0")), None);
+        assert!(overlay.hides("a") && overlay.hides("b.0"));
+        let published = overlay
+            .published_names(names.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(published, BTreeSet::from(["b", "c"]));
+        assert_eq!(overlay.staged_names(), Some(&staged));
+        assert!(!overlay.is_empty());
+    }
+
+    #[test]
+    fn the_staged_rows_are_appended_to_the_generations() {
+        let overlay = overlay_of(&[G1], &["a".into(), alias("a", G1, "")])
+            .staging(SAVED.to_owned(), BTreeSet::from(["x".to_owned()]));
+        let text = storage_table_expression("[db].dbo.[Config]", Some(&overlay));
+
+        assert!(text.starts_with(
+            "(SELECT x.FileName, x.PartNo, x.DataSize, x.BinaryData, x.Attributes, x.Creation, x.Modified FROM (SELECT w.FileName"
+        ));
+        assert!(text.contains(
+            "NOT EXISTS (SELECT 1 FROM [db].dbo.[ConfigSave] k WHERE k.FileName = w.FileName)"
+        ));
+        assert!(text.ends_with(
+            "UNION ALL SELECT s.FileName, s.PartNo, s.DataSize, s.BinaryData, s.Attributes, s.Creation, s.Modified FROM [db].dbo.[ConfigSave] s) AS storage"
+        ));
+    }
+
+    #[test]
+    fn staged_rows_without_an_alias_read_the_table_itself() {
+        let overlay = StorageGenerationOverlay::default()
+            .staging(SAVED.to_owned(), BTreeSet::from(["x".to_owned()]))
+            .dropping(BTreeSet::from(["gone".to_owned()]));
+        let text = storage_table_expression("[db].dbo.[Config]", Some(&overlay));
+
+        assert!(text.starts_with("(SELECT x.FileName, x.PartNo"));
+        assert!(text.contains("FROM [db].dbo.[Config] p"));
+        assert!(text.contains("k.FileName = p.FileName"));
+        assert!(text.contains(
+            "d.Name COLLATE Latin1_General_BIN2 = p.FileName COLLATE Latin1_General_BIN2"
+        ));
+        assert!(!text.contains("MAX(y.Pub)"), "no generation is read");
+    }
+
+    #[test]
+    fn dropped_names_without_an_alias_read_the_table_itself() {
+        let overlay =
+            StorageGenerationOverlay::default().dropping(BTreeSet::from(["gone".to_owned()]));
+        let text = storage_table_expression("[db].dbo.[Config]", Some(&overlay));
+
+        assert!(text.starts_with("(SELECT p.FileName, p.PartNo"));
+        assert!(text.ends_with(") AS storage"));
+        assert!(!text.contains("UNION ALL"));
+    }
+
+    #[test]
+    fn the_staged_names_do_not_lengthen_the_text() {
+        let base = overlay_of(&[G1], &["a".into(), alias("a", G1, "")]);
+        let few = base
+            .clone()
+            .staging(SAVED.to_owned(), BTreeSet::from(["x".to_owned()]));
+        let many = base.staging(
+            SAVED.to_owned(),
+            (0..50_000)
+                .map(|n| format!("{n:08x}-0000-0000-0000-000000000000"))
+                .collect(),
+        );
+        assert_eq!(
+            storage_table_expression("[db].dbo.[Config]", Some(&few)),
+            storage_table_expression("[db].dbo.[Config]", Some(&many)),
+            "the staged table is read on the server"
+        );
+    }
+
     /// The selection the SQL expression makes, written the plain way, against the
     /// overlay the Rust side computes: the same rows must survive under the same names.
     fn selection_of_the_sql(history: &[String], stored: &[String]) -> BTreeMap<String, String> {
@@ -755,17 +954,44 @@ mod tests {
     }
 }
 
-/// The derived table, run on a real server. Set `IBCMD_RS_DYNGEN_DB` to a lab
-/// database whose `Config` holds a `DynamicallyUpdated` row and aliases:
+/// The overlay the export installs, run against a real server: the rows the
+/// derived table publishes and the headers the export lists must be what the
+/// overlay describes, row by row (SHA-256 of the stored bytes).
+///
+/// Set `IBCMD_RS_DYNGEN_DB` to a lab database (it is only read). With
+/// `IBCMD_RS_DYNGEN_MAIN=1` the run publishes the main configuration, as the
+/// platform's export does, staged `ConfigSave` rows included:
 ///
 /// ```text
-/// IBCMD_RS_DYNGEN_DB=ibcmd_rs_04_rcheck_bsp_a cargo test --locked -p ibcmd-rs --lib \
-///     --features mssql-live-tests dynamic_generation::live -- --ignored --nocapture
+/// IBCMD_RS_DYNGEN_DB=ibcmd_rs_04_rcheck_bsp_a IBCMD_RS_DYNGEN_MAIN=1 cargo test --locked \
+///     -p ibcmd-rs --lib --no-default-features --features mssql-live-tests \
+///     dynamic_generation::live -- --ignored --nocapture
 /// ```
 #[cfg(all(test, feature = "mssql-live-tests"))]
 mod live {
     use super::*;
-    use crate::sql::{SqlBackend, SqlExec, SqlOptions};
+    use crate::mssql_dump::fetch::fetch_row_headers;
+    use crate::sql::{SqlBackend, SqlClient, SqlExec, SqlOptions};
+
+    type Rows = BTreeMap<(String, i64), (i64, Vec<u8>)>;
+
+    fn stored_rows(client: &dyn SqlClient, table: &str) -> anyhow::Result<Rows> {
+        let mut rows = Rows::new();
+        for row in client.query_rows(
+            &format!(
+                "SELECT FileName, PartNo, DataSize, HASHBYTES('SHA2_256', BinaryData) FROM {table}"
+            ),
+            &[],
+        )? {
+            let key = (row.text(0)?.to_owned(), row.i64(1)?);
+            assert!(
+                rows.insert(key.clone(), (row.i64(2)?, row.binary(3)?.to_vec()))
+                    .is_none(),
+                "{key:?} is stored twice"
+            );
+        }
+        Ok(rows)
+    }
 
     #[test]
     #[ignore = "reads a lab database: set IBCMD_RS_DYNGEN_DB"]
@@ -774,100 +1000,79 @@ mod live {
             return Ok(());
         };
         let database = database.to_string_lossy().into_owned();
+        let main = std::env::var_os("IBCMD_RS_DYNGEN_MAIN").is_some();
         let sql = SqlExec::from_options(SqlOptions::integrated("localhost", None))?;
         let SqlBackend::Client(client) = sql.backend() else {
             anyhow::bail!("the built-in client is expected");
         };
-        let table = format!("[{}].dbo.[Config]", database.replace(']', "]]"));
+        let config = format!("[{}].dbo.[Config]", database.replace(']', "]]"));
+        let saved = format!("[{}].dbo.[ConfigSave]", database.replace(']', "]]"));
 
-        let marker = client
-            .query_rows(
-                &format!("SELECT BinaryData FROM {table} WHERE FileName = N'DynamicallyUpdated' AND PartNo = 0"),
-                &[],
-            )?
-            .into_iter()
-            .next()
-            .expect("the database has a DynamicallyUpdated row");
-        let history = dynamic_generation_history(marker.binary(0)?).expect("a generation history");
+        let stored = stored_rows(client, &config)?;
+        let staged = stored_rows(client, &saved)?;
 
-        // The stored rows and what each one holds.
-        let stored = client.query_rows(
-            &format!(
-                "SELECT FileName, PartNo, DataSize, HASHBYTES('SHA2_256', BinaryData) FROM {table}"
-            ),
-            &[],
+        // What the export installs, exactly as `dump_table_rows_streamed` asks for it.
+        clear_storage_generation_overlays();
+        let headers = fetch_row_headers(&sql, &database, "Config", &BTreeSet::new())?;
+        let listed = crate::mssql_dump::install_storage_overlay(
+            &sql,
+            &database,
+            "Config",
+            &BTreeSet::new(),
+            headers,
+            main,
         )?;
-        let mut content = BTreeMap::new();
-        let mut names = Vec::new();
-        for row in &stored {
-            let name = row.text(0)?.to_owned();
-            content.insert(
-                (name.clone(), row.i64(1)?),
-                (row.i64(2)?, row.binary(3)?.to_vec()),
-            );
-            names.push(name);
-        }
-        let overlay = storage_generation_overlay(&history, names.iter().map(String::as_str));
-        assert!(
-            !overlay.is_empty(),
-            "the database has aliases of its history"
-        );
-        // The names the published `versions` row does not list are left out.
-        let versions = client
-            .query_rows(
-                &format!(
-                    "SELECT BinaryData FROM {table} WHERE FileName = N'{}' AND PartNo = 0",
-                    overlay.stored_name("versions").replace('\'', "''")
-                ),
-                &[],
-            )?
-            .into_iter()
-            .next()
-            .expect("the database has a versions row");
-        let unlisted = crate::mssql_dump::config_dump_info::unlisted_entries(
-            versions.binary(0)?,
-            overlay.published_names(names.iter().map(String::as_str)),
-        )?;
-        eprintln!(
-            "{database}: {} published names are not listed",
-            unlisted.len()
-        );
-        let overlay = overlay.dropping(unlisted);
+        let overlay = storage_generation_overlay_for("Config").expect("an overlay is installed");
 
         // What the overlay says is published.
-        let mut expected = BTreeMap::new();
-        for ((name, part), value) in &content {
+        let mut expected = Rows::new();
+        for ((name, part), value) in &stored {
             if let Some(published) = overlay.published_name(name) {
                 expected.insert((published.to_owned(), *part), value.clone());
             } else if !is_dynamic_generation_alias(name) && !overlay.hides(name) {
                 expected.insert((name.clone(), *part), value.clone());
             }
         }
+        if let Some(names) = overlay.staged_names() {
+            for ((name, part), value) in &staged {
+                assert!(names.contains(name), "{name} is staged but not listed");
+                expected.insert((name.clone(), *part), value.clone());
+            }
+        }
 
         // What the server publishes.
-        let expression = storage_table_expression(&table, Some(&overlay));
-        let published = client.query_rows(
-            &format!("SELECT FileName, PartNo, DataSize, HASHBYTES('SHA2_256', BinaryData) FROM {expression}"),
-            &[],
-        )?;
-        let mut got = BTreeMap::new();
-        for row in &published {
-            let key = (row.text(0)?.to_owned(), row.i64(1)?);
-            assert!(
-                got.insert(key.clone(), (row.i64(2)?, row.binary(3)?.to_vec()))
-                    .is_none(),
-                "{key:?} is published twice"
-            );
-        }
+        let expression = crate::mssql_dump::qualified_storage_table(&database, "Config");
+        let published = stored_rows(client, &expression)?;
         eprintln!(
-            "{database}: {} stored rows, {} aliases, {} published rows, expression of {} characters",
-            content.len(),
+            "{database}: {} stored rows, {} staged rows, {} aliases published, {} published rows, {} listed, expression of {} characters",
+            stored.len(),
+            staged.len(),
             overlay.renames().len(),
-            got.len(),
+            published.len(),
+            listed.len(),
             expression.len()
         );
-        assert_eq!(got.len(), expected.len());
-        assert!(got == expected, "the server and the overlay disagree");
+        assert_eq!(published.len(), expected.len());
+        assert!(published == expected, "the server and the overlay disagree");
+
+        // What the export lists: the same names, parts and sizes.
+        let listed = listed
+            .iter()
+            .map(|header| {
+                (
+                    (header.file_name.clone(), i64::from(header.part_no)),
+                    header.data_size,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let sizes = expected
+            .iter()
+            .map(|(key, (size, _))| (key.clone(), *size))
+            .collect::<BTreeMap<_, _>>();
+        assert!(
+            listed == sizes,
+            "the headers and the published rows disagree"
+        );
         Ok(())
     }
 }
