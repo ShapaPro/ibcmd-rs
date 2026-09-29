@@ -165,7 +165,10 @@ pub enum Commands {
     MssqlActivateStagedMain(MssqlActivateStagedMainArgs),
     /// Apply the staged main configuration (ConfigSave to Config) without the
     /// platform, as an exclusive native `config apply` does for a
-    /// configuration that needs no restructuring.
+    /// configuration that needs no restructuring: changed modules, forms,
+    /// templates, pictures and help pages of any object, and new forms and
+    /// templates of existing objects. Anything else is refused with the list
+    /// of the rows that need the native apply.
     MssqlConfigApply(MssqlConfigApplyArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
