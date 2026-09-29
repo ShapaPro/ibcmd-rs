@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::rule_id::RuleId;
+use super::tree_diff::{ChangeOp, Seg};
+
 /// What kind of change makes the platform's own apply necessary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +33,11 @@ impl ReasonClass {
 }
 
 /// One change that needs the platform's own apply.
+///
+/// The text fields (`object`, `property`, `change`) are what a person reads.
+/// The typed fields (`rule`, `kind`, `path`, `op`) are what a program acts
+/// on: nobody should match words of the text, and the S1 classification
+/// (`s1`) does not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reason {
     pub class: ReasonClass,
@@ -45,9 +53,60 @@ pub struct Reason {
     pub property: String,
     /// What happened there: `9 -> 12`, `added`, `removed`, `row changed`.
     pub change: String,
+    /// The rule or the step of the check that made the reason.
+    pub rule: RuleId,
+    /// The kind of the object (`Catalog`, `Document`, `Form`); empty when
+    /// the check could not place it (a row it cannot read).
+    pub kind: String,
+    /// `property` as steps: the element names from the object down to the
+    /// change, and for a child object or a named element its name. Empty for
+    /// a reason that is not a change inside a descriptor (a row, an object
+    /// that appeared or went).
+    pub path: Vec<Seg>,
+    /// What happened at `path`: `None` when the reason is not a change of a
+    /// descriptor's element.
+    pub op: Option<ChangeOp>,
+}
+
+impl Default for Reason {
+    /// A reason with no class and no rule is `unknown`: the fail-closed
+    /// default for whoever builds one field by field.
+    fn default() -> Self {
+        Self {
+            class: ReasonClass::Unknown,
+            object: String::new(),
+            file_name: String::new(),
+            property: String::new(),
+            change: String::new(),
+            rule: RuleId::Unspecified,
+            kind: String::new(),
+            path: Vec::new(),
+            op: None,
+        }
+    }
 }
 
 impl Reason {
+    /// A reason of a step of the check: no kind, no path.
+    pub fn step(
+        class: ReasonClass,
+        rule: RuleId,
+        object: &str,
+        file_name: &str,
+        property: &str,
+        change: &str,
+    ) -> Self {
+        Self {
+            class,
+            object: object.to_string(),
+            file_name: file_name.to_string(),
+            property: property.to_string(),
+            change: change.to_string(),
+            rule,
+            ..Self::default()
+        }
+    }
+
     /// `Catalog._ДемоКассы: Properties/CodeLength: 9 -> 12`
     pub fn summary(&self) -> String {
         if self.property.is_empty() {
@@ -55,6 +114,12 @@ impl Reason {
         } else {
             format!("{}: {}: {}", self.object, self.property, self.change)
         }
+    }
+
+    /// The names along `path` (`ChildObjects`, `Attribute`, `Properties`,
+    /// `Type`, ...), without the labels.
+    pub fn path_names(&self) -> Vec<&str> {
+        self.path.iter().map(|seg| seg.name.as_str()).collect()
     }
 }
 
@@ -125,6 +190,10 @@ pub struct Stats {
     /// indexes) and were not compared with the database: only descriptors
     /// are (see `dbtree`).
     pub body_files_not_compared: usize,
+    /// Descriptor rows that differ from the stored ones in bytes only by
+    /// the record format the staging platform writes (`upgrade`): proven
+    /// harmless, neither a reason nor a note each.
+    pub format_upgrades: usize,
 }
 
 /// The answer.
@@ -300,13 +369,14 @@ mod tests {
     use super::*;
 
     fn reason(object: &str, property: &str, change: &str) -> Reason {
-        Reason {
-            class: ReasonClass::Structure,
-            object: object.to_string(),
-            file_name: "f".to_string(),
-            property: property.to_string(),
-            change: change.to_string(),
-        }
+        Reason::step(
+            ReasonClass::Structure,
+            RuleId::PropertyNotCovered,
+            object,
+            "f",
+            property,
+            change,
+        )
     }
 
     #[test]

@@ -52,6 +52,10 @@ pub struct MssqlApplyCheckArgs {
     /// the platform's own apply.
     #[arg(long)]
     pub fail_on_restructuring: bool,
+    /// Also say what the own restructuring (S1) makes of the reasons: the
+    /// operations it would do and the refusals, each with its code.
+    #[arg(long)]
+    pub s1: bool,
 }
 
 #[derive(Debug, Args)]
@@ -68,13 +72,29 @@ pub struct ApplyCheckTreesArgs {
     /// Exit with code 10 when the change needs the platform's own apply.
     #[arg(long)]
     pub fail_on_restructuring: bool,
+    /// Also say what the own restructuring (S1) makes of the reasons.
+    #[arg(long)]
+    pub s1: bool,
 }
 
-fn print(verdict: &Verdict, json: bool) -> Result<()> {
+fn print(verdict: &Verdict, json: bool, s1: bool) -> Result<()> {
+    let classification = s1.then(|| super::s1::classify(verdict));
     if json {
-        println!("{}", serde_json::to_string_pretty(verdict)?);
+        match &classification {
+            None => println!("{}", serde_json::to_string_pretty(verdict)?),
+            Some(classification) => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "verdict": verdict,
+                    "s1": classification,
+                }))?
+            ),
+        }
     } else {
         print!("{}", verdict.render_text());
+        if let Some(classification) = &classification {
+            print!("{}", classification.render_text());
+        }
     }
     Ok(())
 }
@@ -106,14 +126,14 @@ pub fn run_mssql_apply_check(args: &MssqlApplyCheckArgs) -> Result<i32> {
         )?,
         None => super::check_staged(&sql, &args.database, args.xml_version.as_deref())?,
     };
-    print(&verdict, args.json)?;
+    print(&verdict, args.json, args.s1)?;
     Ok(exit_code(&verdict, args.fail_on_restructuring))
 }
 
 /// Runs `apply-check-trees`; the process exit code.
 pub fn run_apply_check_trees(args: &ApplyCheckTreesArgs) -> Result<i32> {
     let verdict = super::check_trees(&args.old, &args.new)?;
-    print(&verdict, args.json)?;
+    print(&verdict, args.json, args.s1)?;
     Ok(exit_code(&verdict, args.fail_on_restructuring))
 }
 
@@ -157,6 +177,9 @@ mod tests {
         assert!(check.args.partial);
 
         assert!(Check::try_parse_from(["x", "--database", "db", "--partial"]).is_err());
+        assert!(!check.args.s1);
+        let check = Check::try_parse_from(["x", "--database", "db", "--s1"]).unwrap();
+        assert!(check.args.s1);
         assert!(Check::try_parse_from(["x"]).is_err());
     }
 
