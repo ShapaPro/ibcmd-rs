@@ -573,6 +573,15 @@ Reasons that name a consumed `deleted` row are dropped before the verdict is rea
 templates are judged by the plan's `objects::analyze` whichever gate runs. Tests: the verdict
 conversion (six), the plan with each gate, and the consumed-row skip.
 
+**Regression with a new form and a new template.** The base-free stage of S1 (9 841 rows, every row staged, a new
+form and a new template of one owner; the route-point flowchart body of the business process left out, which the
+conservative gate refused in S1) passes the default gate (`objects_changed` 3, ten notes, no blocker) and the
+new-object analysis (the two objects, three registration nodes, two search-information records). Own against native
+on twins: `Config` **9 842 of 9 842**, `_ConfigChngR` 20 691 rows equal (messages too), `.si` 15 identical and one
+permuted, `siVersions` and `Params` equal; `_ConfigChngR_ExtProps` equal as sets, but the native long path lists the
+files of one object (the business process, on its five nodes) in another order (`.7` first). Native 1 463 s and own
+430 s, both under load from other tracks' runs (own: 13 s in a dry run, 331 s of SQL under load).
+
 **Finding for the import track: `versions` must be based on the effective row.** A base that carries
 a dynamic overlay has `versions_dynupdate_<g>` next to `versions`; for the names the overlay updated
 the overlay row holds the current version ids. A stage whose `versions` was built from `Config`'s
