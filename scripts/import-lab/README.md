@@ -18,6 +18,11 @@ the "ODBC Driver 18 for SQL Server", PowerShell 7, SQL Server with Windows authe
 | `run_survival.ps1` | stage in a mode, native `config apply`, native `config export`, `source-diff` against the tree |
 | `equiv_cmp.py` | two applied databases: table structure, `DBNames`, `DBSchema`, `Params`, Config rows |
 | `ve_tree.sh` | offline round trip of a tree: the rows `--base-free` would stage, exported again from those rows, diffed against the tree |
+| `guard_probe.ps1` | the guard of the proposal as an experiment: stage a change (patch or `--base-free`), model the state an apply produces (`overlay_rows.py`), export it offline with the model, `source-diff` against the edited tree; a differing file is a change the stage did not carry |
+| `overlay_rows.py` | ConfigSave over Config as a rows folder, without the `deleted` names and the dynamic-update rows (the state the native apply produces) |
+| `guard_table.py` | the guard probe results next to the matrix verdict of each change |
+| `native_complete.py` | the lab's completeness test of a native `config import` stage (has `versions`, no `commit` / `*.new` row, every changed entry of `versions` has its row) |
+| `native_subset.ps1` | native `config import` of a tree with only the named edits, to find which edit the platform refuses |
 
 Typical run:
 
@@ -29,5 +34,6 @@ pwsh -NoProfile -File scripts\import-lab\run_matrix.ps1 -Changes attr,ts,newcat 
 python scripts\import-lab\summarize.py F:\ibcmd\lab\04\import\out\matrix\v0 --detail
 ```
 
-Run one native `ibcmd` of your own at a time and check the `ConfigSave` row count after a native import (a
-partial stage makes the apply fail).
+Run one native `ibcmd` of your own at a time, one command per hold of the native lock, and check a native import
+with `native_complete.py` (a partial stage makes the apply fail). A native import that fails leaves a few rows in
+`ConfigSave` (`*.1c.new`); the next import replaces them.
