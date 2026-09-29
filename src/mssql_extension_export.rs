@@ -10,11 +10,21 @@ use ibcmd_core::storage::StorageImage;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::cli::{MssqlDumpExtensionArgs, MssqlExtensionListArgs, MssqlExtensionListFormat};
+use crate::cli::{
+    MssqlDumpExtensionArgs, MssqlExtensionImage, MssqlExtensionListArgs, MssqlExtensionListFormat,
+};
 use crate::mssql_dump::StorageImageSourceExportReport;
-use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image};
+use crate::mssql_dump::cas::{
+    CasHash, CasStorageRow, MssqlStorageTable, fetch_cas_storage_image,
+    fetch_cas_storage_image_layered,
+};
+use crate::mssql_extension_stage::extension_namespace_prefix;
 use crate::mssql_extensions::{MssqlExtensionInfo, list_extensions};
 use crate::sql::{SqlExec, SqlOptions};
+
+/// Bounds of a staged namespace (the activation layer's).
+const MAX_STAGED_ROWS: usize = 100_000;
+const MAX_STAGED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct MssqlExtensionDumpReport {
@@ -28,6 +38,10 @@ pub struct MssqlExtensionDumpReport {
 pub struct MssqlExtensionDumpEntry {
     pub name: String,
     pub active_cas_root: String,
+    /// `active` or `staged`: the stored image that was exported.
+    pub image: &'static str,
+    /// SHA-1 of the root (`configinfo`) of the image that was exported.
+    pub image_cas_root: String,
     pub output_dir: String,
     pub complete: bool,
     pub storage_rows_complete: bool,
@@ -64,20 +78,19 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
         trust_server_certificate: args.sqlcmd_trust_cert,
     })?;
     let mut fetched = Vec::with_capacity(selected.len());
+    let mut sources = Vec::with_capacity(selected.len());
     for extension in selected {
-        let root = CasHash::parse_hex(&extension.active_cas_root)
-            .with_context(|| format!("extension {:?} has an invalid CAS root", extension.name))?;
-        let image =
-            fetch_cas_storage_image(&sql, &args.database, MssqlStorageTable::ConfigCas, root)
-                .with_context(|| format!("failed to fetch extension {:?}", extension.name))?;
+        let (image, source) = fetch_extension_image(&sql, &args.database, extension, args.image)
+            .with_context(|| format!("failed to fetch extension {:?}", extension.name))?;
         fetched.push((extension, image));
+        sources.push(source);
     }
     write_lab_rows_out(&fetched)?;
 
     let staging_root = prepare_atomic_staging_root(&args.output_dir)?;
     let export_result = (|| -> Result<Vec<MssqlExtensionDumpEntry>> {
         let mut extensions = Vec::with_capacity(fetched.len());
-        for (extension, image) in &fetched {
+        for ((extension, image), source) in fetched.iter().zip(&sources) {
             let staging_dir = if args.all_extensions {
                 staging_root.join(&extension.name)
             } else {
@@ -119,6 +132,8 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
             extensions.push(MssqlExtensionDumpEntry {
                 name: extension.name.clone(),
                 active_cas_root: extension.active_cas_root.clone(),
+                image: source.image,
+                image_cas_root: source.root.to_hex(),
                 output_dir: final_dir.display().to_string(),
                 complete,
                 storage_rows_complete,
@@ -151,6 +166,103 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
         all_extensions: args.all_extensions,
         extensions,
     })
+}
+
+/// Which stored image of an extension was read.
+struct ImageSource {
+    image: &'static str,
+    root: CasHash,
+}
+
+/// The image of one extension: the staged one (`ConfigCASSave`) when the
+/// extension has staged rows and `choice` allows it, else the active one.
+///
+/// The native `config export --extension` exports the staged state: the БСП 8.5
+/// clone keeps two changed modules of ServiceDesk staged and the native tree
+/// holds them. A staged namespace is the changed rows and a new `configinfo`;
+/// the rows it leaves out are the ones `ConfigCAS` already holds under the
+/// same digest.
+fn fetch_extension_image(
+    sql: &SqlExec,
+    database: &str,
+    extension: &MssqlExtensionInfo,
+    choice: MssqlExtensionImage,
+) -> Result<(StorageImage, ImageSource)> {
+    let staged = if choice == MssqlExtensionImage::Active {
+        Vec::new()
+    } else {
+        let prefix = format!(
+            "{}__",
+            extension_namespace_prefix(extension.physical_registry_id)
+        );
+        crate::mssql_dump::fetch_extension_activation_rows(
+            sql,
+            database,
+            "ConfigCASSave",
+            &prefix,
+            MAX_STAGED_ROWS,
+            MAX_STAGED_BYTES,
+        )?
+        .into_iter()
+        .map(|row| {
+            let logical_name = row
+                .file_name
+                .strip_prefix(&prefix)
+                .ok_or_else(|| anyhow!("the staged snapshot returned an unrelated row"))?
+                .to_owned();
+            Ok((logical_name, row.part_no, row.binary_data))
+        })
+        .collect::<Result<Vec<_>>>()?
+    };
+    if staged.is_empty() {
+        if choice == MssqlExtensionImage::Staged {
+            bail!("the extension has no staged rows in ConfigCASSave");
+        }
+        let root = CasHash::parse_hex(&extension.active_cas_root)
+            .with_context(|| "the extension has an invalid CAS root")?;
+        let image = fetch_cas_storage_image(sql, database, MssqlStorageTable::ConfigCas, root)?;
+        return Ok((
+            image,
+            ImageSource {
+                image: "active",
+                root,
+            },
+        ));
+    }
+    let (root, supplied) = staged_cas_rows(staged)?;
+    let (image, _) = fetch_cas_storage_image_layered(
+        sql,
+        database,
+        MssqlStorageTable::ConfigCas,
+        root,
+        supplied,
+    )?;
+    Ok((
+        image,
+        ImageSource {
+            image: "staged",
+            root,
+        },
+    ))
+}
+
+/// The staged rows of one namespace as content-addressed rows, and the digest
+/// of the staged `configinfo` that roots them.
+fn staged_cas_rows(staged: Vec<(String, i32, Vec<u8>)>) -> Result<(CasHash, Vec<CasStorageRow>)> {
+    let mut root = None;
+    let mut rows = Vec::with_capacity(staged.len());
+    for (logical_name, part_no, packed) in staged {
+        if part_no != 0 {
+            bail!("staged row {logical_name:?} has PartNo {part_no}; only PartNo 0 is supported");
+        }
+        let hash = CasHash::for_packed_bytes(&packed);
+        if logical_name == "configinfo" {
+            root = Some(hash);
+        }
+        rows.push(CasStorageRow::new(hash, packed));
+    }
+    let root = root.ok_or_else(|| anyhow!("the staged rows have no configinfo"))?;
+    Ok((root, rows))
 }
 
 /// Lab aid: `IBCMD_RS_EXTENSION_ROWS_OUT=<dir>` also writes every fetched
@@ -364,6 +476,29 @@ mod tests {
         let values = vec![extension("ServiceDesk"), extension("servicedesk")];
         let selected = select_extensions(&values, None, true).unwrap();
         assert!(validate_selected_names(&selected).is_err());
+    }
+
+    /// A staged namespace holds the rows a change touched and a new `configinfo`
+    /// that names them; the export reads them as content-addressed rows rooted
+    /// at that `configinfo`.
+    #[test]
+    fn staged_rows_are_content_addressed_and_rooted_at_the_configinfo() {
+        let staged = vec![
+            ("module".to_owned(), 0, b"changed module".to_vec()),
+            ("configinfo".to_owned(), 0, b"new manifest".to_vec()),
+        ];
+        let (root, rows) = staged_cas_rows(staged).unwrap();
+        assert_eq!(root, CasHash::for_packed_bytes(b"new manifest"));
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.hash, CasHash::for_packed_bytes(&row.packed));
+        }
+    }
+
+    #[test]
+    fn a_staged_namespace_without_a_configinfo_or_with_parts_is_refused() {
+        assert!(staged_cas_rows(vec![("module".to_owned(), 0, b"x".to_vec())]).is_err());
+        assert!(staged_cas_rows(vec![("configinfo".to_owned(), 1, b"x".to_vec())]).is_err());
     }
 
     #[test]

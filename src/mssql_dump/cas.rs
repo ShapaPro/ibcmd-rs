@@ -329,34 +329,59 @@ pub fn fetch_cas_storage_image_with_manifest(
     table: MssqlStorageTable,
     root_hash: CasHash,
 ) -> Result<(StorageImage, CasManifest)> {
+    fetch_cas_storage_image_layered(sql, database, table, root_hash, Vec::new())
+}
+
+/// As [`fetch_cas_storage_image_with_manifest`], with rows the caller already
+/// holds: an extension's staged `ConfigCASSave` namespace, whose rows stand
+/// for the `ConfigCAS` rows of the same digest. A row supplied here is used
+/// and not fetched; the rest of the graph comes from the table. The root may be
+/// a supplied row.
+pub fn fetch_cas_storage_image_layered(
+    sql: &SqlExec,
+    database: &str,
+    table: MssqlStorageTable,
+    root_hash: CasHash,
+    supplied: Vec<CasStorageRow>,
+) -> Result<(StorageImage, CasManifest)> {
     if !table.is_content_addressed() {
         bail!(
             "{} is not a content-addressed storage table",
             table.sql_name()
         );
     }
-    let root_names = BTreeSet::from([root_hash.to_hex()]);
-    preflight_cas_fetch(sql, database, table, &root_names, MAX_CAS_MANIFEST_BYTES)?;
-    let root_rows = fetch_binary_rows(sql, database, table.sql_name(), &root_names, false)?;
-    let root_rows = root_rows
+    let mut supplied = supplied
         .into_iter()
-        .map(CasStorageRow::try_from_binary)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let root = root_rows
-        .iter()
-        .find(|row| row.hash == root_hash)
-        .ok_or(CasGraphError::MissingRoot(root_hash))?;
-    validate_content_hash(root)?;
-    let manifest = CasManifest::decode(&root.packed)?;
-    let child_names = manifest
-        .referenced_hashes()
-        .into_iter()
-        .map(CasHash::to_hex)
-        .collect::<BTreeSet<_>>();
-    if child_names.contains(&root_hash.to_hex()) {
+        .map(|row| (row.hash, row))
+        .collect::<BTreeMap<_, _>>();
+    let root_row = match supplied.remove(&root_hash) {
+        Some(row) => row,
+        None => {
+            let root_names = BTreeSet::from([root_hash.to_hex()]);
+            preflight_cas_fetch(sql, database, table, &root_names, MAX_CAS_MANIFEST_BYTES)?;
+            let root_rows = fetch_binary_rows(sql, database, table.sql_name(), &root_names, false)?;
+            let root_rows = root_rows
+                .into_iter()
+                .map(CasStorageRow::try_from_binary)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root_rows
+                .into_iter()
+                .find(|row| row.hash == root_hash)
+                .ok_or(CasGraphError::MissingRoot(root_hash))?
+        }
+    };
+    validate_content_hash(&root_row)?;
+    let manifest = CasManifest::decode(&root_row.packed)?;
+    let referenced = manifest.referenced_hashes();
+    if referenced.contains(&root_hash) {
         bail!("CAS root {root_hash} references itself");
     }
     preflight_manifest_names(&manifest)?;
+    let child_names = referenced
+        .iter()
+        .filter(|hash| !supplied.contains_key(hash))
+        .map(|hash| hash.to_hex())
+        .collect::<BTreeSet<_>>();
     let child_rows = if child_names.is_empty() {
         Vec::new()
     } else {
@@ -369,7 +394,12 @@ pub fn fetch_cas_storage_image_with_manifest(
         )?;
         fetch_binary_rows(sql, database, table.sql_name(), &child_names, false)?
     };
-    let mut rows = root_rows;
+    let mut rows = vec![root_row];
+    rows.extend(
+        supplied
+            .into_values()
+            .filter(|row| referenced.contains(&row.hash)),
+    );
     rows.extend(
         child_rows
             .into_iter()
