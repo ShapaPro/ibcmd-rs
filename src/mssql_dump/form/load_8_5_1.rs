@@ -1541,6 +1541,8 @@ fn up_bag(
         ("37", "14", "3", 14) => ("3", vec![]),
         ("37", "15", "3", 13) => ("4", vec![DEFAULT_BORDER]),
         ("37", "17", "1", 16) => ("1", vec![]),
+        // A planner field: the same bag in both layouts (see `layout_8_5_1::bag_revision`).
+        ("37", "19", "1", 11) => ("1", vec![]),
         // Unmeasured under 8.5 (see `layout_8_5_1::bag_revision`): kept as is.
         ("37", "12", "3", 16) => ("3", vec![]),
         ("37", "20", "1", 14) => ("1", vec![]),
@@ -2214,7 +2216,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 27);
+        assert_eq!(checked, 28);
     }
 
     #[test]

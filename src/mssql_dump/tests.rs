@@ -6495,6 +6495,45 @@ fn metadata_command_reference_index_reads_catalog_use_standard_commands_from_rea
     assert!(index[true_uuid].use_standard_commands);
 }
 
+/// A constant's `<UseStandardCommands>` is slot 7 of its record, the slot its
+/// own `Constants/<name>.xml` is written from; the platform keeps the raw
+/// `100:<uuid>` sentinel in a command interface when it is `false`. The row is
+/// the constant `ИспользоватьКонтрольТарификации` of the БСП demo, whose
+/// staged copy on the lab database `ibcmd_rs_04_rcheck_bsp_a` says `false`.
+#[test]
+fn metadata_command_reference_index_reads_constant_use_standard_commands() {
+    let uuid = "eaaa6d15-f212-4a47-ae92-c5398ed6296d";
+    let text = |use_standard_commands: &str| {
+        format!(
+            "{{1,\n{{16,\n{{27,\n{{2,\n{{3,\n{{1,0,{uuid}}},\"ИспользоватьКонтрольТарификации\",\n\
+             {{1,\"ru\",\"Использовать контроль тарификации\"}},\"\",0,0,00000000-0000-0000-0000-000000000000,0}},\n\
+             {{\"Pattern\",\n{{\"B\"}}\n}}\n}},0,\n{{0}},\n{{0}},0,\"\",0,\n{{\"U\"}},\n{{\"U\"}},0,\
+             00000000-0000-0000-0000-000000000000,2,0,\n{{5006,0}},\n{{3,0,0}},\n{{0,0}},0,\n{{0}},\n\
+             {{\"S\",\"\"}},0,0,0}},133fd53a-4064-41f3-af43-148ba8f74aa2,5e880ab4-4e7b-4f55-9597-80a12e35fa3b,\
+             a46eb7e4-579a-46bb-9583-5b652c9746f3,ce80f907-bc5b-4bee-8c9c-d648cc329b8f,1,{use_standard_commands},\n\
+             {{0}},\n{{0}},00000000-0000-0000-0000-000000000000,0,0,1459ee59-7ebb-51a0-ac9d-4ca22e26f193,\
+             b028c710-d6c8-5f4f-b103-4c9dafeac716,0,0}},0}}"
+        )
+        .replace('\n', "\r\n")
+    };
+    for (value, uses_them) in [("1", true), ("0", false)] {
+        let packed = deflate_for_test(text(value).as_bytes());
+        let row = metadata_text_row_from_blob(uuid, &packed).expect("the constant row decodes");
+        assert_eq!(row.kind.as_deref(), Some("Constant"));
+        let index = build_metadata_command_reference_index_from_texts(&[row]);
+        assert_eq!(index[uuid].use_standard_commands, uses_them);
+        let name = command_interface_command_name("100", uuid, &BTreeMap::new(), &index);
+        assert_eq!(
+            name,
+            if uses_them {
+                "Constant.ИспользоватьКонтрольТарификации.StandardCommand.Open".to_string()
+            } else {
+                format!("100:{uuid}")
+            }
+        );
+    }
+}
+
 #[test]
 fn extracts_standalone_content_used_items() {
     let first_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
@@ -79390,6 +79429,137 @@ fn ws_definition_publishes_schema_local_qnames_with_the_later_prefix() {
 
     // A document that already spells it that way is left exactly as stored.
     assert!(normalize_ws_definition_own_namespace_prefixes(text.as_bytes()).is_none());
+}
+
+/// Platform 8.5 writes a style body one revision up (`{2,...}`, colours `{4,...}`,
+/// fonts `{8,...}`) and closes it with the brand colour, which the export
+/// prints as the last item `FirstBrand`. The body is the one the БСП 8.5
+/// extension `_ДемоРасширение` stores (`Styles/_ДемоСтильРасширения`).
+#[test]
+fn reads_the_8_5_style_body_with_its_brand_colour() {
+    let item_uuid = "7d3c7d6b-5286-4ece-b7d4-aebcef3465c7";
+    let body = "{2,5,{{0,7d3c7d6b-5286-4ece-b7d4-aebcef3465c7},1,{8,2,0,{-31},1,100}},{{-47},0,{4,0,{16755278},0}},{{-43},0,{4,0,{16772321},0}},{{-42},0,{4,0,{16768433},0}},{{-44},0,{4,0,{16759160},0}},{1,{0,{4,0,{16755278},0}}}}";
+    let refs = BTreeMap::from([(
+        item_uuid.to_owned(),
+        "StyleItem._ДемоРабочийСегментПартнеровШрифтРасширение".to_owned(),
+    )]);
+    let xml = extract_style_body_xml(
+        &deflate_for_test(body.as_bytes()),
+        &refs,
+        &BTreeMap::new(),
+        InfobaseConfigSourceVersion::V2_21,
+    )
+    .expect("an 8.5 style body reads");
+    // The items of the native `Style.xml`, in its order: the four standard
+    // colours by their platform order, the configuration's font, the brand.
+    let expected = [
+        ("ActivityColor", "<Color>#78B9FF</Color>"),
+        ("NavigationColor", "<Color>#B1DDFF</Color>"),
+        ("AuxiliaryNavigationColor", "<Color>#E1ECFF</Color>"),
+        ("ImportantColor", "<Color>#4EAAFF</Color>"),
+        (
+            "StyleItem._ДемоРабочийСегментПартнеровШрифтРасширение",
+            "<Font ref=\"style:NormalTextFont\" kind=\"StyleItem\"/>",
+        ),
+        ("FirstBrand", "<Color>#4EAAFF</Color>"),
+    ]
+    .iter()
+    .map(|(name, value)| format!("\t<Item name=\"{name}\">\r\n\t\t{value}\r\n\t</Item>\r\n"))
+    .collect::<String>();
+    assert!(xml.ends_with(&format!("{expected}</Style>")), "{xml}");
+
+    // The 8.3.27 body keeps its revision `1`, colour `3` and font `7` tags and
+    // has no brand colour; a body of an unknown revision is refused.
+    let old = "{1,1,{{-47},0,{3,0,{16755278}}}}";
+    let old_xml = extract_style_body_xml(
+        &deflate_for_test(old.as_bytes()),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        InfobaseConfigSourceVersion::V2_20,
+    )
+    .expect("an 8.3.27 style body reads");
+    assert!(
+        old_xml.contains("<Item name=\"ImportantColor\">"),
+        "{old_xml}"
+    );
+    assert!(!old_xml.contains("FirstBrand"));
+    let unknown = "{3,1,{{-47},0,{3,0,{16755278}}}}";
+    assert!(
+        extract_style_body_xml(
+            &deflate_for_test(unknown.as_bytes()),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            InfobaseConfigSourceVersion::V2_21,
+        )
+        .is_err()
+    );
+}
+
+/// `{"R"}` is the 8.5 binary data type (`xs:base64Binary`, length 0,
+/// variable); `{"R",<length>,<flag>}` carries its qualifiers.
+#[test]
+fn reads_and_writes_the_8_5_binary_data_type() {
+    let indent = "\t\t\t\t\t";
+    let types = parse_metadata_type_pattern(r#"{"Pattern",{"R"}}"#, &BTreeMap::new())
+        .expect("a binary data pattern");
+    assert_eq!(
+        format_metadata_types_xml_with_indent(&types, indent),
+        "\t\t\t\t\t<Type>\r\n\
+\t\t\t\t\t\t<v8:Type>xs:base64Binary</v8:Type>\r\n\
+\t\t\t\t\t\t<v8:BinaryDataQualifiers>\r\n\
+\t\t\t\t\t\t\t<v8:Length>0</v8:Length>\r\n\
+\t\t\t\t\t\t\t<v8:AllowedLength>Variable</v8:AllowedLength>\r\n\
+\t\t\t\t\t\t</v8:BinaryDataQualifiers>\r\n\
+\t\t\t\t\t</Type>\r\n"
+    );
+    let fixed = parse_metadata_type_pattern(r#"{"Pattern",{"R",16,0}}"#, &BTreeMap::new())
+        .expect("a fixed-length binary data pattern");
+    let xml = format_metadata_types_xml_with_indent(&fixed, indent);
+    assert!(xml.contains("<v8:Length>16</v8:Length>"), "{xml}");
+    assert!(
+        xml.contains("<v8:AllowedLength>Fixed</v8:AllowedLength>"),
+        "{xml}"
+    );
+    // A flag no measured platform writes is refused, not guessed.
+    assert!(parse_metadata_type_pattern(r#"{"Pattern",{"R",16,5}}"#, &BTreeMap::new()).is_none());
+}
+
+/// `HTTPMethod` `PATCH` is stored as `10` (measured on the БСП 8.5 extension
+/// ServiceDesk); a method the reader could not name used to vanish from the
+/// service without a word.
+#[test]
+fn names_the_http_patch_method() {
+    assert_eq!(http_service_method_from_code("10"), Some("PATCH"));
+    assert_eq!(http_service_method_from_code("2"), Some("DELETE"));
+    assert_eq!(http_service_method_from_code("99"), None);
+}
+
+/// A characteristic can name no source: both sources are the nil uuid and the
+/// fields are the `0`/`-1` sentinels. The platform prints `from=""` and the
+/// sentinel numbers (the БСП 8.5 extension catalog
+/// `_ДемоСегментыПартнеровРасширение`).
+#[test]
+fn a_characteristic_without_a_source_reads_and_prints_empty() {
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+    let real = collection(&item("4", DOCUMENT_CHARACTERISTIC_TYPE_UUID, r#"{"U"}"#));
+    let raw = real.replace(TYPES_UUID, NIL).replace(VALUES_UUID, NIL);
+    let model = decode(&raw).expect("an empty characteristic reads");
+    assert_eq!(model.items().len(), 1);
+    assert_eq!(model.items()[0].types().source().path(), "");
+    assert_eq!(model.items()[0].values().source().path(), "");
+    let xml = render_metadata_characteristics_xml(&model).unwrap();
+    // The same item with real sources prints the same fields.
+    let with_sources = render_metadata_characteristics_xml(&decode(&real).unwrap()).unwrap();
+    assert_eq!(
+        xml,
+        with_sources
+            .replace("from=\"Catalog.Types\"", "from=\"\"")
+            .replace("from=\"Catalog.Values\"", "from=\"\"")
+    );
+    assert_eq!(xml.matches("from=\"\"").count(), 2, "{xml}");
+    // A source that is neither a known object nor nil is still refused.
+    let dangling = real.replacen(TYPES_UUID, "20000000-0000-4000-8000-000000000009", 1);
+    assert!(decode(&dangling).is_err());
 }
 
 // Tests of the onecdec fork, kept apart from the upstream file.

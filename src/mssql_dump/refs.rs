@@ -43,11 +43,25 @@ pub(super) fn build_metadata_command_reference_index_from_texts(
     index
 }
 
+/// The `<UseStandardCommands>` of a kind whose row the metadata model decodes,
+/// read at the slot the model writes the object's own XML from. The platform
+/// keeps the raw `<code>:<uuid>` sentinel for such an object when it is
+/// `false`: measured on a database whose staged constant has
+/// `<UseStandardCommands>false</UseStandardCommands>`, where the subsystem that
+/// hides the constant's `Open` command prints the sentinel and this export
+/// printed the name.
+fn model_use_standard_commands(kind: &str, text: &str) -> Option<bool> {
+    let row = crate::metadata_model::brace::parse_row(text.as_bytes()).ok()?;
+    crate::metadata_model::simple::export::use_standard_commands(kind, &row)
+}
+
 /// The target's own `<UseStandardCommands>`, read through the same decoder and
 /// at the same slot the kind's own properties parser uses -- offset 31 of the
 /// normalized owner fields for `Catalog`, offset 23 for `Document`, logical
 /// field 7 for `InformationRegister`, and slot 7 of the object fields for
-/// `Report`. `None` for every other kind, or when the decode fails: the caller
+/// `Report`, and the flag the metadata model itself reads for the kinds it
+/// decodes (`Constant`). `None` for every other kind, or when the decode
+/// fails: the caller
 /// then keeps the pre-existing `true` assumption rather than a guessed offset,
 /// per the project's fail-closed rule on unevidenced field positions.
 ///
@@ -95,7 +109,7 @@ fn metadata_use_standard_commands(kind: &str, text: &str, header: &MetadataHeade
         // document's own `Documents/<name>.xml`, through the same owner-graph
         // decoder.
         "Document" => owner_graph::OwnerGraphFamily::Document,
-        _ => return None,
+        _ => return model_use_standard_commands(kind, text),
     };
     let slot = match kind {
         "Catalog" => 31,
@@ -2875,6 +2889,7 @@ pub(super) fn metadata_declared_leaves_exclude_string(
                 ConstantValueType::Boolean
                 | ConstantValueType::Number { .. }
                 | ConstantValueType::DateTime { .. }
+                | ConstantValueType::BinaryData { .. }
                 | ConstantValueType::Reference { .. } => {}
                 ConstantValueType::String { .. } => excludes = false,
                 // An unresolved form type can itself be string-like; without
@@ -5264,6 +5279,20 @@ const PACKED_PLATFORM_VERSION_8_5_1: u32 = 80501;
 
 pub(super) fn configuration_compatibility_mode_xml(value: &str) -> Option<String> {
     configuration_compatibility_mode_xml_under(value, MAX_EVIDENCED_PACKED_PLATFORM_VERSION)
+}
+
+/// As `configuration_compatibility_mode_xml`, by the edition that writes the
+/// XML: 8.5 prints `80501` as `Version8_5_1`, where 8.3.27 clamps it.
+pub(super) fn configuration_compatibility_mode_xml_for(
+    value: &str,
+    source_version: InfobaseConfigSourceVersion,
+) -> Option<String> {
+    let ceiling = if source_version == InfobaseConfigSourceVersion::V2_21 {
+        PACKED_PLATFORM_VERSION_8_5_1
+    } else {
+        MAX_EVIDENCED_PACKED_PLATFORM_VERSION
+    };
+    configuration_compatibility_mode_xml_under(value, ceiling)
 }
 
 fn configuration_compatibility_mode_xml_under(value: &str, ceiling: u32) -> Option<String> {

@@ -54,6 +54,17 @@
 
 ## 3. `<FullTextSearch>` корня бухгалтерского регистра
 
+> **Correction (2026-09-29, issue #389).** The `header+6` claim below rests on
+> registers that all write `Automatic` and `DontUse`. The extension
+> `_ДемоРасширение` of the БСП demonstration base owns a `Managed` accounting
+> register (`DataLockControlMode` `1`, `FullTextSearch` `0`): owner slot 21
+> (`header+6`) is `<DataLockControlMode>` and `<FullTextSearch>` is slot 22
+> (`header+7`); `<PeriodAdjustmentLength>` stays the last slot. Slot 22 rests on
+> elimination (`0` on all ten registers on record); slot 21 is proved by the
+> extension's register. A register with a period adjustment stores the 31-slot
+> `{22,22,...}` record, every slot after the second `22` one further. See
+> `docs/extensions/parity.md`.
+
 Слот `header+14` — это `<PeriodAdjustmentLength>`, а не `<FullTextSearch>`:
 `КорректировкиНалоговойБазы` и `Хозрасчетный` пишут там `1` и экспортируют
 `<PeriodAdjustmentLength>1</PeriodAdjustmentLength>` ВМЕСТЕ с
@@ -90,6 +101,12 @@
 информационного регистра.
 
 ## 6. Пустые формы и график регистра расчёта
+
+> **Correction (2026-09-29, issue #389).** `<BasePeriod>` (slot 18) is not a
+> constant: the extension's calculation register
+> `_ДемоРегистрРасчетаРасширение` writes `false` there, and `<ActionPeriod>` (slot
+> 17) is `false` on it and on ERP УХ `Удержания`. Both are booleans of the
+> owner record.
 
 * Нулевой uuid формы по умолчанию отказывал весь блок; это регистр, не
   называющий формы, и платформа пишет `<DefaultListForm/>` и

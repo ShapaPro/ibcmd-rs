@@ -22,6 +22,12 @@ use uuid::Uuid;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec};
 
 const EVIDENCED_CONFIGINFO_STORAGE_FORMATS_8327: [u32; 4] = [80_310, 80_314, 80_321, 80_324];
+/// Storage formats the export reads besides the evidenced ones: 80501, the
+/// 8.5.1 extensions of the БСП 8.5 clone (three extensions), and 80327, the
+/// extensions the 8.3.27.2214 platform creates itself (the platform-made
+/// fixtures of upstream PR 387). Read only: nothing is generated or staged in
+/// them.
+const READABLE_CONFIGINFO_STORAGE_FORMATS_85: [u32; 2] = [80_327, 80_501];
 const MAX_CONFIGINFO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONFIGINFO_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_EXTENSION_ZIPPED_INFO_BYTES: usize = 4_000;
@@ -319,7 +325,7 @@ pub fn validate_configinfo_manifest(
     let storage_format = format[0].trim().parse::<u32>().map_err(|_| {
         ExtensionStageError::InvalidConfigInfo("storage format is not an integer".to_owned())
     })?;
-    validate_storage_format(storage_format)?;
+    validate_readable_storage_format(storage_format)?;
 
     let identity = split_braced_fields(records[1])?;
     if identity.len() != 3 || identity[0].trim() != "2" {
@@ -691,6 +697,7 @@ fn validate_content_rows(rows: &[ExtensionStageRow]) -> Result<(), ExtensionStag
     Ok(())
 }
 
+/// The formats a manifest may be generated in (staged into): 8.3.27 only.
 fn validate_storage_format(storage_format: u32) -> Result<(), ExtensionStageError> {
     if EVIDENCED_CONFIGINFO_STORAGE_FORMATS_8327.contains(&storage_format) {
         Ok(())
@@ -698,6 +705,15 @@ fn validate_storage_format(storage_format: u32) -> Result<(), ExtensionStageErro
         Err(ExtensionStageError::InvalidConfigInfo(format!(
             "unsupported storage format {storage_format}"
         )))
+    }
+}
+
+/// The formats a stored manifest may be read in: 8.3.27's and 8.5.1's.
+fn validate_readable_storage_format(storage_format: u32) -> Result<(), ExtensionStageError> {
+    if READABLE_CONFIGINFO_STORAGE_FORMATS_85.contains(&storage_format) {
+        Ok(())
+    } else {
+        validate_storage_format(storage_format)
     }
 }
 
@@ -1197,6 +1213,17 @@ mod tests {
             validate_configinfo_manifest(short_digest.as_bytes()),
             Err(ExtensionStageError::InvalidConfigInfo(reason)) if reason.contains("instead of 20")
         ));
+    }
+
+    #[test]
+    fn reads_an_8_5_manifest_but_never_generates_one() {
+        let plain = generate_configinfo_manifest(&identity(), &content_rows()).unwrap();
+        let text = String::from_utf8(plain).unwrap().replace("80321", "80501");
+        let parsed = validate_configinfo_manifest(text.as_bytes()).unwrap();
+        assert_eq!(parsed.storage_format, 80_501);
+        let mut identity = identity();
+        identity.storage_format = 80_501;
+        assert!(generate_configinfo_manifest(&identity, &content_rows()).is_err());
     }
 
     #[test]

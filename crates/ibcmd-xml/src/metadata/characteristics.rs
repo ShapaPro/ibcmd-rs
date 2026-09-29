@@ -288,11 +288,14 @@ fn group_source(group: &XmlElement) -> Result<CharacteristicReference, MetadataD
             }
         }
     }
-    CharacteristicReference::new(
-        source.ok_or(MetadataDecodeError::Missing("Characteristic from"))?,
-        None,
-    )
-    .map_err(|error| MetadataDecodeError::Core(error.to_string()))
+    let source = source.ok_or(MetadataDecodeError::Missing("Characteristic from"))?;
+    // A characteristic can name no source (`from=""`); the platform stores a nil
+    // uuid for it and every field of the group is a sentinel.
+    if source.is_empty() {
+        return Ok(CharacteristicReference::empty_source());
+    }
+    CharacteristicReference::new(source, None)
+        .map_err(|error| MetadataDecodeError::Core(error.to_string()))
 }
 
 fn decode_field(element: &XmlElement) -> Result<CharacteristicField, MetadataDecodeError> {
@@ -821,6 +824,26 @@ mod tests {
                 "accepted malformed filter {malformed}"
             );
         }
+    }
+
+    #[test]
+    fn a_characteristic_without_a_source_keeps_its_empty_from() {
+        // The БСП 8.5 extension catalog `_ДемоСегментыПартнеровРасширение` names
+        // no source: `from=""` on both groups and only sentinel fields.
+        let xml = union_fixture("<r:TypesFilterValue i:nil=\"true\"/>")
+            .replace("from=\"Catalog.Types\"", "from=\"\"")
+            .replace("from=\"Catalog.Values\"", "from=\"\"");
+        let model = decode_fixture(&xml).unwrap();
+        assert_eq!(model.items()[0].types().source().path(), "");
+        assert_eq!(model.items()[0].values().source().path(), "");
+        let rendered = render_characteristics_xml(&model, "").unwrap();
+        assert_eq!(rendered.matches("from=\"\"").count(), 2, "{rendered}");
+        // A field that names a reference cannot belong to no source.
+        let with_field = xml.replace(
+            "<r:KeyField>0</r:KeyField>",
+            "<r:KeyField>Catalog.Types.Attribute.Key</r:KeyField>",
+        );
+        assert!(decode_fixture(&with_field).is_err());
     }
 
     #[test]

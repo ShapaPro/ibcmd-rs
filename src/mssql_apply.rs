@@ -145,6 +145,8 @@ pub fn apply_source_change(
             all_extensions: false,
             output_dir: active_root.clone(),
             overwrite: false,
+            // The generation a change applies to is the registry's.
+            image: crate::cli::MssqlExtensionImage::Active,
             platform: None,
             source_version: args.source_version,
         })?;
@@ -175,6 +177,7 @@ pub fn apply_source_change(
             output_dir: active_root.clone(),
             overwrite: false,
             include_config_save: false,
+            main_configuration: false,
             file_names: selected_storage_file_names.clone(),
             file_name_lists: Vec::new(),
             inflate: false,

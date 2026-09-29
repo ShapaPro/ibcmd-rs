@@ -307,6 +307,7 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         password_env: "IBCMD_USER_PSW".to_string(),
         // the built-in SQL Server client, unless `--sqlcmd` asks for sqlcmd.exe
         sqlcmd: common.sqlcmd.clone(),
+        extension: request.extension.clone(),
         overwrite: false,
         count_files: common.report.is_some(),
         output_dir: PathBuf::from(&request.path),
@@ -597,9 +598,11 @@ mod tests {
                 ..common()
             },
             threads: Some(4),
+            extension: Some("Расширение".to_string()),
             path: OsString::from("out"),
         };
         let args = export_args(&export);
+        assert_eq!(args.extension.as_deref(), Some("Расширение"));
         assert_eq!(args.db_server.as_deref(), Some("sql01"));
         assert_eq!(sql_server_name("sql01/inst"), r"sql01\inst");
         assert_eq!(sql_server_name(r"lpc:sql01\inst"), r"lpc:sql01\inst");

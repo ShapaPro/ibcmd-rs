@@ -22,6 +22,7 @@ use super::check::items_relation;
 use super::descriptor::{self, ObjectRef};
 use super::model::{Note, ObjectOp, Reason, ReasonClass, Verdict};
 use super::roles::{Effect, file_role};
+use super::rule_id::RuleId;
 
 /// A file of a tree.
 struct Entry {
@@ -190,13 +191,14 @@ pub fn check_trees(old_root: &Path, new_root: &Path) -> Result<Verdict> {
             Ok(diff) => diff,
             Err(error) => {
                 verdict.stats.unreadable += 1;
-                verdict.push_reason(Reason {
-                    class: ReasonClass::Unknown,
-                    object: full_name(&rel),
-                    file_name: rel.clone(),
-                    property: String::new(),
-                    change: format!("{error:#}"),
-                });
+                verdict.push_reason(Reason::step(
+                    ReasonClass::Unknown,
+                    RuleId::TreeFileUnreadable,
+                    &full_name(&rel),
+                    &rel,
+                    "",
+                    &format!("{error:#}"),
+                ));
                 continue;
             }
         };
@@ -329,21 +331,21 @@ pub fn check_trees(old_root: &Path, new_root: &Path) -> Result<Verdict> {
                 } else {
                     ReasonClass::Structure
                 };
-                verdict.push_reason(Reason {
-                    class,
-                    object: owner,
-                    file_name: rel,
-                    property: role.name.to_string(),
-                    change: what.to_string(),
-                });
+                let rule = match &diff {
+                    Diff::Changed { .. } => RuleId::BodyContentChanged,
+                    Diff::OnlyOld(_) => RuleId::BodyRowRemoved,
+                    _ => RuleId::BodyRowAdded,
+                };
+                verdict.push_reason(Reason::step(class, rule, &owner, &rel, role.name, what));
             }
-            None => verdict.push_reason(Reason {
-                class: ReasonClass::Unknown,
-                object: owner,
-                file_name: rel,
-                property: String::new(),
-                change: format!("{what}: a file the check does not know"),
-            }),
+            None => verdict.push_reason(Reason::step(
+                ReasonClass::Unknown,
+                RuleId::TreeFileUnknown,
+                &owner,
+                &rel,
+                "",
+                &format!("{what}: a file the check does not know"),
+            )),
         }
     }
     Ok(verdict)
@@ -384,13 +386,14 @@ fn content_relation(old: &[u8], new: &[u8]) -> Option<&'static str> {
 fn unreadable(rel: &str, error: &anyhow::Error, verdict: &mut Verdict) {
     verdict.stats.unreadable += 1;
     let name = full_name(rel);
-    verdict.push_reason(Reason {
-        class: ReasonClass::Unknown,
-        object: name.clone(),
-        file_name: rel.to_string(),
-        property: String::new(),
-        change: format!("{error:#}"),
-    });
+    verdict.push_reason(Reason::step(
+        ReasonClass::Unknown,
+        RuleId::TreeFileUnreadable,
+        &name,
+        rel,
+        "",
+        &format!("{error:#}"),
+    ));
     descriptor::unresolved(
         &ObjectRef {
             kind: "",

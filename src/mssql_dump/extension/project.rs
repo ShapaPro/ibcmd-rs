@@ -279,6 +279,19 @@ impl Projector<'_> {
                 header.uuid
             );
         }
+        // The modules and forms in the platform's order, then the multi-state
+        // properties, whatever the order of the header list.
+        let (mut blocks, multi_states): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .partition(|(_, state)| *state == "Extended");
+        blocks.sort_by_key(|(name, _)| {
+            BLOCK_STATE_ORDER
+                .iter()
+                .position(|known| known == name)
+                .unwrap_or(usize::MAX)
+        });
+        let mut states = blocks;
+        states.extend(multi_states);
 
         output.push(open.to_owned());
         let internal = children.iter().find(|(tag, _, _)| tag == "InternalInfo");
@@ -374,6 +387,10 @@ impl Projector<'_> {
                 );
             }
         }
+        // A subsystem lists the extension's objects it holds, empty when none.
+        if element == "Subsystem" && !seen.contains("Content") {
+            output.push(format!("{}<Content/>", pad(2)));
+        }
         output.push(self.lines[properties_end].to_owned());
 
         // Everything else (ChildObjects, ...) as it is, adopted children
@@ -383,6 +400,11 @@ impl Projector<'_> {
                 continue;
             }
             self.emit_range(*child_start, *child_end + 1, output)?;
+        }
+        if prints_empty_child_objects(&element)
+            && !children.iter().any(|(tag, _, _)| tag == "ChildObjects")
+        {
+            output.push(format!("{}<ChildObjects/>", pad(1)));
         }
         output.push(self.lines[end].to_owned());
         Ok(())
@@ -465,8 +487,35 @@ impl Projector<'_> {
 fn always_printed(element: &str) -> &'static [&'static str] {
     match element {
         "Document" => &["RegisterRecords"],
+        // The objects of the extension in the subsystem: `<Content/>` when none
+        // (fixtures `external/adopted/props_b*`).
+        "Subsystem" => &["Content"],
         _ => &[],
     }
+}
+
+/// The order the platform writes the states of an adopted object's modules
+/// and forms in, whatever the order of the header list (upstream PR 387,
+/// `src/extension/adopted.rs`; `RecordSetModule` sits before the manager module
+/// as it does in the two registers of the БСП 8.3.27 extension).
+const BLOCK_STATE_ORDER: [&str; 11] = [
+    "Predefined",
+    "Module",
+    "ObjectModule",
+    "RecordSetModule",
+    "ManagerModule",
+    "Form",
+    "CommandInterface",
+    "CommandModule",
+    "Content",
+    "Rights",
+    "MainSectionCommandInterface",
+];
+
+/// Whether an adopted object of this kind prints `<ChildObjects/>` when it
+/// has no children: the registers do (`external/adopted/props_*`).
+fn prints_empty_child_objects(element: &str) -> bool {
+    matches!(element, "InformationRegister" | "AccumulationRegister")
 }
 
 fn push_property_state(pad: &str, name: &str, state: &str, output: &mut Vec<String>) {
@@ -506,6 +555,93 @@ mod tests {
             projected,
             "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<MetaDataObject version=\"2.20\">\r\n\t<CommonModule uuid=\"eb50ccde-ac43-46b8-a693-56b559ca323a\">\r\n\t\t<InternalInfo>\r\n\t\t\t<xr:PropertyState>\r\n\t\t\t\t<xr:Property>Module</xr:Property>\r\n\t\t\t\t<xr:State>Extended</xr:State>\r\n\t\t\t</xr:PropertyState>\r\n\t\t</InternalInfo>\r\n\t\t<Properties>\r\n\t\t\t<ObjectBelonging>Adopted</ObjectBelonging>\r\n\t\t\t<Name>M</Name>\r\n\t\t\t<Comment/>\r\n\t\t\t<ExtendedConfigurationObject>640d7486-8abd-40aa-a244-2ed899b7225a</ExtendedConfigurationObject>\r\n\t\t\t<Server>true</Server>\r\n\t\t</Properties>\r\n\t</CommonModule>\r\n</MetaDataObject>"
         );
+    }
+
+    fn header(uuid: &str, properties: &[(&str, u8)]) -> AdoptedHeader {
+        AdoptedHeader {
+            uuid: uuid.to_owned(),
+            properties: properties
+                .iter()
+                .map(|(guid, state)| ((*guid).to_owned(), *state))
+                .collect(),
+            extended_object: Some("640d7486-8abd-40aa-a244-2ed899b7225a".to_owned()),
+            added_values: Vec::new(),
+        }
+    }
+
+    const EXTENDED_OBJECT: (&str, u8) = ("9595ddd6-e72c-47ad-a156-672db811628c", 2);
+
+    /// A register with no children of its own still prints `<ChildObjects/>`
+    /// when adopted (`external/adopted/props_b2`); a subsystem prints its
+    /// (empty) `<Content/>` whether the extension controls it or not.
+    #[test]
+    fn adopted_registers_and_subsystems_print_what_the_platform_prints_when_empty() {
+        let register = "<MetaDataObject>\r\n\t<InformationRegister uuid=\"e3000000-0000-4000-8000-000000000006\">\r\n\t\t<Properties>\r\n\t\t\t<Name>R</Name>\r\n\t\t\t<Comment/>\r\n\t\t</Properties>\r\n\t</InformationRegister>\r\n</MetaDataObject>";
+        let projected = project_object_xml(
+            register,
+            &context(header(
+                "e3000000-0000-4000-8000-000000000006",
+                &[EXTENDED_OBJECT],
+            )),
+        )
+        .unwrap();
+        assert!(
+            projected
+                .contains("\t\t</Properties>\r\n\t\t<ChildObjects/>\r\n\t</InformationRegister>"),
+            "{projected}"
+        );
+        // Children the row has stay as they are.
+        let with_children = register.replace(
+            "\t\t</Properties>\r\n",
+            "\t\t</Properties>\r\n\t\t<ChildObjects>\r\n\t\t\t<Dimension/>\r\n\t\t</ChildObjects>\r\n",
+        );
+        let projected = project_object_xml(
+            &with_children,
+            &context(header(
+                "e3000000-0000-4000-8000-000000000006",
+                &[EXTENDED_OBJECT],
+            )),
+        )
+        .unwrap();
+        assert_eq!(projected.matches("<ChildObjects").count(), 1, "{projected}");
+
+        let subsystem = "<MetaDataObject>\r\n\t<Subsystem uuid=\"e3000000-0000-4000-8000-000000000007\">\r\n\t\t<Properties>\r\n\t\t\t<Name>S</Name>\r\n\t\t\t<Comment/>\r\n\t\t</Properties>\r\n\t</Subsystem>\r\n</MetaDataObject>";
+        let projected = project_object_xml(
+            subsystem,
+            &context(header(
+                "e3000000-0000-4000-8000-000000000007",
+                &[EXTENDED_OBJECT],
+            )),
+        )
+        .unwrap();
+        assert!(
+            projected.contains(
+                "</ExtendedConfigurationObject>\r\n\t\t\t<Content/>\r\n\t\t</Properties>"
+            ),
+            "{projected}"
+        );
+    }
+
+    /// The header of a catalog lists its modules in any order; the platform
+    /// writes their states in one (fixture `external/adopted/catalog_modules`).
+    #[test]
+    fn the_states_of_an_adopted_object_come_out_in_the_platforms_order() {
+        let catalog = "<MetaDataObject>\r\n\t<Catalog uuid=\"e0000000-0000-4000-8000-000000000002\">\r\n\t\t<Properties>\r\n\t\t\t<Name>C</Name>\r\n\t\t\t<Comment/>\r\n\t\t</Properties>\r\n\t\t<ChildObjects/>\r\n\t</Catalog>\r\n</MetaDataObject>";
+        let projected = project_object_xml(
+            catalog,
+            &context(header(
+                "e0000000-0000-4000-8000-000000000002",
+                &[
+                    EXTENDED_OBJECT,
+                    ("d1b64a2c-8078-4982-8190-8f81aefda192", 3),
+                    ("a637f77f-3840-441d-a1c3-699c8c5cb7e0", 3),
+                ],
+            )),
+        )
+        .unwrap();
+        let object_module = projected.find("<xr:Property>ObjectModule<").unwrap();
+        let manager_module = projected.find("<xr:Property>ManagerModule<").unwrap();
+        assert!(object_module < manager_module, "{projected}");
     }
 
     #[test]

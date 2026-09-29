@@ -2643,6 +2643,7 @@ fn http_method_code(value: &str) -> Option<&'static str> {
     match value {
         "DELETE" => Some("2"),
         "GET" => Some("3"),
+        "PATCH" => Some("10"),
         "POST" => Some("11"),
         "PUT" => Some("14"),
         _ => None,
@@ -2653,6 +2654,7 @@ fn http_method_from_code(value: &str) -> Option<&'static str> {
     match value {
         "2" => Some("DELETE"),
         "3" => Some("GET"),
+        "10" => Some("PATCH"),
         "11" => Some("POST"),
         "14" => Some("PUT"),
         _ => None,

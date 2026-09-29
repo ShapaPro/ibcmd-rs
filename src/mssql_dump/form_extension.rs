@@ -206,13 +206,19 @@ fn unescape_xml_text(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// The base form body an adopted form carries, when it is one.
-pub(super) fn adopted_base_form(body: &ParsedFormBodyBlob) -> Option<ParsedFormBodyBlob> {
+/// The trailing section of an adopted form that holds its base form record.
+pub(super) fn adopted_base_record_slot(body: &ParsedFormBodyBlob) -> Option<usize> {
     let flag = body.trailing.get(5)?.trim();
     let base = body.trailing.get(6)?.trim();
     if flag != "1" || !base.starts_with('{') {
         return None;
     }
+    Some(6)
+}
+
+/// The base form body an adopted form carries, when it is one.
+pub(super) fn adopted_base_form(body: &ParsedFormBodyBlob) -> Option<ParsedFormBodyBlob> {
+    let base = body.trailing.get(adopted_base_record_slot(body)?)?.trim();
     crate::module_blob::parse_form_body_plain(base).ok()
 }
 

@@ -22,7 +22,9 @@ use crate::metadata_model::export::{
 };
 use crate::metadata_model::objects::parts::Compat;
 use crate::metadata_model::root::ConfigurationShape;
-use crate::metadata_model::root::export::{root_configuration_uuid, stored_shape};
+use crate::metadata_model::root::export::{
+    fold_split_compatibility, root_configuration_uuid, stored_shape, version_text,
+};
 use crate::metadata_model::xml::Element;
 
 /// One configuration's descriptor rows, read.
@@ -315,7 +317,7 @@ pub fn build(
             names: std::mem::take(&mut plan.names),
             ..context
         };
-        match decode_object("Configuration", row, &context) {
+        match decode_tree("Configuration", row, &context) {
             Ok(element) => {
                 if let Some(mode) = element
                     .path(&["Properties", "CompatibilityMode"])
@@ -330,6 +332,36 @@ pub fn build(
     }
     plan.errors = errors;
     plan
+}
+
+/// The name of the property the folded extension compatibility mode goes
+/// back into.
+const EXTENSION_COMPATIBILITY: &str = "ConfigurationExtensionCompatibilityMode";
+
+/// `decode_object`, and a Configuration row of the shape the model refuses
+/// (see `fold_split_compatibility`) read the way the comparison needs: the
+/// compatibility mode from the field that holds it, the extension
+/// compatibility mode from the field that holds that.
+fn decode_tree(kind: &str, tree: &Brace, context: &ExportContext) -> Result<Element> {
+    if kind == "Configuration"
+        && let Some((folded, extension)) = fold_split_compatibility(tree)
+    {
+        let mut element = decode_object(kind, &folded, context)?;
+        let property = element
+            .children
+            .iter_mut()
+            .find(|child| child.name == "Properties")
+            .and_then(|properties| {
+                properties
+                    .children
+                    .iter_mut()
+                    .find(|child| child.name == EXTENSION_COMPATIBILITY)
+            })
+            .ok_or_else(|| anyhow!("the decoded Configuration has no {EXTENSION_COMPATIBILITY}"))?;
+        property.text = version_text(extension);
+        return Ok(element);
+    }
+    decode_object(kind, tree, context)
 }
 
 /// Decodes stored descriptors into element trees. Both sides of a comparison
@@ -421,6 +453,6 @@ impl Decoder {
             return Err(anyhow!("the model has no decoder for {kind}"));
         }
         let tree = parse_row(row).with_context(|| format!("failed to read the {kind} row"))?;
-        decode_object(kind, &tree, context)
+        decode_tree(kind, &tree, context)
     }
 }

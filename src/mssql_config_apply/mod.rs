@@ -180,14 +180,18 @@ pub fn structural_gate<'a>(
 /// it is built here, in the one place that builds gates.
 fn restructure_gate<'a>(
     kind: AllowRestructure,
-    _sql: &'a SqlExec,
-    _options: &ConfigApplyOptions,
+    sql: &'a SqlExec,
+    options: &ConfigApplyOptions,
 ) -> Result<Box<dyn StructuralGate + 'a>> {
     match kind {
-        AllowRestructure::S1 => Err(NeedsNativeApply::apply(
-            "--allow-restructure s1: the S1 gate of the restructure track (#391) is not part of this build; run the native `ibcmd infobase config apply`",
-        )
-        .into()),
+        AllowRestructure::S1 => Ok(Box::new(
+            crate::restructure::s1::S1Gate::new(
+                sql,
+                options.conservative_gate(),
+                crate::restructure::plan::PlanOptions::default(),
+            )
+            .xml_version(xml_version_of(options.platform_profile)),
+        )),
     }
 }
 
@@ -700,6 +704,8 @@ pub fn plan_with_gate(
     let mut consumed_note = None;
     // the dynamic-update rows the list names: dropped, not folded
     let mut dropped_rows: Vec<String> = Vec::new();
+    // the list names removals and the gate said it judges them
+    let mut judged_deleted = false;
     if staged
         .iter()
         .any(|row| row.name.eq_ignore_ascii_case("deleted"))
@@ -742,6 +748,17 @@ pub fn plan_with_gate(
                     note.push_str("; the dynamic-update rows it names are deleted, not folded");
                 }
                 consumed_note = Some(note);
+                consumed.insert("deleted".to_owned());
+            }
+            // A list of removals the gate judges itself (the S1 gate: the attributes the stage
+            // removes). It is consumed like an empty list, but only when the gate hands over a
+            // phase that accounts for it (checked once the gate has answered).
+            Some(_) if structural_gate.judges_deleted_row() => {
+                judged_deleted = true;
+                consumed_note = Some(format!(
+                    "{}; the gate judges it",
+                    describe_removals(plain.as_deref().unwrap_or_default())
+                ));
                 consumed.insert("deleted".to_owned());
             }
             _ => {
@@ -1014,6 +1031,17 @@ pub fn plan_with_gate(
     // A gate that lets a restructuring through hands over the structure work: T-SQL for this
     // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
     let structure = structural_gate.take_structure();
+    // A `deleted` list of removals is consumed only when a phase accounts for it.
+    if judged_deleted
+        && !structure
+            .as_ref()
+            .is_some_and(|phase| phase.consumed_staged_rows > 0)
+    {
+        return Err(NeedsNativeApply::apply(
+            "the stage's `deleted` list asks for removals that no structure phase accounts for; run the native `ibcmd infobase config apply`",
+        )
+        .into());
+    }
 
     // Fingerprints the script asserts.
     let started = Instant::now();
@@ -1844,21 +1872,20 @@ mod tests {
     }
 
     #[test]
-    fn the_s1_class_is_not_built_into_this_binary_and_says_so() {
+    fn the_s1_class_builds_the_s1_gate_of_the_restructure_track() {
         let sql = SqlExec::detached("no server in a unit test");
         let mut options =
             ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214);
         options.allow_restructure = Some(AllowRestructure::S1);
-        let error = structural_gate(&sql, &options)
-            .err()
-            .expect("no S1 gate here");
+        let gate = structural_gate(&sql, &options).expect("the S1 gate is built");
+        assert_eq!(gate.name(), "s1");
+        // The gate judges the stage's `deleted` list of removed attributes; the others do not.
+        assert!(gate.judges_deleted_row());
+        options.allow_restructure = None;
         assert!(
-            error.downcast_ref::<NeedsNativeApply>().is_some(),
-            "{error}"
-        );
-        assert!(
-            error.to_string().contains("--allow-restructure s1"),
-            "{error}"
+            !structural_gate(&sql, &options)
+                .unwrap()
+                .judges_deleted_row()
         );
     }
 

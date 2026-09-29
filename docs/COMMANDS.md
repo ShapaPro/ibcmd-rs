@@ -43,6 +43,17 @@ ibcmd infobase config export [параметры] <каталог>
 
 Каталог должен быть пустым или отсутствовать, как у штатного `ibcmd`.
 
+Выгружается основная конфигурация, как у штатного `ibcmd`: если после загрузки
+(`infobase config import`) в ConfigSave лежит законченная подготовка —
+строка `versions` без маркеров `commit` и строк `*.new`, — объекты, для которых
+в ConfigSave есть строки, выгружаются из них, остальные из Config, а
+`ConfigDumpInfo.xml` строится по `versions` подготовки. Пока подготовка не
+применена (`infobase config apply` очищает ConfigSave), выгрузка отличается от
+содержимого Config. Без законченной подготовки выгружается Config, и об этом
+сказано в стандартном потоке ошибок. Строки, которых нет в `versions`
+(остатки удалённых онлайн-обновлением объектов и модулей), в выгрузку не
+попадают.
+
 ### Загрузка XML в базу
 
 ```
@@ -144,6 +155,7 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 ^
 
 | Параметр | Что задаёт |
 |---|---|
+| `--extension=<имя>`, `-e <имя>` | Выгрузить расширение конфигурации с этим именем, а не конфигурацию. Дерево такое же, как у штатного `ibcmd`: выгружается подготовленное к применению состояние расширения, если оно есть, иначе применённое. Неизвестное имя и расширение, которое не удаётся записать точно, дают ошибку. Как и конфигурация, расширение пишется только в пустой каталог. Проверено на четырёх расширениях БСП 8.3.27 и расширениях БСП 8.5 (см. [extensions/parity.md](extensions/parity.md)). |
 | `--threads=<n>`, `-T <n>` | Число потоков выгрузки: по умолчанию — число ядер, но не больше 16; явно — до 64. |
 | `--force` | Принимается. Непустой каталог, как и у штатного `ibcmd`, не перезаписывается. |
 | `--ignore-unresolved-refs` | Принимается для совместимости. |
@@ -174,9 +186,9 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 ^
   `support`, `data-separation`, `extension`, `generation-id`, `sign`;
 - `infobase config export info|status|objects|all-extensions`,
   `infobase config import files|all-extensions`;
-- параметры выгрузки `--base`, `--file`, `--extension`, `--sync`,
-  `--archive`; загрузки `--out`, `--extension`; применения `--extension`,
-  `--dynamic=force`, `--sqlcmd`; общие `--pid`, `--remote`;
+- параметры выгрузки `--base`, `--file`, `--sync`, `--archive`; загрузки
+  `--out`, `--extension`; применения `--extension`, `--dynamic=force`,
+  `--sqlcmd`; общие `--pid`, `--remote`;
 - файловые базы (`--db-path`) и СУБД кроме `MSSQLServer`.
 
 ### Вывод и коды возврата
@@ -330,6 +342,7 @@ ibcmd-rs mssql-dump-config --database MyBase --extract-metadata-xml ^
 | `--no-binary-rows` | Не сохранять сырые строки таблицы Config (быстрее). |
 | `--platform <версия>` | Версия платформы, то есть формат XML. |
 | `--include-config-save` | Выгружать и несохранённые изменения из ConfigSave. |
+| `--main-configuration` | Выгрузить основную конфигурацию, как `infobase config export`: строки законченной подготовки из ConfigSave вместо строк Config с теми же именами и `versions` подготовки (по умолчанию — только таблица Config). Не сочетается с `--include-config-save` и `--rows-dir`. |
 | `--file-name <имя>`, `--file-name-list <файл>` | Выгрузить только указанные строки Config (по `FileName`). |
 | `--rows-dir <каталог>` | Читать строки Config из файлов `<FileName>__part<N>.bin` без сервера. |
 | `--legacy-export` | Прежние конвертеры описаний объектов. |

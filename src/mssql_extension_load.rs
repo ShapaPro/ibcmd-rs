@@ -19,7 +19,9 @@ use crate::cli::{
     MssqlActivateStagedExtensionArgs, MssqlExtensionListArgs, MssqlExtensionListFormat,
     MssqlLoadExtensionArgs,
 };
-use crate::compiler::bootstrap::compile_extension_overlay_source_tree;
+use crate::compiler::bootstrap::{
+    BootstrapCompileError, compile_extension_module_overlay, compile_extension_overlay_source_tree,
+};
 use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image_with_manifest};
 use crate::mssql_extension_stage::{
     ConfigInfoIdentity, ExtensionRegistrySnapshot, ExtensionStagePlan, ExtensionStageRow,
@@ -195,13 +197,14 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
         })?;
         let (compile_tree, retained_metadata) = sanitize_extension_tree(&tree)?;
         let compile_tree = filter_extension_tree(&compile_tree, &args.path_prefix)?;
-        let patch = compile_extension_overlay_source_tree(
+        let patch = compile_overlay_patch(
             &compile_tree,
+            !args.path_prefix.is_empty(),
             args.source_version.version_axes().xml_dialect().clone(),
             target_profile,
+            &active,
         )
-        .with_context(|| format!("failed to compile extension {:?}", extension.name))?
-        .into_patch();
+        .with_context(|| format!("failed to compile extension {:?}", extension.name))?;
         let (plan, compiled_targets, retained_base_targets) = overlay_stage_plan(
             extension.physical_registry_id,
             manifest.identity(),
@@ -682,6 +685,53 @@ fn bounded_subprocess_text(bytes: &[u8]) -> String {
     value
 }
 
+/// The compiled overlay of a source tree.
+///
+/// A bounded load (`--path-prefix`) whose selection holds nothing but module
+/// bodies compiles them without decoding the metadata documents: the document
+/// of an adopted object lists only the properties the extension records, which
+/// the metadata decoders refuse, and an overlay retains every metadata row of
+/// the active image anyway. A module body replaces an existing row; adding a
+/// body to an object that has none changes the object's structure and is
+/// refused. Any other selection (a form, a picture, a template) takes the full
+/// compile.
+fn compile_overlay_patch(
+    tree: &SourceTree,
+    bounded: bool,
+    xml_dialect: ibcmd_core::version::XmlDialect,
+    target_profile: &ibcmd_core::profile::EffectiveProfile,
+    active: &StorageImage,
+) -> Result<StoragePatch> {
+    if bounded {
+        match compile_extension_module_overlay(tree, target_profile) {
+            Ok(compilation) => {
+                let patch = compilation.into_patch();
+                let existing = active
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.logical_key().as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for entry in patch.entries() {
+                    let key = entry.target().key().as_str();
+                    if !existing.contains(key) {
+                        bail!(
+                            "module body {key:?} has no row in the active extension; adding a body to an object that has none is a structural change"
+                        );
+                    }
+                }
+                return Ok(patch);
+            }
+            // Something other than module bodies is selected.
+            Err(
+                BootstrapCompileError::UnconsumedSource { .. }
+                | BootstrapCompileError::UnsupportedAssetCodec { .. },
+            ) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(compile_extension_overlay_source_tree(tree, xml_dialect, target_profile)?.into_patch())
+}
+
 fn overlay_stage_plan(
     extension_id: [u8; 16],
     identity: &ConfigInfoIdentity,
@@ -1139,6 +1189,100 @@ mod tests {
         .unwrap();
         assert_eq!(active.len(), 1);
     }
+    /// An active image that holds exactly the given rows.
+    fn active_image(keys: &[&str]) -> StorageImage {
+        let origin = StorageOrigin::new(
+            StorageProfileId::parse("storage:test").unwrap(),
+            StorageProvenance::new("test").unwrap(),
+        );
+        StorageImage::new(
+            keys.iter()
+                .map(|key| {
+                    StorageEntry::new(
+                        StorageName::new(key).unwrap(),
+                        StorageKey::new(key).unwrap(),
+                        MultipartIdentity::single(),
+                        OpaqueStorageMetadata::new(Vec::new(), Vec::new()).unwrap(),
+                        StoragePayloads::new(b"old".to_vec(), b"old".to_vec()).unwrap(),
+                        CompressionKind::stored(),
+                        origin.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// The tree a bounded change of one adopted module selects: the extension's
+    /// root, the adopted owner's document (which lists only what the extension
+    /// records) and the module body.
+    fn adopted_module_selection() -> SourceTree {
+        let root = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration uuid="10000000-0000-4000-8000-000000000001"><Properties><Name>Extension</Name></Properties><ChildObjects><CommonModule>Portable</CommonModule></ChildObjects></Configuration></MetaDataObject>"#;
+        let owner = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><CommonModule uuid="20000000-0000-4000-8000-000000000001"><InternalInfo/><Properties><ObjectBelonging>Adopted</ObjectBelonging><Name>Portable</Name><Comment/><ExtendedConfigurationObject>30000000-0000-4000-8000-000000000001</ExtendedConfigurationObject></Properties></CommonModule></MetaDataObject>"#;
+        let entry = |path: &str, bytes: &[u8]| {
+            SourceEntry::from_bytes(
+                ibcmd_xml::source_tree::SourcePath::new(path).unwrap(),
+                bytes.to_vec(),
+            )
+            .unwrap()
+        };
+        SourceTree::new(vec![
+            entry("Configuration.xml", root.as_bytes()),
+            entry("CommonModules/Portable.xml", owner.as_bytes()),
+            entry(
+                "CommonModules/Portable/Ext/Module.bsl",
+                b"Procedure Smoke() Export
+EndProcedure",
+            ),
+        ])
+        .unwrap()
+    }
+
+    fn overlay_profile() -> ibcmd_core::profile::EffectiveProfile {
+        load_bundled_profile_registry()
+            .unwrap()
+            .get(&ProfileId::parse("platform-8.3.27.2214").unwrap())
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_bounded_module_change_of_an_adopted_object_compiles_to_its_module_row() {
+        let tree = adopted_module_selection();
+        let dialect = ibcmd_core::version::XmlDialect::parse("2.20").unwrap();
+        let active = active_image(&[
+            "20000000-0000-4000-8000-000000000001",
+            "20000000-0000-4000-8000-000000000001.0",
+        ]);
+        let patch =
+            compile_overlay_patch(&tree, true, dialect.clone(), &overlay_profile(), &active)
+                .unwrap();
+        let keys = patch
+            .entries()
+            .iter()
+            .map(|entry| entry.target().key().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["20000000-0000-4000-8000-000000000001.0"]);
+
+        // An unbounded load still takes the full compile, which refuses the
+        // adopted object's document.
+        assert!(compile_overlay_patch(&tree, false, dialect, &overlay_profile(), &active).is_err());
+    }
+
+    #[test]
+    fn a_module_body_without_an_active_row_is_a_structural_change() {
+        let tree = adopted_module_selection();
+        let dialect = ibcmd_core::version::XmlDialect::parse("2.20").unwrap();
+        // The owner's row exists; its module row does not.
+        let active = active_image(&["20000000-0000-4000-8000-000000000001"]);
+        let error =
+            compile_overlay_patch(&tree, true, dialect, &overlay_profile(), &active).unwrap_err();
+        assert!(error.to_string().contains("structural change"), "{error:#}");
+    }
+
     #[test]
     fn compiled_extension_payload_is_already_storage_ready() {
         let compiled = b"storage-ready";

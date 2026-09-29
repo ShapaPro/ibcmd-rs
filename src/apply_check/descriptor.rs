@@ -7,8 +7,9 @@
 use crate::metadata_model::xml::Element;
 
 use super::model::{Note, ObjectChange, ObjectOp, Reason, ReasonClass, Verdict};
+use super::rule_id::RuleId;
 use super::rules::{self, Class};
-use super::tree_diff::{self, Change};
+use super::tree_diff::{self, Change, ChangeOp};
 
 /// What the object is called in messages and where it lives.
 pub struct ObjectRef<'a> {
@@ -55,6 +56,10 @@ fn record(object: &ObjectRef<'_>, change: &Change, verdict: &mut Verdict) -> Opt
             file_name: object.file_name.to_string(),
             property: change.display_path(),
             change: format!("{} ({})", change.describe(), decision.rule),
+            rule: decision.rule,
+            kind: object.kind.to_string(),
+            path: change.path.clone(),
+            op: Some(change.op.clone()),
         }),
     }
     class
@@ -121,6 +126,14 @@ pub fn lifecycle(object: &ObjectRef<'_>, added: bool, verdict: &mut Verdict) {
             file_name: object.file_name.to_string(),
             property: String::new(),
             change: format!("{what} ({}; {})", object.kind, decision.rule),
+            rule: decision.rule,
+            kind: object.kind.to_string(),
+            path: Vec::new(),
+            op: Some(if added {
+                ChangeOp::Added
+            } else {
+                ChangeOp::Removed
+            }),
         }),
     }
     push_object(object, op, class, 1, verdict);
@@ -135,6 +148,10 @@ pub fn kind_changed(object: &ObjectRef<'_>, old_kind: &str, verdict: &mut Verdic
         file_name: object.file_name.to_string(),
         property: String::new(),
         change: format!("the kind changed: {old_kind} -> {}", object.kind),
+        rule: RuleId::KindChanged,
+        kind: object.kind.to_string(),
+        path: Vec::new(),
+        op: None,
     });
     push_object(
         object,

@@ -37,17 +37,21 @@ are summarised in section 9, they are not part of the product).
    restructured; one false alarm (an exchange plan's flag) led to a rule (6.3). The four reference exports
    (БСП and ERP УХ, 8.3.27 and 8.5) give no reason against databases restored from the same corpora, and 17 596
    real metadata files rewritten by the model's writer compare equal (6.4). The 8.5 dialect and the 8.3.27 one
-   both work. **Not achieved:** a native-imported ConfigSave of the corpus is refused as a whole (finding 9), and a
-   patch-mode stage is judged correctly but is not what the tree said (finding 1, why `--tree` exists). 82 unit
-   tests.
+   both work. A native-imported ConfigSave of the corpus (the ddl track's case a2, 9 842 rows) gives its one real
+   reason and nothing else: 516 descriptors that differ in bytes are proven to differ by the record format only
+   (3.6), and the `deleted` row is read (#404). **Not achieved:** a patch-mode stage is judged correctly but is
+   not what the tree said (finding 1, why `--tree` exists). 115 unit tests.
+6. **For the own restructuring (S1).** Every reason carries a stable rule id, the kind of the object, its path as
+   steps and the operation (section 2), and `apply_check::s1::classify` maps a verdict onto the operations of S1
+   or a refusal with a named code, without reading any text (section 10).
 
 ## 2. Commands and API
 
 ```
 ibcmd-rs mssql-apply-check --database X [--server S] [--sql-user U --sql-pwd-env V] [--xml-version 2.20|2.21]
-                           [--json] [--fail-on-restructuring]
-ibcmd-rs mssql-apply-check --database X --tree DIR [--partial] [--json] [--fail-on-restructuring]
-ibcmd-rs apply-check-trees --old DIR --new DIR [--json] [--fail-on-restructuring]
+                           [--json] [--fail-on-restructuring] [--s1]
+ibcmd-rs mssql-apply-check --database X --tree DIR [--partial] [--json] [--fail-on-restructuring] [--s1]
+ibcmd-rs apply-check-trees --old DIR --new DIR [--json] [--fail-on-restructuring] [--s1]
 ```
 
 All three only read. Exit code: 0 (the check ran; `--fail-on-restructuring` turns "needed" into 10), 1 on an error.
@@ -56,16 +60,23 @@ The text report is Russian, `--json` prints the `Verdict`:
 | field | meaning |
 |---|---|
 | `needs_restructuring` | some reason exists |
-| `reasons[]` | `class` (`structure`, `data`, `unknown`), `object` (`Catalog._ДемоКассы`), `file_name` (Config row or tree file), `property` (`Properties/CodeLength`, `ChildObjects/Attribute[Код]/Properties/Type`, or a body role such as `Predefined`), `change` (`9 -> 12 (a property no rule covers)`, `added`, `removed`) |
+| `reasons[]` | `class` (`structure`, `data`, `unknown`), `object` (`Catalog._ДемоКассы`), `file_name` (Config row or tree file), `property` (`Properties/CodeLength`, `ChildObjects/Attribute[Код]/Properties/Type`, or a body role such as `Predefined`), `change` (`9 -> 12 (a property no rule covers)`, `added`, `removed`); and the same as data, for a program: `rule` (a stable id, `column-added-or-dropped`), `kind` (`Catalog`), `path` (`[{"name":"ChildObjects"},{"name":"Attribute","label":"Код"}]`), `op` (`{"added"}`, `{"modified":{"old","new"}}`, `removed`, `reordered`; absent for a reason that is not a change of a descriptor) |
 | `notes[]` | the changes that were seen and are harmless (capped at 500, the rest is counted) |
 | `objects[]` | **every** object whose descriptor differs, harmless or not, no cap: `object`, `id` (uuid), `file_name`, `kind`, `op` (`added`, `removed`, `changed`), `class` (the most serious among its changes, `null` when all are harmless), `changes` |
-| `stats` | files, rows, descriptors compared, body rows by role, unreadable rows, files not compared |
+| `stats` | files, rows, descriptors compared, body rows by role, unreadable rows, files not compared, `format_upgrades` (rows proven to differ by the record format only, 3.6) |
 | `source` | `rows`, `tree-db` or `trees` |
 | `incomplete` | files that carry data were left out of the comparison (`stats.body_files_not_compared`, a tree against a database): `needs_restructuring: false` says nothing about them; `Verdict::is_conclusive()` |
 
 Rust: `apply_check::check_staged(sql, database, xml_version)`, `check_tree_against_db(sql, database, tree,
 xml_version, partial)`, `check_trees(old, new)`, all returning `Verdict`; `Verdict::refusal()` is the message an
 apply prints.
+
+**Rule ids.** `RuleId` (`apply_check::rule_id`) names the rule of `rules::decide` or the step of the check that
+made a reason: `column-added-or-dropped`, `tabular-section-added-dropped-moved`, `property-not-covered`,
+`row-decodes-to-same-xml`, `row-format-upgrade-unproven`, `deleted-row-not-empty`, ... (`RuleId::ALL`). The
+text that `change` still prints in brackets is `RuleId::text()`; nothing should match that text. A reason built
+without a rule is `unspecified`, class `unknown` (`Reason::default()`), and every consumer treats it as a refusal.
+`--s1` appends what the own restructuring makes of the reasons (section 10).
 
 `--tree` is what an **import** must run on its input. The ConfigSave check judges what the ConfigSave holds; it
 cannot tell that a stage dropped a change the tree had. The patch-mode import of this tool does exactly that with
@@ -109,8 +120,9 @@ the list of plain rows (`sql::published_names`).
   same decoders the export uses) into the element tree the XML export would write, then diffed **property by
   property** (`tree_diff`): child objects are matched by uuid, then by name, then by position; localized strings
   item by item; a reordered collection is one change. Every change goes through `rules::decide` (section 4). Two
-  rows that differ in bytes but decode to the same tree are a reason too (`unknown`): the model does not carry
-  something in the row, and the check cannot say what.
+  rows that differ in bytes but decode to the same tree are compared as brace trees (3.6): a reason
+  (`unknown`, `row-format-upgrade-unproven`, with the first place that differs) unless every difference is the
+  record format of the platform that staged the row.
 * **Body** (`<uuid>.<suffix>`). The owner's kind and the suffix give the role (`roles::body_role`, read off the
   `ConfigDumpInfo.xml` of the four reference exports). Roles that copy rows when applied (modules, forms,
   templates, help, pictures, rights, command interfaces, schedules, packages) are **counted, not compared**.
@@ -125,6 +137,10 @@ the list of plain rows (`sql::published_names`).
   active one (or lists as new) and that the ConfigSave does not hold means a partial stage (the native import
   under load made some, see finding 6): `unknown`. (A base-free stage gives *every* file a new version id, so the
   ids cannot say which files changed; they only have to be backed by rows.)
+
+The `deleted` row a native import writes is read: its content `0` means no file was deleted and it changes
+nothing; anything else (a list of files) is `unknown`, `deleted-row-not-empty`, because the check judges removals
+by the staged `versions` row and has not read a list.
 
 Anything else in the ConfigSave (a row named like an online-update alias or `DynamicallyUpdated`, a row the
 inventory does not list, a row of an unknown shape) is a reason of class `unknown`.
@@ -160,6 +176,46 @@ finding 7). A check on `DBSchema` entries is stronger and plugs into the same pl
 walks the table-owning ones, and a `structure` or `unknown` reason on such an object is what it may confirm or
 withdraw (its own reasons would carry `property = DBSchema/<table>`). The generator is not part of this module
 (it belongs to the ddl track).
+
+### 3.6 Rows that differ only by the record format
+
+A native `config import` writes every descriptor it stages in the record format of its own edition, changed or
+not (finding 9 of section 8): in the ddl track's case a2 (9 842 rows, an attribute added to
+`Catalog._ДемоПартнеры`) 517 of 4 929 descriptors differ from the stored ones in bytes, one of them by the
+attribute. The model reads a row by the fields it knows, so 396 of them decode to the same XML in the same format,
+119 decode to the same XML only in the newer format, and the Configuration row is rewritten from the `{67}` to the
+`{68}` shape. A check that trusted the decoding would call them unchanged, one that trusted the bytes would call
+all of them changes. `apply_check::upgrade` settles it on the rows: both are read as brace trees and aligned
+item by item, and the staged row is the stored one in the newer format when every difference is one of
+
+| difference | meaning |
+|---|---|
+| the first item of a list is one greater | the record version |
+| an integer after the head is one greater, and an entry was inserted in that same list (never more counters than inserted entries in the row) | a counter of a counted list |
+| an entry was inserted, and it is one of the platform's defaults | the entries a new record version introduces: `0`, `1`, `5`, the class id `3b10624f-...`, `{1,<nil uuid>}`, `{"#",502b7765-...,{502b7765-...,0}}` (and `...,2}`), and three entries of the Configuration row |
+| an empty string became `"5"` | the default of a new version |
+| in the Configuration row, an integer in `80300..80399` grew | the extension compatibility mode names the edition that staged the row |
+
+The table of defaults is what the native import showed (`upgrade::FILLERS`), each entry an exact value, and
+nothing else passes: not a number that grew by two, not a list that lost an item, not an entry inserted with a
+value that is not in the table (a new attribute, a predefined item). A row that is not proven is a reason
+(`row-format-upgrade-unproven`, class `unknown`) that names the first place that no rule explains
+(`at 5/2/3: 24 -> 26`, or `items 2..: nothing -> {9,"X"}`); a caller that has no raw rows (the tree modes, the
+tests' fake rows) keeps the old behaviour, the reason `row-decodes-to-same-xml`. The proof is a property of the
+two rows and does not depend on the decoder being total. What it cannot vouch for is a change that a native
+import of an XML could not have made: every property an XML can express is decoded and diffed as before.
+
+**The Configuration row of the `{68}` shape.** The import stores the compatibility mode (field 26, 80324) as it was
+and its own edition as the extension compatibility mode (field 43, 80327). The model refuses such a row (no corpus
+had shown which of the fields the platform prints), and the check used to stop at it with two reasons. For the
+comparison only, `fold_split_compatibility` reads field 26 as the compatibility mode and puts the value of field 43
+back into `ConfigurationExtensionCompatibilityMode`, which is exactly what the `{67}` row prints (the edition of
+the platform); the export keeps refusing the row.
+
+Result on the a2 image (`s1h_corpus_tests`, ignored, the rows are in the lab): one reason, `structure:
+Catalog._ДемоПартнеры ChildObjects/Attribute[ДемоНовыйРеквизит] added`; `format_upgrades` 516 (396 + 119 + the
+Configuration row); the `deleted` row `0` accepted. The same image with one default entry changed by one digit is
+refused by name for that row and no other, and a `deleted` row that lists a file is refused.
 
 ## 4. The rules
 
@@ -541,18 +597,20 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
    28 predefined bodies exactly, but not the flowchart of the business process `Задание` (a counter, 37 stored,
    23 compiled), and the platform does rebuild that process's route-point table for it, so the reason is right.
 6. **Both sides go through one model.** A property the metadata model does not decode cannot be seen changing; a
-   row that differs while both sides decode to the same tree is reported as `unknown` (fail closed), which also
-   catches the non-decoded case.
+   row that differs while both sides decode to the same tree is reported as `unknown` (fail closed) unless every
+   difference is a known record-format upgrade (3.6), which also catches the non-decoded case. A row that has a
+   decoded change is not searched for further undecoded ones.
 7. **Sessions.** Nothing here says how a change can be applied to an infobase that has sessions. The check is
    about the content of the change.
 8. **Tree against database compares descriptors only**, see section 2; the data-carrying bodies of a tree are
    counted in `stats.body_files_not_compared` (28 in the БСП, 271 in ERP УХ).
 9. **`DBSchema` is not consulted** (section 3.5): a property the whitelist does not know is `structure` even when
    the platform would find every table entry unchanged.
-10. **Native-staged and 8.5 base-free ConfigSave.** The check refuses the ConfigSave of a native import of the
-    corpus БСП and the base-free stage of the 8.5 БСП as it is (findings 9 and 10 of section 8): the rows are in
-    a record format or shape the model does not decode completely. Fail closed, and not a corruption risk, but
-    the own apply cannot skip the platform for them until the model learns them.
+10. **Native-staged (lifted in #404) and 8.5 base-free ConfigSave.** The ConfigSave of a native import of the
+    corpus БСП is judged (3.6): its own change, and the record-format noise proven harmless by the table of
+    defaults seen in one import (8.3.27.2214 on the БСП). Another platform edition or another configuration may
+    write a default the table does not have; such a row is refused by name, never guessed. The base-free stage of
+    the 8.5 БСП is still refused as it is (finding 10 of section 8).
 11. **Speed.** ConfigSave check on the БСП: about 5 s; on ERP УХ (118 000 rows) not measured (a full УХ stage takes
     minutes). Tree against database: 11 s (БСП 8.3.27), 14 s (БСП 8.5), 144 s (УХ 8.3.27), 202 s (УХ 8.5), of
     which the model's export of every descriptor is most.
@@ -608,8 +666,9 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
    the 396 byte-only differences and a row `deleted` (content `0`: the native way to list deleted files, which the
    check does not know yet) stay `unknown`, so the ConfigSave of a native import of this corpus is refused.
    Two things would lift that: the model decoding a `{68}` Configuration row whose fields 26 and 43 differ, and a
-   way to tell a format upgrade from a field the model does not carry. Until then the source tree is the reliable
-   input: `mssql-apply-check --tree` on the import's input.
+   way to tell a format upgrade from a field the model does not carry. **Lifted in #404** by 3.6 (the check
+   reads the `{68}` row for the comparison, proves the 516 rows, and reads the `deleted` row `0`); the source tree
+   remains the reliable input for a stage the check cannot prove.
 10. **The 8.5 base-free stage of an unchanged БСП is not neutral either** (import track): the `root` row, the
     Configuration row (139 204 -> 139 197 bytes), `Task.ЗадачаИсполнителя` (same size) and a 99 MB body row of the
     configuration differ from the stored ones, and the flowchart of `Задание` as on 8.3.27; the check reports
@@ -631,6 +690,8 @@ In the repository, `docs/apply/evidence/restructuring-check/`:
 | `probes-auto-a.tsv` | the 159 probes of 6.1: kind, object, property, from, to, whether the platform acted |
 | `force-applies.md` | the native `--dynamic=force` applies of 5.1 and 6.2: exit, seconds, what changed, the objects named |
 | `selftest.md` | section 6.4: the four reference exports against databases restored from the same corpora |
+| `s1-matrix.md` | section 10.4: every case of the probe runs through the check and the S1 classification, one line each |
+| `nat-a2-image.md` | section 3.6 and 10.3: the whole native image of the ddl track's case a2 before and after (`--s1` output, counts) |
 
 The lab is `F:\ibcmd\lab\04\restructure-check` (its scripts are not part of the product):
 
@@ -652,6 +713,160 @@ ibcmd-rs mssql-apply-check --database ibcmd_rs_04_rcheck_bsp_b2 --tree F:\path\t
 ibcmd-rs apply-check-trees --old F:\path\to\export --new F:\path\to\edited --json
 ```
 
-Tests: `cargo test -p ibcmd-rs --lib --no-default-features apply_check` (82 tests: every rule with synthetic XML, the
-row check with fake rows, the modes on synthetic trees); `... apply_check::corpus_tests -- --ignored` for the
-reference exports (6.4).
+Tests: `cargo test -p ibcmd-rs --lib --no-default-features apply_check` (115 tests: every rule with synthetic XML, the
+row check with fake rows, the modes on synthetic trees, the upgrade proof, the S1 classification and its matrix);
+`... apply_check::corpus_tests -- --ignored` for the reference exports (6.4); `... apply_check::s1h -- --ignored`
+for the a2 image (3.6; the rows are the lab's `fixtures/nat_a2` and `fixtures/nat_a2_base`).
+
+## 10. What the own restructuring takes of a verdict (S1, #404)
+
+The own restructuring (#391, S1) does a few restructurings itself and hands everything else to the platform: on
+catalogs and documents, add or delete an attribute, widen a variable string, switch the index of an attribute, add a
+tabular section, add a plain object. The gate that decides needs the check's answer as **data**: which operation, on
+which object, and if none, why not. It used to be text ("the property path and the first word of the change").
+
+### 10.1 The types
+
+* `Reason` (section 2) has four typed fields beside the text: `rule: RuleId`, `kind: String`, `path: Vec<Seg>` (the
+  element names from the object down, and a child's name in `label`), `op: Option<ChangeOp>` (`Added`, `Removed`,
+  `Reordered`, `Modified { old, new }`). `Reason::default()` is class `unknown`, rule `unspecified`: a literal that
+  predates the fields is refused, never taken. `Reason::step(class, rule, object, file, property, change)` builds the
+  reason of a step of the check.
+* `apply_check::s1::classify(&Verdict) -> Classification`:
+
+```rust
+pub struct Classification { pub operations: Vec<S1Operation>, pub refusals: Vec<Refusal> }
+pub enum S1Operation {                    // every variant carries `object: ObjectId { kind, name, row }`
+    AddAttribute { attribute },  DeleteAttribute { attribute },
+    WidenString { attribute, from: u32, to: u32 },
+    SwitchIndex { attribute, from: IndexMode, to: IndexMode },   // DontIndex <-> Index only
+    AddTabularSection { section },  AddObject,                   // a catalog or a document
+}
+pub struct Refusal { pub code: RefusalCode, pub rule: RuleId, pub reason: String, pub detail: String }
+```
+
+`row` of an `ObjectId` is the Config row of the object's descriptor (its uuid) as the reason gave it, for a new object
+the row of the new descriptor, not the configuration's; `by_object()` groups the operations by it.
+`Classification::accepted()` is "no refusal" (a stage with no operations is accepted too: the caller has its own
+plain path for it); `refusal_message()` is the text of the first four; `--s1` prints it. Each reason is exactly one of
+an operation or a refusal, except the two reasons of a new object, which are one operation together (10.2).
+
+### 10.2 Reason to operation or refusal
+
+The rows are the whole table: what is not here is refused (`structure-outside-s1`, `rule-unspecified`, ...). The
+match is on `rule`, `kind`, the steps of `path` and `op`, never on words.
+
+| reason (rule; kind; path; op) | S1 |
+|---|---|
+| `column-added-or-dropped`; Catalog, Document; `ChildObjects/Attribute[A]`; added | `AddAttribute` |
+| the same, removed | `DeleteAttribute` |
+| `attribute-property-not-covered`; ...; `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`; modified `n -> m`, both numbers, `m > n` | `WidenString` |
+| the same, `m <= n` or not a number | refused `length-not-widened` |
+| `attribute-property-not-covered`; ...; `.../Properties/Indexing`; `DontIndex <-> Index` | `SwitchIndex` |
+| the same to or from another mode (`IndexWithAdditionalOrder`) | refused `index-mode-outside-s1` |
+| `tabular-section-added-dropped-moved`; ...; `ChildObjects/TabularSection[T]`; added | `AddTabularSection` |
+| the same, dropped or moved; any change inside a section (an added column: case h) | refused `tabular-section-outside-s1` |
+| `object-with-storage-added-or-dropped`; Catalog, Document; no path; added, **and** the same rule on `Configuration`, `ChildObjects/<Kind>[Name]`, added, of the same kind and name | `AddObject` (one operation for the two reasons) |
+| the one without the other | refused `object-list-mismatch` |
+| the same rule, dropped | refused `object-removed` |
+| `property-not-covered`, `properties-changed`, `standard-attribute-property-not-covered` (`CodeLength`, `HierarchyType`, ...) | refused `property-outside-s1` |
+| any other property of an attribute (`Type/Type`, `Use`, `DataHistory`), a part of an attribute | refused `attribute-property-outside-s1` |
+| attributes reordered | refused `attribute-moved` |
+| `InternalInfo`, a child kind no rule covers, the object itself | refused `child-outside-s1` |
+| any other kind (registers, charts, enumerations, ...); the configuration row other than a listing | refused `kind-outside-s1`, `configuration-outside-s1` |
+| a name with a dot after the kind (`Catalog.X.Form.F`) | refused `nested-object-outside-s1` |
+| class `data` (predefined items, enumeration values, scheduled jobs, route points) | refused `data-change` |
+| class `unknown`: `row-decodes-to-same-xml`; `row-format-upgrade-unproven`; the rest | refused `row-unexplained`; `row-format-unproven`; `unknown-step` |
+| `root` or `version` row changed; a body row that carries data | refused `service-row-changed`; `body-data-outside-s1` |
+| a verdict with `incomplete` set (a tree against a database left data out) | refused `incomplete-verdict` |
+
+`exactly_the_operations_of_s1_pass_and_nothing_else_does` holds `classify` to this table from outside: 62 rule ids x
+10 kinds x 12 paths x 10 operations x 3 classes, 223 200 reasons one at a time, and exactly the 12 that the table
+names (six operations on two kinds) come out as operations.
+
+An operation says what the descriptors changed by, not what a reason cannot see: that a string being widened is
+variable-length (`AllowedLength` is another leaf), that a new object has no predefined items or hierarchy, that a
+new attribute has a primitive type. The plan of the restructuring reads the same descriptors and refuses what it
+does not build.
+
+### 10.3 The whole native image
+
+| | reasons | of which |
+|---|---|---|
+| before (section 8, finding 9) | 400 | 1 real, 396 `unknown` "the row differs but both sides decode to the same XML", 2 for the Configuration `{68}` row, 1 for `deleted` |
+| after | 1 | `column-added-or-dropped`, `Catalog._ДемоПартнеры`, `ChildObjects/Attribute[ДемоНовыйРеквизит]`, added |
+
+`--s1` says: `add-attribute: Catalog._ДемоПартнеры`. The 516 rows are counted in `stats.format_upgrades` and are
+neither reasons nor notes; the Configuration row goes through the fold of 3.6; `deleted` is `0`. A row outside the
+table is refused by name and the first deviation (`row-format-upgrade-unproven`, `at 5/2/3: ...`), so the stage is
+too. `apply` still refuses **any** `deleted` row before it asks the gate (ddl track, 12.2.3): to take a whole native
+image it has to let the row `0` through, and refuse a non-empty one, as the check does.
+
+### 10.4 The refusal matrix
+
+`s1_matrix_tests` sends every case of the probe runs of 6.1 and 6.2 through the check's own comparison
+(`descriptor::compare` on synthetic descriptors, the same code the rows and trees use) and `s1::classify`. The runs
+are `p1`, `p2`, `p4`, `p5`, `p6`, `p7a`, `p7b`, `p8` (there is no `p3` and no `p9`-`p12` in the record; the probe
+table of 6.1 is the 159 further cases). Asserted for every case: what the platform acted on is never harmless,
+each case is what the table below says, and an operation is never given to a change the platform did not act on.
+
+| run | cases | platform acted on | harmless | S1 operations | refused |
+|---|---|---|---|---|---|
+| `p1` catalog properties | 18 | 3 | 15 | 0 | 3 (`property-outside-s1`) |
+| `p2` attribute properties | 16 | 2 | 13 | 2 (`switch-index`, `widen-string`) | 1 (the attribute's `DataHistory`, over-refused) |
+| `p4` children | 10 | 3 | 6 | 1 (`switch-index`) | 3 (`Use`; the enumeration value, `data-change`; a standard attribute's `DataHistory`, over-refused) |
+| `p5` children | 9 | 4 | 5 | 2 (`add-tabular-section`, `delete-attribute`) | 2 (`tabular-section-outside-s1`, `kind-outside-s1`) |
+| `p6` configuration, jobs, comments | 19 | 3 | 16 | 0 | 3 (`data-change`, the scheduled jobs) |
+| `p7a` add a module, a role, a catalog | 3 | 1 | 2 | 1 (`add-object`) | 0 |
+| `p7b` drop them | 3 | 1 | 2 | 0 | 1 (`object-removed`) |
+| `p8` presentation | 9 | 0 | 9 | 0 | 0 |
+| S1's own two (an attribute added to a catalog, to a document) | 2 | 2 | 0 | 2 (`add-attribute`) | 0 |
+| **focused** | **89** | **19** | **68** | **8** | **13** |
+| the 159 probes of 6.1 | 159 | 20 | 128 | 0 | 31: the 20 the platform acted on, and 11 it left alone |
+
+The 11 over-refusals are the price of failing closed, and they are the properties the platform applied without
+acting that the rules do not list: `HierarchyType` and `LimitLevelCount` of a catalog (`property-outside-s1`),
+`ExtendedEdit`, `FillFromFillingValue`, `MarkNegatives`, `MultiLine`, `PasswordMode` of a common attribute,
+`DistributedInfoBase` of an exchange plan, `EnableTotalsSliceFirst`, `EnableTotalsSliceLast`, `MainFilterOnPeriod`
+of an information register (all `kind-outside-s1`). None of them is an operation of S1 and none is let through; the
+number is pinned in the test and only goes down when a property is probed and listed. `s1-matrix.md` in the evidence
+folder has every case.
+
+### 10.5 What the gate should consume (proposal for `src/restructure/s1.rs`)
+
+Replace `classify_reason(&Reason)`, which matches `reason.object.split_once('.')`, `reason.property.split('/')` and
+the first word of `reason.change`, by the verdict-level call:
+
+```rust
+use crate::apply_check::s1::{self, S1Operation};
+
+let class = s1::classify(&verdict);                 // verdict: apply_check::check_staged(...)
+if let Some(why) = class.refusal_message() {        // "code: reason [detail]; ..."
+    return blockers(format!("S1: {why}"));
+}
+for operation in &class.operations {
+    match operation {
+        S1Operation::AddAttribute { object, attribute } => /* built */,
+        other => /* NotBuilt { operation: other.name(), subject: other.object().full_name() } */,
+    }
+}
+```
+
+`Operation::AddAttribute(String)` of the gate is `S1Operation::AddAttribute { object, attribute }`; `NotBuilt` is any
+other variant; the gate's `ObjectOperations { object, row, operations }` is `class.by_object()` (`object.full_name()`,
+`object.row`, the operations). Two things change in the tests: a `Reason` literal now has nine fields (`..Reason::default()` keeps the
+old five and makes the reason `unknown`/`unspecified`, which the gate refuses; build a real one with the fields of 10.2
+or run the check on a tree), and the agreement of the two decoders (12.2.2) can compare `operations[i].object()` and
+the attribute name with the plan's, without parsing anything.
+
+### 10.6 Limits
+
+* The first object of a kind in a configuration: the listing `ChildObjects/Catalog` of a configuration that has no
+  other catalog is not a list of values, its item has no name in the path, and the new object is refused
+  (`configuration-outside-s1`). A configuration that has catalogs is not affected.
+* `WidenString` does not say `AllowedLength` (the plan must find it `Variable` on both sides) and `AddObject` does
+  not say the object is plain.
+* The proof of 3.6 is a table measured in one native import (8.3.27.2214, the БСП demo): another edition or another
+  configuration can write a default the table lacks, and is then refused by name.
+* `mssql-apply-check --s1` classifies the verdict of whichever mode it ran; a tree mode has no raw rows, so it
+  cannot prove a format upgrade and does not need to (it compares XML).

@@ -2003,6 +2003,13 @@ ConfigDump, configuration export, or `ConfigDumpInfo.xml` change was performed.
 Status: implemented from saved raw/native evidence; native re-export remains
 paused by user instruction.
 
+> **Superseded (2026-09-29, issue #389).** The period vector is not fixed:
+> `ActionPeriod` (field 17) and `BasePeriod` (field 18) are two booleans. The
+> extension `_ДемоРасширение` owns a calculation register that writes `false`
+> in both (`0` at fields 17 and 18); ERP УХ `Удержания` writes `ActionPeriod`
+> false. The readers and the compilers take both fields from the row now, see
+> `docs/extensions/parity.md`.
+
 The sole paired BSP CalculationRegister root uses the exact code-21/33-field
 owner layout and stores fields 16, 17, and 18 as `2/1/1`. Native emits
 `Periodicity=Month`, `ActionPeriod=true`, and `BasePeriod=true`; the previous

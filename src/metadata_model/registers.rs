@@ -772,7 +772,7 @@ impl AccountingRegister {
 
     /// `{1,{21,<7 generated pairs>,{0,<md base>},UseStandardCommands,
     /// IncludeHelpInContents,ChartOfAccounts,DefaultListForm,Correspondence,
-    /// FullTextSearch,DataLockControlMode,EnableTotalsSplitting,
+    /// DataLockControlMode,FullTextSearch,EnableTotalsSplitting,
     /// <standard attributes>,AuxiliaryListForm,ListPresentation,
     /// ExtendedListPresentation,Explanation,PeriodAdjustmentLength},6,
     /// dimensions,templates,resources,commands,attributes,forms}`.
@@ -798,8 +798,8 @@ impl AccountingRegister {
             self.chart_of_accounts,
             self.default_list_form,
             self.correspondence,
-            self.full_text_search,
             self.data_lock_control_mode,
+            self.full_text_search,
             self.enable_totals_splitting,
             self.standard_attributes,
             self.auxiliary_list_form,

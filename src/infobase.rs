@@ -21,7 +21,7 @@ use crate::adapters::mssql_legacy::MssqlLegacyAdapter;
 use crate::cli::{
     InfobaseConfigExportArgs, InfobaseConfigFormat, InfobaseConfigImportArgs,
     InfobaseConfigSourceVersion, InfobaseImportStageMode, InfobaseImportVerify,
-    MssqlDumpConfigArgs, MssqlStageSourceObjectsArgs,
+    MssqlDumpConfigArgs, MssqlDumpExtensionArgs, MssqlExtensionImage, MssqlStageSourceObjectsArgs,
 };
 use crate::legacy_version::LegacyVersionAxes;
 use crate::platform::PlatformSpec;
@@ -212,6 +212,15 @@ impl InfobaseConfigImportArgs {
 pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigExportReport> {
     let config = resolve_connection(args.connection())?;
     ensure_mssql(&config.dbms)?;
+    if let Some(extension) = args.extension.as_deref() {
+        return export_extension_report(
+            &config,
+            args.sqlcmd.as_deref(),
+            &args.db_pwd_env,
+            extension,
+            &args.output_dir,
+        );
+    }
     export_config_report(
         &config,
         args.sqlcmd.as_deref(),
@@ -273,6 +282,100 @@ pub(crate) fn export_config_report(
     })
 }
 
+/// `infobase config export --extension=<name>`: the tree of one extension, as
+/// the platform's export writes it (the staged image when the extension has
+/// one, else the active one). Like the export of the configuration it refuses
+/// a directory that holds files, and it fails, having written the tree, when
+/// a row of the extension cannot be written exactly.
+pub(crate) fn export_extension_report(
+    config: &ConnectionConfig,
+    sqlcmd: Option<&Path>,
+    db_pwd_env: &str,
+    extension: &str,
+    output_dir_arg: &Path,
+) -> Result<InfobaseConfigExportReport> {
+    let source_version = config.legacy_source_version()?;
+    let output_dir = absolute_path(output_dir_arg)?;
+    if output_dir.exists() {
+        prepare_output_dir(&output_dir, false)?;
+    }
+    // An existing directory is empty by now; the tree replaces it.
+    let dump_args = extension_dump_args(
+        config,
+        sqlcmd,
+        db_pwd_env,
+        extension,
+        output_dir.clone(),
+        output_dir.exists(),
+        source_version,
+    );
+    let dump = crate::mssql_extension_export::dump_extensions(&dump_args)?;
+    let [entry] = dump.extensions.as_slice() else {
+        bail!(
+            "the export of extension {extension:?} produced {} trees, one expected",
+            dump.extensions.len()
+        );
+    };
+    if !entry.complete {
+        bail!(
+            "the export of extension {extension:?} is incomplete ({}); the tree in {} holds what could be written",
+            entry.warnings.join("; "),
+            output_dir.display()
+        );
+    }
+
+    Ok(InfobaseConfigExportReport {
+        operation: "infobase config export",
+        backend: "mssql-extension-direct",
+        format: format_name(config.format),
+        source_version: source_version.as_str(),
+        dbms: config.dbms.clone(),
+        db_server: config.db_server.clone(),
+        db_name: config.db_name.clone(),
+        db_user: config.db_user.clone(),
+        password_source: config.password_source.clone(),
+        native_config: config.native_config.clone(),
+        temp_dump_dir: output_dir.clone(),
+        output_dir,
+        exported_files: Some(entry.export.files_written),
+        raw_rows: entry.export.storage.physical_entries,
+        metadata_xml_rows: 0,
+        module_text_rows: 0,
+        source_asset_rows: 0,
+        dump_timings: Default::default(),
+    })
+}
+
+/// The export of one extension of the connection's database into
+/// `output_dir`, which `overwrite` says already exists (empty).
+fn extension_dump_args(
+    config: &ConnectionConfig,
+    sqlcmd: Option<&Path>,
+    db_pwd_env: &str,
+    extension: &str,
+    output_dir: PathBuf,
+    overwrite: bool,
+    source_version: InfobaseConfigSourceVersion,
+) -> MssqlDumpExtensionArgs {
+    MssqlDumpExtensionArgs {
+        sqlcmd: sqlcmd.map(Path::to_path_buf),
+        bcp_executable: None,
+        server: config.db_server.clone(),
+        sql_user: config.db_user.clone(),
+        sql_pwd: config.db_pwd.clone(),
+        sql_pwd_env: db_pwd_env.to_string(),
+        sqlcmd_trust_cert: true,
+        database: config.db_name.clone(),
+        extension: Some(extension.to_string()),
+        all_extensions: false,
+        output_dir,
+        overwrite,
+        image: MssqlExtensionImage::Auto,
+        platform: None,
+        source_version,
+    }
+}
+
 /// The export of the connection's database into `output_dir`.
 fn dump_args(
     config: &ConnectionConfig,
@@ -297,6 +400,7 @@ fn dump_args(
         output_dir,
         overwrite: false,
         include_config_save: false,
+        main_configuration: true,
         file_names,
         file_name_lists: Vec::new(),
         inflate: false,
@@ -1104,6 +1208,7 @@ mod tests {
             password_env: "IBCMD_USER_PSW".to_string(),
             // never run: every case here settles before a probe
             sqlcmd: None,
+            extension: None,
             overwrite: false,
             count_files: false,
             output_dir: PathBuf::from("out"),
@@ -1308,5 +1413,56 @@ mod tests {
         assert!(error.downcast_ref::<OutputDirectoryNotEmpty>().is_some());
         assert!(root.join("x.txt").is_file());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_extension_export_reads_the_image_the_platform_exports() {
+        let scratch = Scratch::new("extension-args");
+        let load = settings_in(&scratch.0, &[]);
+        // the version is named: nothing reads the database
+        let mut export = export_args("ibcmd_rs_x");
+        export.source_version = Some(InfobaseConfigSourceVersion::V2_20);
+        let config = resolve_connection_with(export.connection(), &load).unwrap();
+        let args = extension_dump_args(
+            &config,
+            None,
+            "IBCMD_RS_TEST_NO_SUCH_PSW",
+            "Расширение",
+            PathBuf::from("out"),
+            true,
+            InfobaseConfigSourceVersion::V2_20,
+        );
+        assert_eq!(args.extension.as_deref(), Some("Расширение"));
+        assert!(!args.all_extensions);
+        assert_eq!(args.image, MssqlExtensionImage::Auto);
+        assert_eq!(args.database, "ibcmd_rs_x");
+        assert_eq!(args.output_dir, PathBuf::from("out"));
+        assert!(args.overwrite);
+        assert!(args.sqlcmd_trust_cert);
+        assert_eq!(args.platform, None);
+    }
+
+    #[test]
+    fn an_extension_export_refuses_a_non_empty_directory_before_reading() {
+        let scratch = Scratch::new("extension-not-empty");
+        let load = settings_in(&scratch.0, &[]);
+        // the version is named: nothing reads the database
+        let mut export = export_args("ibcmd_rs_x");
+        export.source_version = Some(InfobaseConfigSourceVersion::V2_20);
+        let config = resolve_connection_with(export.connection(), &load).unwrap();
+        let out = scratch.0.join("out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("x.txt"), b"x").unwrap();
+        // the directory is refused before the database is read
+        let error = export_extension_report(
+            &config,
+            None,
+            "IBCMD_RS_TEST_NO_SUCH_PSW",
+            "Расширение",
+            &out,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<OutputDirectoryNotEmpty>().is_some());
+        assert!(out.join("x.txt").is_file());
     }
 }

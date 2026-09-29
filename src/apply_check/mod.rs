@@ -39,16 +39,25 @@ mod descriptor;
 mod model;
 mod plan;
 pub mod roles;
+mod rule_id;
 pub mod rules;
+pub mod s1;
 mod sql;
 mod tree_diff;
 mod trees;
+mod upgrade;
 
 #[cfg(test)]
 mod corpus_tests;
+#[cfg(test)]
+mod s1_matrix_tests;
+#[cfg(test)]
+mod s1h_corpus_tests;
 
 pub use check::{Inputs, RowProvider, check};
 pub use dbtree::check_tree_against_db;
 pub use model::{Note, ObjectChange, ObjectOp, Reason, ReasonClass, Stats, Verdict};
+pub use rule_id::RuleId;
 pub use sql::check_staged;
+pub use tree_diff::{ChangeOp, Seg};
 pub use trees::check_trees;
