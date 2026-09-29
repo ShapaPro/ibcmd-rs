@@ -1024,6 +1024,33 @@ mod tests {
         assert!(normalize_descriptor(text).is_err());
     }
 
+    /// The extension context is process-wide, and the ordinary converters read
+    /// it: a test that runs an extension export beside the other tests of this
+    /// process would turn some of them into extension conversions. Such a test
+    /// runs again alone in a child process (`test` is its name in the crate);
+    /// this returns `false` in the parent, whose verdict is the child's, and
+    /// `true` where the body is to run.
+    fn alone(test: &str) -> bool {
+        const CHILD: &str = "IBCMD_RS_ISOLATED_EXTENSION_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{test} failed alone:
+{stdout}
+{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     /// The extension `_ДемоПустоеРасширение` of the БСП 8.3.27 and the БСП 8.5
     /// demonstration bases: the same two rows in both, and the tree each
     /// platform's own `config export --extension` wrote for them
@@ -1031,6 +1058,11 @@ mod tests {
     /// empty captions after the version; the tree is otherwise the same.
     #[test]
     fn the_empty_extension_exports_to_the_native_tree_of_both_platforms() {
+        if !alone(
+            "mssql_dump::extension::tests::the_empty_extension_exports_to_the_native_tree_of_both_platforms",
+        ) {
+            return;
+        }
         use crate::mssql_dump::cas::{CasHash, CasStorageRow, resolve_cas_storage_image};
         use crate::mssql_extension_stage::{
             ConfigInfoIdentity, ExtensionStageRow, generate_configinfo_manifest,
@@ -1154,7 +1186,7 @@ mod tests {
     /// periodicity of a register, the default roles and the managed
     /// application module of the root, the members 3, 21 and 49 of the root
     /// tuple).
-    const UPSTREAM_MATCHING_CASES: [&str; 16] = [
+    const UPSTREAM_MATCHING_CASES: [&str; 22] = [
         "extension_roots/values",
         "extension_roots/spellings",
         "extension_roots/modules",
@@ -1171,22 +1203,22 @@ mod tests {
         "adopted/catalog_modules",
         "adopted/catalog_object_module",
         "adopted/document_children",
-    ];
-
-    /// The other upstream cases: each fails closed or differs, and is listed in
-    /// `docs/extensions/parity.md` (adopted forms with interceptors, predefined
-    /// items and exchange plan content of an adopted object, widened types with
-    /// a check value, roles, event subscriptions, tasks, business processes).
-    const UPSTREAM_OPEN_CASES: [&str; 10] = [
         "adopted/form_events",
         "adopted/form_events_shared",
-        "adopted/predefined",
-        "adopted/exchange_plan",
-        "adopted/widened",
         "adopted/role",
         "adopted/subscription",
         "adopted/kinds",
         "adopted/foreign_links",
+    ];
+
+    /// The other upstream cases: each fails closed or differs, and is listed in
+    /// `docs/extensions/parity.md` (predefined items and exchange plan content
+    /// of an adopted object, widened types with a check value, and a container
+    /// whose CAS content is missing).
+    const UPSTREAM_OPEN_CASES: [&str; 4] = [
+        "adopted/predefined",
+        "adopted/exchange_plan",
+        "adopted/widened",
         "extension_roots/unknown_property",
     ];
 
@@ -1283,6 +1315,11 @@ mod tests {
 
     #[test]
     fn the_export_equals_the_platform_dumps_of_the_upstream_fixtures() {
+        if !alone(
+            "mssql_dump::extension::tests::the_export_equals_the_platform_dumps_of_the_upstream_fixtures",
+        ) {
+            return;
+        }
         let root = std::env::var_os("IBCMD_UPSTREAM_FIXTURES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {

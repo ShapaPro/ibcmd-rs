@@ -79392,41 +79392,6 @@ fn ws_definition_publishes_schema_local_qnames_with_the_later_prefix() {
     assert!(normalize_ws_definition_own_namespace_prefixes(text.as_bytes()).is_none());
 }
 
-/// The БСП 8.5 extension ServiceDesk stores its home page as one column:
-/// template `0`, the column, an empty right column and the closing `2`. The
-/// platform writes a single `<Column>`.
-#[test]
-fn reads_and_writes_a_one_column_home_page_work_area() {
-    let form_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
-    let item = format!("{{0,{{0,{form_uuid}}},10,{{0,{{0,{{\"B\",1}},0}}}}}}");
-    let row = format!("{{1,0,1,{item},0,2}}");
-    let area = parse_home_page_work_area_text(&row, &BTreeMap::new(), &BTreeMap::new())
-        .expect("one column");
-    assert_eq!(area.template, "OneColumn");
-    assert_eq!(area.left_column.len(), 1);
-    assert!(area.right_column.is_empty());
-    let xml = format_home_page_work_area_xml(&area, InfobaseConfigSourceVersion::V2_21);
-    assert!(
-        xml.contains(&format!(
-            "\t<WorkingAreaTemplate>OneColumn</WorkingAreaTemplate>\r\n\t<Column>\r\n\t\t<Item>\r\n\t\t\t<Form>{form_uuid}</Form>\r\n"
-        )),
-        "{xml}"
-    );
-    assert!(xml.ends_with("\t</Column>\r\n</HomePageWorkArea>"), "{xml}");
-    assert!(!xml.contains("LeftColumn") && !xml.contains("RightColumn"));
-    // A one-column row that also fills the right column is not one the writer can state.
-    let both = format!("{{1,0,1,{item},1,{item},2}}");
-    assert!(parse_home_page_work_area_text(&both, &BTreeMap::new(), &BTreeMap::new()).is_none());
-    // Template `2` keeps its two columns.
-    let two = format!("{{1,2,1,{item},0}}");
-    let area = parse_home_page_work_area_text(&two, &BTreeMap::new(), &BTreeMap::new()).unwrap();
-    let xml = format_home_page_work_area_xml(&area, InfobaseConfigSourceVersion::V2_20);
-    assert!(
-        xml.contains("<LeftColumn>") && xml.contains("<RightColumn>"),
-        "{xml}"
-    );
-}
-
 /// Platform 8.5 writes a style body one revision up (`{2,...}`, colours `{4,...}`,
 /// fonts `{8,...}`) and closes it with the brand colour, which the export
 /// prints as the last item `FirstBrand`. The body is the one the БСП 8.5

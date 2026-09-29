@@ -210,7 +210,10 @@ fn unescape_xml_text(text: &str) -> String {
 pub(super) fn adopted_base_record_slot(body: &ParsedFormBodyBlob) -> Option<usize> {
     let flag = body.trailing.get(5)?.trim();
     let base = body.trailing.get(6)?.trim();
-    (flag == "1" && base.starts_with('{')).then_some(6)
+    if flag != "1" || !base.starts_with('{') {
+        return None;
+    }
+    Some(6)
 }
 
 /// The base form body an adopted form carries, when it is one.
