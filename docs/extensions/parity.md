@@ -420,7 +420,21 @@ These are read off a single native sample; the evidence is in the lab folder
   and the empty-source characteristic compiles, but no 8.5 extension was loaded);
 * the load of a whole native-format tree (only the bounded module change loads;
   forms, pictures and templates of an extension still take the strict compile);
-* the drop-in `ibcmd infobase config export --extension=<name>` route.
+* the drop-in route on 8.5 and on the other three 8.3.27 extensions (the route
+  is the same export; only `_ДемоРасширение` was run through it).
+
+## The drop-in route
+
+`ibcmd-rs infobase config export --extension=<name> <dir>` (also `-e <name>`)
+runs the export above under the drop-in command line: the connection, the XML
+version (`--platform`) and the output directory (empty or absent, as for the
+configuration) are the ones of `infobase config export`; the image is the
+staged one when the extension has staged rows, else the active one
+(`--image auto`). An unknown name fails; so does an extension with an opaque or
+failed storage row, after writing the tree. `infobase config import` still
+refuses `--extension`. Measured 2026-09-30 on the БСП 8.3.27 clone:
+`_ДемоРасширение` through the drop-in command equals the native export in all
+185 files (`ConfigDumpInfo.xml` included).
 
 ## Reproducing
 
