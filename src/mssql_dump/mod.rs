@@ -7939,6 +7939,11 @@ fn parse_exchange_plan_content_extension(
         .get(1)
         .and_then(|field| field.trim().parse::<usize>().ok())
         .context("ExchangePlanContent item count is not numeric")?;
+    // A count past the fields is not a readable body; the arithmetic below
+    // never sees it.
+    if count > fields.len() {
+        bail!("ExchangePlanContent declares {count} items but holds {} fields", fields.len());
+    }
     let at = 2 + 2 * count;
     let Some(extension_count) = fields.get(at) else {
         return Ok(Vec::new());
@@ -7947,7 +7952,7 @@ fn parse_exchange_plan_content_extension(
         .trim()
         .parse::<usize>()
         .context("ExchangePlanContent extension count is not numeric")?;
-    if fields.len() != at + 1 + 2 * extension_count {
+    if extension_count > fields.len() || fields.len() != at + 1 + 2 * extension_count {
         bail!("ExchangePlanContent extension list does not close the body");
     }
     // The platform's order is not the stored one: listed members follow the
@@ -15602,6 +15607,9 @@ fn parse_information_register_owner_header(value: &str) -> Option<MetadataHeader
         _ => return None,
     };
     let controlled: usize = fields.get(6)?.trim().parse().ok()?;
+    if controlled > fields.len() {
+        return None;
+    }
     // Every adopted header seen controls at least one property (ИТК x3, the
     // extension probes); an own one controls none.
     if adopted != (controlled != 0) {

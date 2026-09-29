@@ -167,6 +167,14 @@ fn write_foreign_stubs(
         let Some((kind, name)) = reference.split_once('.') else {
             continue;
         };
+        // A top-level object only (`Catalog.X`, not `Catalog.X.Form.Y`), its
+        // name an identifier: the name is a path under the scratch tree and
+        // XML text, and it comes from the file.
+        if !crate::external::header::is_object_name(name)
+            || !uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+        {
+            continue;
+        }
         let Some(folder) = crate::mssql_dump::root_family_folder(kind) else {
             continue;
         };
@@ -265,9 +273,17 @@ fn merged_root(base: &str, edited: &str, main: &header::ExternalMain) -> Result<
 
 /// The span of the text between `<Properties>` and `</Properties>`.
 fn properties_span(xml: &str) -> Option<(usize, usize)> {
-    let open = xml.find("\t\t<Properties>")? + "\t\t<Properties>".len();
-    let close = xml[open..].find("\t\t</Properties>")? + open;
+    let open = root_line(xml, 0, "<Properties>")? + "\t\t<Properties>".len();
+    let close = root_line(xml, open, "</Properties>")?;
     Some((open, close))
+}
+
+/// Where the first line from `from` on that holds `tag` at the root's
+/// children depth (two tabs) starts: a nested element's line (four tabs)
+/// holds the same text after two of its tabs.
+fn root_line(xml: &str, from: usize, tag: &str) -> Option<usize> {
+    let needle = format!("\n\t\t{tag}");
+    xml[from..].find(&needle).map(|at| from + at + 1)
 }
 
 /// The root's properties, `(tag, element text with its line)`, in order.
@@ -300,11 +316,11 @@ fn properties(xml: &str) -> Option<Vec<(String, String)>> {
 
 /// The span of the root's `<ChildObjects>` element (self-closed or not).
 fn child_objects_span(xml: &str) -> Option<(usize, usize)> {
-    if let Some(at) = xml.find("\t\t<ChildObjects/>") {
+    if let Some(at) = root_line(xml, 0, "<ChildObjects/>") {
         return Some((at, at + "\t\t<ChildObjects/>".len()));
     }
-    let at = xml.find("\t\t<ChildObjects>")?;
-    let end = xml[at..].find("\t\t</ChildObjects>")? + at + "\t\t</ChildObjects>".len();
+    let at = root_line(xml, 0, "<ChildObjects>")?;
+    let end = root_line(xml, at, "</ChildObjects>")? + "\t\t</ChildObjects>".len();
     Some((at, end))
 }
 
@@ -339,5 +355,25 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_root_child_objects_are_not_cut_at_a_tabular_sections_own() {
+        let xml = "<MetaDataObject>\r\n\t<DataProcessor>\r\n\t\t<Properties>\r\n\t\t\t<Name>X</Name>\r\n\
+                   \t\t</Properties>\r\n\t\t<ChildObjects>\r\n\t\t\t<TabularSection>\r\n\
+                   \t\t\t\t<Properties>\r\n\t\t\t\t</Properties>\r\n\t\t\t\t<ChildObjects/>\r\n\
+                   \t\t\t</TabularSection>\r\n\t\t\t<TabularSection>\r\n\t\t\t\t<ChildObjects>\r\n\
+                   \t\t\t\t</ChildObjects>\r\n\t\t\t</TabularSection>\r\n\t\t\t<Form>Ф</Form>\r\n\
+                   \t\t</ChildObjects>\r\n\t</DataProcessor>\r\n</MetaDataObject>";
+        let (at, end) = child_objects_span(xml).unwrap();
+        assert!(xml[at..end].starts_with("\t\t<ChildObjects>\r\n"));
+        assert!(xml[at..end].ends_with("<Form>Ф</Form>\r\n\t\t</ChildObjects>"));
+        let (open, close) = properties_span(xml).unwrap();
+        assert_eq!(&xml[open..close], "\r\n\t\t\t<Name>X</Name>\r\n");
     }
 }

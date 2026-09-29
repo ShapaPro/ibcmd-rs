@@ -110,6 +110,12 @@ pub fn parse_main(main_uuid: &str, text: &str) -> Result<Option<ExternalMain>> {
         .context("external object name")?
         .trim_matches('"')
         .replace("\"\"", "\"");
+    // The name becomes a folder and a file under the output (and a scratch
+    // directory a load clears): only a 1C identifier is taken, never `..`
+    // or a path.
+    if !is_object_name(&name) {
+        bail!("external object name {name:?} is not a 1C identifier");
+    }
     Ok(Some(ExternalMain {
         kind,
         main_uuid: main_uuid.to_ascii_lowercase(),
@@ -118,6 +124,15 @@ pub fn parse_main(main_uuid: &str, text: &str) -> Result<Option<ExternalMain>> {
         header: header.iter().map(|s| (*s).to_owned()).collect(),
         collections,
     }))
+}
+
+/// A 1C object name: a letter or `_`, then letters, digits and `_`.
+pub(crate) fn is_object_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 /// The configuration row (BOM-prefixed) the pipeline decodes as the same
@@ -274,6 +289,17 @@ mod tests {
             let main = parse_main(uuid, text).unwrap().unwrap();
             let internal = internal_row_text(&main).unwrap();
             assert_eq!(external_main_text(&main, &internal, text).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_an_identifier_is_refused() {
+        for name in ["..", "a\\\\..\\\\..", "x/y", "", "1abc", "a.b"] {
+            let text = MAIN_DP.replace("},\"Тест\",", &format!("}},\"{name}\","));
+            assert!(parse_main("aaaaaaaa-0000-0000-0000-000000000001", &text).is_err(), "{name:?}");
+        }
+        for name in ["Тест", "_x1", "ОбработкаА2"] {
+            assert!(is_object_name(name), "{name}");
         }
     }
 

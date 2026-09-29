@@ -218,18 +218,21 @@ pub fn write_tree_index(
 }
 
 /// Rewrites the index of `tree` for a new base (a load's output): the files
-/// it loaded (`applied`) hashed again, every other digest and every key as
-/// they were -- nothing else differs between the tree and the new file.
+/// it loaded (`applied`) hashed again, every other digest as it was --
+/// nothing else differs between the tree and the new file. The keys are
+/// `fresh_keys` (the new file's export) when given: a compiled load gives
+/// added files entries the old index cannot name.
 pub fn refresh_tree_index(
     tree: &Path,
     base: &Path,
     index: &TreeIndex,
     applied: &[String],
     removed: &[String],
+    fresh_keys: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
     let written = now_ns();
     let mut digests = index.digests();
-    let mut keys = index.keys();
+    let mut keys = fresh_keys.cloned().unwrap_or_else(|| index.keys());
     for path in removed {
         digests.remove(path);
         keys.remove(path);

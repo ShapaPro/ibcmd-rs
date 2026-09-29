@@ -375,7 +375,7 @@ fn verify_loaded(
     diff: &TreeDiff,
     report: &LoadReport,
     external: bool,
-) -> std::result::Result<(), LoadError> {
+) -> std::result::Result<BTreeMap<String, String>, LoadError> {
     let scratch = Scratch(std::env::temp_dir().join(format!(
         "ibcmd-load-verify-{}-{}",
         std::process::id(),
@@ -384,7 +384,8 @@ fn verify_loaded(
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     )));
-    export_base(output, &scratch.0, source_version).context("failed to export the loaded file")?;
+    let exported = export_base(output, &scratch.0, source_version)
+        .context("failed to export the loaded file")?;
     let in_scope = |path: &str| {
         path != CONFIG_DUMP_INFO
             && (external
@@ -412,7 +413,9 @@ fn verify_loaded(
         }
     }
     if differ.is_empty() {
-        return Ok(());
+        // The new file's entries by output: the tree index's keys from now
+        // on (an added file has one the old index cannot name).
+        return Ok(keys_by_output(&exported));
     }
     Err(anyhow::anyhow!(
         "the loaded file does not export back to the edited tree -- the compiler does not write these faithfully yet, so nothing was written: {}",
@@ -532,7 +535,10 @@ pub fn load_onto_base(
     };
     // Module text alone goes through the overlay, byte for byte; anything
     // else compiles the objects it touches.
-    if plan.unsupported.is_empty() {
+    // A compiled load's new file keys (None: not verified, so not known).
+    let mut compiled_keys = None;
+    let compiled_load = !plan.unsupported.is_empty();
+    if !compiled_load {
         load_plan(edited, base, output, source_version, plan, &base_versions, &mut report)?;
     } else {
         let external =
@@ -547,18 +553,33 @@ pub fn load_onto_base(
         // IBCMD_RS_LOAD_NO_VERIFY=1 keeps an unverified file, for diagnosing
         // what the compiler misses; never for real use.
         let verify = std::env::var_os("IBCMD_RS_LOAD_NO_VERIFY").is_none();
-        if let Err(error) = verify
-            .then(|| verify_loaded(edited, output, source_version, &diff, &report, external))
-            .unwrap_or(Ok(()))
-        {
-            let _ = fs::remove_file(output);
-            return Err(error);
+        if verify {
+            match verify_loaded(edited, output, source_version, &diff, &report, external) {
+                Ok(keys) => compiled_keys = Some(keys),
+                Err(error) => {
+                    let _ = fs::remove_file(output);
+                    return Err(error);
+                }
+            }
         }
     }
     // The index follows the file just written: the next edit of this tree
-    // loads onto it the same way.
+    // loads onto it the same way. An unverified compiled load leaves no
+    // index: its keys for added files are unknown, and a stale key would
+    // send the next edit of such a file down the wrong path.
     if let Some(found) = &tree_index {
-        index::refresh_tree_index(edited, output, found, &report.applied, &diff.removed)?;
+        if compiled_load && compiled_keys.is_none() {
+            let _ = fs::remove_file(index::index_path(edited));
+        } else {
+            index::refresh_tree_index(
+                edited,
+                output,
+                found,
+                &report.applied,
+                &diff.removed,
+                compiled_keys.as_ref(),
+            )?;
+        }
     }
     Ok(report)
 }

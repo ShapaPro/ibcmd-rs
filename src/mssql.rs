@@ -4430,7 +4430,7 @@ fn prepare_metadata_body_rows(
             // An offline compile (`cf load`) takes only the rows of the files
             // the tree edited: a body it could not compile is kept from the
             // base, and one the edit needed is missed by name there.
-            Err(error) if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) => {
+            Err(error) if CF_LOAD_COMPILE.load(std::sync::atomic::Ordering::Relaxed) => {
                 offline_compile::note_skipped(format!(
                     "{} {}: {error:#}",
                     xml_path.display(),
@@ -5684,7 +5684,7 @@ fn prepare_form_body_row(
     let form_item_assets_root = form_path.with_extension("").join("Items");
     // An extension's adopted form, compiled offline against its base row
     // (`cf load`): the form, its interceptors' call types, the base form.
-    if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed)
+    if CF_LOAD_COMPILE.load(std::sync::atomic::Ordering::Relaxed)
         && !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed)
         && form_xml.windows(10).any(|window| window == b"<BaseForm ")
     {
@@ -7256,6 +7256,13 @@ static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
 /// --script-only`. A base row missing from the directory is then a missing
 /// row, not a query, and every request fails instead of connecting.
 static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set only by the offline compile of `cf load`, which takes the rows of
+/// the files the tree edited: a body it cannot compile is noted and kept
+/// from the base there. Every other stage (`--script-only` too) still fails
+/// on it.
+static CF_LOAD_COMPILE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn ensure_online(action: &str) -> Result<()> {
     if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {

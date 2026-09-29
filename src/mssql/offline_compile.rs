@@ -54,6 +54,7 @@ pub fn compile_source_rows_offline(
         bail!("an offline compile has already run in this process");
     }
     OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+    CF_LOAD_COMPILE.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let manifest = scan_sources_with_prefixes(source_root, prefixes)?;
     let metadata_xmls = filter_source_paths_by_prefix(

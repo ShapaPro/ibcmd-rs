@@ -416,7 +416,7 @@ fn parse_extension_config_info(text: &str) -> Result<Vec<ConfigVersionEntry>> {
         .first()
         .and_then(|field| field.trim().parse::<usize>().ok())
         .ok_or_else(|| anyhow!("configinfo entry list has no count"))?;
-    if fields.len() != 1 + 2 * count {
+    if count > fields.len() || fields.len() != 1 + 2 * count {
         bail!(
             "configinfo declares {count} entries but holds {} fields",
             fields.len()

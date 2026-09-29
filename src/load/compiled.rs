@@ -192,6 +192,15 @@ pub(crate) fn compile_edit(
             .into());
         };
         dropped.insert(uuid.clone());
+        // Its forms, templates and commands are entries of their own (their
+        // own uuids): they go with it.
+        for path in &diff.removed {
+            if object_prefix(path).as_deref() == Some(object.as_str())
+                && let Some(key) = keys.get(path)
+            {
+                dropped.insert(key.clone());
+            }
+        }
     }
     let base_keys = base_rows.keys().cloned().collect::<BTreeSet<_>>();
     let root_children_changed = parents_of_added_or_removed(diff, edited)
@@ -497,8 +506,11 @@ fn with_tree_families(plain: &str, children: &BTreeMap<String, Vec<String>>) -> 
     while let Some(offset) = plain[at..].find('{') {
         let start = at + offset;
         at = start + 1;
+        // No class here: too near the end, or 36 bytes on is inside a
+        // letter (a `{` before Cyrillic text). The families further on are
+        // still looked for.
         let Some(class) = plain.get(start + 1..start + 37) else {
-            break;
+            continue;
         };
         let Some(kind) = crate::compiler::root::configuration_family_kind(class) else {
             continue;
