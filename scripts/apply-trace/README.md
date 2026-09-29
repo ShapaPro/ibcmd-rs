@@ -23,6 +23,7 @@ trace).  No sqlcmd, no bcp, no pip packages.
 | `compare_traces.py --capture <label>=<dir> ...` | the writes of several captured runs side by side, one line per (table, operation, row-name shape): statements / rows / bytes per run, and the DDL verbs |
 | `blobstore.py rebuild\|merge\|verify\|stats <dir>` | maintenance of the content-addressed blob store shared by snapshots (see "Blob store") |
 | `tests/` | offline unit tests: `python -m unittest discover -s scripts/apply-trace/tests` |
+| `lab/` | the case wrappers of the 0.4 trace track (stage, apply, path experiment, УХ plan); **not part of the kit**: they use `sqlcmd` and the lab paths `F:\ibcmd\lab\...`, see the last section |
 
 ## One command, everything
 
@@ -209,3 +210,23 @@ variant under `capture.ps1`, and compare the two `after` snapshots with `diff.py
 * Dates in the platform's tables carry a year offset (see `year_offset` in
   `meta.json`).  Files and the text of `tables.tsv` are UTF-8, `\`, tab, CR, LF escaped.
 * The kit reads only.  It is not a backup: a snapshot has no data of the object tables.
+
+## lab/ - the case wrappers of the trace track
+
+Recipes, kept so that a case can be repeated; they are not tested and not generic. They assume the lab of 2026-09-29:
+disposable databases `ibcmd_rs_04_trace_*` made by `F:\ibcmd\lab\04\tools\restore-clone.ps1`, the named locks of
+`heavy-lock.ps1` (one command per hold), the reference exports under `F:\ibcmd\lab\parity\` and `sqlcmd`. What they
+document, and where the numbers are used: `docs/apply/native-apply-trace.md` section 2 (the cases), 6.4 (the path
+experiment: `run_paths*.ps1`, `make_case1*_tree*.ps1`, `stage_vs_config.ps1`), 11 (8.5), 12 and `docs/apply/uh-case1-plan.md`
+(`run_uh_case1.ps1`, prepared, refuses to run without `-Go`), `docs/apply/native-infobase-create.md` (`run_native_create.ps1`).
+
+| Script | Purpose |
+|---|---|
+| `run_native_import_files.ps1`, `run_native_apply.ps1` | native staging (`config import files --partial`) and one traced native apply (kit capture, lock hooks) |
+| `run_case3.ps1`, `run_queue.ps1`, `run_queue2.ps1`, `make_case2.py` | the БСП cases 1 - 3 of section 2 |
+| `run_native_create.ps1` | traced native `infobase create` (8.3.27 and 8.5) |
+| `make_case1_tree*.ps1` | hard-link trees of a reference export with a few module texts edited (no disk cost) |
+| `run_paths.ps1` ... `run_paths6.ps1` | the path experiment (which staged sets make the native apply take the long path) |
+| `validate_sparse_import.ps1`, `check_stage.py` | native staging from a sparse base directory; the `versions` completeness test of a stage |
+| `stage_vs_config.ps1`, `dump_rows.ps1`, `row_sha.ps1` | read-only row comparisons (ConfigSave against Config, decoded rows, hashes) |
+| `run_uh_case1.ps1` | the ERP УХ case 1 (prepared) |
