@@ -424,6 +424,13 @@ Exclusivity with a real 1C process: an `ibsrv` (standalone server) started on a 
 connections; the apply refuses with the sessions listed, and a second apply started meanwhile is
 refused by the in-transaction check (`THROW 57302`) -- both leave the database unchanged.
 
+Cluster sessions (`docs/apply/evidence/own-apply/cluster-sessions.md`): the lab clone registered in the
+8.3.27 cluster (`tools/register-ib.ps1`), sessions through the COM connector reading a probe function of a
+common module. Before the apply a new session reads `ibcmd-rs-apply-probe-v1`; after the own apply a **new session reads
+`ibcmd-rs-cluster-probe-v1`**. Second change, applied under an open (warm) session with `--exclusivity assumed`
+(the default check refuses: three `1CV83 Server` connections): a session opened after it reads the new value
+(`ibcmd-rs-cluster-probe-v2`) while the warm session still reads the old one 30 s later -- information for 0.5.
+
 Session probe (`ibcmd_rs_04_apply_bsp8327_probe_20260929`, a clean БСП clone with a full-tree
 stage of 9 517 rows -- the 227 S2 edits and a marker added to `ПоддерживаемыеВерсииПрограммногоИнтерфейса`
 in `СтандартныеПодсистемыСервер`): a standalone server (`ibsrv`, integrated SQL login, `tools\srv.ps1`)
@@ -446,13 +453,10 @@ the snapshot row, every saved file hashes to its manifest entry).
   is refused. Several new body rows of one object are refused (the order of their
   registration is not known). The importer's patch mode cannot stage a new form or template
   yet (`Config row not found`); a delta stage made by hand or by the base-free import can.
-- **Sessions**: the 1C server (LocalSystem) has no SQL login on this machine, so a clone cannot
-  be registered in the cluster and `rac`/COM sessions cannot be tested (creating the login is a
-  security change this track does not make: `tools\session_probe.ps1` runs the check once one
-  exists). A standalone server (`ibsrv`) started cold on the result is the substitute: it is a
-  new process reading the tables, and it sees the applied module (probe above). A **warm**
-  server does not notice an external apply within minutes (ui track), which is why the
-  apply demands exclusive access.
+- **Sessions**: new sessions see the change in the 1C cluster (8.3.27, clients `localhost:2541`): see
+  "Cluster sessions" above and `docs/apply/evidence/own-apply/cluster-sessions.md`. A session that was
+  open before the apply keeps its old configuration (read the old value 30 s after the apply); the
+  apply therefore demands exclusive access and refuses while the working process holds its connections.
 - **Dynamic-update overlays in `Params`** (a `.si` row under a `_dynupdate_` name, left by a native
   dynamic apply) are refused: this apply folds only `Config` overlays.
 - **8.5** is refused: the apply is measured on 8.3.27 only.
