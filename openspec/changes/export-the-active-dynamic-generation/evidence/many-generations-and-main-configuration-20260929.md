@@ -168,3 +168,36 @@ ERP УХ 8.3.27 from its stored rows, whole (140 709 files, default path, heavy
 lock, 30.09.2026 before this change): 140 709 of 140 709 identical to the
 native reference; the fixed build cannot move a УХ file (count stated exactly,
 fields 26 and 43 equal), and no second full УХ export was made.
+
+## The port onto feat/0.4 (30.09.2026)
+
+The eight commits were re-applied on `feat/0.4` at `0f6b6e1e` (the verified
+master merge of PR #387, the import guard `export_staged_state`, the apply and
+rcheck checkpoints). The reconciliation:
+
+- `config_dump_info.rs`: the origin-aware parser of #387 (`ExtensionConfigInfo`,
+  `service_names`, the string `version`, `without_unstored_nil_versions`) stays;
+  the reader by pairs, the `counted` flag and the unlisted-name decision are
+  added to it, and the inventory check keeps its origin argument.
+- `offline_rows.rs`: import's in-memory rows (`from_memory`, `with_staged`)
+  and its tests stay; the tests of the folder take the overlay are added.
+- `mod.rs`: `dump_table_rows_streamed` has both parameters (import's sink and
+  `main_configuration`); the staged-state export passes `false`, it reads
+  memory and never a database's ConfigSave. The stage guard keeps its own
+  semantics (a file the tree lacks is something the stage leaves in), so it does
+  not drop the names a staged `versions` does not list, and the export of a
+  database does.
+- `root_export.rs`: the staged split of fields 26 and 43 is decoded only when 43
+  is the greater, the rule `fold_split_compatibility` of the row comparison
+  already uses.
+- `main_configuration: false` at the one other literal (`mssql_apply.rs`).
+
+Acceptance on the ported branch, against the native export of the same
+database: `ibcmd_rs_04_rcheck_bsp_a` 12 198 of 12 198; the `nat_a2` fixture
+loaded into a corpus restore 12 198 of 12 198; the БСП database with an active
+generation from SQL 12 198 of 12 198; БСП 8.3.27 and 8.5 from rows equal the
+native reference trees (12 198 and 12 337 files, plus `manifest.json`); ERP УХ
+8.3.27 from rows, default path, 140 709 of 140 709 identical with
+`ConfigDumpInfo.xml` byte for byte. `cargo test -p ibcmd-rs
+--no-default-features`: 3 436 passed, 0 failed, 12 ignored in 46 binaries.
+
