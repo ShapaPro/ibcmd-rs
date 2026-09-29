@@ -429,7 +429,7 @@ pub struct ExportRequest {
 pub struct ImportRequest {
     pub common: Common,
     pub base_free: bool,
-    /// `--verify`: check the staged state against the tree in every mode.
+    /// `--verify`: check the staged state against the tree (the default).
     pub verify: bool,
     /// `--no-verify`: check nothing.
     pub no_verify: bool,
