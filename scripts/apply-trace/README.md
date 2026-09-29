@@ -23,7 +23,7 @@ trace).  No sqlcmd, no bcp, no pip packages.
 | `compare_traces.py --capture <label>=<dir> ...` | the writes of several captured runs side by side, one line per (table, operation, row-name shape): statements / rows / bytes per run, and the DDL verbs |
 | `blobstore.py rebuild\|merge\|verify\|stats <dir>` | maintenance of the content-addressed blob store shared by snapshots (see "Blob store") |
 | `tests/` | offline unit tests: `python -m unittest discover -s scripts/apply-trace/tests` |
-| `lab/` | the case wrappers of the 0.4 trace track (stage, apply, path experiment, УХ plan); **not part of the kit**: they use `sqlcmd` and the lab paths `F:\ibcmd\lab\...`, see the last section |
+| `lab/` | the case wrappers of the 0.4 trace track (stage, apply, path experiment, УХ plan); **not part of the kit**: they use `sqlcmd` and the lab paths `F:\ibcmd\lab\04\...`, see the last section |
 
 ## One command, everything
 
