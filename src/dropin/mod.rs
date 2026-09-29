@@ -27,7 +27,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::cli::{InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode};
+use crate::cli::{
+    InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode,
+    InfobaseImportVerify,
+};
 use crate::infobase::OutputDirectoryNotEmpty;
 pub use parse::{Common, ExportRequest, ImportRequest, Invocation, Refusal};
 
@@ -335,6 +338,13 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         } else {
             InfobaseImportStageMode::Auto
         },
+        verify: if request.no_verify {
+            InfobaseImportVerify::Off
+        } else if request.verify {
+            InfobaseImportVerify::On
+        } else {
+            InfobaseImportVerify::Auto
+        },
         source_dir: PathBuf::from(&request.path),
     }
 }
@@ -573,11 +583,14 @@ mod tests {
                 ..common()
             },
             base_free: false,
+            verify: false,
+            no_verify: false,
             path: OsString::from("tree"),
         };
         let args = import_args(&import);
         assert!(args.replace_config_save && args.allow_non_lab);
         assert_eq!(args.stage_mode, InfobaseImportStageMode::Auto);
+        assert_eq!(args.verify, InfobaseImportVerify::Auto);
         assert_eq!(
             args.script_output,
             Some(
@@ -589,9 +602,19 @@ mod tests {
         );
         let args = import_args(&ImportRequest {
             base_free: true,
-            ..import
+            ..import.clone()
         });
         assert_eq!(args.stage_mode, InfobaseImportStageMode::BaseFree);
+        let args = import_args(&ImportRequest {
+            no_verify: true,
+            ..import.clone()
+        });
+        assert_eq!(args.verify, InfobaseImportVerify::Off);
+        let args = import_args(&ImportRequest {
+            verify: true,
+            ..import
+        });
+        assert_eq!(args.verify, InfobaseImportVerify::On);
     }
 
     #[test]

@@ -92,7 +92,10 @@ use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 mod empty_stage;
+mod stage_guard;
 mod stage_timing;
+
+pub use stage_guard::{StageRefused, StageVerification};
 
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
@@ -487,6 +490,8 @@ pub struct StageSourceObjectsReport {
     pub after: StorageTableManifest,
     pub versions_blob: GeneratedBlobReport,
     pub version_replacements: Vec<VersionReplacement>,
+    /// What the guard compared with the tree, when it ran.
+    pub verification: Option<StageVerification>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3431,6 +3436,17 @@ pub fn stage_source_objects(
     let patched_versions =
         patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
 
+    // The guard: the state this stage would leave, exported with the model and
+    // compared with the tree, before anything is written.
+    let verification = if stage_guard::wanted(args.verify) {
+        let staged = bulk_stage_rows(&metadata_objects, &common_modules, &patched_versions.blob);
+        Some(timed_stage_step("verify the staged state", || {
+            stage_guard::verify_patch_stage(args, &sql, &manifest, &staged)
+        })?)
+    } else {
+        None
+    };
+
     let batch_size = args.batch_size.unwrap_or(500).max(1);
     let batches = if !args.per_row {
         Vec::new()
@@ -3545,6 +3561,7 @@ pub fn stage_source_objects(
             sha256: patched_versions.output_sha256,
         },
         version_replacements: patched_versions.replacements,
+        verification,
     })
 }
 

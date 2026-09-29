@@ -318,7 +318,7 @@ fn infer_object_hint(relative: &str, kind: &SourceKind, xml_root: Option<&str>) 
     xml_root.map(ToOwned::to_owned)
 }
 
-fn is_metadata_collection(value: &str) -> bool {
+pub(crate) fn is_metadata_collection(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     matches!(
         value.as_str(),

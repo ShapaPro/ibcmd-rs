@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::cli::{
     InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseConfigRoundtripArgs,
-    InfobaseConfigSweepArgs, InfobaseImportStageMode, MssqlCloneArgs,
+    InfobaseConfigSweepArgs, InfobaseImportStageMode, InfobaseImportVerify, MssqlCloneArgs,
 };
 use crate::infobase::{
     ConnectionConfig, ConnectionRequest, InfobaseConfigExportReport, InfobaseConfigImportReport,
@@ -236,6 +236,8 @@ pub fn roundtrip_config(
         script_output: args.script_output.clone(),
         // A clone of the source database: its own rows are patched.
         stage_mode: InfobaseImportStageMode::Patch,
+        // A research sweep measures what the stage does; it is not refused.
+        verify: InfobaseImportVerify::Off,
         source_dir: baseline_dir.clone(),
     })?;
 

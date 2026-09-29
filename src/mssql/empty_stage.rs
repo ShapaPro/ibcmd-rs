@@ -1677,6 +1677,15 @@ pub(super) fn stage_source_objects_base_free(
             &args.sql_pwd_env,
         )?)
     };
+    // The guard: the state this stage would leave, exported with the model and
+    // compared with the tree, before anything is written.
+    let verification = if super::stage_guard::wanted(args.verify) {
+        Some(super::timed_stage_step("verify the staged state", || {
+            super::stage_guard::verify_base_free_stage(args, sql.as_ref(), &bulk)
+        })?)
+    } else {
+        None
+    };
     if sql
         .as_ref()
         .is_none_or(|sql| bulk_stage_rows_file_needed(sql, args.script_only))
@@ -1785,6 +1794,7 @@ pub(super) fn stage_source_objects_base_free(
         after,
         versions_blob: versions,
         version_replacements: Vec::new(),
+        verification,
     })
 }
 
