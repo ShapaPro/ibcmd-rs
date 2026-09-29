@@ -336,6 +336,11 @@ pub fn build(
 /// go through one decoder, so a reference is spelled the same on both.
 pub struct Decoder {
     context: ExportContext,
+    /// Other compatibility modes a staged row may be written for: the
+    /// platform that imported it writes the record format of its own
+    /// edition, which is not always the one the active configuration's
+    /// compatibility mode stores.
+    staged: Vec<ExportContext>,
 }
 
 impl Decoder {
@@ -346,6 +351,40 @@ impl Decoder {
                 version: version.to_string(),
                 compat,
             },
+            staged: Vec::new(),
+        }
+    }
+
+    /// A decoder for a comparison: the active rows are read in `compat`, a
+    /// staged row in `compat` or, when that does not read it, in the first of
+    /// `staged_compats` that does.
+    pub fn for_comparison(
+        names: NameIndex,
+        version: &str,
+        compat: Compat,
+        staged_compats: &[Compat],
+    ) -> Self {
+        let mut others = Vec::<Compat>::new();
+        for other in staged_compats {
+            if *other != compat && !others.contains(other) {
+                others.push(*other);
+            }
+        }
+        let staged = others
+            .into_iter()
+            .map(|other| ExportContext {
+                names: names.clone(),
+                version: version.to_string(),
+                compat: other,
+            })
+            .collect();
+        Self {
+            context: ExportContext {
+                names,
+                version: version.to_string(),
+                compat,
+            },
+            staged,
         }
     }
 
@@ -358,10 +397,30 @@ impl Decoder {
     }
 
     pub fn decode(&self, kind: &str, row: &[u8]) -> Result<Element> {
+        self.decode_in(kind, row, &self.context)
+    }
+
+    /// A staged row: in the active compatibility mode, else in another one;
+    /// the flag says it was another (the row is in a record format the
+    /// active configuration does not store).
+    pub fn decode_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
+        let first = self.decode(kind, row);
+        if let Ok(element) = first {
+            return Ok((element, false));
+        }
+        for context in &self.staged {
+            if let Ok(element) = self.decode_in(kind, row, context) {
+                return Ok((element, true));
+            }
+        }
+        first.map(|element| (element, false))
+    }
+
+    fn decode_in(&self, kind: &str, row: &[u8], context: &ExportContext) -> Result<Element> {
         if !has_decoder(kind) {
             return Err(anyhow!("the model has no decoder for {kind}"));
         }
         let tree = parse_row(row).with_context(|| format!("failed to read the {kind} row"))?;
-        decode_object(kind, &tree, &self.context)
+        decode_object(kind, &tree, context)
     }
 }

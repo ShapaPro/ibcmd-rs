@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::Result;
 
 use crate::metadata_model::brace::parse_row;
+use crate::metadata_model::objects::parts::Compat;
 use crate::metadata_model::xml::Element;
 
 use super::descriptor::{self, ObjectRef};
@@ -70,11 +71,21 @@ pub trait RowProvider {
 /// Turns a stored descriptor into the element tree the diff compares.
 pub trait Describe {
     fn describe_row(&self, kind: &str, row: &[u8]) -> Result<Element>;
+
+    /// A row of the staged configuration; the flag says it is in a record
+    /// format the active configuration does not store.
+    fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
+        self.describe_row(kind, row).map(|element| (element, false))
+    }
 }
 
 impl Describe for Decoder {
     fn describe_row(&self, kind: &str, row: &[u8]) -> Result<Element> {
         self.decode(kind, row)
+    }
+
+    fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
+        self.decode_staged(kind, row)
     }
 }
 
@@ -205,7 +216,15 @@ pub fn check(inputs: &Inputs, rows: &dyn RowProvider) -> Verdict {
     plan_problems(&old_plan, &new_plan, &mut verdict);
     let mut names = std::mem::take(&mut new_plan.names);
     names.absorb(std::mem::take(&mut old_plan.names));
-    let decoder = Decoder::new(names, &new_plan.version, new_plan.compat);
+    // The active rows are read in the active compatibility mode, a staged row
+    // in the staged one, or in the newest the model knows (a native import
+    // upgrades the record format of the rows it stages).
+    let decoder = Decoder::for_comparison(
+        names,
+        &new_plan.version,
+        old_plan.compat,
+        &[new_plan.compat, Compat(8, 3, 27)],
+    );
     check_planned(
         inputs,
         rows,
@@ -581,14 +600,10 @@ pub(crate) fn check_planned(
                     )),
                 }
             }
-            RowName::Service(service) => verdict.push_reason(reason(
-                ReasonClass::Unknown,
-                "Configuration",
-                name,
-                service,
-                "removed",
-            )),
-            RowName::DynamicMarker | RowName::Alias => {}
+            // `root`, `version` and `versions` are rows of the configuration,
+            // not versioned files: the native import leaves them out of the
+            // inventory it writes, ours lists them.
+            RowName::Service(_) | RowName::DynamicMarker | RowName::Alias => {}
             RowName::Other => verdict.push_reason(reason(
                 ReasonClass::Unknown,
                 name,
@@ -699,9 +714,9 @@ fn compare_descriptor(
         return;
     };
     let old_element = describe.describe_row(kind, old);
-    let new_element = describe.describe_row(kind, staged);
+    let new_element = describe.describe_staged(kind, staged);
     match (old_element, new_element) {
-        (Ok(old_element), Ok(new_element)) => {
+        (Ok(old_element), Ok((new_element, upgraded))) => {
             let count = descriptor::compare(
                 &ObjectRef {
                     kind,
@@ -713,7 +728,17 @@ fn compare_descriptor(
                 &new_element,
                 verdict,
             );
-            if count == 0 {
+            if count == 0 && upgraded {
+                // The platform that imported the stage writes the record
+                // format of its own edition; the descriptor is the same.
+                verdict.push_note(Note {
+                    object: label.clone(),
+                    file_name: name.to_string(),
+                    property: String::new(),
+                    change: "the row is in another record format; the descriptor is the same"
+                        .to_string(),
+                });
+            } else if count == 0 {
                 verdict.push_reason(reason(
                     ReasonClass::Unknown,
                     &label,
@@ -1086,6 +1111,61 @@ mod tests {
         let verdict = run(&inputs, &Rows::default());
         assert!(verdict.needs_restructuring);
         assert_eq!(verdict.reasons[0].class, ReasonClass::Unknown);
+    }
+
+    /// Reads a staged row in "another record format": the flag is set.
+    struct Upgraded;
+
+    impl Describe for Upgraded {
+        fn describe_row(&self, _kind: &str, row: &[u8]) -> Result<Element> {
+            parse_element_tree(row)
+        }
+
+        fn describe_staged(&self, _kind: &str, row: &[u8]) -> Result<(Element, bool)> {
+            parse_element_tree(row).map(|element| (element, true))
+        }
+    }
+
+    #[test]
+    fn a_row_in_another_record_format_that_says_the_same_is_no_change() {
+        let mut inputs = base_inputs();
+        stage(&mut inputs, CATALOG);
+        let mut same = catalog_xml("9", "Кассы");
+        same.extend_from_slice(b"  ");
+        inputs.staged_descriptors.insert(CATALOG.to_string(), same);
+        let old = plan_of(&[(CATALOG, "Catalog"), (MODULE, "CommonModule")]);
+        let mut verdict = Verdict::new("rows");
+        verdict.stats.staged_rows = inputs.staged_names.len();
+        let verdict = check_planned(
+            &inputs,
+            &Rows::default(),
+            &old,
+            &old,
+            &labels(),
+            &Upgraded,
+            &inputs.new_inventory.clone(),
+            verdict,
+        );
+        assert!(!verdict.needs_restructuring, "{:?}", verdict.reasons);
+        assert_eq!(verdict.notes.len(), 1);
+        assert!(verdict.notes[0].change.contains("record format"));
+
+        // A change in such a row is still a change.
+        inputs
+            .staged_descriptors
+            .insert(CATALOG.to_string(), catalog_xml("12", "Кассы"));
+        let verdict = check_planned(
+            &inputs,
+            &Rows::default(),
+            &old,
+            &old,
+            &labels(),
+            &Upgraded,
+            &inputs.new_inventory.clone(),
+            Verdict::new("rows"),
+        );
+        assert!(verdict.needs_restructuring);
+        assert_eq!(verdict.reasons[0].property, "Properties/CodeLength");
     }
 
     #[test]
