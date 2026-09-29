@@ -150,6 +150,17 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
             NodeKind::Export | NodeKind::Import => {
                 assert_malformed(&args, "Не указано значение параметра");
             }
+            // served, and it needs no path: it starts, and stops at the
+            // connection (a user without a password never reaches the server)
+            NodeKind::Apply => {
+                args.push("--db-user=sa");
+                let output =
+                    assert_exit(&args, FAILED, "не указан пароль пользователя сервера СУБД");
+                assert_eq!(
+                    text(&output.stdout),
+                    "[INFO] Обновление конфигурации базы данных...\n"
+                );
+            }
         }
     }
     assert_malformed(&["infobase"], "Указана неполная команда");
@@ -388,6 +399,7 @@ fn help_and_version() {
         vec!["infobase", "--help"],
         vec!["infobase", "-?"],
         vec!["infobase", "config", "export", "-h"],
+        vec!["infobase", "config", "apply", "--help"],
         vec!["help", "infobase"],
     ] {
         let output = run(&args);
@@ -402,6 +414,17 @@ fn help_and_version() {
     let output = run(&["help"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(text(&output.stdout).contains("Поддерживаемые режимы"));
+    assert!(text(&output.stdout).contains("config apply"));
+    // the help of the mode describes apply, its words and its refusals
+    let output = run(&["help", "infobase"]);
+    let help = text(&output.stdout);
+    for word in [
+        "--dynamic=<auto|disable|prompt|force>",
+        "--session-terminate=<disable|prompt|force>",
+        "требуется штатный config apply",
+    ] {
+        assert!(help.contains(word), "{word}");
+    }
     let output = run(&["help", "source-diff"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(text(&output.stdout).contains("Usage"));
@@ -416,4 +439,149 @@ fn help_and_version() {
         assert_eq!(output.status.code(), Some(0), "{flag}");
         assert!(text(&output.stdout).starts_with("ibcmd-rs "), "{flag}");
     }
+}
+
+#[test]
+fn apply_words_and_refusals_are_the_platforms_before_anything_runs() {
+    // every case fails at the command line, before a connection: nothing on
+    // stdout, the platform's exit code (2) for what its parser refuses too,
+    // ibcmd-rs's (1) for what this version does not serve
+    let common = [
+        "infobase",
+        "config",
+        "apply",
+        "--dbms=MSSQLServer",
+        "--db-name=b",
+    ];
+    let refused = "не поддерживается в этой версии ibcmd-rs";
+    for (option, code, needle) in [
+        // measured on 8.3.27.2214: the words are case-sensitive, a missing word is a wrong one
+        (
+            "--dynamic=bogus",
+            MALFORMED,
+            "Некорректное значение параметра: dynamic",
+        ),
+        (
+            "--dynamic=AUTO",
+            MALFORMED,
+            "Некорректное значение параметра: dynamic",
+        ),
+        (
+            "--dynamic=",
+            MALFORMED,
+            "Некорректное значение параметра: dynamic",
+        ),
+        (
+            "--dynamic",
+            MALFORMED,
+            "Некорректное значение параметра: dynamic",
+        ),
+        (
+            "--session-terminate=bogus",
+            MALFORMED,
+            "Некорректное значение параметра: session-terminate",
+        ),
+        ("--force=yes", MALFORMED, "Ошибка разбора параметра: force"),
+        ("--bogus", MALFORMED, "Ошибка разбора параметра: --bogus"),
+        (
+            "--exclusivity=maybe",
+            MALFORMED,
+            "Недопустимое значение параметра --exclusivity: maybe",
+        ),
+        (
+            "--dynamic=force",
+            UNSUPPORTED,
+            "Параметр `--dynamic=force` команды `infobase config apply`",
+        ),
+        (
+            "--extension=E",
+            UNSUPPORTED,
+            "Параметр `--extension` команды `infobase config apply`",
+        ),
+        ("--remote=http://h:1545", UNSUPPORTED, "Параметр `--remote`"),
+        ("--pid=1", UNSUPPORTED, "Параметр `--pid`"),
+        (
+            "--sqlcmd=C:\\sql\\SQLCMD.EXE",
+            UNSUPPORTED,
+            "работает только через встроенный клиент SQL Server",
+        ),
+    ] {
+        let mut args = common.to_vec();
+        args.push(option);
+        let output = assert_exit(&args, code, needle);
+        assert_eq!(text(&output.stdout), "", "{option}");
+        if code == UNSUPPORTED && !option.starts_with("--sqlcmd") {
+            assert!(text(&output.stderr).contains(refused), "{option}");
+        }
+    }
+    for dbms in ["PostgreSQL", "IBMDB2", "OracleDatabase"] {
+        assert_refused(
+            &["infobase", "config", "apply", &format!("--dbms={dbms}")],
+            &format!("СУБД `{dbms}` не поддерживается"),
+        );
+    }
+    // what the platform accepts is accepted: the short spellings, the
+    // session options that need nobody connected, a stray argument; the
+    // run stops at the connection (a user without a password)
+    for extra in [
+        vec!["-F"],
+        vec![
+            "--force",
+            "--dynamic=disable",
+            "--session-terminate=disable",
+        ],
+        vec![
+            "--dynamic=auto",
+            "--session-terminate=force",
+            "--session-terminate-message=lab",
+        ],
+        vec!["--dynamic=prompt", "--session-terminate=prompt"],
+        vec!["stray"],
+    ] {
+        let mut args = common.to_vec();
+        args.push("--db-user=sa");
+        args.extend(extra.iter().copied());
+        let output = assert_exit(&args, FAILED, "не указан пароль пользователя сервера СУБД");
+        assert_eq!(
+            text(&output.stdout),
+            "[INFO] Обновление конфигурации базы данных...\n",
+            "{extra:?}"
+        );
+    }
+}
+
+#[test]
+fn apply_failure_is_told_in_the_platforms_shape_and_recorded() {
+    let out = TempDir::new("apply-failure");
+    let report = out.path().join("report.json");
+    let output = run(&[
+        "infobase",
+        "config",
+        "apply",
+        "--dbms=MSSQLServer",
+        "--db-server=localhost",
+        "--db-name=ibcmd_rs_dropin_test",
+        "--db-user=sa",
+        "--force",
+        &format!("--report={}", report.display()),
+    ]);
+    assert_eq!(output.status.code(), Some(FAILED));
+    assert_eq!(
+        text(&output.stdout),
+        "[INFO] Обновление конфигурации базы данных...\n"
+    );
+    let stderr = text(&output.stderr);
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert!(lines.len() >= 2, "{stderr}");
+    assert!(
+        lines[0].starts_with("[ERROR] не указан пароль пользователя сервера СУБД"),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[lines.len() - 1],
+        "[ERROR] Обновление конфигурации базы данных завершено с ошибкой"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["operation"], "infobase config apply");
 }

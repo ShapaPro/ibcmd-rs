@@ -26,9 +26,10 @@ pub enum Commands {
     Convert(ConvertArgs),
     /// Inspect, verify, export, or overlay CF without an installed 1C platform.
     Cf(CfArgs),
-    /// Drop-in `ibcmd infobase`: `config export` and `config import` in the
-    /// platform ibcmd's syntax, against Microsoft SQL Server; other commands
-    /// are refused. `infobase --help` prints its help (in Russian).
+    /// Drop-in `ibcmd infobase`: `config export`, `config import` and
+    /// `config apply` in the platform ibcmd's syntax, against Microsoft SQL
+    /// Server; other commands are refused. `infobase --help` prints its help
+    /// (in Russian).
     #[command(disable_help_flag = true)]
     Infobase(NativeModeArgs),
     /// The platform ibcmd's other modes, refused with a clear message.
