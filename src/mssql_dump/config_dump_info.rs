@@ -75,27 +75,32 @@ const CONFIGURATION_COMMAND_INTERFACE_UUID: &str = "00000000-0000-0000-0000-0000
 pub(super) enum VersionsBlobOrigin {
     MssqlConfigTable,
     CfStorageImage,
+    /// A configuration extension (.cfe): no `versions` entry, but its
+    /// `configinfo` lists every entry with a SHA-1 (base64) whose hex is the
+    /// `configVersion` 8.3.27.2214 writes (ИТК x3, fixture `test_extension`).
+    ExtensionConfigInfo,
 }
 
 impl VersionsBlobOrigin {
     const fn embeds_service_entries(self) -> bool {
         matches!(self, Self::MssqlConfigTable)
     }
+
+    /// The service entries the storage keeps beside the versioned ones.
+    const fn service_names(self) -> &'static [&'static str] {
+        match self {
+            Self::MssqlConfigTable | Self::CfStorageImage => &MANIFEST_SERVICE_NAMES,
+            Self::ExtensionConfigInfo => &EXTENSION_SERVICE_NAMES,
+        }
+    }
 }
+
+const EXTENSION_SERVICE_NAMES: [&str; 1] = ["configinfo"];
 
 struct ConfigVersionEntry {
     id: String,
-    version: ConfigVersion,
-}
-
-/// The version stamp of one storage entry. A configuration keeps a 16-byte
-/// uuid per entry in its `versions` row (printed padded to 40 hex digits); an
-/// extension has no `versions` row, and the platform prints the SHA-1 of the
-/// entry's packed bytes instead.
-#[derive(Clone, Copy)]
-enum ConfigVersion {
-    Uuid(Uuid),
-    Sha1([u8; 20]),
+    /// The `configVersion` as written: 40 hex digits.
+    version: String,
 }
 
 struct ConfigDumpMetadata {
@@ -153,8 +158,11 @@ pub(super) fn write_config_dump_info(
     partial_inventory_policy: ConfigDumpInfoPartialInventoryPolicy,
     inventory: ConfigDumpInfoInventory<'_>,
 ) -> Result<bool> {
-    let versions = parse_versions_blob(versions_blob, versions_blob_origin)?;
-    validate_versions_inventory(&versions, inventory.file_names)?;
+    let versions = without_unstored_nil_versions(
+        parse_versions_blob(versions_blob, versions_blob_origin)?,
+        inventory.file_names,
+    );
+    validate_versions_inventory(&versions, inventory.file_names, versions_blob_origin)?;
     write_config_dump_info_entries(
         output,
         output_dir,
@@ -195,7 +203,7 @@ pub(super) fn write_extension_config_dump_info(
         .iter()
         .map(|(id, digest)| ConfigVersionEntry {
             id: id.clone(),
-            version: ConfigVersion::Sha1(*digest),
+            version: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
         })
         .collect::<Vec<_>>();
     write_config_dump_info_entries(
@@ -320,7 +328,7 @@ fn write_config_dump_info_entries(
         metadata.push(ConfigDumpMetadata {
             name,
             id: entry.id,
-            config_version: config_version(&entry.version),
+            config_version: entry.version,
             children,
         });
     }
@@ -360,10 +368,41 @@ fn write_config_dump_info_entries(
     Ok(true)
 }
 
+/// Entry name → the `configVersion` ConfigDumpInfo.xml gives it, as the
+/// container records them: a configuration's `versions`, an extension's
+/// `configinfo`. `None` for a container that records neither (an external
+/// object) or records them unreadably.
+pub fn stored_config_versions(entries: &[(String, Vec<u8>)]) -> Option<BTreeMap<String, String>> {
+    let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
+    let (name, origin) = if has("versions") {
+        ("versions", VersionsBlobOrigin::CfStorageImage)
+    } else if has("configinfo") && !has("root") {
+        ("configinfo", VersionsBlobOrigin::ExtensionConfigInfo)
+    } else {
+        return None;
+    };
+    let (_, blob) = entries.iter().find(|(entry, _)| entry == name)?;
+    let file_names = entries
+        .iter()
+        .map(|(entry, _)| entry.clone())
+        .collect::<BTreeSet<_>>();
+    let versions =
+        without_unstored_nil_versions(parse_versions_blob(blob, origin).ok()?, &file_names);
+    Some(
+        versions
+            .into_iter()
+            .map(|entry| (entry.id, entry.version))
+            .collect(),
+    )
+}
+
 fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<ConfigVersionEntry>> {
     let plain = inflate_raw_deflate(blob).context("failed to inflate Config versions row")?;
     let text = std::str::from_utf8(&plain).context("Config versions row is not valid UTF-8")?;
     let text = text.trim_start_matches('\u{feff}');
+    if origin == VersionsBlobOrigin::ExtensionConfigInfo {
+        return parse_extension_config_info(text);
+    }
     let fields = split_1c_braced_fields(text, 0)
         .ok_or_else(|| anyhow!("Config versions row is not a structured 1C list"))?;
     if fields.first().map(|field| field.trim()) != Some("1") {
@@ -422,8 +461,54 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
         .filter(|(name, _)| !VERSIONS_EMBEDDED_SERVICE_NAMES.contains(&name.as_str()))
         .map(|(id, version)| ConfigVersionEntry {
             id,
-            version: ConfigVersion::Uuid(version),
+            version: config_version(version),
         })
+        .collect())
+}
+
+/// `configinfo`: `{0,{216,0,{<compat>,0}}},{2,<root>,},{N,("entry",<sha1 base64>)xN}`.
+fn parse_extension_config_info(text: &str) -> Result<Vec<ConfigVersionEntry>> {
+    let mut start = 0;
+    let mut lists = Vec::new();
+    while let Some(open) = text[start..].find('{').map(|at| start + at) {
+        let end = scan_1c_braced_value(text, open)
+            .ok_or_else(|| anyhow!("configinfo holds an unbalanced list"))?;
+        lists.push(&text[open..end]);
+        start = end;
+    }
+    let [_, _, entries] = lists.as_slice() else {
+        bail!("configinfo holds {} lists, not three", lists.len());
+    };
+    let fields = split_1c_braced_fields(entries, 0)
+        .ok_or_else(|| anyhow!("configinfo entry list is not a structured 1C list"))?;
+    let count = fields
+        .first()
+        .and_then(|field| field.trim().parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("configinfo entry list has no count"))?;
+    if count > fields.len() || fields.len() != 1 + 2 * count {
+        bail!(
+            "configinfo declares {count} entries but holds {} fields",
+            fields.len()
+        );
+    }
+    let mut named = BTreeMap::new();
+    for pair in fields[1..].chunks_exact(2) {
+        let name = parse_1c_quoted_string(pair[0].trim())
+            .ok_or_else(|| anyhow!("configinfo holds an invalid entry name"))?;
+        let hash = crate::module_blob::decode_base64_mime(pair[1].trim())
+            .filter(|hash| hash.len() == 20)
+            .ok_or_else(|| anyhow!("configinfo entry {name:?} has no SHA-1"))?;
+        let version = hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if named.insert(name.clone(), version).is_some() {
+            bail!("configinfo lists {name} twice");
+        }
+    }
+    Ok(named
+        .into_iter()
+        .map(|(id, version)| ConfigVersionEntry { id, version })
         .collect())
 }
 
@@ -450,14 +535,29 @@ pub(super) fn is_dynamic_update_entry(name: &str) -> bool {
     name.contains(DYNAMIC_UPDATE_STAMP)
 }
 
+/// `versions` without records of nothing stored: a nil version naming no
+/// entry of the container (2.1.34.1.cf: `"deleted"`), which the platform's
+/// dump does not name either.
+fn without_unstored_nil_versions(
+    versions: Vec<ConfigVersionEntry>,
+    file_names: &BTreeSet<String>,
+) -> Vec<ConfigVersionEntry> {
+    let nil = config_version(Uuid::nil());
+    versions
+        .into_iter()
+        .filter(|entry| entry.version != nil || file_names.contains(&entry.id))
+        .collect()
+}
+
 fn validate_versions_inventory(
     versions: &[ConfigVersionEntry],
     file_names: &BTreeSet<String>,
+    origin: VersionsBlobOrigin,
 ) -> Result<()> {
     let version_names = versions
         .iter()
         .map(|entry| entry.id.as_str())
-        .chain(MANIFEST_SERVICE_NAMES)
+        .chain(origin.service_names().iter().copied())
         .collect::<BTreeSet<_>>();
     let manifest_names = file_names
         .iter()
@@ -808,21 +908,12 @@ fn build_config_dump_children(
     Ok(Some(children_by_owner))
 }
 
-fn config_version(version: &ConfigVersion) -> String {
+fn config_version(version: Uuid) -> String {
     let mut value = String::with_capacity(40);
-    match version {
-        ConfigVersion::Uuid(uuid) => {
-            for byte in uuid.to_bytes_le() {
-                value.push_str(&format!("{byte:02x}"));
-            }
-            value.push_str("00000000");
-        }
-        ConfigVersion::Sha1(digest) => {
-            for byte in digest {
-                value.push_str(&format!("{byte:02x}"));
-            }
-        }
+    for byte in version.to_bytes_le() {
+        value.push_str(&format!("{byte:02x}"));
     }
+    value.push_str("00000000");
     value
 }
 
@@ -868,7 +959,7 @@ mod tests {
     fn dynamic_update_service_marker_is_not_an_object_inventory_entry() {
         let versions = vec![ConfigVersionEntry {
             id: "object.0".to_owned(),
-            version: ConfigVersion::Uuid(Uuid::nil()),
+            version: config_version(Uuid::nil()),
         }];
         let names = [
             "object.0",
@@ -880,6 +971,30 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-        validate_versions_inventory(&versions, &names).unwrap();
+        validate_versions_inventory(&versions, &names, VersionsBlobOrigin::CfStorageImage).unwrap();
+    }
+
+    #[test]
+    fn a_versions_record_of_nothing_stored_is_no_inventory_entry() {
+        // 2.1.34.1.cf lists `"deleted"` under the nil version with no such
+        // entry in the container, and the native dump names nothing of it;
+        // the mismatch failed the whole export.
+        let versions = vec![
+            ConfigVersionEntry {
+                id: "object.0".to_owned(),
+                version: config_version(Uuid::from_u128(1)),
+            },
+            ConfigVersionEntry {
+                id: "deleted".to_owned(),
+                version: config_version(Uuid::nil()),
+            },
+        ];
+        let names = ["object.0", "root", "version", "versions"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let kept = without_unstored_nil_versions(versions, &names);
+        assert_eq!(kept.len(), 1);
+        validate_versions_inventory(&kept, &names, VersionsBlobOrigin::CfStorageImage).unwrap();
     }
 }

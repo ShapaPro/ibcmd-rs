@@ -9,6 +9,8 @@ pub mod dcs_template_audit;
 pub mod dropin;
 #[cfg(feature = "platform-oracle")]
 pub mod dump_sources;
+pub mod extension;
+pub mod external;
 pub mod form_matrix;
 pub mod form_provenance;
 pub(crate) mod form_schema;
@@ -16,6 +18,7 @@ pub mod infobase;
 #[cfg(feature = "platform-oracle")]
 pub mod infobase_oracle;
 pub mod legacy_version;
+pub mod load;
 pub mod metadata_model;
 pub(crate) mod metadata_owner_graph;
 pub mod module_blob;
@@ -52,4 +55,5 @@ pub mod sql;
 pub mod storage_map;
 pub mod templates;
 pub mod trace;
+pub mod update;
 pub(crate) mod v8_container;

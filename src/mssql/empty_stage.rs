@@ -608,6 +608,25 @@ impl EmptyStage {
     }
 }
 
+/// The rows of the objects `selected` (descriptor XMLs of the tree) alone,
+/// base-free, against the whole tree's context: objects a container does not
+/// have yet (`offline_compile`, `cf load` of an added object). Sets
+/// `BASE_FREE_STAGE`: no base row is read after it.
+pub(crate) fn prepare_empty_objects(
+    root: &Path,
+    selected: &[PathBuf],
+) -> Result<Vec<EmptyStageObject>> {
+    let walked = source_listing::walk(root);
+    let paths = descriptor_xmls_of(root, walked.files);
+    let files = read_descriptor_xmls(&paths)?;
+    let context = EmptyStageContext::new(root, None, &files, walked.listing)?;
+    drop(files);
+    Ok(selected
+        .iter()
+        .map(|path| prepare_empty_object(&context, path, false))
+        .collect())
+}
+
 pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<EmptyStage> {
     stage_timing::reset_from_env();
     let setup = stage_timing::start();

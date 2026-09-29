@@ -105,11 +105,32 @@ pub(super) fn metadata_text_row_audit_from_text(
         std::borrow::Cow::Borrowed(_) => text,
         std::borrow::Cow::Owned(rewritten) => rewritten,
     };
+    let text = match without_adoption_headers(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(rewritten) => rewritten,
+    };
+    // Header blocks in an older platform's spelling read in the current one
+    // (see `upgrade_header_blocks` for the evidence).
+    let text = super::upgrade::upgrade_record_by_shape(&text, file_name).unwrap_or(text);
     let object_code = parse_metadata_object_code(&text);
     let fields_missing = metadata_object_fields(&text).is_none();
     let header = parse_metadata_header_from_text(&text, file_name);
     let (kind, folder) = match object_code {
         Some(12) => (Some("CommonModule".to_string()), Some("CommonModules")),
+        // A form descriptor (`{0,{13,<header>,0,1,…}}`) shares an integration
+        // service's code and header slot but names nothing behind the
+        // header; read as a service, an orphan one (its owner not read) wrote
+        // its body as `IntegrationServices/<form>/Ext/Module.bsl` (21 files
+        // over two real configurations). It is a form, which has no folder of
+        // its own -- the kind `normalize_direct_form_metadata` gives the other
+        // form descriptor shape.
+        Some(0)
+            if metadata_source_for_text(0, &text, file_name)
+                == Some(("IntegrationService", "IntegrationServices"))
+                && !metadata_text_names_identifiers_behind_header(&text, file_name) =>
+        {
+            (Some("Form".to_string()), None)
+        }
         Some(code) => metadata_source_for_text(code, &text, file_name)
             .map(|(kind, folder)| (Some(kind.to_string()), Some(folder)))
             .unwrap_or((None, None)),
@@ -129,7 +150,7 @@ pub(super) fn metadata_text_row_audit_from_text(
         Some(MetadataExtractionMissReason::Fields)
     } else if row.header.is_none() {
         Some(MetadataExtractionMissReason::Header)
-    } else if row.folder.is_none() {
+    } else if row.folder.is_none() && row.kind.as_deref() != Some("Form") {
         Some(MetadataExtractionMissReason::Family)
     } else {
         None
@@ -145,6 +166,150 @@ pub(super) fn metadata_text_row_audit_from_text(
     } else {
         MetadataTextRowAudit::Extracted(row)
     }
+}
+
+/// `text` with every object header's adoption part cleared: an extension
+/// stores an adopted object -- and each adopted attribute, tabular section,
+/// … inside it -- as `{3,{1,0,<uuid>},<name>,<synonym>,<comment>,1,N,
+/// (<property>,<state>)×N,<extended object>,0}`, which every reader here
+/// refuses (a real extension: 65 catalogs and documents). Read as the object of the
+/// extension it also is (`…,0,0,<nil>,0`), it takes the path an own object
+/// takes; the extension writer (`crate::extension`) reads the adoption from
+/// the stored row and rewrites the XML (fixture `adopted/document_children`).
+pub(super) fn without_adoption_headers(text: &str) -> std::borrow::Cow<'_, str> {
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+    // The configuration root keeps its own: its readers take the adopted
+    // header, and it holds no children's headers.
+    if text.trim_start().starts_with("{2,")
+        && text.contains("{9cd510cd-abfc-11d4-9434-004095e12fc7,")
+    {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut edits = Vec::new();
+    let mut search = 0;
+    while let Some(relative) = text[search..].find("{1,0,") {
+        let marker = search + relative;
+        search = marker + 1;
+        // The header list opens right before the marker: `{3,` or `{2,`.
+        let before = text[..marker].trim_end();
+        let Some(before) = before.strip_suffix(',') else {
+            continue;
+        };
+        let before = before.trim_end();
+        let version = if before.ends_with("{3") {
+            "3"
+        } else if before.ends_with("{2") {
+            "2"
+        } else {
+            continue;
+        };
+        let start = before.len() - 2;
+        let Some(fields) = split_1c_braced_fields(text, start) else {
+            continue;
+        };
+        // Counts come from the file: one beyond the fields is no header.
+        let Some(pairs) = fields
+            .get(6)
+            .and_then(|field| field.trim().parse::<usize>().ok())
+            .filter(|pairs| *pairs <= fields.len())
+        else {
+            continue;
+        };
+        let belonging = fields.get(5).map(|field| field.trim());
+        if !(belonging == Some("1") || (belonging == Some("0") && pairs > 0)) {
+            continue;
+        }
+        // `{3,…}` ends with the widened properties: a count, then
+        // `(property, state, extend value)` each (a real extension: 15 widened types).
+        let tail = if version == "3" {
+            let Some(widened) = fields
+                .get(8 + 2 * pairs)
+                .and_then(|field| field.trim().parse::<usize>().ok())
+                .filter(|widened| *widened <= fields.len())
+            else {
+                continue;
+            };
+            2 + 3 * widened
+        } else {
+            1
+        };
+        if fields.len() != 7 + 2 * pairs + tail {
+            continue;
+        }
+        // An adopted object names the object it extends; one that names none
+        // is no header this reads.
+        if belonging == Some("1") && fields[7 + 2 * pairs].trim() == NIL {
+            continue;
+        }
+        let Some(end) = scan_1c_braced_value(text, start) else {
+            continue;
+        };
+        let mut plain = format!(
+            "{{{version},{},{},{},{},0,0,{NIL}",
+            fields[1].trim(),
+            fields[2].trim(),
+            fields[3].trim(),
+            fields[4].trim()
+        );
+        if version == "3" {
+            plain.push_str(",0");
+        }
+        plain.push('}');
+        edits.push((start, end, plain));
+        search = end;
+        // A widened type: the field after the header holds the type the
+        // extension checks the adopted one against, the header the types the
+        // extension adds. The readers take the added ones as the object's
+        // type; the extension writer prints both (`ExtendedProperty`).
+        if version == "3" {
+            let widened_at = 9 + 2 * pairs;
+            let widened_type = (0..(tail - 2) / 3).find_map(|index| {
+                let at = widened_at + 3 * index;
+                (fields.get(at)?.trim() == WIDENED_TYPE)
+                    .then(|| widened_type_pattern(fields.get(at + 2)?))
+                    .flatten()
+            });
+            if let Some(pattern) = widened_type {
+                let after = text[end..].trim_start();
+                let type_start = text.len() - after.len();
+                if let Some(value) = after.strip_prefix(',') {
+                    let value_start = type_start + 1 + (value.len() - value.trim_start().len());
+                    if text[value_start..].starts_with("{\"Pattern\"")
+                        && let Some(value_end) = scan_1c_braced_value(text, value_start)
+                    {
+                        edits.push((value_start, value_end, pattern.to_owned()));
+                        search = value_end;
+                    }
+                }
+            }
+        }
+    }
+    if edits.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end, plain) in edits {
+        out.push_str(&text[at..start]);
+        out.push_str(&plain);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// The type property (`Type` of a defined type, an attribute, a dimension,
+/// a filter criterion, …) in an adoption header.
+const WIDENED_TYPE: &str = "b1053250-abe6-11d4-9434-004095e12fc7";
+
+/// The `{"Pattern",…}` inside a widened value `{"#",<TypeDescription>,…}`.
+fn widened_type_pattern(value: &str) -> Option<&str> {
+    let fields = split_1c_braced_fields(value.trim(), 0)?;
+    (fields.len() == 3
+        && fields[0].trim() == r##""#""##
+        && fields[1].trim() == "f5c65050-3bbb-11d5-b988-0050bae0a95d"
+        && fields[2].trim().starts_with("{\"Pattern\""))
+    .then(|| fields[2].trim())
 }
 
 fn metadata_text_row_miss(
@@ -187,6 +352,18 @@ pub(super) fn metadata_source_for_text(
 ) -> Option<(&'static str, &'static str)> {
     let fields = metadata_object_fields(text)?;
     metadata_source_for_object_fields(code, text, uuid, &fields)
+}
+
+/// Whether the object record carries an identifier right behind its header
+/// (`{0,<header>,<uuid>,…}`), as an integration service does and a form
+/// descriptor (`{0,{13,<header>,0,1,…}}`) does not.
+pub(super) fn metadata_text_names_identifiers_behind_header(text: &str, uuid: &str) -> bool {
+    metadata_object_fields(text).is_some_and(|fields| {
+        metadata_header_field_index(&fields, uuid) == Some(1)
+            && fields
+                .get(2)
+                .is_some_and(|field| is_uuid_text(field.trim()))
+    })
 }
 
 pub(super) fn metadata_source_for_object_text(
@@ -421,4 +598,22 @@ pub(super) fn parse_metadata_header_from_text(text: &str, uuid: &str) -> Option<
         comment,
         template_type_code: template_type_code_from_metadata_text(text, uuid),
     })
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn a_count_beyond_the_fields_leaves_the_text_as_it_is() {
+        // Counts come from the file: arithmetic on them must not overflow.
+        for text in [
+            "{3,{1,0,00000000-0000-0000-0000-000000000015},\"Р\",{0},\"\",1,18446744073709551615,x}",
+            "{3,{1,0,00000000-0000-0000-0000-000000000015},\"Р\",{0},\"\",1,0,\
+             00000000-0000-0000-0000-000000000001,18446744073709551615}",
+        ] {
+            let text = text.replace("18446744073709551615", "18446744073709551615");
+            assert_eq!(without_adoption_headers(&text), text.as_str());
+        }
+    }
 }

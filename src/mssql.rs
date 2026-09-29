@@ -92,6 +92,7 @@ use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 mod empty_stage;
+mod offline_compile;
 mod patch_refusal;
 mod stage_guard;
 mod stage_timing;
@@ -100,6 +101,9 @@ pub use stage_guard::{StageRefused, StageVerification};
 
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
+};
+pub use offline_compile::{
+    CompiledContainerRows, compile_source_rows_offline, pack_module_text, skipped_bodies,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4459,9 +4463,23 @@ fn prepare_metadata_body_rows(
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
     let mut rows = Vec::new();
     for family in MetadataBodyFamily::ALL {
-        rows.extend(prepare_metadata_body_family(
+        let family_rows = prepare_metadata_body_family(
             family, sql, database, xml_path, xml, properties, source, axes,
-        )?);
+        );
+        match family_rows {
+            Ok(family_rows) => rows.extend(family_rows),
+            // An offline compile (`cf load`) takes only the rows of the files
+            // the tree edited: a body it could not compile is kept from the
+            // base, and one the edit needed is missed by name there.
+            Err(error) if CF_LOAD_COMPILE.load(std::sync::atomic::Ordering::Relaxed) => {
+                offline_compile::note_skipped(format!(
+                    "{} {}: {error:#}",
+                    xml_path.display(),
+                    family.label()
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(rows)
 }
@@ -5705,6 +5723,29 @@ fn prepare_form_body_row(
         None
     };
     let form_item_assets_root = form_path.with_extension("").join("Items");
+    // An extension's adopted form, compiled offline against its base row
+    // (`cf load`): the form, its interceptors' call types, the base form.
+    if CF_LOAD_COMPILE.load(std::sync::atomic::Ordering::Relaxed)
+        && !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed)
+        && form_xml.windows(10).any(|window| window == b"<BaseForm ")
+    {
+        let base_body = fetch_config_blob(sql, database, &body_id)?;
+        let items_root = form_path.with_file_name("Form").join("Items");
+        let blob = offline_compile::adopted_form_body(
+            &form_xml,
+            module_text.as_deref(),
+            source,
+            Some(items_root.as_path()),
+            &base_body,
+        )
+        .with_context(|| format!("failed to compile the adopted form {}", form_path.display()))?;
+        return Ok(vec![PreparedMetadataBodyStage {
+            body_id,
+            path: form_path,
+            blob_sha256: hex_sha256(&blob),
+            blob,
+        }]);
+    }
     // The native writer compiles a Form.xml from the source alone and is the
     // first choice for every form: every verified load-and-export cycle
     // (virtual and real, БСП and ERP УХ, 8.3.27 and 8.5) ran it that way, then
@@ -5722,6 +5763,14 @@ fn prepare_form_body_row(
                     source,
                     Some(native_items_root.as_path()),
                 )
+                .inspect_err(|error| {
+                    if std::env::var_os("IBCMD_RS_NATIVE_FORM_DEBUG").is_some() {
+                        eprintln!(
+                            "native form writer refused {}: {error:#}",
+                            form_path.display()
+                        );
+                    }
+                })
                 .ok()
             })
             .flatten()
@@ -7251,6 +7300,12 @@ static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
 /// --script-only`. A base row missing from the directory is then a missing
 /// row, not a query, and every request fails instead of connecting.
 static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set only by the offline compile of `cf load`, which takes the rows of
+/// the files the tree edited: a body it cannot compile is noted and kept
+/// from the base there. Every other stage (`--script-only` too) still fails
+/// on it.
+static CF_LOAD_COMPILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn ensure_online(action: &str) -> Result<()> {
     if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -16060,3 +16115,6 @@ mod tests {
         assert_eq!(super::bounded_patch_reason("short"), "short");
     }
 }
+
+#[cfg(test)]
+mod onecdec_tests;

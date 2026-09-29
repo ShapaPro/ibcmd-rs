@@ -4978,6 +4978,15 @@ fn native_root_property_bag(
         }
     };
     let mut bag: Vec<(&'static str, String)> = Vec::new();
+    // `<UseForFoldersAndItems>` is a catalog's (or a characteristic type
+    // chart's) form property: an adopted form spells it though its main
+    // attribute is the base configuration's form's, not its own.
+    let main_attribute_class =
+        if main_attribute_class.is_empty() && properties.use_for_folders_and_items.is_some() {
+            "cfg:CatalogObject"
+        } else {
+            main_attribute_class
+        };
     match main_attribute_class {
         "cfg:DynamicList" => {
             bag.push((
@@ -5323,9 +5332,17 @@ fn native_table_property_bag(
         )
     };
     let mut bag = Vec::new();
+    // A dynamic list's own properties say so too: an adopted form's table is
+    // bound to a list the base configuration's form declares, which the
+    // extension's Form.xml does not (the export prints them for dynamic
+    // lists alone).
     let dynamic_list = items
         .get(&item.name)
-        .is_some_and(|target| target.dynamic_list);
+        .is_some_and(|target| target.dynamic_list)
+        || item.auto_refresh_period.is_some()
+        || ["AutoRefresh", "UpdateOnDataChange", "AllowRootChoice"]
+            .iter()
+            .any(|name| item.scalars.contains_key(*name));
     if dynamic_list {
         bag.push(("5", flag("AutoRefresh", false)));
         bag.push((
@@ -11208,6 +11225,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                         &current_child_items,
                     )
                     || path_ends_with(&path, &["Form", "Attributes", "Attribute", "Type", "Type"])
+                    || path_ends_with(&path, &["Form", "Attributes", "Attribute", "Type", "TypeId"])
                     || path_ends_with(
                         &path,
                         &[
@@ -11681,6 +11699,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                     || path_ends_with_for_child_command_name(&path, &current_child_items)
                     || path_ends_with_for_child_data_path(&path, &current_child_items)
                     || path_ends_with(&path, &["Form", "Attributes", "Attribute", "Type", "Type"])
+                    || path_ends_with(&path, &["Form", "Attributes", "Attribute", "Type", "TypeId"])
                     || path_ends_with(
                         &path,
                         &[
@@ -12934,6 +12953,20 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                             let value = text_value.trim();
                             if !value.is_empty() {
                                 attribute.types.push(value.to_string());
+                            }
+                        }
+                    }
+                    // A type the export could not name: its raw id.
+                    "TypeId"
+                        if path_ends_with(
+                            &path,
+                            &["Form", "Attributes", "Attribute", "Type", "TypeId"],
+                        ) =>
+                    {
+                        if let Some(attribute) = current_attribute.as_mut() {
+                            let value = text_value.trim();
+                            if !value.is_empty() {
+                                attribute.types.push(format!("{RAW_TYPE_ID_PREFIX}{value}"));
                             }
                         }
                     }
@@ -30300,6 +30333,10 @@ fn parse_metadata_type_pattern_elements(
         .collect()
 }
 
+/// A form attribute's `<v8:TypeId>` (a type the export could not name),
+/// kept among its type names under this prefix.
+const RAW_TYPE_ID_PREFIX: &str = "#type-id:";
+
 #[allow(clippy::too_many_arguments)]
 fn parse_metadata_type_pattern_element(
     kind: &str,
@@ -30313,6 +30350,11 @@ fn parse_metadata_type_pattern_element(
     allowed_length_coding: StringAllowedLengthCoding,
     source: Option<&MetadataSourceContext>,
 ) -> Result<MetadataTypePatternElement> {
+    if let Some(type_id) = type_name.trim().strip_prefix(RAW_TYPE_ID_PREFIX) {
+        return Ok(MetadataTypePatternElement::Reference {
+            type_id: type_id.to_ascii_lowercase(),
+        });
+    }
     match type_name.trim() {
         "xs:boolean" => Ok(MetadataTypePatternElement::Boolean),
         "xs:string" => {
@@ -30477,6 +30519,9 @@ fn builtin_v8_type_id(type_name: &str) -> Option<&'static str> {
         "cfg:CatalogRef" => Some("e61ef7b8-f3e1-4f4b-8ac7-676e90524997"),
         "cfg:DocumentRef" => Some("38bfd075-3e63-4aaa-a93e-94521380d579"),
         "cfg:AnyIBRef" => Some("280f5f0e-9c8a-49cc-bf6d-4d296cc17a63"),
+        // The same type, as the export spells it under older compatibility
+        // modes (`mssql_dump::respell_any_ib_ref_by_compatibility`).
+        "cfg:AnyRef" => Some("280f5f0e-9c8a-49cc-bf6d-4d296cc17a63"),
         "cfg:ConstantsSet" => Some("dcfc3784-a14f-4786-ac7b-c82db5ba275f"),
         "cfg:ExchangePlanRef" => Some("0a52f9de-73ea-4507-81e8-66217bead73a"),
         "cfg:EnumRef" => Some("474c3bf6-08b5-4ddc-a2ad-989cedf11583"),

@@ -659,6 +659,10 @@ pub fn export_extension_image_to_source(
         output_dir,
         false,
         source_version,
+        // The extended configuration is resolved through this module's
+        // ExtensionContext base provider, not through the .cfe export's
+        // foreign references.
+        None,
     );
     let context = active();
     drop(guard);

@@ -38,6 +38,8 @@ import` тот же синтаксис, тот же вывод и те же ко
 | Выгрузить конфигурацию из базы в XML | `ibcmd infobase config export` | БСП и ERP УХ, платформы 8.3.27 и 8.5: все файлы совпадают со штатной выгрузкой |
 | Загрузить XML в существующую базу | `ibcmd infobase config import` | после загрузки и штатного `config apply` штатная выгрузка совпадает с исходным XML |
 | Загрузить XML в пустую базу | `ibcmd infobase config import` (режим выбирается сам) | БСП и ERP УХ, 8.3.27 и 8.5 |
+| Выгрузить `.cf`, `.cfe`, `.epf`, `.erf` в XML без базы и платформы | `ibcmd-rs cf export` | БСП и ERP УХ 8.3.27: все файлы совпадают со штатной выгрузкой |
+| Собрать новый `.cf`/`.cfe`/`.epf`/`.erf` из отредактированного XML | `ibcmd-rs cf load` | ERP УХ: правки модуля, описаний объектов и формы; штатная платформа загружает файл |
 | Сравнить два дерева XML | `ibcmd-rs source-diff` | — |
 
 Все команды, параметры, настройки и переменные окружения — в справочнике
@@ -216,7 +218,16 @@ ibcmd-rs mssql-stage-source-objects --database MyBase ^
   --replace-config-save --allow-non-lab [--base-free]
 
 ibcmd-rs source-diff -o diff.json C:\export\native C:\export\ours
+
+ibcmd-rs cf export C:\cf\MyConf.cf C:\src\MyConf --index
+ibcmd-rs cf load C:\src\MyConf C:\cf\MyConf-new.cf --base C:\cf\MyConf.cf
 ```
+
+`cf export` выгружает файл `.cf`, `.cfe`, `.epf` или `.erf` в XML без базы
+(штатному `ibcmd` для этого нужна база). `cf load` собирает новый файл с
+правками дерева, выгружает его обратно и сверяет с деревом; при расхождении
+файл не пишется. Подробнее — в
+[docs/COMMANDS.md](docs/COMMANDS.md#cf-export-и-cf-load--файлы-cf-cfe-epf-erf--xml-без-базы).
 
 У них сервер задаёт `--server`, логин — `--sql-user`, пароль — `--sql-pwd` или
 `IBCMD_DB_PSW`. `mssql-dump-config --rows-dir` выгружает XML без сервера, из
@@ -231,6 +242,8 @@ ibcmd-rs source-diff -o diff.json C:\export\native C:\export\ours
 - Проверено на БСП и ERP УХ, платформы 8.3.27.2214 и 8.5.1.1150. Другие
   конфигурации и версии платформы могут дать расхождения.
 - `ibcmd -v` печатает версию утилиты, а не платформы.
+- `cf load` пока проверен на правках модулей, описаний объектов и форм;
+  большой файл (ERP УХ) собирается 5–15 минут и требует до 20 ГБ памяти.
 - Остальные команды (`ibcmd-rs --help`: расширения, CF, аудит) —
   исследовательские и проверены меньше.
 

@@ -411,6 +411,8 @@ pub enum CfCommands {
     Overlay(CfOverlayArgs),
     /// Build a new CF from a complete XML source tree without a base or 1C platform.
     Bootstrap(CfBootstrapArgs),
+    /// Overlay the module and form edits of an exported tree onto the file it came from.
+    Load(CfLoadArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -508,6 +510,17 @@ pub struct CfExportArgs {
     /// Replace files under the output directory.
     #[arg(long, alias = "force")]
     pub overwrite: bool,
+    /// Also write `.ibcmd/index.tsv`: the input's digest and every file's, so
+    /// that `cf load` of this tree onto the same file needs no re-export.
+    #[arg(long)]
+    pub index: bool,
+    /// Bring an indexed tree exported from an earlier version of this file up
+    /// to it, rewriting only the entries that changed (a full export when
+    /// objects were added, removed or their metadata changed). Refuses a tree
+    /// without an index or with edits not loaded yet; files in dot
+    /// directories (`.git`) are never touched. Implies --index.
+    #[arg(long)]
+    pub update: bool,
 }
 
 #[derive(Debug, Args)]
@@ -566,6 +579,30 @@ pub struct CfOverlayArgs {
     /// Compile managed Form.xml against its existing native body row (`STORAGE_KEY=FILE`); repeatable.
     #[arg(long = "form-xml", value_name = "KEY=FILE")]
     pub form_xml: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CfLoadArgs {
+    /// Edited hierarchical XML source tree (a `cf export` of the base, changed).
+    pub source_dir: PathBuf,
+    /// New file destination. Existing files are never overwritten.
+    pub output: PathBuf,
+    /// The .cf/.cfe/.epf/.erf the tree was exported from.
+    #[arg(long)]
+    pub base: PathBuf,
+    /// Platform the tree's XML is for: a release (8.3.27, 8.5.1) or an exact
+    /// build; 8.3.x reads XML 2.20, 8.5.x 2.21.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        value_parser = crate::platform::parse_flag,
+        conflicts_with = "source_version"
+    )]
+    pub platform: Option<crate::platform::PlatformSpec>,
+    /// Source XML dialect of the tree (`--platform` names it through the
+    /// platform).
+    #[arg(long, value_enum, default_value_t = InfobaseConfigSourceVersion::V2_20, hide = true)]
+    pub source_version: InfobaseConfigSourceVersion,
 }
 
 #[derive(Debug, Args)]

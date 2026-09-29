@@ -107,7 +107,14 @@ pub(super) fn parse_role_rights_blob(
     // by the time that object is reached.
     let restriction_templates = parse_role_restriction_templates(fields.get(2)?)?;
     let set_for_new_objects = parse_role_bool_field(fields.get(3)?)?;
-    let set_for_attributes_by_default = parse_role_bool_field_or_default(&fields, 4, true)?;
+    // An extension's adopted role stores `2` here whatever its source says,
+    // and 8.3.27.2214 dumps `false` (fixture `adopted/role`).
+    let adopted_role = fields.get(4).map(|field| field.trim()) == Some("2");
+    let set_for_attributes_by_default = if adopted_role {
+        false
+    } else {
+        parse_role_bool_field_or_default(&fields, 4, true)?
+    };
     let independent_rights_of_child_objects = parse_role_bool_field_or_default(&fields, 5, false)?;
 
     let mut objects = Vec::with_capacity(count);
@@ -137,7 +144,7 @@ pub(super) fn parse_role_rights_blob(
         }
         let object_name = role_object_ref_name(&object_ref, object_refs)?;
 
-        let (rights, has_conditionless_restrictions) =
+        let (rights, mut has_conditionless_restrictions) =
             if is_configuration_root_rights_object(&object_name) {
                 (
                     parse_configuration_root_object_rights(entry[1], set_for_new_objects)?,
@@ -146,6 +153,19 @@ pub(super) fn parse_role_rights_blob(
             } else {
                 parse_role_object_rights(entry[1], field_refs, &object_name)?
             };
+        if object_ref.last().map(|field| field.trim()) == Some("3") {
+            // An extension's role names an object of the configuration it
+            // extends (an adopted object, the root, their attributes) with
+            // the reference tail `3`, and 8.3.27.2214 prints the rights it
+            // grants there and nothing else, whatever setForNewObjects or
+            // setForAttributesByDefault say -- the value-only mode. Fixture
+            // `adopted/role` (unset rights stored `2`); a real extension: its
+            // adopted full-access role (flag true) prints the root's six
+            // client-mode rights and two adopted data processors' Use/View,
+            // an own role prints `View` on an adopted catalog's standard
+            // attributes against setForAttributesByDefault true.
+            has_conditionless_restrictions = true;
+        }
         let intra_uuid_order =
             role_rights_object_intra_uuid_order(&object_ref, &object_name).unwrap_or(0);
         objects.push((
@@ -749,6 +769,9 @@ pub(super) fn role_standard_attribute_descriptor(
 const CONFIGURATION_ROOT_TOLERATED_UNNAMED_RIGHT_UUIDS: [&str; 1] =
     ["4df6d046-3bf8-4dda-991c-53ba664296a5"];
 
+/// The name the platform prints for that uuid once it diverges from the flag.
+const EXCLUSIVE_MODE_TERMINATION_AT_SESSION_START: &str = "ExclusiveModeTerminationAtSessionStart";
+
 /// True for the six Configuration-root rights that pick the client's launch
 /// mode (thin/thick client window mode, analytics client). Unlike every
 /// other Configuration-root right, their type default is `true`, not the
@@ -809,9 +832,18 @@ pub(super) fn parse_configuration_root_object_rights(
         }
         let value = parse_role_right_value(pairs[index * 2 + 1].trim())?;
         if CONFIGURATION_ROOT_TOLERATED_UNNAMED_RIGHT_UUIDS.contains(&right_uuid) {
-            if value != set_for_new_objects {
-                return None;
+            if value == set_for_new_objects {
+                continue;
             }
+            // Diverging from the flag, the platform names it: ИТК
+            // `Roles/ИТК_СтруктураХранения` and `ИТК_ПоискПоСтруктуреХранения`
+            // (flag false, value 1) print `ExclusiveModeTerminationAtSessionStart`
+            // `true` at this position.
+            entries.push(RoleRight {
+                name: EXCLUSIVE_MODE_TERMINATION_AT_SESSION_START.to_string(),
+                value,
+                restrictions: Vec::new(),
+            });
             continue;
         }
         let name = role_right_name(right_uuid)?;
@@ -844,7 +876,30 @@ pub(super) fn parse_configuration_root_object_rights(
             });
             entries.splice(insert_at..insert_at, synthesized);
         }
-        6 => {}
+        6 => {
+            // Present, they print where the platform's canonical order puts
+            // them too -- immediately before `SaveUserData`, in the order of
+            // `CONFIGURATION_MODE_RIGHT_NAMES` -- whatever order the blob
+            // stores them in: a real extension stores seven roles with
+            // `AnalyticsSystemClient` before `MobileClient` and the window
+            // modes after `Output`, and 8.3.27.2214 prints them canonically.
+            if let Some(save_user_data) = save_user_data_index {
+                let save_user_data_name = entries[save_user_data].name.clone();
+                let (mut modes, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut entries)
+                    .into_iter()
+                    .partition(|entry| is_configuration_mode_right(&entry.name));
+                entries = rest;
+                modes.sort_by_key(|entry| {
+                    CONFIGURATION_MODE_RIGHT_NAMES
+                        .iter()
+                        .position(|name| *name == entry.name)
+                });
+                let insert_at = entries
+                    .iter()
+                    .position(|entry| entry.name == save_user_data_name)?;
+                entries.splice(insert_at..insert_at, modes);
+            }
+        }
         _ => return None, // partial presence: an unproven shape
     }
 
@@ -928,7 +983,9 @@ pub(super) fn parse_role_bool_field_or_default(
 
 pub(super) fn parse_role_right_value(value: &str) -> Option<bool> {
     match value {
-        "-1" | "0" => Some(false),
+        // `2`: an adopted role's right the extension leaves unset (fixture
+        // `adopted/role`), printed as `-1` is -- not at all.
+        "-1" | "0" | "2" => Some(false),
         "1" => Some(true),
         _ => None,
     }
@@ -1449,7 +1506,7 @@ pub(super) fn role_rights_for_xml<'a>(
     rights: &RoleRights,
     object: &'a RoleObjectRights,
 ) -> Vec<&'a RoleRight> {
-    if is_configuration_root_rights_object(&object.name) {
+    if is_configuration_root_rights_object(&object.name) && !object.has_conditionless_restrictions {
         // The Configuration root has its own convention, proven over the
         // whole ERP УХ role corpus (2026-08-24, 1,679/1,679 Configuration-
         // scoped Rights blobs matched exactly): a right renders exactly when

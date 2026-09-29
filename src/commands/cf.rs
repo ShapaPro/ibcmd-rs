@@ -38,7 +38,7 @@ use serde::Serialize;
 use crate::{
     cli::{
         CfArgs, CfBootstrapArgs, CfCommands, CfCompression, CfExportArgs, CfExtractArgs,
-        CfInspectArgs, CfOverlayArgs, CfRevision, CfVerifyArgs,
+        CfInspectArgs, CfLoadArgs, CfOverlayArgs, CfRevision, CfVerifyArgs,
     },
     commands::platform::PlatformFlag,
     compiler::{
@@ -51,7 +51,7 @@ use crate::{
         pack_form_body_blob_from_form_xml, pack_simple_metadata_blob_from_xml,
         patch_versions_blob_bytes_allowing_additions,
     },
-    mssql_dump::{self, StorageImageSourceExportReport},
+    mssql_dump::StorageImageSourceExportReport,
     profile_registry::{BUNDLED_PROFILES, ProfileRegistryLimits, load_profile_registry},
 };
 
@@ -140,6 +140,9 @@ pub struct CfExportReport {
     pub profile: CfProfileReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export: Option<StorageImageSourceExportReport>,
+    /// With `--update`: how the tree was brought up to the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<crate::update::UpdateSummary>,
     pub errors: Vec<CfDiagnostic>,
 }
 
@@ -231,6 +234,32 @@ pub enum CfCommandReport {
     Extract(CfExtractReport),
     Export(CfExportReport),
     Overlay(CfOverlayReport),
+    Load(CfLoadReport),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CfLoadReport {
+    pub schema_version: u32,
+    pub command: &'static str,
+    pub ok: bool,
+    pub source_dir: String,
+    pub output: String,
+    pub base: String,
+    pub source_version: &'static str,
+    /// `index` when the tree's own index stood in for exporting the base,
+    /// `full` when the base was exported again.
+    pub base_export: &'static str,
+    pub modules: usize,
+    pub forms: usize,
+    /// The tree's files whose text was loaded.
+    pub applied: Vec<String>,
+    /// Objects compiled from the tree (edits beyond module text).
+    pub compiled_objects: Vec<String>,
+    /// Objects the tree lost whole, removed from the file.
+    pub removed_objects: Vec<String>,
+    /// Loaded, but worth a look (an object the base changed since export).
+    pub warnings: Vec<String>,
+    pub errors: Vec<CfDiagnostic>,
 }
 
 impl CfCommandReport {
@@ -242,6 +271,7 @@ impl CfCommandReport {
             Self::Extract(report) => report.ok,
             Self::Export(report) => report.ok,
             Self::Overlay(report) => report.ok,
+            Self::Load(report) => report.ok,
         }
     }
 
@@ -253,6 +283,7 @@ impl CfCommandReport {
             Self::Extract(report) => &report.errors,
             Self::Export(report) => &report.errors,
             Self::Overlay(report) => &report.errors,
+            Self::Load(report) => &report.errors,
         }
     }
 }
@@ -370,6 +401,65 @@ pub fn run(args: CfArgs) -> Result<CfCommandReport, CfCommandError> {
         CfCommands::Bootstrap(mut args) => {
             args.apply_platform_flag();
             bootstrap(args)
+        }
+        CfCommands::Load(mut args) => {
+            args.apply_platform_flag();
+            load(args)
+        }
+    }
+}
+
+fn load(args: CfLoadArgs) -> Result<CfCommandReport, CfCommandError> {
+    let mut report = CfLoadReport {
+        schema_version: REPORT_SCHEMA_VERSION,
+        command: "load",
+        ok: false,
+        source_dir: display_path(&args.source_dir),
+        output: display_path(&args.output),
+        base: display_path(&args.base),
+        source_version: args.source_version.as_str(),
+        base_export: "",
+        modules: 0,
+        forms: 0,
+        applied: Vec::new(),
+        warnings: Vec::new(),
+        compiled_objects: Vec::new(),
+        removed_objects: Vec::new(),
+        errors: Vec::new(),
+    };
+    if args.output.exists() {
+        report.errors.push(diagnostic(
+            "output_exists",
+            format!("`{}` already exists", args.output.display()),
+        ));
+        return Err(CfCommandError {
+            report: Box::new(CfCommandReport::Load(report)),
+        });
+    }
+    match crate::load::load_onto_base(
+        &args.source_dir,
+        &args.base,
+        &args.output,
+        args.source_version,
+    ) {
+        Ok(loaded) => {
+            report.ok = true;
+            report.base_export = loaded.base_export;
+            report.modules = loaded.modules;
+            report.forms = loaded.forms;
+            report.applied = loaded.applied;
+            report.compiled_objects = loaded.compiled_objects;
+            report.removed_objects = loaded.removed_objects;
+            report.warnings = loaded.warnings;
+            Ok(CfCommandReport::Load(report))
+        }
+        Err(error) => {
+            report
+                .errors
+                .push(diagnostic(error.code(), error.to_string()));
+            Err(CfCommandError {
+                report: Box::new(CfCommandReport::Load(report)),
+            })
         }
     }
 }
@@ -762,6 +852,31 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
             format!("failed to open `{}`: {source}", args.input.display()),
         )
     })?;
+    if args.update && crate::load::index::update_interrupted(&args.output_dir) {
+        return Err(export_failure(
+            &args,
+            profile.clone(),
+            "update_refused",
+            crate::update::interrupted(&args.output_dir),
+        ));
+    }
+    if args.update
+        && let Some(summary) =
+            crate::update::already_current(&args.output_dir, &args.input, args.source_version)
+    {
+        return Ok(CfCommandReport::Export(CfExportReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            command: "export",
+            ok: true,
+            input: display_path(&args.input),
+            output_dir: display_path(&args.output_dir),
+            source_version: args.source_version.as_str(),
+            profile,
+            export: None,
+            update: Some(summary),
+            errors: Vec::new(),
+        }));
+    }
     let archive = decode_packed_archive(source, limits, source_profile).map_err(|source| {
         export_failure(
             &args,
@@ -770,10 +885,99 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
             format!("failed to read packed CF archive: {source}"),
         )
     })?;
-    let export = mssql_dump::export_packed_cf_archive_to_source(
-        archive,
-        &args.output_dir,
-        args.overwrite,
+    let overwrite = args.overwrite || args.update;
+    let write_index = args.index || args.update;
+    let mut update = None;
+    // A full update of an existing tree exports here first, then replaces
+    // the tree's exported files (`update::replace_tree`).
+    let mut aside = None;
+    if args.update {
+        let fresh = crate::update::preflight(&args.output_dir)
+            .map_err(|reason| export_failure(&args, profile.clone(), "update_refused", reason))?;
+        let entries = crate::external::export::entries_of(&archive);
+        let planned = if fresh {
+            Err("the directory holds no tree yet".to_owned())
+        } else if crate::external::export::detect_in_archive(&archive)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            Err("an external object keeps no versions".to_owned())
+        } else {
+            crate::update::plan(&args.output_dir, &entries, args.source_version)
+        };
+        match planned {
+            Ok(changed) => {
+                let scratch = std::env::temp_dir().join(format!(
+                    "ibcmd-update-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                let result = crate::update::update_incrementally(
+                    &args.input,
+                    &args.output_dir,
+                    archive.source_profile().as_str(),
+                    entries,
+                    &changed,
+                    args.source_version,
+                    &scratch,
+                );
+                let _ = std::fs::remove_dir_all(&scratch);
+                let (partial, summary) = result.map_err(|source| {
+                    export_failure(
+                        &args,
+                        profile.clone(),
+                        "update_failed",
+                        format!("failed to update the tree: {source:#}"),
+                    )
+                })?;
+                return Ok(CfCommandReport::Export(CfExportReport {
+                    schema_version: REPORT_SCHEMA_VERSION,
+                    command: "export",
+                    ok: true,
+                    input: display_path(&args.input),
+                    output_dir: display_path(&args.output_dir),
+                    source_version: args.source_version.as_str(),
+                    profile,
+                    export: partial,
+                    update: Some(summary),
+                    errors: Vec::new(),
+                }));
+            }
+            Err(reason) => {
+                update = Some(crate::update::UpdateSummary {
+                    mode: "full",
+                    reason: Some(reason),
+                    ..crate::update::UpdateSummary::default()
+                });
+                if !fresh {
+                    aside = Some(std::env::temp_dir().join(format!(
+                        "ibcmd-update-full-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_default()
+                    )));
+                }
+            }
+        }
+    }
+    let target = aside.clone().unwrap_or_else(|| args.output_dir.clone());
+    let versions = if write_index {
+        crate::load::archive_versions(&archive)
+    } else {
+        Default::default()
+    };
+    // An external data processor/report (.epf/.erf) is the same container
+    // family; the adapter answers `None` for configurations and extensions.
+    let external = crate::external::export::export_if_external(
+        &archive,
+        &target,
+        overwrite,
         args.source_version,
     )
     .map_err(|source| {
@@ -781,10 +985,61 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
             &args,
             profile.clone(),
             "export_failed",
-            format!("failed to export CF storage image: {source:#}"),
+            format!("failed to export external object: {source:#}"),
         )
     })?;
+    let export = match external {
+        Some(report) => report,
+        None => crate::extension::export_packed_cf_archive_to_source(
+            archive,
+            &target,
+            overwrite,
+            args.source_version,
+        )
+        .map_err(|source| {
+            export_failure(
+                &args,
+                profile.clone(),
+                "export_failed",
+                format!("failed to export CF storage image: {source:#}"),
+            )
+        })?,
+    };
 
+    let mut export = export;
+    if let Some(aside) = &aside {
+        let replaced = replace_from_aside(&args.output_dir, aside, &export);
+        let _ = std::fs::remove_dir_all(aside);
+        replaced
+            .map_err(|message| export_failure(&args, profile.clone(), "update_failed", message))?;
+        export.output_dir = args.output_dir.clone();
+    }
+    if write_index
+        && let Err(source) = crate::load::write_tree_index(
+            &args.output_dir,
+            &args.input,
+            &export,
+            args.source_version,
+            &versions,
+        )
+    {
+        return Err(export_failure(
+            &args,
+            profile.clone(),
+            "index_failed",
+            format!("failed to write the tree index: {source:#}"),
+        ));
+    }
+    if aside.is_some()
+        && let Err(source) = crate::load::index::finish_update(&args.output_dir)
+    {
+        return Err(export_failure(
+            &args,
+            profile.clone(),
+            "update_failed",
+            format!("{source:#}"),
+        ));
+    }
     let failed = export.storage.failed;
     let mut report = CfExportReport {
         schema_version: REPORT_SCHEMA_VERSION,
@@ -795,6 +1050,7 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
         source_version: args.source_version.as_str(),
         profile,
         export: Some(export),
+        update,
         errors: Vec::new(),
     };
     if failed > 0 {
@@ -807,6 +1063,24 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
         });
     }
     Ok(CfCommandReport::Export(report))
+}
+
+/// A full update's tree replaced by the export made aside; refused, the tree
+/// untouched, when any entry failed to export.
+fn replace_from_aside(
+    tree: &Path,
+    aside: &Path,
+    export: &crate::mssql_dump::StorageImageSourceExportReport,
+) -> std::result::Result<(), String> {
+    if export.storage.failed > 0 {
+        return Err(format!(
+            "{} entries of the new file failed to export, the tree is unchanged; export it \
+             with --overwrite to take the partial export",
+            export.storage.failed
+        ));
+    }
+    let index = crate::load::index::read_tree_index(tree).ok_or("the tree index went away")?;
+    crate::update::replace_tree(tree, aside, &index).map_err(|source| format!("{source:#}"))
 }
 
 fn export_failure(
@@ -825,6 +1099,7 @@ fn export_failure(
             source_version: args.source_version.as_str(),
             profile,
             export: None,
+            update: None,
             errors: vec![diagnostic(code, message)],
         })),
     }
@@ -1803,7 +2078,8 @@ mod tests {
             CfCommandReport::Bootstrap(_)
             | CfCommandReport::Extract(_)
             | CfCommandReport::Export(_)
-            | CfCommandReport::Overlay(_) => {
+            | CfCommandReport::Overlay(_)
+            | CfCommandReport::Load(_) => {
                 panic!("expected archive command report")
             }
         }
@@ -1815,7 +2091,8 @@ mod tests {
             CfCommandReport::Bootstrap(_)
             | CfCommandReport::Extract(_)
             | CfCommandReport::Export(_)
-            | CfCommandReport::Overlay(_) => {
+            | CfCommandReport::Overlay(_)
+            | CfCommandReport::Load(_) => {
                 panic!("expected archive command error")
             }
         }

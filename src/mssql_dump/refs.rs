@@ -2828,7 +2828,8 @@ fn type_set_leaf_entry(
                 && is_defined_type_metadata_text(&row.text, &row.file_name)
             {
                 let properties =
-                    parse_defined_type_properties_from_text(&row.text, &header.uuid, type_index)?;
+                    parse_defined_type_properties_from_text(&row.text, &header.uuid, type_index)
+                        .filter(|properties| !properties.value_types.is_empty())?;
                 return Some((
                     format!("cfg:DefinedType.{}", header.name),
                     properties.value_types,
@@ -3601,6 +3602,14 @@ fn configuration_properties_8_5_1(
     })
 }
 
+/// The configuration row `text` is an extension's root: its header, the one
+/// under `header_uuid`, records an adoption.
+fn extension_root_row(text: &str, header_uuid: &str) -> bool {
+    crate::extension::adoption::header_of(text, header_uuid)
+        .and_then(crate::extension::adoption::parse)
+        .is_some_and(|adoption| adoption.adopted)
+}
+
 /// Inserts the 8.5 properties after the elements they follow in 2.21. A
 /// neighbour the record did not let the writer spell (a partial record) takes
 /// its 8.5 followers with it; a complete configuration record writes all five.
@@ -3814,6 +3823,13 @@ pub(super) fn extract_configuration_source_xml(
             parse_configuration_allowed_incoming_share_request_types(text, uuid)?;
     }
     if let Some(property_fields) = evidenced_property_fields.as_deref() {
+        // A default style naming no style of the container cannot be spelled.
+        let stored_style = property_fields.get(9).map(|field| field.trim());
+        if properties.default_style.is_none()
+            && stored_style.and_then(parse_non_zero_uuid).is_some()
+        {
+            return None;
+        }
         let policy = ibcmd_schema::configuration_properties_evidenced_default_block_policy();
         for (slot, target) in [
             (
@@ -3828,6 +3844,10 @@ pub(super) fn extract_configuration_source_xml(
                 policy.default_report_settings_form_tuple_field(),
                 &mut properties.default_report_settings_form,
             ),
+            (
+                policy.default_search_form_tuple_field(),
+                &mut properties.default_search_form,
+            ),
         ] {
             *target = parse_configuration_root_reference_slot(
                 property_fields,
@@ -3835,6 +3855,13 @@ pub(super) fn extract_configuration_source_xml(
                 object_refs,
                 "CommonForm.",
             );
+            // A slot naming no common form of the container cannot be
+            // spelled; printing it empty would say the configuration has
+            // none. Fail closed, and the export report names the file.
+            let stored = property_fields.get(slot).map(|field| field.trim());
+            if target.is_none() && stored.and_then(parse_non_zero_uuid).is_some() {
+                return None;
+            }
         }
     }
     let root_layout = parse_configuration_root_layout(text, uuid);
@@ -3844,8 +3871,16 @@ pub(super) fn extract_configuration_source_xml(
         .unwrap_or_default();
     let mut xml = format_configuration_source_xml(&header, &properties, source_version);
     if source_version == InfobaseConfigSourceVersion::V2_21 {
-        let properties_8_5_1 = configuration_properties_8_5_1(text, object_refs)?;
-        insert_configuration_properties_8_5_1_xml(&mut xml, &properties_8_5_1)?;
+        match configuration_properties_8_5_1(text, object_refs) {
+            Some(properties_8_5_1) => {
+                insert_configuration_properties_8_5_1_xml(&mut xml, &properties_8_5_1)?
+            }
+            // An extension's root properties are rewritten whole by the
+            // extension writer (`crate::extension::root`), which spells the
+            // members 8.5 adds to an extension; only this file's frame counts.
+            None if extension_root_row(text, &header_uuid) => {}
+            None => return None,
+        }
     }
     if let Some(root_layout) = &root_layout {
         insert_configuration_internal_info_xml(&mut xml, &root_layout.contained_objects).ok()?;
@@ -3930,8 +3965,19 @@ pub(super) fn parse_configuration_properties_from_text(
     // `ConfigurationExtensionCompatibilityMode` beside `Version8_3_27` for
     // `CompatibilityMode`.
     let tuple_8_5_1 = !text.contains("{68,") && !text.contains("{67,") && text.contains("{76,");
-    let configuration_extension_compatibility_mode = if source_version
-        == InfobaseConfigSourceVersion::V2_21
+    // An extension's root (its header adopted) stores its own compatibility
+    // in field 43 and the platform prints it (extension_roots fixtures, ИР:
+    // 80309 -> Version8_3_9); the edition below is a configuration's.
+    let extension_root = fields
+        .get(1)
+        .and_then(|field| field.find("{3,").map(|at| &field[at..]))
+        .and_then(crate::extension::adoption::parse)
+        .is_some_and(|adoption| adoption.adopted);
+    let configuration_extension_compatibility_mode = if extension_root {
+        fields
+            .get(43)
+            .and_then(|field| configuration_compatibility_mode_xml_under(field.trim(), ceiling))
+    } else if source_version == InfobaseConfigSourceVersion::V2_21
         && !tuple_8_5_1
         && (is_native_68_shape || is_normalized_67_shape)
     {
@@ -3940,7 +3986,14 @@ pub(super) fn parse_configuration_properties_from_text(
             ceiling,
         )
     } else if is_native_68_shape {
-        stored_compatibility_mode.clone()
+        // 8.3.27.2214 prints its own edition here whatever the tuple stores:
+        // field 43 holds the requested extension compatibility, yet
+        // Version8_3_27 comes back for 10/27, 27/10, 19/12, 21/24 (fields
+        // 26/43; fixtures `config_compat`), 8/27, 13..26 against 27, and 1Cv8
+        // 21/23. The corpora this reader was fitted to all store 80327 in field
+        // 26, which is why reading field 26 matched them.
+        // The dialect's edition: 8.5 prints Version8_5_1 the same way.
+        configuration_compatibility_mode_xml_under(&ceiling.to_string(), ceiling)
     } else if is_normalized_67_shape {
         configuration_compatibility_mode_xml(&MAX_EVIDENCED_PACKED_PLATFORM_VERSION.to_string())
     } else {
@@ -4015,6 +4068,7 @@ pub(super) fn parse_configuration_properties_from_text(
         default_report_form: None,
         default_report_variant_form: None,
         default_report_settings_form: None,
+        default_search_form: None,
         used_mobile_application_functionalities: Vec::new(),
         used_mobile_application_permission_messages: Vec::new(),
         allowed_incoming_share_request_types: Vec::new(),
@@ -4180,6 +4234,17 @@ fn parse_exact_1c_quoted_string(field: &str) -> Option<String> {
 /// default_language whole -- most of `Configuration.xml`'s remaining diff on
 /// both `ssl` and `sslbase`.
 pub(super) fn configuration_root_fields(text: &str) -> Option<(Vec<&str>, bool)> {
+    // Every edition's tuple, the older prefixes included, read in the 68
+    // shape: the members keep their meaning, field 26 is CompatibilityMode in
+    // each (1cv8_en.cf `{67,…}`: 26 = 80321, 43 = 80324, native
+    // Version8_3_21; MONITOR-TRIAL-2.cf `{59,…}`: 26 = 80314, Version8_3_14).
+    if let Some(fields) = configuration_root_tuple_in_envelope(text)
+        && let Some(normalized) = normalize_short_configuration_root_property_fields(fields)
+        && normalized.len() == 61
+        && normalized.first().map(|field| field.trim()) == Some("68")
+    {
+        return Some((normalized, true));
+    }
     if let Some(start) = text.find("{68,") {
         return Some((split_1c_braced_fields(text, start)?, true));
     }
@@ -4225,14 +4290,61 @@ fn normalize_short_configuration_root_property_fields(fields: Vec<&str>) -> Opti
         normalized.extend(fields[1..61].iter().copied());
         return Some(normalized);
     }
-    if fields.first()?.trim() != "67" || fields.len() != 60 {
+    // An older tuple is a prefix of the 68 one; the members it does not store
+    // read as the all-default reference's. Evidence (8.3.27.2214): Src/1Cv8.cf
+    // (`{66,…}`, 59 members) dumps to the same Configuration.xml as the same
+    // configuration saved by 8.5; MONITOR-TRIAL-2.cf (`{59,…}`, 53) against
+    // its own native XML loaded back and saved (`{68,…}`): every shared member
+    // equal but the root header and two tables the reader does not compare,
+    // members 53..60 exactly the reference's. 1cv8_en.cf and БСП 3.1 are
+    // `{67,…}` of 60.
+    let Some(version) = fields
+        .first()
+        .and_then(|field| field.trim().parse::<u32>().ok())
+    else {
+        return Some(fields);
+    };
+    if !(OLDEST_READ_ROOT_TUPLE_VERSION..68).contains(&version)
+        || !(OLDEST_READ_ROOT_TUPLE_FIELDS..61).contains(&fields.len())
+    {
         return Some(fields);
     }
+    let tail = super::configuration_properties_evidence::evidenced_default_reference_fields_from(
+        fields.len(),
+    );
     let mut normalized = Vec::with_capacity(61);
     normalized.push("68");
     normalized.extend(fields[1..].iter().copied());
-    normalized.push("1");
-    Some(normalized)
+    normalized.extend(tail.iter().copied());
+    (normalized.len() == 61).then_some(normalized)
+}
+
+/// The oldest root tuple read: version 52 of 46 members (a real
+/// configuration in 8.3.9 mode, container version 216; its Configuration.xml
+/// matches the platform's dump but for the IntegrationService id the platform
+/// draws on every load). The same prefix reading holds there: the fixture
+/// `old_roots/v52` -- a platform-built root cut to 46 members, its header and
+/// section identities in the older spelling (`upgrade.rs`) and the flag table
+/// of field 40 in its version 13 -- is loaded by 8.3.27.2214 and dumped to
+/// the original's Configuration.xml byte for byte. Older ones are refused.
+const OLDEST_READ_ROOT_TUPLE_VERSION: u32 = 52;
+const OLDEST_READ_ROOT_TUPLE_FIELDS: usize = 46;
+
+/// The root's `<Properties>` tuple, located through the root record's own
+/// envelope (`{2,{uuid},N,{<class>,{1,{<tuple>}}},…}`) rather than by
+/// searching for its version marker, which differs by edition.
+fn configuration_root_tuple_in_envelope(text: &str) -> Option<Vec<&str>> {
+    let envelope = parse_configuration_root_envelope(text)?;
+    let first_section = envelope.sections.first()?.trim();
+    let contained_fields = split_1c_braced_fields(first_section, 0)?;
+    if contained_fields.len() != 2 {
+        return None;
+    }
+    let payload_fields = split_1c_braced_fields(contained_fields.get(1)?.trim(), 0)?;
+    if payload_fields.first().map(|field| field.trim()) != Some("1") {
+        return None;
+    }
+    split_1c_braced_fields(payload_fields.get(1)?.trim(), 0)
 }
 
 const CONFIGURATION_USE_PURPOSE_TYPE_UUID: &str = "1708fdaa-cbce-4289-b373-07a5a74bee91";
@@ -4334,7 +4446,8 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
 )> {
     let fields = configuration_root_property_fields(text, uuid)?;
     let raw_fields = split_1c_braced_fields(fields.get(53)?.trim(), 0)?;
-    if raw_fields.first()?.trim() != "2" {
+    let table_version = raw_fields.first()?.trim();
+    if !matches!(table_version, "1" | "2") {
         return None;
     }
     let count = raw_fields.get(1)?.trim().parse::<usize>().ok()?;
@@ -4394,6 +4507,25 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
             })
         }
         ("2.20" | "2.21", n) if n == full => {}
+        // The version-1 table of an older root stops earlier and ends in a
+        // `0` (Src/1Cv8.cf, `{66,…}`: 33 pairs); the platform prints the
+        // functionalities it lacks as unused -- the same Configuration.xml as
+        // the same configuration saved by 8.5 with all 38 pairs.
+        ("2.20" | "2.21", n)
+            if table_version == "1"
+                && n + 1 < full
+                && tail.len() == 1
+                && trailing_field.trim() == "0" =>
+        {
+            functionalities.extend(
+                CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES[n..]
+                    .iter()
+                    .map(|(_, name)| ConfigurationMobileApplicationFunctionality {
+                        name,
+                        use_functionality: false,
+                    }),
+            );
+        }
         _ => return None,
     }
     // The shorter record spends its trailing scalar on the last
@@ -4524,12 +4656,6 @@ fn configuration_root_property_fields<'a>(text: &'a str, uuid: &str) -> Option<V
         return None;
     }
     let fields = split_1c_braced_fields(payload_fields.get(1)?.trim(), 0)?;
-    match (fields.first()?.trim(), fields.len()) {
-        ("67", 60) => {}
-        ("68", 61) if fields.get(60)?.trim() == "1" => {}
-        ("76", 77) => {}
-        _ => return None,
-    }
     let mut object_ids = configuration_contained_object_ids(first_section).into_iter();
     let object_id = object_ids.next()?;
     if object_ids.next().is_some() {
@@ -4538,12 +4664,19 @@ fn configuration_root_property_fields<'a>(text: &'a str, uuid: &str) -> Option<V
     if !is_configuration_root_property_header(fields.get(1)?.trim(), &object_id) {
         return None;
     }
-    // Normalize the short `{67,...}` shape to the canonical `{68,...}` one
-    // (see `configuration_root_fields`'s doc comment for the evidence) so
-    // `parse_configuration_properties_evidenced_default_block`'s exact-arity
-    // check against the 61-field evidenced reference sees this corpus's real
-    // shape instead of always refusing it as `UnexpectedTupleArity`.
-    normalize_short_configuration_root_property_fields(fields)
+    // Normalize the older and the 8.5 shapes to the canonical `{68,...}` one
+    // (see `normalize_short_configuration_root_property_fields` for the
+    // evidence) so `parse_configuration_properties_evidenced_default_block`'s
+    // exact-arity check against the 61-field evidenced reference sees this
+    // corpus's real shape instead of always refusing it as
+    // `UnexpectedTupleArity`.
+    // A genuine 68 tuple is still required to end in `1`, as before.
+    let genuine_68 = fields.first()?.trim() == "68";
+    let normalized = normalize_short_configuration_root_property_fields(fields)?;
+    (normalized.len() == 61
+        && normalized.first()?.trim() == "68"
+        && (!genuine_68 || normalized.get(60)?.trim() == "1"))
+        .then_some(normalized)
 }
 
 fn is_configuration_root_property_header(field: &str, object_id: &str) -> bool {
@@ -4569,11 +4702,33 @@ fn is_configuration_root_property_header(field: &str, object_id: &str) -> bool {
     // small blast radius, but a total-parse failure if hit (the whole
     // Configuration.xml's default roles/use-purposes/localized properties
     // read depends on this header resolving).
-    let header_has_trailing_default = match header.len() {
-        9 => true,
-        8 => false,
+    // After the comment: `0` (the configuration's own, not adopted), a count
+    // of `(property uuid, state)` pairs, the nil uuid. MONITOR-TRIAL-2.cf's
+    // root counts two (its command interfaces, state 3) under a `{2,…}`
+    // header; 8.3.27.2214 prints no trace of them for a configuration (its
+    // native Configuration.xml, and the root it saves back is `…,0,0,<nil>,0`).
+    let Some(pairs) = header
+        .get(6)
+        .and_then(|field| field.trim().parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let Some(nil_at) = pairs.checked_mul(2).and_then(|len| len.checked_add(7)) else {
+        return false;
+    };
+    let header_has_trailing_default = match header.len().checked_sub(nil_at) {
+        Some(2) => true,
+        Some(1) => false,
         _ => return false,
     };
+    let pairs_are_states = (0..pairs).all(|index| {
+        header
+            .get(7 + 2 * index)
+            .is_some_and(|field| parse_non_zero_uuid(field.trim()).is_some())
+            && header
+                .get(8 + 2 * index)
+                .is_some_and(|field| matches!(field.trim(), "2" | "3"))
+    });
     if header.first().map(|field| field.trim())
         != Some(if header_has_trailing_default {
             "3"
@@ -4590,9 +4745,11 @@ fn is_configuration_root_property_header(field: &str, object_id: &str) -> bool {
             .and_then(|field| parse_1c_quoted_string(field.trim()))
             .is_none()
         || header.get(5).map(|field| field.trim()) != Some("0")
-        || header.get(6).map(|field| field.trim()) != Some("0")
-        || header.get(7).map(|field| field.trim()) != Some("00000000-0000-0000-0000-000000000000")
-        || (header_has_trailing_default && header.get(8).map(|field| field.trim()) != Some("0"))
+        || !pairs_are_states
+        || header.get(nil_at).map(|field| field.trim())
+            != Some("00000000-0000-0000-0000-000000000000")
+        || (header_has_trailing_default
+            && header.get(nil_at + 1).map(|field| field.trim()) != Some("0"))
     {
         return false;
     }
@@ -4716,6 +4873,11 @@ fn parse_configuration_root_envelope(text: &str) -> Option<ConfigurationRootEnve
     })
 }
 
+/// The configuration root record `uuid` (its layout reads).
+pub(super) fn is_configuration_root_row(text: &str, uuid: &str) -> bool {
+    parse_configuration_root_layout(text, uuid).is_some()
+}
+
 fn parse_configuration_root_layout(text: &str, uuid: &str) -> Option<ConfigurationRootLayout> {
     let envelope = parse_configuration_root_envelope(text)?;
     // Both evidenced footer variants carry the identical
@@ -4730,7 +4892,8 @@ fn parse_configuration_root_layout(text: &str, uuid: &str) -> Option<Configurati
     // Any *other* footer shape already fails closed inside
     // `classify_configuration_root_footer`, which built this envelope.
     if envelope.identity != uuid
-        || envelope.sections.len() != CONFIGURATION_CONTAINED_OBJECT_COUNT
+        || !(CONFIGURATION_CONTAINED_OBJECT_COUNT - 1..=CONFIGURATION_CONTAINED_OBJECT_COUNT)
+            .contains(&envelope.sections.len())
         || !matches!(
             envelope.footer,
             ConfigurationRootFooter::Bare | ConfigurationRootFooter::Checksummed
@@ -4759,11 +4922,57 @@ fn parse_configuration_root_layout(text: &str, uuid: &str) -> Option<Configurati
         });
         child_families.extend(families);
     }
+    // A root saved before a class existed stores fewer sections (MONITOR-
+    // TRIAL-2.cf: six, no IntegrationService). 8.3.27.2214 prints the missing
+    // one anyway, under an ObjectId it draws afresh on every load (1a3c6800-…,
+    // then bcdb59fc-… for the same file) -- no export can match it; this one
+    // derives it from the configuration so repeated exports agree.
+    let stored = contained_objects
+        .iter()
+        .map(|object| object.class_id.as_str())
+        .collect::<Vec<_>>();
+    if stored.len() < CONFIGURATION_CONTAINED_OBJECT_COUNT
+        && !CONFIGURATION_CONTAINED_OBJECT_CLASSES.starts_with(&stored)
+    {
+        return None;
+    }
+    for class_id in CONFIGURATION_CONTAINED_OBJECT_CLASSES
+        .get(stored.len()..)
+        .unwrap_or_default()
+    {
+        contained_objects.push(ConfigurationContainedObject {
+            class_id: (*class_id).to_owned(),
+            object_id: derived_uuid(&format!("{uuid}/{class_id}")),
+        });
+    }
 
     Some(ConfigurationRootLayout {
         contained_objects,
         child_families,
     })
+}
+
+/// The root's contained objects by class, in the order every 7-section root
+/// stores them (`compiler::root::CONFIGURATION_SECTIONS`).
+const CONFIGURATION_CONTAINED_OBJECT_CLASSES: [&str; CONFIGURATION_CONTAINED_OBJECT_COUNT] = [
+    "9cd510cd-abfc-11d4-9434-004095e12fc7",
+    "9fcd25a0-4822-11d4-9414-008048da11f9",
+    "e3687481-0a87-462c-a166-9f34594f9bba",
+    "9de14907-ec23-4a07-96f0-85521cb6b53b",
+    "51f2d5d8-ea4d-4064-8892-82951750031e",
+    "e68182ea-4237-4383-967f-90c1e3370bc7",
+    "fb282519-d103-4dd3-bc12-cb271d631dfc",
+];
+
+/// A name-based (SHA-1, version 5 layout) uuid of `seed`.
+fn derived_uuid(seed: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).hyphenated().to_string()
 }
 
 /// The two evidenced Configuration root-control tails.
@@ -5071,6 +5280,178 @@ fn configuration_compatibility_mode_xml_under(value: &str, ceiling: u32) -> Opti
         (version / 100) % 100,
         version % 100
     ))
+}
+
+/// The first compatibility mode whose forms declare the data-composition
+/// schema namespace on their root. 8.3.27.2214 writes `xmlns:dcssch` on
+/// `<Form>` from `Version8_3_19` on and leaves it out below: an extension's
+/// common form under `ConfigurationExtensionCompatibilityMode` 8.3.11 … 8.3.18
+/// without it, 8.3.19 … 8.3.26 with it; a configuration's under
+/// `CompatibilityMode` 8.2.16, 8.3.8, 8.3.10 without, 8.3.19 and 8.3.27 with
+/// (its `ConfigurationExtensionCompatibilityMode` plays no part).
+const FORM_DCS_SCHEMA_NAMESPACE_FROM: (u32, u32, u32) = (8, 3, 19);
+
+/// Whether forms written under `compatibility_mode` declare `xmlns:dcssch` on
+/// their root. With nothing read -- an external object, an unknown spelling --
+/// the platform writes under its own edition, which declares it.
+pub(super) fn forms_declare_dcs_schema_namespace(compatibility_mode: Option<&str>) -> bool {
+    let Some(version) = compatibility_mode.and_then(|mode| mode.strip_prefix("Version")) else {
+        return true;
+    };
+    let mut parts = version.split('_').map(str::parse::<u32>);
+    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
+        return true;
+    };
+    let patch = match parts.next() {
+        None => 0,
+        Some(Ok(patch)) => patch,
+        Some(Err(_)) => return true,
+    };
+    (major, minor, patch) >= FORM_DCS_SCHEMA_NAMESPACE_FROM
+}
+
+/// The first compatibility mode that writes the AnyIBRef type set
+/// (`280f5f0e-…`) as `cfg:AnyIBRef`; below it 8.3.27.2214 writes `cfg:AnyRef`.
+/// Probed on an extension's form attribute: 8.3.10, 8.3.21, 8.3.22 AnyRef;
+/// 8.3.23, 8.3.24, 8.3.27 AnyIBRef (fixtures `form_events`,
+/// `form_events_8_3_22`); ИТК (8.3.10) and 1Cv8 (8.3.21) write AnyRef
+/// throughout, and an external object in a configuration of 8.3.21 too.
+const ANY_IB_REF_FROM: (u32, u32, u32) = (8, 3, 23);
+
+/// Whether a configuration of `compatibility_mode` writes the AnyIBRef type
+/// set as `cfg:AnyRef`. With nothing read, the platform's own edition: no.
+pub(super) fn compatibility_mode_spells_any_ref(compatibility_mode: Option<&str>) -> bool {
+    compatibility_mode
+        .and_then(compatibility_version)
+        .is_some_and(|version| version < ANY_IB_REF_FROM)
+}
+
+/// The first compatibility mode whose forms write a `UsualGroup`'s
+/// `<Behavior>Usual</Behavior>`. 8.3.27.2214 dumps one form holding a group
+/// loaded with an explicit `Usual` (stored as code `0`, not the default `3`)
+/// without the element under `CompatibilityMode` 8.3.17, 8.3.18 and 8.3.19,
+/// and with it under 8.3.20 and 8.3.21; `Collapsible` and `PopUp` are written
+/// under every one of them (fixture `group_behavior`). Real configurations
+/// agree: three under 8.3.14/8.3.17 never write `Usual`, two under 8.3.21 do.
+const USUAL_GROUP_BEHAVIOR_FROM: (u32, u32, u32) = (8, 3, 20);
+
+/// Whether forms written under `compatibility_mode` spell a group's explicit
+/// `Usual` behavior. With nothing read, the platform's own edition: yes.
+pub(super) fn forms_write_usual_group_behavior(compatibility_mode: Option<&str>) -> bool {
+    compatibility_mode
+        .and_then(compatibility_version)
+        .is_none_or(|version| version >= USUAL_GROUP_BEHAVIOR_FROM)
+}
+
+/// The first compatibility mode under which a dynamic list that declares no
+/// main table has no `DefaultPicture` field of its own, so the platform marks
+/// the path `~List.DefaultPicture`. 8.3.27.2214 loads a one-form configuration
+/// whose table names `Список.DefaultPicture` of such a list under
+/// `CompatibilityMode` 8.3.17 and 8.3.18 and dumps it unmarked, refuses the
+/// same path under 8.3.19, 8.3.20 and 8.3.21 ("wrong data path"), and dumps
+/// `~Список.DefaultPicture` there (fixture `dynamic_list_default_picture`).
+/// Real configurations agree: 23 such paths under 8.3.17 and one under 8.3.14
+/// are unmarked, 37 under 8.3.21 marked.
+const NO_MAIN_TABLE_DEFAULT_PICTURE_MARKED_FROM: (u32, u32, u32) = (8, 3, 19);
+
+/// Whether a no-main-table dynamic list's `DefaultPicture` path carries `~`
+/// under `compatibility_mode`. With nothing read, the platform's own edition:
+/// yes.
+pub(super) fn forms_mark_no_main_table_default_picture(compatibility_mode: Option<&str>) -> bool {
+    compatibility_mode
+        .and_then(compatibility_version)
+        .is_none_or(|version| version >= NO_MAIN_TABLE_DEFAULT_PICTURE_MARKED_FROM)
+}
+
+/// What a form's spelling depends on in the configuration's compatibility
+/// mode, read once per export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FormCompatibility {
+    pub(super) usual_group_behavior: bool,
+    pub(super) no_main_table_default_picture_marked: bool,
+}
+
+impl Default for FormCompatibility {
+    /// The platform's own edition.
+    fn default() -> Self {
+        Self::of(None)
+    }
+}
+
+impl FormCompatibility {
+    pub(super) fn of(compatibility_mode: Option<&str>) -> Self {
+        Self {
+            usual_group_behavior: forms_write_usual_group_behavior(compatibility_mode),
+            no_main_table_default_picture_marked: forms_mark_no_main_table_default_picture(
+                compatibility_mode,
+            ),
+        }
+    }
+}
+
+/// `Version8_3_21` -> (8, 3, 21).
+fn compatibility_version(mode: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = mode
+        .strip_prefix("Version")?
+        .split('_')
+        .map(str::parse::<u32>);
+    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
+        return None;
+    };
+    let patch = match parts.next() {
+        None => 0,
+        Some(Ok(patch)) => patch,
+        Some(Err(_)) => return None,
+    };
+    Some((major, minor, patch))
+}
+
+/// The compatibility mode the configuration (or extension) among `rows` runs
+/// in: its `CompatibilityMode`, or the extension compatibility where that is
+/// the only one read.
+pub(super) fn configuration_compatibility_mode_from_texts(
+    rows: &[MetadataTextRow],
+    source_version: InfobaseConfigSourceVersion,
+) -> Option<String> {
+    rows.iter()
+        .filter(|row| parse_configuration_header_uuid(&row.text).is_some())
+        .find_map(|row| {
+            let properties = parse_configuration_properties_from_text(
+                &row.text,
+                &BTreeMap::new(),
+                source_version,
+            )?;
+            properties
+                .compatibility_mode
+                .or(properties.configuration_extension_compatibility_mode)
+        })
+}
+
+/// The form rules of the rows' configuration or extension. The two rules read
+/// different modes of an extension: the explicit `Usual` group behavior does
+/// not follow its own compatibility mode (fixture `group_behavior_extension`:
+/// 8.3.14 still writes it; a real extension at 8.3.9 agrees), while the
+/// `~List.DefaultPicture` mark does (a real extension at 8.3.10 leaves it
+/// unmarked, as a configuration below 8.3.19 does).
+pub(super) fn form_compatibility_from_texts(
+    rows: &[MetadataTextRow],
+    source_version: InfobaseConfigSourceVersion,
+) -> FormCompatibility {
+    let own_mode = rows.iter().find_map(|row| {
+        let header_uuid = parse_configuration_header_uuid(&row.text)?;
+        if extension_root_row(&row.text, &header_uuid) {
+            return None;
+        }
+        parse_configuration_properties_from_text(&row.text, &BTreeMap::new(), source_version)?
+            .compatibility_mode
+    });
+    let any_mode = configuration_compatibility_mode_from_texts(rows, source_version);
+    FormCompatibility {
+        usual_group_behavior: forms_write_usual_group_behavior(own_mode.as_deref()),
+        no_main_table_default_picture_marked: forms_mark_no_main_table_default_picture(
+            any_mode.as_deref(),
+        ),
+    }
 }
 
 struct ConfigurationChildObject {
