@@ -179,3 +179,10 @@ native config apply on the seam twin: "Обновление конфигурац
 === check 11, refusals (mssql-restructure --through-apply --dry-run)
 the T1 stage with the root row changed by one byte (ibcmd_rs_04_ddl_s1_base): refused, exit 1, one blocker "root: the service row root changes"
 the whole native image of a2 (ibcmd_rs_04_ddl_s1_full): refused by the apply before the gate: "the stage carries a `deleted` row, the list of removals: it is empty ..."
+
+=== a failure after everything else (ibcmd_rs_04_ddl_s1_t1_fail, a fresh twin of the same staged backup)
+The generated script (--through-apply --dry-run --script-output) with `IF 1 = 1 THROW 57999, N'injected failure before COMMIT', 1;` as the last
+statement before COMMIT TRANSACTION, run with sqlcmd -d master -i script -b -a 32767 (20 s):
+  Сообщение 57999, уровень 16, состояние 1, ... строка 720: injected failure before COMMIT
+afterwards: ConfigSave 9, Config 9847, SchemaStorage 100/100 (hash of CurrentSchema of id 0 unchanged), no *NG table, _Reference20 has no _Fld11037,
+            DBNames 143619 bytes (unchanged), DynamicallyUpdated still in Config.

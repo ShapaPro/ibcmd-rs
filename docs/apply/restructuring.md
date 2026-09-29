@@ -919,7 +919,10 @@ files. The standalone command stays a research tool; the promotion belongs to th
 
 Any failed assertion or error rolls the transaction back: the database is as it was, `SchemaStorage` never leaves
 `Status 100`, no `*NG` table survives (they are created inside the transaction). SQL Server rolls a crashed session back
-at recovery. What a committed restructuring cannot give is its own undo: the old tables are dropped in the transaction.
+at recovery. **Measured** with a `THROW` injected as the last statement before `COMMIT` of the generated script (run with
+`sqlcmd` on a fresh twin, `s1_t1_fail`): the structure phase, the fold and the move ran for 20 s and the `CATCH` block took
+all of it back -- `ConfigSave` 9 rows, `Config` 9847, no `NG` table, no new column, `SchemaStorage` `Status 100` with the
+hash it had, `DBNames` and the `DynamicallyUpdated` marker as they were. What a committed restructuring cannot give is its own undo: the old tables are dropped in the transaction.
 The apply's recovery artifact keeps the `Config` rows and the cache rows; for the tables the answer is a SQL Server
 backup taken before (`BACKUP DATABASE ... WITH COPY_ONLY`), which is also how the lab makes twins. **Proposal**: a
 structural apply refuses without `--recovery-backup <file>` (the command takes the backup) or `--i-have-a-backup`;
@@ -1010,6 +1013,7 @@ One protocol for every case of S1 (a2, b, f, g, h, c and the types case are the 
 | 9 | a session in the cluster on both | `register-ib.ps1`, `session_job.ps1 -Database <db> -Job <case>.bsl`, `unregister` | identical output (read, defaults, XDTO, write, query) |
 | 10 | a rehearsal changes nothing | `--rehearse`, then `snapshot.py` | no difference |
 | 11 | the refusals of the case | tests of `decide` + a dry run on a stage with one change more than S1 | refused with the reason, nothing written |
+| 12 | a failure inside the transaction takes everything back (once per operation kind that adds a statement) | a `THROW` injected before `COMMIT` of the `--script-output` script, run with `sqlcmd` on a fresh twin | the database as it was: row counts, `SchemaStorage` hash, no `NG` table, no new column |
 
 The drift list -- differences that are the platform's own derived state, tolerated in every case: `_DbCopies` and
 `_DbCopiesUpdates` (the platform upgrades those system tables on its own; new ones appear in another build: case c), the
@@ -1036,6 +1040,13 @@ to three days, L ~ a week of an agent.
 | **S1-I** | Extensions | `DBNames-Ext-*` numbering (done), `SchemaStorage(1)` and the `X1` tables, `_ExtensionsRestruct*`; refuse when an extension adopts a changed object, or prove it harmless | wave 0 | БСП twin with 4 extensions: an object adopted by none passes; one adopted by an extension is refused; the extension's tables and the platform's later native apply are unchanged | M, ext |
 | **S1-J** | Size guard, chunked copy | a limit on the rows / bytes of the rebuilt tables, the refusal that points to the native apply; the chunked copy is 0.5 | wave 0 | a synthetic table above the limit is refused; the limit is measured (log growth, time) | S, ddl |
 | **S1-K** | End to end with our import | tree edit -> our `infobase config import` -> `mssql-config-apply` -> compare with native import + native apply; every operation; cluster session; ERP УХ with the coordinator's OK | S1-A, and the import track's fix of the silently dropped attribute (10.1) | the twin protocol with our import as the stager, БСП 8.3.27; then УХ | L, import + ddl |
+
+Where an operation plugs in (all in `src/restructure/`): `plan.rs::find_changes` (detects; today it refuses removed,
+retyped and re-indexed attributes), `check_object` (what else may differ), `plan_object` (fields -> the new entry -> the
+tables -> the copy), `xdto_update` / `registry_update` (the caches), `s1.rs::classify_reason` (flip `NotBuilt` to a built
+operation) and `decide` (the agreement of the two decoders), `script.rs` (nothing to change unless a new kind of statement
+appears). Each sub-issue starts with the corpus test of its case (`tests_corpus.rs`: the plan made offline from the staged
+snapshot against the native result), which is the quick loop; the twin run of 12.6 closes it.
 
 Not in S1 and not filed: 8.5 (the apply refuses it; the storage differs in `ALTER INDEX` lists and all sixteen `*.si`),
 types by reference and composite types (need the map from type ids to tables), predefined data, registers.
