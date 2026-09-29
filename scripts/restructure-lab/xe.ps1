@@ -3,6 +3,7 @@
 # C:\temp\ibcmd_rs_04\ddl\. Only sessions with that prefix are ever created/stopped/dropped.
 # The lab folder is $env:DDL_LAB (default F:\ibcmd\lab\04\restructure).
 
+. "$PSScriptRoot\native_lock.ps1"
 $script:LabRoot = if ($env:DDL_LAB) { $env:DDL_LAB } else { 'F:\ibcmd\lab\04\restructure' }
 $script:XeDir = 'C:\temp\ibcmd_rs_04\ddl'
 
@@ -55,31 +56,16 @@ function Get-DdlXeSessions {
     Invoke-Sql "SET NOCOUNT ON; SELECT name FROM sys.server_event_sessions WHERE name LIKE N'ibcmd_rs_04_ddl[_]%'; SELECT name, create_time FROM sys.dm_xe_sessions WHERE name LIKE N'ibcmd_rs_04_ddl[_]%';"
 }
 
-# native ibcmd, platform 8.3.27.2214, on one lab database
-function Invoke-NativeApply([string]$Db, [string]$Dynamic = 'disable', [string]$Data = '', [int]$TimeoutSec = 3600) {
-    $ibcmd = 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe'
+# native ibcmd config apply on one lab database, under the lab "native" lock (native_lock.ps1: closed stdin, timeout,
+# output cap). Platform 8.3.27.2214 unless -Ibcmd/-User say otherwise. Returns the exit code; the platform's output
+# is in logs\native-apply-<tag>.out / .err.
+function Invoke-NativeApply([string]$Db, [string]$Dynamic = 'disable', [string]$Data = '', [int]$TimeoutSec = 3600,
+                            [string]$Ibcmd = 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe', [string]$Tag = '',
+                            [string]$User = 'Администратор') {
     if (-not $Data) { $Data = "$($script:LabRoot)\ibdata\$Db" }
-    New-Item -ItemType Directory -Force "$($script:LabRoot)\logs" | Out-Null
-    if (-not (Test-Path "$($script:LabRoot)\logs\empty.txt")) { New-Item -ItemType File "$($script:LabRoot)\logs\empty.txt" | Out-Null }
+    if (-not $Tag) { $Tag = $Db }
     New-Item -ItemType Directory -Force $Data | Out-Null
-    $args = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
-              "--data=$Data", '--user=Администратор', '--force', "--dynamic=$Dynamic")
-    $p = Start-Process -FilePath $ibcmd -ArgumentList $args -NoNewWindow -PassThru `
-        -RedirectStandardOutput "$($script:LabRoot)\logs\native-apply-$Db.out.txt" `
-        -RedirectStandardError "$($script:LabRoot)\logs\native-apply-$Db.err.txt" `
-        -RedirectStandardInput "$($script:LabRoot)\logs\empty.txt"
-    # poll instead of a plain wait: note every other ibcmd process seen while ours runs
-    # (concurrent native ibcmd runs of other tracks may crash each other - evidence)
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    $seen = @{}
-    while (-not $p.HasExited) {
-        Get-Process ibcmd -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $p.Id } | ForEach-Object { $seen[$_.Id] = $_.StartTime.ToString('s') }
-        if ((Get-Date) -gt $deadline) { $p.Kill(); throw "native apply timeout ($TimeoutSec s)" }
-        Start-Sleep -Milliseconds 1500
-    }
-    $p.WaitForExit()
-    $note = ($seen.GetEnumerator() | ForEach-Object { "pid=$($_.Key) started=$($_.Value)" }) -join '; '
-    Set-Content -LiteralPath "$($script:LabRoot)\logs\native-apply-$Db.concurrent.txt" -Value ("exit=$($p.ExitCode) others=[$note]")
-    $p.ExitCode
+    $nativeArgs = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
+                    "--data=$Data", "--user=$User", '--force', "--dynamic=$Dynamic")
+    Invoke-NativeCommand -Ibcmd $Ibcmd -Arguments $nativeArgs -Log "$($script:LabRoot)\logs\native-apply-$Tag" -TimeoutSec $TimeoutSec
 }
-

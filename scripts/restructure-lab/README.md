@@ -16,6 +16,7 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | script | what |
 |---|---|
 | `xe.ps1` | Extended Events helpers: `Start-DdlXe` / `Stop-DdlXe` (session `ibcmd_rs_04_ddl_<n>`, filtered to one database, files in `C:\temp\ibcmd_rs_04\ddl`), `Invoke-NativeApply` (native apply, notes other ibcmd processes seen while it ran) |
+| `native_lock.ps1` | `Invoke-NativeLocked { ... }`: runs a native `config import` / `config apply` / `infobase create` under the lab `native` lock (`heavy-lock.ps1 acquire ddl -Name native` ... `release`), held for that command only; every script here that starts a native write uses it |
 | `run_case.ps1` | one traced apply: light snapshot of the staged state, COPY_ONLY backup (twin source), XE session, native `config apply --force --dynamic=disable`, XE read, full snapshot, diff |
 | `run_series.ps1` | cumulative cases: edit the tree, native import until the stage is complete (row count check), `run_case` |
 | `try_native.ps1` | fast loop: native import (+ apply) of a tree on a debug clone |
@@ -48,5 +49,6 @@ pwsh -NoProfile -File scripts\restructure-lab\run_series.ps1 -Cases a -Prev <sna
 python scripts\restructure-lab\snapdiff.py <db> <before-label> <db> <after-label>
 ```
 
-Run only one native `ibcmd` of your own at a time; verify the `ConfigSave` row count after a native import
-(a partial stage makes the apply fail, see the findings in the doc).
+Every native write goes through the lab `native` lock (`native_lock.ps1`); verify the `ConfigSave` row count after a
+native import (a full stage of this configuration is 9842 rows; a partial stage makes the apply fail, see the
+findings in the doc).
