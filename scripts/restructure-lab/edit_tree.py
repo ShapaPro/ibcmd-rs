@@ -121,6 +121,9 @@ if __name__ == "__main__":
     elif case == "h":
         import edit_cases_h
         edit_cases_h.case_h()
+    elif case == "k":
+        import edit_cases_k
+        edit_cases_k.case_k()
     else:
         import edit_cases_more
         edit_cases_more.MORE[case]()

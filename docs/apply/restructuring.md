@@ -16,8 +16,9 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
 1. **Native apply never uses `ALTER TABLE`.** Whenever the structure entry of a table changes (a column
    added, widened or removed, an index added or removed, a sub-table added), the platform rebuilds the
    whole object through "new generation" tables: it creates `_XNG` for the table and each of its
-   sub-tables, loads the data with `INSERT ... SELECT` (defaults for new columns), drops the old tables and
-   renames the new ones. New objects take the same path (create `NG`, rename). Progress is recorded in
+   sub-tables, loads the data with `INSERT ... SELECT` (defaults for new columns; a type change is converted
+   row by row inside the 1C engine and bulk-inserted), drops the old tables and renames the new ones. New
+   objects take the same path (create `NG`, rename). Progress is recorded in
    `SchemaStorage`: `Status` 100 -> 200 -> 400 -> 500 -> 100, and `NewGenCreated` holds the definitions of the
    tables created so far (section 3).
 2. **The structure is a text, and it is decoded.** `DBSchema` (== `SchemaStorage.CurrentSchema` of
@@ -58,7 +59,7 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
 - **Snapshots.** Before/after: every table's columns and indexes, row count and `CHECKSUM_AGG(BINARY_CHECKSUM(*))`,
   and the service tables (`DBSchema`, `SchemaStorage`, `Params`, `Config`, `ConfigSave`, `Files`, `ConfigCAS`)
   row by row with content hashes (`snapshot.py`, `snapdiff.py`).
-- **Cases** (all on rows that exist: 8-716 rows per changed table):
+- **Cases** (the changed tables hold data: 8-716 rows, the totals table 3424; case c creates an empty table):
 
 | label | change (all in the БСП demo objects) | table(s) that changed | rows |
 |---|---|---|---|
@@ -70,10 +71,11 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
 | e + g (`g`) | that attribute widened 50 -> 100 and its index flag switched on (one apply) | `_Reference20` | 14 |
 | f | that attribute (indexed) deleted | `_Reference20` | 14 |
 | h | 12 attributes of every basic type on a flat catalog; 1 attribute on a catalog with common attributes; 1 attribute in a tabular section; 1 new tabular section | `_Reference2598`, `_Reference27`, `_Reference20_VT159`, new `_Reference15_VT11039` | 716, 71, 18 |
+| k | string String(0) -> String(5), Number(10,0) -> Number(5,0), Boolean -> String(10) on rows that hold longer/larger values | `_Reference2598` | 716 (5 seeded) |
 
 Case e was merged into g (two failed native imports; section 10); the string widening and the index
-creation are still separable in the trace. No trace exists for: type change with data loss, string
-narrowing, deleting a whole object, `--dynamic=force`, 8.5, ERP УХ.
+creation are still separable in the trace. No trace exists for: deleting a whole object, type changes of
+references, `--dynamic=force`, 8.5, ERP УХ.
 
 ## 3. What native apply does
 
@@ -140,9 +142,13 @@ continued by the next apply.
   structural apply also upgraded system tables (`_DbCopies` +`_StorageVariant`, `_DbCopiesUpdates`
   +3 columns in a2; created `_DbCopiesInfoBaseUse`, `_DbCopiesUpdateStat`, `_DbCopiesUpdateTableStat`,
   `_WebSocketClients` in c). Their names take numbers from the same `DBNames` counter (nil uuid).
-- **Data copy is `INSERT ... SELECT` with column mapping and defaults** (section 6.3): unchanged
+- **Data copy is `INSERT ... SELECT` with column mapping and defaults** (the defaults: section 5): unchanged
   columns are copied by name, a widened column is `CAST(T1._Fld11034 AS NVARCHAR(100))`, a new one is a typed
   parameter; `(T1._TrNum + 0.0)` is how the query compiler widens a numeric.
+- **A type change is converted by the platform, not by SQL** (case k, `conversion-k.md`): the old table is read
+  in pages of 100 rows, the values are converted in the 1C engine and written with `insert bulk` into the NG
+  table. Measured results with no warning: string truncated (`abcdefghij` -> `abcde`), number saturated
+  (`123456` -> `99999`), boolean to string -> `Да`/`Нет`.
 - The log messages of the platform name the actions: "Новый объект: Справочник.X", "Объект изменен:
   РегистрСведений.Y", "Создана таблица: ...", "Изменена структура таблиц базы данных", and for registers
   "Реструктуризация ... пересчет итогов" (totals of the accumulation register are copied, not recalculated:
@@ -220,8 +226,10 @@ A field with several type entries (composite type) becomes several columns: `_<F
 
 Conformance (`dbschema_check.py`; `docs/apply/evidence/restructuring/dbschema-conformance-*.txt`): 8.3.27
 БСП 1937/1937 tables (1761 main + 176 sub-tables) columns and indexes, 1761/1761 implicit keys; 8.5 БСП
-1922/1922 and 1769/1769. Same grammar, same 14-element table entry, same type tags in 8.5; both databases
-report `IBVersion 7`, `PlatformVersionReq 80313`.
+1922/1922 and 1769/1769. The extension schema (`SchemaID = 1`, 243 entries, SQL names get the suffix
+`X1`, e.g. `_Reference10523X1`, `_Document10069_VT10186X1`): all 277 physical tables match (columns; indexes not
+checked). Same grammar, same 14-element table entry, same type tags in 8.5; both databases report
+`IBVersion 7`, `PlatformVersionReq 80313`.
 
 ### 4.3 `DBNames` and `DBNamesVersion`
 
@@ -349,8 +357,10 @@ order) is accepted by the platform; which derived `Params` rows are required.
   most of the database.
 - **Exchange plans**: `ChngR` tables exist only for objects in exchange plans; `_ConfigChngR` registration.
 - **Type sets** (defined types, characteristics) need the resolved set to know the composite columns.
-- **Data conversion** of type changes (string -> number, narrowing, reference type change) is untraced;
-  the platform's rules (losses, warnings, `--force`) are unknown.
+- **Data conversion** of type changes runs inside the 1C engine (case k): string truncation, number
+  saturation and the text of a boolean (`Да`/`Нет`, probably language dependent) were seen; the rules for other
+  type pairs (string -> number, date <-> string, reference type change, composite <-> simple) and the
+  conditions under which the platform refuses or asks for `--force` are unknown.
 - **Predefined data** (tables, `Predefined.xml`) and **subordination** are outside the traced cases.
 - **Platform-build drift**: a database from an older build needs the built-in tables of the current build
   (about 40 system tables, 4 upgraded or created in our traces); a reference list per build is required.
@@ -373,7 +383,7 @@ tools of this track available. Numbers are ranges of working weeks; confidence i
 | W3 metadata -> schema for catalogs, documents and their tabular sections (all attribute kinds, indexes, common attributes) | 3-4 | medium | rules verified for main fields; sub-tables, owners, type sets are the unknown part |
 | W4 registers (information, accumulation: dims, resources, indexes, totals, aggregates) | 4-6 | low-medium | index derivation is not decoded |
 | W5 other families (constants, enums, charts, BP, tasks, exchange plans, journals, accounting/calculation registers) | 5-8 | low | 106 table families in the corpus |
-| W6 data conversion for type changes, deletions of objects and their references | 3-5 | low | untraced |
+| W6 data conversion for type changes, deletions of objects and their references | 3-5 | low | done by the 1C engine row by row (case k); rules per type pair unknown |
 | W7 extensions and platform-build drift | 3-4 | low | `_ExtensionsRestruct*`, `X1` tables |
 | W8 verification harness (native twin per case, session read, parity export) | 2 | medium | the lab kit exists |
 | W9 8.5 differences | 2-3 | low | formats equal, rows differ |
@@ -407,7 +417,8 @@ reads the catalog with the new attribute at its default.
 ## 10. Findings other tracks need
 
 1. **Our patch-mode import silently drops a new attribute.** Case a: 9517 rows staged, every row identical
-   to `Config` except `versions`; the apply had nothing to do. It must refuse or stage. `--base-free` staged
+   to `Config` except `versions`; the native apply then ran to the end (92 s) and changed nothing
+   structural. The import must refuse or stage the attribute. `--base-free` staged
    the whole edited tree (9838 rows; 3 multi-part rows `5189beb9..0[1..2]`, `7e3283df..0[1]` are missing
    compared with native) and **native apply accepted it on an existing database** for 12 attributes of
    every type, a new tabular section, and a new catalog (cases h, c).
@@ -417,8 +428,8 @@ reads the catalog with the new attribute at its default.
    between attempts and disappeared on retry; the import uses several writer connections; **hypothesis**:
    a race between the load of predefined items and the objects that refer to them at 90-99% CPU).
    A partial stage makes the following apply fail at once with "Нарушена целостность структуры
-   конфигурации" (cases c, e). A second import stages everything. Count the rows of `ConfigSave`
-   (ROWS >= the previous full stage) before applying. `--threads` is not accepted by import.
+   конфигурации" (cases c, e). A second import stages everything. Count the rows of `ConfigSave` (a full
+   stage of this configuration is 9842) before applying. `--threads` is not accepted by import.
 3. **A native apply can die at "Принятие изменений"** (exit -1, no message; case d on clone `a`, while a
    second ibcmd of this track - an import and an apply on another clone - ran at the same time; the clean
    re-run on a fresh clone passed while four ibcmd processes of other tracks were running, so concurrency
@@ -432,6 +443,19 @@ reads the catalog with the new attribute at its default.
    the 113 s); an own apply that promotes only changed rows in one transaction should be much faster.
 6. `ConfigDumpInfo.xml` did not need an entry for a new object once the stage was complete (the case c
    failure was a partial stage); not tested in isolation.
+7. **Detecting a structural change (for an own apply that must refuse it).** The platform recomputes the whole
+   `DBSchema` from the metadata and rebuilds exactly the tables whose entry differs. An apply without
+   restructuring can therefore be guarded the same way: build the expected entries of the changed
+   objects from the staged rows and compare them with the stored `DBSchema`; any difference (or an object
+   family the generator does not know) means "structural, use native apply". As a cheaper first cut, a
+   changed object row of a table-owning kind (catalog, document, register, constant, enum, chart, ...) that
+   differs from `Config` in anything but names, synonyms, comments, forms, commands, templates and
+   module flags is structural.
+8. **XE capture recipe** that worked: `sql_batch_completed`, `rpc_completed`, `sql_statement_completed`,
+   `object_created|altered|deleted`, action `database_name` predicate, `EVENT_RETENTION_MODE = NO_EVENT_LOSS`
+   (then `error_reported` cannot be added), `event_file` target. `sp_statement_completed` adds 200 000
+   events per apply and no information beyond `rpc_completed`; `object_*` events list every DDL with its
+   text, including the temp tables of the platform.
 
 ## 11. Evidence
 
@@ -439,7 +463,7 @@ Repo (`docs/apply/evidence/restructuring/`): `a2-structure-statements.sql` (the 
 `newgen-created-a2-first.brace.txt`, `newgen-created-a2-last.brace.txt`, `timeline-dm.txt`,
 `types-h-statements.sql`, `dbschema-conformance-8327.txt`, `dbschema-conformance-85.txt`,
 `gen-check-catalogs-documents.txt`, `md-types-vs-dbschema.txt`, `dbnames-kinds.txt`, `roundtrip.txt`,
-`cases.md`.
+`conversion-k.md`, `cases.md`.
 
 Lab (`F:\ibcmd\lab\04\restructure`): `xe/<case>/events.jsonl` (+ `.xel`), `out/diff_<case>.txt`,
 `snap/<db>/<label>/{schema.txt,tables.tsv,svc.json}` with blobs in `blobs/`, `bak/*.bak` (twin sources),

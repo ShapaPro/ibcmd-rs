@@ -19,6 +19,7 @@ CASES = [
     ("g", DBM, "e_after", "g_after", "attribute widened 50 -> 100 (case e) and index flag on (case g), one apply (native-staged)", "75 s"),
     ("f", DBM, "g_after", "f_after", "the indexed attribute deleted (native-staged)", "96 s"),
     ("h", DBM, "f_after", "h_after", "12 attributes of all basic types on `Catalog.КлючевыеОперации`, 1 on `Catalog.ВидыКонтактнойИнформации` (common attributes), 1 in a tabular section of `_ДемоПартнеры`, a new tabular section on `_ДемоКонтрагенты` (our `--base-free` stage)", "122 s"),
+    ("k", DBM, "k0", "k_after", "data conversion on `Catalog.КлючевыеОперации` (rows seeded before): String(0) -> String(5), Number(10,0) -> Number(5,0), Boolean -> String(10) (our `--base-free` stage)", "175 s (busy machine)"),
 ]
 
 

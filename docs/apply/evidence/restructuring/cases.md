@@ -254,3 +254,29 @@ header max 11038 -> 11056, entries 6464 -> 6481
   +11055 Fld a113a8d3-3e72-497c-81c7-06a94fe126f7
   +11056 Fld d7c5be5e-1a96-448f-88bf-a04d4b5d324b
 ```
+
+## k - data conversion on `Catalog.КлючевыеОперации` (rows seeded before): String(0) -> String(5), Number(10,0) -> Number(5,0), Boolean -> String(10) (our `--base-free` stage)
+
+Apply wall time: 175 s (busy machine).
+
+Schema (table/column/index changes, `snapdiff.py`):
+
+```
+== schema: tables added / removed / changed
+added (0): 
+removed (0): 
+changed (2):
+  T _Reference2598
+     - C _Fld11045 binary(1) NOT NULL
+     - C _Fld11048 numeric(10,0) NOT NULL
+     - C _Fld11051 nvarchar(max) NOT NULL COLLATE Cyrillic_General_CI_AS
+     + C _Fld11045 nvarchar(10) NOT NULL COLLATE Cyrillic_General_CI_AS
+     + C _Fld11048 numeric(5,0) NOT NULL
+     + C _Fld11051 nvarchar(5) NOT NULL COLLATE Cyrillic_General_CI_AS
+```
+
+`DBNames`:
+
+```
+header max 11056 -> 11056, entries 6481 -> 6481
+```
