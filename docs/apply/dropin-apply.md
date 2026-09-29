@@ -6,6 +6,13 @@ This page records what the platform's command does (measured on 8.3.27.2214, eve
 [`evidence/dropin-apply/native-cases.md`](evidence/dropin-apply/native-cases.md)), which of it
 this version serves and how, and the words and exit codes it answers with.
 
+**Stricter than the platform, on purpose.** Run against a database (`--dbms=...`, the way the
+drop-in and every script of the lab run), the platform does not see other sessions and applies
+whatever is connected; in server mode (`--pid`, `--remote`) it cancels with a warning and **exit
+0**. This apply refuses while SQL Server shows another user process on the database, with exit
+-1, so that a script never takes "not applied" for success (`--exclusivity=assumed` switches the
+look off). It also refuses, with exit 1, every stage that would restructure the database.
+
 Contents: [the platform's command](#the-platforms-command) -
 [what is served](#what-is-served) - [what the drop-in prints](#what-the-drop-in-prints) -
 [differences from the platform](#differences-from-the-platform) -
@@ -130,8 +137,12 @@ the database by the apply. 8.5 is refused (exit 1): the apply is measured on 8.3
   `Ошибка исключительной блокировки информационной базы.` / `Активные сеансы и соединения:` / one
   line per session as SQL Server knows it (`компьютер: <host>, приложение: <program>, соединение
   с СУБД: <id> (<login>, <status>)`; the 1C session's own start time is not known here) and the
-  advice to close them, then the closing `[ERROR]` line. The platform's server mode cancels with
-  exit 0 (n26); a script must not take "cancelled" for "applied", so this is a failure.
+  advice to close them, then the closing `[ERROR]` line. **This is stricter than the platform**:
+  run against a database it applies with sessions connected (n20), and its server mode cancels
+  with a warning and exit 0 (n26). Here it is a failure (exit -1): a script must never take "not
+  applied" for success. `--exclusivity=assumed` (this program's option, default `sql`) does not
+  look at the sessions: for a login without `VIEW SERVER STATE`, or when only a working
+  process's pooled connections remain and the operator knows nobody is working.
 
 ## What the drop-in prints
 
@@ -219,6 +230,11 @@ text matching (open point 2).
   refused by name (exit 1), `--exclusivity=assumed` applied; a stage written by the platform's
   own import refused read-only (exit 1).
 * The platform's help of the command: [`evidence/dropin-apply/native-help-apply.txt`](evidence/dropin-apply/native-help-apply.txt).
+* The whole user-facing flow, [`evidence/dropin-apply/e2e-0.4.md`](evidence/dropin-apply/e2e-0.4.md): our exe as
+  `ibcmd.exe` without `sqlcmd`/`bcp` on `PATH`; `config import` of a tree with 25 edited files (modules of 17
+  kinds of object, forms, templates, a help page), `config apply`, the platform's export, `source-diff`: 12 197
+  files identical and `ConfigDumpInfo.xml` identical with `configVersion` blanked, twice; the times against the
+  platform's own import and apply (`scripts/dropin-e2e/run_e2e.ps1`).
 
 ## Open points
 
