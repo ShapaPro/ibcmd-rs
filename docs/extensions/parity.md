@@ -420,8 +420,9 @@ These are read off a single native sample; the evidence is in the lab folder
   and the empty-source characteristic compiles, but no 8.5 extension was loaded);
 * the load of a whole native-format tree (only the bounded module change loads;
   forms, pictures and templates of an extension still take the strict compile);
-* the drop-in route on 8.5 and on the other three 8.3.27 extensions (the route
-  is the same export; only `_ДемоРасширение` was run through it).
+* the drop-in route on the other extensions (the route is the same export; only
+  `_ДемоРасширение` of the БСП 8.3.27 clone and `ServiceDesk` of the БСП 8.5
+  clone were run through it).
 
 ## The drop-in route
 
@@ -432,9 +433,10 @@ configuration) are the ones of `infobase config export`; the image is the
 staged one when the extension has staged rows, else the active one
 (`--image auto`). An unknown name fails; so does an extension with an opaque or
 failed storage row, after writing the tree. `infobase config import` still
-refuses `--extension`. Measured 2026-09-30 on the БСП 8.3.27 clone:
-`_ДемоРасширение` through the drop-in command equals the native export in all
-185 files (`ConfigDumpInfo.xml` included).
+refuses `--extension`. Measured 2026-09-30: `_ДемоРасширение` of the БСП 8.3.27
+clone (`--platform=8.3.27`) equals the native export in all 185 files, and
+`ServiceDesk` of the БСП 8.5 clone (`--platform=8.5.1`) in all 633 files
+(`ConfigDumpInfo.xml` included, compared byte for byte).
 
 ## Reproducing
 
