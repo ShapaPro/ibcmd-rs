@@ -197,6 +197,11 @@ def change(name, family, summary):
     return deco
 
 
+@change("noop", "control: no change", "the unchanged tree (a control: nothing may differ)")
+def c_noop(t):
+    return {}
+
+
 @change("attr", "descriptor: new attribute", "String(50) attribute ДемоНовыйРеквизит added to Catalog._ДемоПартнеры")
 def c_attr(t):
     rel = "Catalogs/_ДемоПартнеры.xml"

@@ -32,7 +32,7 @@ def load(outdir):
         with open(meta_path, encoding="utf-8-sig") as f:
             meta = json.load(f)
         change, mode = meta["change"], meta["mode"]
-        entry = {"meta": meta, "rows": None}
+        entry = {"meta": meta, "rows": None, "outdir": outdir}
         rows_path = meta_path.replace(".meta.json", ".json")
         if os.path.exists(rows_path) and meta.get("exit") == 0:
             with open(rows_path, encoding="utf-8") as f:
@@ -73,13 +73,81 @@ def cell(entry):
     return "%d rows (%d changed, %d new, %d dropped)" % (n, len(rows["different"]), len(rows["new"]), len(rows["dropped"]))
 
 
+def refusal_text(entry):
+    """The first line of the refusal: the failure report of the run when there is one, else the log tail."""
+    meta = entry["meta"]
+    outdir = os.path.normpath(entry["outdir"])
+    tag = os.path.basename(outdir)
+    report = os.path.join(os.path.dirname(os.path.dirname(outdir)),
+                          "import-%s-%s.%s.json" % (tag, meta["change"], meta["mode"]))
+    if os.path.exists(report):
+        try:
+            with open(report, encoding="utf-8-sig") as f:
+                text = json.load(f).get("error") or ""
+            first = text.strip().splitlines()[0]
+            m = re.match(r"a base-free stage needs every row, and (\d+) could not be produced", first)
+            if m:
+                return "%s rows cannot be built (dangling references)" % m.group(1)
+            return first
+        except (OSError, ValueError, IndexError):
+            pass
+    tail = (meta.get("tail") or "").replace(" | ", "\n")
+    errors = [x for x in re.findall(r"\[ERROR\] (.*)", tail) if "завершен с ошибкой" not in x]
+    return errors[0].strip() if errors else tail.strip()
+
+
+def short_cell(entry):
+    """One table cell for the doc: LOST, REFUSED, or the rows the change reached."""
+    if entry is None:
+        return "-"
+    meta = entry["meta"]
+    if meta.get("exit") != 0:
+        msg = refusal_text(entry)
+        msg = re.sub(r"[0-9a-f]{8}-[0-9a-f-]{27}", "<uuid>", msg)
+        msg = re.sub(r"\\\\\?\\\S+", "<path>", msg)
+        return "REFUSED: " + msg[:70].replace("|", "/")
+    rows = changed_rows(entry)
+    labels = []
+    for key in ("different", "new", "dropped"):
+        for name, what in rows[key]:
+            labels.append((key, what))
+    if not labels:
+        return "**LOST**"
+    shown = []
+    for key, what in labels[:2]:
+        text = what if len(what) <= 44 else what[:41] + "..."
+        shown.append(("%s%s" % ("+" if key == "new" else "-" if key == "dropped" else "", text)).replace("|", "/"))
+    more = " (+%d)" % (len(labels) - 2) if len(labels) > 2 else ""
+    return "%d row(s): %s%s" % (len(labels), "; ".join(shown), more)
+
+
+def doc_table(data):
+    import edits
+    lines = ["| change | what | patch | base-free | native |", "|---|---|---|---|---|"]
+    for change in [c for c in ORDER if c in data] + [c for c in data if c not in ORDER]:
+        if change not in edits.CHANGES:
+            continue
+        summary = edits.CHANGES[change]["summary"].replace("|", "/")
+        cells = [short_cell(data[change].get(m)) for m in MODES]
+        lines.append("| `%s` | %s | %s |" % (change, summary, " | ".join(cells)))
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("outdir")
     ap.add_argument("--md")
     ap.add_argument("--detail", action="store_true")
+    ap.add_argument("--doc", action="store_true", help="print the table of docs/import/patch-mode.md")
+    ap.add_argument("--merge", nargs="*", default=[], help="more matrix folders whose results add to or replace these")
     args = ap.parse_args()
     data = load(args.outdir)
+    for extra in args.merge:
+        for change, modes in load(extra).items():
+            data.setdefault(change, {}).update(modes)
+    if args.doc:
+        print(doc_table(data))
+        return
     lines = ["| change | patch | base-free | native |", "|---|---|---|---|"]
     for change in [c for c in ORDER if c in data] + [c for c in data if c not in ORDER]:
         cells = [cell(data[change].get(m)) for m in MODES]
