@@ -6495,6 +6495,45 @@ fn metadata_command_reference_index_reads_catalog_use_standard_commands_from_rea
     assert!(index[true_uuid].use_standard_commands);
 }
 
+/// A constant's `<UseStandardCommands>` is slot 7 of its record, the slot its
+/// own `Constants/<name>.xml` is written from; the platform keeps the raw
+/// `100:<uuid>` sentinel in a command interface when it is `false`. The row is
+/// the constant `ИспользоватьКонтрольТарификации` of the БСП demo, whose
+/// staged copy on the lab database `ibcmd_rs_04_rcheck_bsp_a` says `false`.
+#[test]
+fn metadata_command_reference_index_reads_constant_use_standard_commands() {
+    let uuid = "eaaa6d15-f212-4a47-ae92-c5398ed6296d";
+    let text = |use_standard_commands: &str| {
+        format!(
+            "{{1,\n{{16,\n{{27,\n{{2,\n{{3,\n{{1,0,{uuid}}},\"ИспользоватьКонтрольТарификации\",\n\
+             {{1,\"ru\",\"Использовать контроль тарификации\"}},\"\",0,0,00000000-0000-0000-0000-000000000000,0}},\n\
+             {{\"Pattern\",\n{{\"B\"}}\n}}\n}},0,\n{{0}},\n{{0}},0,\"\",0,\n{{\"U\"}},\n{{\"U\"}},0,\
+             00000000-0000-0000-0000-000000000000,2,0,\n{{5006,0}},\n{{3,0,0}},\n{{0,0}},0,\n{{0}},\n\
+             {{\"S\",\"\"}},0,0,0}},133fd53a-4064-41f3-af43-148ba8f74aa2,5e880ab4-4e7b-4f55-9597-80a12e35fa3b,\
+             a46eb7e4-579a-46bb-9583-5b652c9746f3,ce80f907-bc5b-4bee-8c9c-d648cc329b8f,1,{use_standard_commands},\n\
+             {{0}},\n{{0}},00000000-0000-0000-0000-000000000000,0,0,1459ee59-7ebb-51a0-ac9d-4ca22e26f193,\
+             b028c710-d6c8-5f4f-b103-4c9dafeac716,0,0}},0}}"
+        )
+        .replace('\n', "\r\n")
+    };
+    for (value, uses_them) in [("1", true), ("0", false)] {
+        let packed = deflate_for_test(text(value).as_bytes());
+        let row = metadata_text_row_from_blob(uuid, &packed).expect("the constant row decodes");
+        assert_eq!(row.kind.as_deref(), Some("Constant"));
+        let index = build_metadata_command_reference_index_from_texts(&[row]);
+        assert_eq!(index[uuid].use_standard_commands, uses_them);
+        let name = command_interface_command_name("100", uuid, &BTreeMap::new(), &index);
+        assert_eq!(
+            name,
+            if uses_them {
+                "Constant.ИспользоватьКонтрольТарификации.StandardCommand.Open".to_string()
+            } else {
+                format!("100:{uuid}")
+            }
+        );
+    }
+}
+
 #[test]
 fn extracts_standalone_content_used_items() {
     let first_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";

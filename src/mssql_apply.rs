@@ -177,6 +177,7 @@ pub fn apply_source_change(
             output_dir: active_root.clone(),
             overwrite: false,
             include_config_save: false,
+            main_configuration: false,
             file_names: selected_storage_file_names.clone(),
             file_name_lists: Vec::new(),
             inflate: false,

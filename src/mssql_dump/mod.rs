@@ -2193,6 +2193,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             args.collect_all_source_asset_diagnostics,
             model_export::requested(args.model_export, args.legacy_export),
             None,
+            args.main_configuration && !args.include_config_save,
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -2378,6 +2379,8 @@ pub(crate) fn export_staged_state(
             false,
             model_export::requested(false, false),
             Some(sink),
+            // The state is the rows of the memory, not a database's tables.
+            false,
         )
     };
     dynamic_generation::clear_storage_generation_overlays();
@@ -4075,6 +4078,7 @@ fn dump_table_rows_streamed(
     collect_all_source_asset_diagnostics: bool,
     model_export: bool,
     sink: Option<Arc<dyn FileSink>>,
+    main_configuration: bool,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
@@ -4103,8 +4107,14 @@ fn dump_table_rows_streamed(
     // Everything below reads the configuration an active dynamic generation
     // publishes; without one this leaves the headers and every later query
     // exactly as they were.
-    let headers =
-        install_dynamic_generation_overlay(sql, database, table, selected_file_names, headers)?;
+    let headers = install_storage_overlay(
+        sql,
+        database,
+        table,
+        selected_file_names,
+        headers,
+        main_configuration,
+    )?;
     let fetch_headers_ms = elapsed_ms(headers_started);
     let mut timings = MssqlDumpTimingReport {
         fetch_headers_ms,
@@ -45717,43 +45727,64 @@ fn quote_ident(value: &str) -> String {
     format!("[{}]", value.replace(']', "]]"))
 }
 
-/// Resolves the storage table's active dynamic generation, makes every later
-/// query on that table read the configuration it publishes, and returns the
-/// row headers under their published names.
+/// Resolves what the storage table publishes -- its active dynamic generation
+/// and, when the run asks for the platform's main configuration, the rows a
+/// completed import staged in `ConfigSave` -- makes every later query on that
+/// table read it, and returns the row headers under their published names.
 ///
-/// A table with no `DynamicallyUpdated` row -- every parity corpus this
-/// project measures except a database an online update left mid-flight --
-/// installs nothing and gets its own headers back unchanged.
+/// A table with no `DynamicallyUpdated` row and nothing staged -- every parity
+/// corpus this project measures except a database an online update left
+/// mid-flight -- installs nothing and gets its own headers back unchanged.
 ///
 /// A marker this reader cannot read is an error rather than "no generation":
 /// reading it as absent would publish the previous configuration silently,
 /// which is the defect this exists to close.
-#[allow(clippy::too_many_arguments)]
-fn install_dynamic_generation_overlay(
+fn install_storage_overlay(
     sql: &crate::sql::SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
     headers: Vec<ConfigRowHeader>,
+    main_configuration: bool,
 ) -> Result<Vec<ConfigRowHeader>> {
-    // A full run already knows every row there is, so a table without the
-    // marker costs nothing at all.
-    if selected_file_names.is_empty()
-        && !headers
-            .iter()
-            .any(|row| row.file_name == DYNAMIC_UPDATE_MARKER_ROW)
-    {
-        return Ok(headers);
+    let (overlay, headers) = resolve_storage_overlay(
+        sql,
+        database,
+        table,
+        selected_file_names,
+        headers,
+        main_configuration,
+    )?;
+    if let Some(overlay) = overlay {
+        dynamic_generation::install_storage_generation_overlay(table, overlay);
     }
-    let marker_name = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
-    let marker = fetch_config_rows(sql, database, table, &marker_name)?;
-    let Some(marker) = marker.into_iter().find(|row| row.part_no == 0) else {
-        return Ok(headers);
+    Ok(headers)
+}
+
+/// The overlay [`install_storage_overlay`] installs, if there is one, and the
+/// row headers under their published names. Reads the table, installs nothing.
+fn resolve_storage_overlay(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+    headers: Vec<ConfigRowHeader>,
+    main_configuration: bool,
+) -> Result<(
+    Option<std::sync::Arc<dynamic_generation::StorageGenerationOverlay>>,
+    Vec<ConfigRowHeader>,
+)> {
+    let history = generation_history(sql, database, table, selected_file_names, &headers)?;
+    // Only a full run publishes the staged rows: a run that selected a few
+    // rows by name reads them from the table, as it always did.
+    let staged = if main_configuration && selected_file_names.is_empty() {
+        staged_configuration(sql, database, table)?
+    } else {
+        None
     };
-    let history = dynamic_generation::dynamic_generation_history(&marker.binary_bytes()?)
-        .ok_or_else(|| {
-            anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history")
-        })?;
+    if history.is_none() && staged.is_none() {
+        return Ok((None, headers));
+    }
 
     // The overlay is a property of the whole table, so a run that selected a
     // few rows by name still resolves it against every row there is.
@@ -45764,16 +45795,53 @@ fn install_dynamic_generation_overlay(
         inventory = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
         &inventory
     };
-    let overlay = dynamic_generation::storage_generation_overlay(
-        &history,
-        names.iter().map(|row| row.file_name.as_str()),
-    );
-    if overlay.is_empty() {
-        return Ok(headers);
-    }
-    dynamic_generation::install_storage_generation_overlay(table, overlay.clone());
+    let generations = match &history {
+        Some(history) => dynamic_generation::storage_generation_overlay(
+            history,
+            names.iter().map(|row| row.file_name.as_str()),
+        ),
+        None => dynamic_generation::StorageGenerationOverlay::default(),
+    };
 
-    Ok(headers
+    let mut overlay = generations.clone();
+    let mut staged_headers = Vec::new();
+    let mut inventoried = false;
+    if let Some(staged) = staged {
+        let saved = format!(
+            "{}.dbo.{}",
+            quote_ident(database),
+            quote_ident(MssqlConfigurationTableRole::Saved.sql_name())
+        );
+        let candidate = generations.clone().staging(saved, staged.names.clone());
+        let published = candidate
+            .published_names(names.iter().map(|row| row.file_name.as_str()))
+            .chain(staged.names.iter().map(String::as_str));
+        // The staged `versions` is the inventory of the main configuration:
+        // what it does not list is left out of the Config side, and a staged
+        // row it does not list means the stage is not one this reads.
+        match config_dump_info::unlisted_entries(&staged.versions, published) {
+            Ok(unlisted) if unlisted.is_disjoint(&staged.names) => {
+                overlay = candidate.dropping(unlisted);
+                staged_headers = staged.headers;
+                inventoried = true;
+            }
+            Ok(_) => eprintln!(
+                "ConfigSave holds rows its `versions` does not list; the export publishes the Config table"
+            ),
+            Err(error) => eprintln!(
+                "ConfigSave `versions` cannot be read ({error:#}); the export publishes the Config table"
+            ),
+        }
+    }
+    if !inventoried {
+        if overlay.is_empty() {
+            return Ok((None, headers));
+        }
+        overlay = drop_unlisted_names(sql, database, table, overlay, names)?;
+    }
+    let overlay = std::sync::Arc::new(overlay);
+
+    let mut published = headers
         .into_iter()
         .filter_map(|mut row| {
             if let Some(published) = overlay.published_name(&row.file_name) {
@@ -45787,7 +45855,145 @@ fn install_dynamic_generation_overlay(
             }
             Some(row)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    published.extend(staged_headers);
+    Ok((Some(overlay), published))
+}
+
+/// The generation history the table's `DynamicallyUpdated` row records, or
+/// `None` when it has none.
+fn generation_history(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+    headers: &[ConfigRowHeader],
+) -> Result<Option<Vec<String>>> {
+    // A full run already knows every row there is, so a table without the
+    // marker costs nothing at all.
+    if selected_file_names.is_empty()
+        && !headers
+            .iter()
+            .any(|row| row.file_name == DYNAMIC_UPDATE_MARKER_ROW)
+    {
+        return Ok(None);
+    }
+    let marker_name = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
+    let marker = fetch_config_rows(sql, database, table, &marker_name)?;
+    let Some(marker) = marker.into_iter().find(|row| row.part_no == 0) else {
+        return Ok(None);
+    };
+    dynamic_generation::dynamic_generation_history(&marker.binary_bytes()?)
+        .map(Some)
+        .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))
+}
+
+/// The row that lists a whole configuration, in `Config` and in a stage.
+const STAGE_INVENTORY_ROW: &str = "versions";
+
+/// The row an import or an apply keeps while it is not finished.
+const STAGE_COMMIT_ROW: &str = "commit";
+
+/// The suffix of a row an import or an apply has copied and not yet promoted.
+const STAGE_NEW_SUFFIX: &str = ".new";
+
+/// What a completed import left in `ConfigSave`: the main configuration.
+struct StagedConfiguration {
+    /// The row headers of the stage.
+    headers: Vec<ConfigRowHeader>,
+    /// The names it holds a row for.
+    names: BTreeSet<String>,
+    /// Its `versions` row, the inventory of the whole configuration.
+    versions: Vec<u8>,
+}
+
+/// The main configuration staged in `ConfigSave`, when there is one.
+///
+/// The platform's export does not publish `Config` alone. An import stages the
+/// configuration it read in `ConfigSave` -- a `versions` row that lists all of
+/// it and the rows of the objects whose version changed -- and it stays there
+/// until an apply moves it into `Config` and empties the table; until then the
+/// export writes the staged configuration: the staged rows in place of their
+/// namesakes, the staged `versions` for `ConfigDumpInfo.xml`.
+///
+/// A `ConfigSave` without a `versions` row, or with the `commit` marker or a
+/// `.new` row of an import or an apply that did not finish, is not a stage this
+/// reads: the export publishes `Config` and says so. An empty table, and a
+/// database read from a folder of rows, have nothing staged.
+fn staged_configuration(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+) -> Result<Option<StagedConfiguration>> {
+    if table != MssqlConfigurationTableRole::Current.sql_name() || offline_rows::active().is_some()
+    {
+        return Ok(None);
+    }
+    let saved = MssqlConfigurationTableRole::Saved.sql_name();
+    let headers = fetch_row_headers(sql, database, saved, &BTreeSet::new())?;
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let names = headers
+        .iter()
+        .map(|row| row.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    let unfinished = names.contains(STAGE_COMMIT_ROW)
+        || names.iter().any(|name| name.ends_with(STAGE_NEW_SUFFIX));
+    if !names.contains(STAGE_INVENTORY_ROW) || unfinished {
+        eprintln!(
+            "{saved} holds no complete stage (no `versions` row, or the markers of an unfinished import or apply); the export publishes the {table} table"
+        );
+        return Ok(None);
+    }
+    let versions = fetch_binary_rows(
+        sql,
+        database,
+        saved,
+        &BTreeSet::from([STAGE_INVENTORY_ROW.to_owned()]),
+        false,
+    )?
+    .into_iter()
+    .find(|row| row.part_no == 0)
+    .map(|row| row.binary)
+    .ok_or_else(|| anyhow!("{saved} has a `versions` header but no part 0 of it"))?;
+    Ok(Some(StagedConfiguration {
+        headers,
+        names,
+        versions,
+    }))
+}
+
+/// Leaves out the published names the active `versions` row does not list.
+///
+/// An online update that removes an object leaves its rows in the table: the
+/// plain ones, or the aliases of the generation that wrote them. The `versions`
+/// row of the newer generation no longer lists the object and the platform,
+/// and so its own export, publishes nothing for it -- while this export would
+/// publish the stale rows and then refuse the whole run, because the manifest
+/// has names the inventory does not.
+///
+/// The row is read by its stored name before the overlay is installed, on the
+/// clustered key of the table itself. A table without a readable `versions`
+/// row keeps its overlay as it is; the export reports that row where it needs
+/// it.
+fn drop_unlisted_names(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    overlay: dynamic_generation::StorageGenerationOverlay,
+    stored: &[ConfigRowHeader],
+) -> Result<dynamic_generation::StorageGenerationOverlay> {
+    let versions_row = BTreeSet::from([overlay.stored_name(STAGE_INVENTORY_ROW).to_owned()]);
+    let rows = fetch_binary_rows(sql, database, table, &versions_row, false)?;
+    let Some(versions) = rows.iter().find(|row| row.part_no == 0) else {
+        return Ok(overlay);
+    };
+    let published = overlay.published_names(stored.iter().map(|row| row.file_name.as_str()));
+    let Ok(unlisted) = config_dump_info::unlisted_entries(&versions.binary, published) else {
+        return Ok(overlay);
+    };
+    Ok(overlay.dropping(unlisted))
 }
 
 /// The storage row an online update records its generation history in.
@@ -45802,7 +46008,7 @@ fn qualified_storage_table(database: &str, table: &str) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
     dynamic_generation::storage_table_expression(
         &qualified,
-        dynamic_generation::storage_generation_overlay_for(table).as_ref(),
+        dynamic_generation::storage_generation_overlay_for(table).as_deref(),
     )
 }
 

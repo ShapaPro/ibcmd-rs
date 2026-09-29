@@ -42,6 +42,22 @@ pub(crate) fn decode(kind: &str, row: &Brace, context: &ExportContext) -> Result
     }
 }
 
+/// The `<UseStandardCommands>` a simple kind's row carries, read without
+/// building the object's element: the flag that decides whether the platform
+/// names the kind's standard commands in a command interface. `None` for a kind
+/// that has no such flag here and for a row of another shape.
+pub(crate) fn use_standard_commands(kind: &str, row: &Brace) -> Option<bool> {
+    let root = list(row).ok()?;
+    let payload = item(root, 1).ok()?;
+    match kind {
+        "Constant" => {
+            let fields = record(payload, "16", "Constant").ok()?;
+            Some(bool_text(fields.get(7)?).ok()? == "true")
+        }
+        _ => None,
+    }
+}
+
 /// The payload's fields after its version number, checked.
 fn record<'a>(payload: &'a Brace, version: &str, kind: &str) -> Result<&'a [Brace]> {
     let fields = list(payload)?;
