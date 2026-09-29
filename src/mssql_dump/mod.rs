@@ -967,6 +967,7 @@ mod config_rows;
 mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
+pub(crate) mod extension;
 mod fetch;
 mod form;
 mod form_body;
@@ -2074,6 +2075,13 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
 }
 
 fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    // Lab aid: `IBCMD_RS_EXTENSION_MODE=1` runs this export as an extension
+    // export's converters run (rows written by `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT`),
+    // to probe one row without a database.
+    let _extension_probe = std::env::var_os("IBCMD_RS_EXTENSION_MODE")
+        .filter(|value| !value.is_empty())
+        .map(|_| extension::activate(extension::ExtensionContext::default()))
+        .transpose()?;
     // `--rows-dir`: every Config read of this run comes from the folder and
     // no query reaches a server.
     let _offline_rows = match &args.rows_dir {
@@ -3128,6 +3136,9 @@ fn dump_table_rows_with_options_mode(
     } else {
         MetadataObjectReferenceIndexes::default()
     };
+    if let Some(extension) = extension::active() {
+        extension.note_indexes(&type_index, &object_refs);
+    }
     let (
         ((configuration_root_object_refs, role_rights_object_refs), (metadata_order, field_refs)),
         (
@@ -3534,6 +3545,11 @@ fn dump_table_rows_with_options_mode(
         }
         manifests.push(dumped.manifest);
     }
+    if let Some(extension) = extension::active() {
+        for (file_name, diagnostic) in &metadata_extraction_diagnostics {
+            extension.note_diagnostic(file_name, extension::describe_diagnostic(diagnostic));
+        }
+    }
     for (source_row_id, reason) in &source_asset_discovery_misses {
         source_asset_completeness.record_affected_reason(source_asset_audit_entry(
             table,
@@ -3630,6 +3646,30 @@ fn dump_table_rows_with_options_mode(
                 source_version,
                 &versions_blob,
                 VersionsBlobOrigin::CfStorageImage,
+                ConfigDumpInfoPartialInventoryPolicy::Skip,
+                ConfigDumpInfoInventory {
+                    file_names: &file_names_owned,
+                    metadata_texts: &metadata_audit.rows,
+                    object_refs: &object_refs,
+                    form_refs: &form_refs,
+                    template_refs: &template_refs,
+                    subsystem_refs: &subsystem_refs,
+                    module_text_paths: &module_text_paths,
+                    source_assets: &source_assets,
+                    emitted_source_asset_paths: &emitted_source_asset_paths,
+                    configuration_module_groups: &configuration_module_groups,
+                },
+            )?;
+        } else if let Some(extension) = extension::active()
+            && let Some(packed_sha1) = extension.packed_sha1()
+        {
+            // A configuration extension has no `versions` row: its CAS
+            // manifest holds the digest of every row instead.
+            config_dump_info::write_extension_config_dump_info(
+                &output,
+                output_dir,
+                source_version,
+                packed_sha1,
                 ConfigDumpInfoPartialInventoryPolicy::Skip,
                 ConfigDumpInfoInventory {
                     file_names: &file_names_owned,
@@ -8139,7 +8179,9 @@ fn configuration_module_body_paths(file_names: &BTreeSet<&str>) -> BTreeMap<Stri
 
     let mut paths = BTreeMap::new();
     for (metadata_id, suffixes) in suffixes_by_id {
-        if file_names.contains(metadata_id) || !is_configuration_module_group(&suffixes) {
+        if file_names.contains(metadata_id)
+            || !is_configuration_module_group(metadata_id, &suffixes)
+        {
             continue;
         }
         for route in
@@ -8179,8 +8221,16 @@ fn form_module_body_paths(
     paths
 }
 
-fn is_configuration_module_group(suffixes: &BTreeSet<&str>) -> bool {
+fn is_configuration_module_group(owner: &str, suffixes: &BTreeSet<&str>) -> bool {
     let registry = crate::compiler::families::assets::SourceAssetRegistry;
+    if let Some(extension) = extension::active() {
+        // An extension keeps only the blocks of its root object that it
+        // overrides (the managed application module, say), not the whole set.
+        return extension.is_root_header(owner)
+            && registry
+                .configuration_routes()
+                .any(|route| suffixes.contains(route.suffix().trim_start_matches('.')));
+    }
     registry
         .module_routes("Configuration")
         .all(|route| suffixes.contains(route.suffix().trim_start_matches('.')))
@@ -16542,6 +16592,14 @@ fn register_standard_attributes(
         ));
     }
     if kind == "AccountingRegister" {
+        if extension::active().is_some()
+            && metadata_header_field_index(fields, uuid)
+                .and_then(|header_index| fields.get(header_index + 9))
+                .is_some_and(|field| field.trim() == "{0}")
+        {
+            // An extension's own register can hold no standard attributes.
+            return Vec::new();
+        }
         let account_data_path =
             format!("AccountingRegister.{owner_name}.StandardAttribute.Account");
         if accounting_attributes.present.contains("PeriodAdjustment") {
@@ -16877,7 +16935,11 @@ fn parse_register_data_lock_control_mode(
 ) -> Option<&'static str> {
     let header_index = metadata_header_field_index(fields, uuid)?;
     let field_offset = match kind {
-        "AccountingRegister" => 7,
+        // Slot header+7 is `<FullTextSearch>`; an extension's own accounting
+        // register (`Managed`, `DontUse`) is the record that separates the two.
+        // The nine accounting registers of the ordinary corpora write `0` in
+        // both slots.
+        "AccountingRegister" => 6,
         "AccumulationRegister" => 5,
         _ => return None,
     };
@@ -17221,19 +17283,21 @@ fn parse_calculation_register_fixed_period(
     // demo one. Slot 18 is `1` on all three and slot 16 is `2`/`Month` on all
     // three; both stay checked constants so an unobserved code refuses rather
     // than being invented.
-    let (Some("2"), Some(action_period), Some("1")) = (
+    let (Some("2"), Some(action_period), Some(base_period)) = (
         fields.get(16).map(|field| field.trim()),
         fields
             .get(17)
             .and_then(|field| parse_1c_bool_field(Some(*field))),
-        fields.get(18).map(|field| field.trim()),
+        fields
+            .get(18)
+            .and_then(|field| parse_1c_bool_field(Some(*field))),
     ) else {
         return Some(None);
     };
     Some(Some(CalculationRegisterPeriodProperties {
         periodicity: "Month",
         action_period,
-        base_period: true,
+        base_period,
     }))
 }
 
@@ -17455,13 +17519,13 @@ fn parse_register_full_text_search(
         // `Хозрасчетный` write `1` there and export
         // `<PeriodAdjustmentLength>1</PeriodAdjustmentLength>` together with
         // `<FullTextSearch>DontUse`, and reading the one slot for both made
-        // exactly those two registers write `Use`. All seven accounting
-        // registers of the stand export `DontUse`, so this family separates no
-        // second value: header+6 -- the only slot no other property claims and
-        // `0` on all seven -- carries it as a checked constant, and an
-        // unobserved code refuses rather than being read as something it has
-        // never been.
-        "AccountingRegister" => 6,
+        // exactly those two registers write `Use`. Header+6 is
+        // `<DataLockControlMode>` (see `parse_register_data_lock_control_mode`)
+        // and header+7 carries this property: the accounting register of an
+        // extension writes `1` in the first and `0` in the second and exports
+        // `Managed` with `DontUse`. The nine accounting registers of the other
+        // corpora write `0` in both.
+        "AccountingRegister" => 7,
         "AccumulationRegister" => 6,
         _ => return None,
     };
@@ -20125,11 +20189,18 @@ fn parse_information_register_type_pattern_element(
         }),
         (r##""#""##, 2) => {
             let type_id = parse_uuid_field(fields.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
                 .or_else(|| information_register_builtin_reference(&type_id).map(str::to_string))
-                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))?;
+                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))
+            else {
+                // A type of the extended configuration (see
+                // `parse_metadata_type_pattern_element_with_builtin`).
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             if metadata_reference_is_type_set(&reference) {
                 Some(ConstantValueType::ReferenceTypeSet { reference })
             } else {
@@ -20356,6 +20427,7 @@ fn parse_information_register_bound(value: &str) -> Option<Option<String>> {
     match fields.first()?.trim() {
         r#""U""# if fields.len() == 1 => Some(None),
         r#""S""# if fields.len() == 2 => Some(Some(parse_1c_quoted_string(fields.get(1)?.trim())?)),
+        r#""N""# | r#""D""# | r#""B""# => parse_typed_bound_member(&fields).map(Some),
         _ => None,
     }
 }
@@ -20679,7 +20751,19 @@ fn information_register_design_time_owner_reference(
     if let Some(reference) = object_refs.get(owner_uuid) {
         return Some(reference.clone());
     }
-    parse_generated_metadata_reference_owner(type_index.get(owner_uuid)?)
+    if let Some(type_reference) = type_index.get(owner_uuid) {
+        return parse_generated_metadata_reference_owner(type_reference)
+            .map(|owner| owner.owner_reference());
+    }
+    // A value of an extension may point at an object of the configuration the
+    // extension extends (an empty reference to its catalog, say); the platform
+    // names it through the whole configuration.
+    let extension = extension::active()?;
+    let base = extension.base_indexes()?;
+    if let Some(reference) = base.object_refs.get(owner_uuid) {
+        return Some(reference.clone());
+    }
+    parse_generated_metadata_reference_owner(base.type_index.get(owner_uuid)?)
         .map(|owner| owner.owner_reference())
 }
 
@@ -21173,7 +21257,9 @@ fn parse_catalog_attribute_wrapper_fields<'a>(
     // an attribute with no type.
     let detail = split_1c_braced_fields(payload.get(1)?.trim(), 0)?;
     let pattern = split_1c_braced_fields(detail.get(2)?.trim(), 0)?;
-    if pattern.len() < 2 {
+    // An attribute the extension adopted keeps no type of its own: the pattern
+    // is empty and the type stays that of the extended configuration.
+    if pattern.len() < 2 && extension::active().is_none() {
         return None;
     }
     metadata_attribute_indexing_xml(fields.get(2)?.trim())?;
@@ -22309,8 +22395,8 @@ fn parse_accounting_register_child_properties_from_fields(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(7).copied()).unwrap_or(false),
         extended_edit: parse_1c_bool_field(fields.get(17).copied()).unwrap_or(false),
-        min_value: parse_constant_bound_value(fields.get(8).copied()),
-        max_value: parse_constant_bound_value(fields.get(9).copied()),
+        min_value: parse_metadata_bound_value(fields.get(8).copied()),
+        max_value: parse_metadata_bound_value(fields.get(9).copied()),
         fill_from_filling_value: false,
         emit_fill_from_filling_value: false,
         fill_value: None,
@@ -22388,8 +22474,8 @@ fn parse_metadata_child_properties_from_fields(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(header_index + 7).copied())?,
         extended_edit: parse_1c_bool_field(fields.get(header_index + 8).copied())?,
-        min_value: parse_constant_bound_value(fields.get(header_index + 9).copied()),
-        max_value: parse_constant_bound_value(fields.get(header_index + 10).copied()),
+        min_value: parse_metadata_bound_value(fields.get(header_index + 9).copied()),
+        max_value: parse_metadata_bound_value(fields.get(header_index + 10).copied()),
         fill_from_filling_value: parse_1c_bool_field(fields.get(header_index + 11).copied())?,
         emit_fill_from_filling_value: true,
         fill_value: parse_metadata_child_fill_value(
@@ -22544,8 +22630,8 @@ fn parse_data_processor_wrapped_child_properties(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(8).copied()).unwrap_or(false),
         extended_edit: parse_1c_bool_field(fields.get(18).copied()).unwrap_or(false),
-        min_value: parse_constant_bound_value(fields.get(9).copied()),
-        max_value: parse_constant_bound_value(fields.get(10).copied()),
+        min_value: parse_metadata_bound_value(fields.get(9).copied()),
+        max_value: parse_metadata_bound_value(fields.get(10).copied()),
         fill_from_filling_value: parse_1c_bool_field(fields.get(21).copied()).unwrap_or(false),
         emit_fill_from_filling_value: true,
         // The wider index, the only one carrying owner-qualified predefined-item
@@ -23339,25 +23425,33 @@ fn parse_chart_of_accounts_properties(
     )?;
 
     let input_modes = parse_catalog_input_modes(fields.get(52)?)?;
-    // Field 24 is `"1"` on every chart of accounts of the stand, exactly as it
-    // is on every characteristic-type plan. It used to be read as
-    // `<CodeSeries>`, which made all four charts write
-    // `WithinSubordination`; the separating carrier is field 35 below. Field
-    // 49 is `"1"` on all four and used to be read as
-    // `<DataLockControlMode>`, whose carrier is field 36. Both are kept as
-    // validated constants so an unobserved value fails closed.
-    if fields.get(24)?.trim() != "1" || fields.get(49)?.trim() != "1" {
+    // Field 27 is `"1"` on every chart of accounts on record, the chart of an
+    // extension included. Field 49 is `"1"` on all of them and used to be read
+    // as `<DataLockControlMode>`, whose carrier is field 36. Both are kept as
+    // validated constants so an unobserved value fails closed. (Field 24, once
+    // the constant here, carries `<AutoOrderByCode>` below; it was `"1"` on the
+    // four charts of the ordinary corpora and is `"0"` on the one of an
+    // extension.)
+    if fields.get(27)?.trim() != "1" || fields.get(49)?.trim() != "1" {
         return None;
     }
     Some(ChartOfAccountsProperties {
         generated_types,
         use_standard_commands: information_register_bool(fields.get(16)?)?,
         include_help_in_contents: information_register_bool(fields.get(17)?)?,
-        ext_dimension_types: parse_chart_direct_object_reference(
-            fields.get(19)?,
-            "ChartOfCharacteristicTypes",
-            object_refs,
-        )?,
+        ext_dimension_types: if extension::active().is_some()
+            && parse_information_register_uuid(fields.get(19)?)
+                .is_some_and(|uuid| information_register_uuid_is_zero(&uuid))
+        {
+            // An extension's own chart can name no plan of extra dimensions.
+            String::new()
+        } else {
+            parse_chart_direct_object_reference(
+                fields.get(19)?,
+                "ChartOfCharacteristicTypes",
+                object_refs,
+            )?
+        },
         max_ext_dimension_count: parse_exchange_plan_u32(fields.get(20)?)?,
         code_mask: parse_information_register_quoted_string(fields.get(21)?)?,
         code_length: parse_exchange_plan_u32(fields.get(22)?)?,
@@ -23460,11 +23554,11 @@ fn parse_chart_of_accounts_properties(
             &header.name,
             form_refs,
         )?,
-        // Field 27 is `"1"` on all four charts of accounts of the stand and
-        // all four export `<AutoOrderByCode>true`; field 34, against which
-        // this used to be read, is `<CheckUnique>` and is `"0"` on two of
-        // them. The constant is validated above rather than invented.
-        auto_order_by_code: information_register_bool(fields.get(27)?)?,
+        // `<AutoOrderByCode>` rides field 24: `"1"`/`true` on the four charts
+        // of accounts of the ordinary corpora, `"0"`/`false` on the chart of an
+        // extension (whose field 27, the constant validated above, stays
+        // `"1"`). Field 34 is `<CheckUnique>` and is `"0"` on two of the four.
+        auto_order_by_code: information_register_bool(fields.get(24)?)?,
         order_length: parse_exchange_plan_u32(fields.get(25)?)?,
         // `<DataLockControlMode>` rides field 36 with the shared 0/1 encoding:
         // `uh` `МСФО` and `Хозрасчетный` write `"0"`/`Automatic`, `ssl`
@@ -23690,7 +23784,7 @@ fn parse_chart_of_calculation_types_properties(
     // and used to be read as `<CodeAllowedLength>` and `<DataLockControlMode>`,
     // whose separating carriers are fields 53 and 41. Both are kept as
     // validated constants so an unobserved value fails closed.
-    if fields.get(27)?.trim() != "1" || fields.get(55)?.trim() != "1" {
+    if fields.get(35)?.trim() != "1" || fields.get(55)?.trim() != "1" {
         return None;
     }
     Some(ChartOfCalculationTypesProperties {
@@ -23785,17 +23879,29 @@ fn parse_chart_of_calculation_types_properties(
             &header.name,
             form_refs,
         )?,
-        dependence_on_calculation_types: match fields.get(35)?.trim() {
+        // `<DependenceOnCalculationTypes>` rides field 27: the three charts of
+        // the ordinary corpora write `1` and export `OnActionPeriod`, the chart
+        // of an extension writes `0` and exports `DontUse`. Field 35, against
+        // which this used to be read, is `1` on all four and is kept as a
+        // checked constant above.
+        dependence_on_calculation_types: match fields.get(27)?.trim() {
             "0" => "DontUse",
             "1" => "OnActionPeriod",
             "2" => "OnBasePeriod",
             _ => return None,
         },
-        base_calculation_types: parse_chart_wrapped_object_reference(
-            fields.get(28)?,
-            "ChartOfCalculationTypes",
-            object_refs,
-        )?,
+        base_calculation_types: if extension::active().is_some()
+            && fields.get(28)?.trim() == "{0,0}"
+        {
+            // An extension's own chart can name no base calculation types.
+            String::new()
+        } else {
+            parse_chart_wrapped_object_reference(
+                fields.get(28)?,
+                "ChartOfCalculationTypes",
+                object_refs,
+            )?
+        },
         action_period_use: information_register_bool(fields.get(29)?)?,
         standard_attributes: parse_chart_standard_attributes(
             fields.get(43)?,
@@ -24203,6 +24309,10 @@ fn parse_chart_standard_attributes(
     type_index: &BTreeMap<String, String>,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<RegisterStandardAttribute>> {
+    // An extension's own chart can hold no standard attributes at all.
+    if extension::active().is_some() && value.trim() == "{0}" {
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     let payload = if outer.len() == 2 && outer.first()?.trim() == "1" {
         split_information_register_braced_fields(outer.get(1)?)?
@@ -24378,6 +24488,9 @@ fn parse_chart_standard_tabular_sections(
     value: &str,
     definitions: &[ChartStandardTabularSectionDefinition],
 ) -> Option<Vec<MetadataStandardTabularSection>> {
+    if extension::active().is_some() && value.trim() == "{0}" {
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     if outer.len() != 2 || outer.first()?.trim() != "1" {
         return None;
@@ -25014,6 +25127,10 @@ fn parse_cct_standard_attributes(
     type_index: &BTreeMap<String, String>,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<RegisterStandardAttribute>> {
+    if extension::active().is_some() && value.trim() == "{0}" {
+        // An extension's own plan can hold no standard attributes at all.
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     if outer.len() != 2 || outer.first()?.trim() != "1" {
         return None;
@@ -31172,7 +31289,13 @@ fn parse_catalog_form_ref(
     form_refs: &BTreeMap<String, FormSourceReference>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    form_refs.get(&uuid).and_then(form_source_reference_name)
+    match form_refs.get(&uuid) {
+        Some(form) => form_source_reference_name(form),
+        // A form of the extended configuration: the extension does not hold
+        // it, and the platform prints the identifier the row stores.
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 fn parse_default_list_form_ref(
@@ -31264,7 +31387,12 @@ fn parse_metadata_object_ref(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    object_refs.get(&uuid).cloned()
+    match object_refs.get(&uuid) {
+        Some(reference) => Some(reference.clone()),
+        // An object of the extended configuration (see `parse_catalog_form_ref`).
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 fn parse_report_child_templates_from_text(
@@ -31677,8 +31805,8 @@ fn parse_constant_properties_from_text(
         .get(6)
         .and_then(|field| parse_1c_quoted_string(field.trim()))
         .unwrap_or_default();
-    let min_value = parse_constant_bound_value(constant_detail_fields.get(8).copied());
-    let max_value = parse_constant_bound_value(constant_detail_fields.get(9).copied());
+    let min_value = parse_metadata_bound_value(constant_detail_fields.get(8).copied());
+    let max_value = parse_metadata_bound_value(constant_detail_fields.get(9).copied());
     let fill_checking = match constant_detail_fields.get(13).map(|field| field.trim()) {
         Some("1") => "ShowError",
         _ => "DontCheck",
@@ -32197,6 +32325,48 @@ fn parse_design_time_references(text: &str, object_refs: &BTreeMap<String, Strin
         .into_iter()
         .filter_map(|uuid| object_refs.get(&uuid).cloned())
         .collect()
+}
+
+/// A bound that is not a string (`{"N",0}`) travels as the string bound does,
+/// behind this marker, the XML type and the marker again.
+const TYPED_BOUND_MARKER: char = '\u{1}';
+
+fn typed_bound(xsi_type: &str, text: &str) -> String {
+    format!("{TYPED_BOUND_MARKER}{xsi_type}{TYPED_BOUND_MARKER}{text}")
+}
+
+/// The XML type and the text of a bound built by [`typed_bound`].
+fn split_typed_bound(value: &str) -> Option<(&str, &str)> {
+    value
+        .strip_prefix(TYPED_BOUND_MARKER)?
+        .split_once(TYPED_BOUND_MARKER)
+}
+
+/// The bound a `{"N",..}`, `{"D",..}` or `{"B",..}` member states.
+fn parse_typed_bound_member(fields: &[&str]) -> Option<String> {
+    if fields.len() != 2 {
+        return None;
+    }
+    let text = fields.get(1)?.trim();
+    match fields.first()?.trim() {
+        r#""N""# => {
+            information_register_decimal_is_valid(text).then(|| typed_bound("xs:decimal", text))
+        }
+        r#""D""# => format_1c_date_time(text).map(|date| typed_bound("xs:dateTime", &date)),
+        r#""B""# => parse_1c_bool_flag(text)
+            .map(|flag| typed_bound("xs:boolean", if flag { "true" } else { "false" })),
+        _ => None,
+    }
+}
+
+/// [`parse_constant_bound_value`], and the bounds of the other value types.
+fn parse_metadata_bound_value(field: Option<&str>) -> Option<String> {
+    let text = field?;
+    let fields = split_1c_braced_fields(text, 0)?;
+    match fields.first()?.trim() {
+        r#""S""# => parse_constant_bound_value(Some(text)),
+        _ => parse_typed_bound_member(&fields),
+    }
 }
 
 fn parse_constant_bound_value(field: Option<&str>) -> Option<String> {
@@ -33644,7 +33814,8 @@ fn parse_defined_type_properties_from_text(
     let defined_type_start = text[..marker_start].rfind("{0,")?;
     let fields = split_1c_braced_fields(text, defined_type_start)?;
     let value_types = parse_metadata_type_pattern(fields.get(4)?, type_index)?;
-    if value_types.is_empty() {
+    // An adopted defined type of an extension keeps no type of its own.
+    if value_types.is_empty() && extension::active().is_none() {
         return None;
     }
     let header = parse_metadata_header_from_text(text, uuid)?;
@@ -34936,6 +35107,7 @@ fn standard_style_item_for_code(code: i32) -> Option<(usize, &'static str)> {
         -42 => "NavigationColor",
         -43 => "AuxiliaryNavigationColor",
         -44 => "ActivityColor",
+        -47 => "ImportantColor",
         // Platform 8.5 standard style fonts. 8.5.1.1150 BSP: every form item
         // and style item that carries exactly one style font pairs the code
         // with the native `ref` without exception (`fontcodes.py`).
@@ -34956,8 +35128,8 @@ fn standard_style_item_for_code(code: i32) -> Option<(usize, &'static str)> {
 
 const STANDARD_STYLE_ITEM_CODES: &[i32] = &[
     -1, -11, -3, -15, -7, -13, -21, -10, -14, -23, -24, -16, -17, -22, -25, -26, -27, -28, -18,
-    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -42, -43, -44, -50, -52, -53, -54, -55, -56,
-    -59,
+    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -44, -42, -43, -47, -50, -52, -53, -54, -55,
+    -56, -59,
 ];
 
 fn parse_style_body_color_value(
@@ -35594,10 +35766,17 @@ fn parse_metadata_type_pattern_element_with_builtin(
         }),
         r##""#""## if element.len() >= 2 => {
             let type_id = parse_uuid_field(element.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
-                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))?;
+                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))
+            else {
+                // A type of the extended configuration, which an extension
+                // does not hold: the platform prints its identifier.
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             Some(ConstantValueType::Reference { reference })
         }
         _ => None,
@@ -37998,9 +38177,9 @@ fn format_chart_of_accounts_source_xml(
         "\t\t\t<UseStandardCommands>{}</UseStandardCommands>\r\n\
 \t\t\t<IncludeHelpInContents>{}</IncludeHelpInContents>\r\n\
 \t\t\t<BasedOn/>\r\n\
-\t\t\t<ExtDimensionTypes>{}</ExtDimensionTypes>\r\n\
+{}\
 \t\t\t<MaxExtDimensionCount>{}</MaxExtDimensionCount>\r\n\
-\t\t\t<CodeMask>{}</CodeMask>\r\n\
+{}\
 \t\t\t<CodeLength>{}</CodeLength>\r\n\
 \t\t\t<DescriptionLength>{}</DescriptionLength>\r\n\
 \t\t\t<CodeSeries>{}</CodeSeries>\r\n\
@@ -38008,9 +38187,23 @@ fn format_chart_of_accounts_source_xml(
 \t\t\t<DefaultPresentation>{}</DefaultPresentation>\r\n",
         xml_bool(chart.use_standard_commands),
         xml_bool(chart.include_help_in_contents),
-        escape_xml_element_text(&chart.ext_dimension_types),
+        if chart.ext_dimension_types.is_empty() {
+            "\t\t\t<ExtDimensionTypes/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<ExtDimensionTypes>{}</ExtDimensionTypes>\r\n",
+                escape_xml_element_text(&chart.ext_dimension_types)
+            )
+        },
         chart.max_ext_dimension_count,
-        escape_xml_element_text(&chart.code_mask),
+        if chart.code_mask.is_empty() {
+            "\t\t\t<CodeMask/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<CodeMask>{}</CodeMask>\r\n",
+                escape_xml_element_text(&chart.code_mask)
+            )
+        },
         chart.code_length,
         chart.description_length,
         chart.code_series,
@@ -38117,7 +38310,7 @@ fn format_chart_of_accounts_source_xml(
     for command in &chart.child_commands {
         push_metadata_child_command_xml(&mut children, command);
     }
-    insert_metadata_child_objects_xml(&mut xml, "ChartOfAccounts", &children);
+    insert_metadata_child_objects_or_empty_xml(&mut xml, "ChartOfAccounts", &children);
     Some(xml)
 }
 
@@ -38182,12 +38375,19 @@ fn format_chart_of_calculation_types_source_xml(
     properties.push_str("\t\t\t<BasedOn/>\r\n");
     properties.push_str(&format!(
         "\t\t\t<DependenceOnCalculationTypes>{}</DependenceOnCalculationTypes>\r\n\
-\t\t\t<BaseCalculationTypes>\r\n\
-\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">{}</xr:Item>\r\n\
-\t\t\t</BaseCalculationTypes>\r\n\
+{}\
 \t\t\t<ActionPeriodUse>{}</ActionPeriodUse>\r\n",
         chart.dependence_on_calculation_types,
-        escape_xml_element_text(&chart.base_calculation_types),
+        if chart.base_calculation_types.is_empty() {
+            "\t\t\t<BaseCalculationTypes/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<BaseCalculationTypes>\r\n\
+\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">{}</xr:Item>\r\n\
+\t\t\t</BaseCalculationTypes>\r\n",
+                escape_xml_element_text(&chart.base_calculation_types)
+            )
+        },
         xml_bool(chart.action_period_use),
     ));
     push_register_standard_attributes_xml(&mut properties, &chart.standard_attributes);
@@ -38251,7 +38451,7 @@ fn format_chart_of_calculation_types_source_xml(
             escape_xml_element_text(form)
         ));
     }
-    insert_metadata_child_objects_xml(&mut xml, "ChartOfCalculationTypes", &children);
+    insert_metadata_child_objects_or_empty_xml(&mut xml, "ChartOfCalculationTypes", &children);
     Some(xml)
 }
 
@@ -38277,7 +38477,9 @@ fn push_chart_standard_tabular_sections_xml(
     sections: &[MetadataStandardTabularSection],
 ) {
     if sections.is_empty() {
-        xml.push_str("\t\t\t<StandardTabularSections/>\r\n");
+        if extension::active().is_none() {
+            xml.push_str("\t\t\t<StandardTabularSections/>\r\n");
+        }
         return;
     }
     xml.push_str("\t\t\t<StandardTabularSections>\r\n");
@@ -40504,6 +40706,24 @@ fn insert_metadata_child_command_objects_xml(
     insert_metadata_child_objects_xml(xml, owner_kind, &child_objects);
 }
 
+/// [`insert_metadata_child_objects_xml`], and an empty `<ChildObjects/>` when
+/// the owner has no child object at all (the platform always writes the
+/// element).
+fn insert_metadata_child_objects_or_empty_xml(
+    xml: &mut String,
+    owner_kind: &str,
+    child_objects: &str,
+) {
+    if child_objects.is_empty() && !xml.contains("<ChildObjects") {
+        let marker = format!("\t</{owner_kind}>");
+        if let Some(index) = xml.find(&marker) {
+            xml.insert_str(index, "\t\t<ChildObjects/>\r\n");
+        }
+        return;
+    }
+    insert_metadata_child_objects_xml(xml, owner_kind, child_objects);
+}
+
 fn insert_metadata_child_objects_xml(xml: &mut String, owner_kind: &str, child_objects: &str) {
     if child_objects.is_empty() {
         return;
@@ -41847,6 +42067,13 @@ fn format_simple_property_xml(name: &str, value: &str) -> String {
 
 fn format_constant_bound_xml(name: &str, value: Option<&str>) -> String {
     match value {
+        Some(value) if split_typed_bound(value).is_some() => {
+            let (xsi_type, text) = split_typed_bound(value).unwrap_or_default();
+            format!(
+                "<{name} xsi:type=\"{xsi_type}\">{}</{name}>",
+                escape_xml_element_text(text)
+            )
+        }
         Some(value) => format!(
             "<{name} xsi:type=\"xs:string\">{}</{name}>",
             escape_xml_element_text(value)
@@ -42820,6 +43047,16 @@ fn parse_filter_criterion_type_pattern(
             FilterCriterionDecodeReason::Shape,
         )
     })?;
+    // A criterion the extension adopted keeps no type pattern of its own: the
+    // type stays that of the extended configuration.
+    if extension::active().is_some()
+        && fields.len() == 1
+        && fields
+            .first()
+            .is_some_and(|value| owner_graph::FilterCriterionPhysicalSchema::pattern(value.trim()))
+    {
+        return Ok(Vec::new());
+    }
     if fields.len() < 2
         || !fields
             .first()

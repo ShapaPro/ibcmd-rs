@@ -66,7 +66,8 @@ pub(super) fn configuration_module_groups(file_names: &BTreeSet<String>) -> BTre
     suffixes_by_id
         .into_iter()
         .filter(|(metadata_id, suffixes)| {
-            !file_names.contains(*metadata_id) && is_configuration_module_group(suffixes)
+            !file_names.contains(*metadata_id)
+                && is_configuration_module_group(metadata_id, suffixes)
         })
         .map(|(metadata_id, _)| metadata_id.to_string())
         .collect()
@@ -94,7 +95,9 @@ pub(super) fn standalone_content_asset_file_names<'a>(
 
     suffixes_by_id
         .into_iter()
-        .filter(|(_, suffixes)| suffixes.contains("f") && is_configuration_module_group(suffixes))
+        .filter(|(metadata_id, suffixes)| {
+            suffixes.contains("f") && is_configuration_module_group(metadata_id, suffixes)
+        })
         .map(|(metadata_id, _)| format!("{metadata_id}.f"))
         .collect()
 }
@@ -968,7 +971,7 @@ pub(super) fn source_asset_paths_with_indexes(
         if file_names.contains(metadata_id) {
             continue;
         }
-        let is_configuration_group = is_configuration_module_group(&suffixes);
+        let is_configuration_group = is_configuration_module_group(metadata_id, &suffixes);
         for route in crate::compiler::families::assets::SourceAssetRegistry.configuration_routes() {
             let Some(kind) = configuration_source_asset_kind(route.role()) else {
                 continue;
@@ -1179,7 +1182,7 @@ pub(super) fn source_asset_discovery_misses(
             .insert(row_id.suffix_component());
     }
     for (owner_id, suffixes) in suffixes_by_id {
-        if !is_configuration_module_group(&suffixes) {
+        if !is_configuration_module_group(owner_id, &suffixes) {
             continue;
         }
         for suffix in ["9", "a"] {
@@ -4855,7 +4858,11 @@ pub(super) fn format_ext_picture_xml(
         source_version.as_str(),
         xml_bool(transparent_pixel.is_some())
     );
-    if let Some((x, y)) = transparent_pixel {
+    // `-1,-1` is the absence of a pixel; the load-transparent flag stays.
+    if let Some((x, y)) = transparent_pixel
+        && x >= 0
+        && y >= 0
+    {
         xml.push_str(&format!(
             "\t\t<xr:TransparentPixel x=\"{x}\" y=\"{y}\"/>\r\n"
         ));

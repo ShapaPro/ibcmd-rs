@@ -367,6 +367,40 @@ pub(super) enum DetailedFormBodyExtraction {
 pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     body: &ParsedFormBodyBlob,
     context: &FormParseContext<'_>,
+    timings: Option<&mut MssqlDumpTimingReport>,
+) -> Option<DetailedFormBodyExtraction> {
+    let extraction = extract_form_body_xml_from_body_detailed_single(body, context, timings)?;
+    // A form an extension adopted carries the form of the extended
+    // configuration after its own tree; the platform writes it as `<BaseForm>`.
+    let Some(base_body) = super::extension::base_form_body(body) else {
+        return Some(extraction);
+    };
+    let DetailedFormBodyExtraction::Emitted {
+        xml,
+        mut diagnostics,
+    } = extraction
+    else {
+        return Some(extraction);
+    };
+    match extract_form_body_xml_from_body_detailed_single(&base_body, context, None) {
+        Some(DetailedFormBodyExtraction::Emitted {
+            xml: base_xml,
+            diagnostics: base_diagnostics,
+        }) => {
+            let Some(xml) = super::extension::splice_base_form(&xml, &base_xml) else {
+                return Some(DetailedFormBodyExtraction::OpaqueNotEmitted { diagnostics });
+            };
+            diagnostics.extend(base_diagnostics);
+            Some(DetailedFormBodyExtraction::Emitted { xml, diagnostics })
+        }
+        // A form whose base form does not read is not emitted without it.
+        _ => Some(DetailedFormBodyExtraction::OpaqueNotEmitted { diagnostics }),
+    }
+}
+
+fn extract_form_body_xml_from_body_detailed_single(
+    body: &ParsedFormBodyBlob,
+    context: &FormParseContext<'_>,
     mut timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
     // Every reader below splits the values it meets, each once per value that
@@ -13446,7 +13480,9 @@ fn parse_form_child_item_with_metadata_owners(
             .or_else(|| {
                 parse_form_document_field_on_flag(tag, fields, |layout| layout.enable_start_drag)
             }),
-        enable_drag: table_schema.and_then(|schema| schema.enable_drag(&fields)),
+        enable_drag: table_schema
+            .and_then(|schema| schema.enable_drag(&fields))
+            .or_else(|| parse_planner_field_enable_drag(tag, fields)),
         file_drag_mode: if tag == "Table" {
             if let Some(schema) = table_schema {
                 schema.file_drag_mode(&fields)
@@ -17185,6 +17221,22 @@ const FORM_GRAPHICAL_SCHEME_COMMANDS: &[(&str, &'static str)] = &[
 
 /// The mirror of `parse_form_document_field_flag` for a flag whose unwritten
 /// default is `0`: only the `1` state reaches the XML.
+/// A `PlannerField` keeps `EnableDrag` in the option slot behind
+/// `EnableStartDrag` (slot 6, behind slot 5). Evidence: the one planner of the
+/// ServiceDesk extension (`сд_Канбан2`), written `<EnableStartDrag>true` and
+/// `<EnableDrag>true` with both slots `1`; the planners of the ordinary
+/// corpora write neither. Read in an extension export only.
+fn parse_planner_field_enable_drag(tag: &str, fields: &[&str]) -> Option<bool> {
+    if tag != "PlannerField" || super::extension::active().is_none() {
+        return None;
+    }
+    let (_, options) = form_document_field_geometry_options(tag, fields)?;
+    match options.get(6).map(|field| field.trim()) {
+        Some("1") => Some(true),
+        _ => None,
+    }
+}
+
 fn parse_form_document_field_on_flag(
     tag: &str,
     fields: &[&str],
@@ -24117,9 +24169,34 @@ fn form_register_record_set_standard_attribute_name(
         "InformationRegister" => INFORMATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES
             .iter()
             .find_map(|(candidate, name)| (*candidate == marker).then_some(*name)),
+        "CalculationRegister" => CALCULATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES
+            .iter()
+            .find_map(|(candidate, name)| (*candidate == marker).then_some(*name)),
         _ => None,
     }
 }
+
+/// The standard attributes a calculation register's record set spells for the
+/// markers a form binding names them by. The markers are the register's own
+/// standard-attribute markers, identical on the three calculation registers of
+/// the ordinary corpora (the БСП demo register and the two ERP УХ ones); a form
+/// binding uses them the way the other families' bindings do (`-3` is
+/// `LineNumber` in the document form of the `_ДемоРасширение` extension, `-4`
+/// `CalculationType` and `-11` `ReversingEntry` in the same register's
+/// columns).
+const CALCULATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES: [(&str, &str); 11] = [
+    ("-13", "RegistrationPeriod"),
+    ("-11", "ReversingEntry"),
+    ("-10", "Active"),
+    ("-9", "EndOfBasePeriod"),
+    ("-8", "BegOfBasePeriod"),
+    ("-7", "EndOfActionPeriod"),
+    ("-6", "BegOfActionPeriod"),
+    ("-5", "ActionPeriod"),
+    ("-4", "CalculationType"),
+    ("-3", "LineNumber"),
+    ("-2", "Recorder"),
+];
 
 /// The standard attributes an information register's *record set* spells for
 /// the markers a form binding names them by.
@@ -32657,6 +32734,9 @@ pub(super) fn format_form_child_item_xml(
         xml.push_str(&format!(
             "{tab}\t<EnableStartDrag>true</EnableStartDrag>\r\n"
         ));
+    }
+    if item.tag == "PlannerField" && item.enable_drag == Some(true) {
+        xml.push_str(&format!("{tab}\t<EnableDrag>true</EnableDrag>\r\n"));
     }
     if item.tag == "LabelDecoration"
         && let Some(skip_on_input) = item.skip_on_input

@@ -39018,6 +39018,7 @@ fn format_role_rights_top_level_object_hides_plain_false_rights_matching_set_for
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Document.Invoice".to_string(),
             rights: vec![
@@ -39070,6 +39071,7 @@ fn format_role_rights_top_level_object_inverts_when_set_for_new_objects_true() {
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Catalog.Products".to_string(),
             rights: vec![
@@ -39102,6 +39104,7 @@ fn format_role_rights_omits_plain_false_rights_for_restriction_only_top_level_ob
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Catalog.Products".to_string(),
             rights: vec![
@@ -39140,6 +39143,7 @@ fn format_role_rights_omits_plain_false_rights_when_only_view_input_by_string_ar
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Document.Invoice".to_string(),
             rights: vec![
@@ -39183,6 +39187,7 @@ fn format_role_rights_omits_non_native_top_level_accumulation_register_false_rig
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "AccumulationRegister.Stock".to_string(),
             rights: vec![
@@ -39233,6 +39238,7 @@ fn format_role_rights_configuration_root_shows_rights_that_differ_from_set_for_n
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Configuration.DemoApp".to_string(),
             rights: vec![
@@ -39272,6 +39278,7 @@ fn format_role_rights_configuration_root_inverts_when_set_for_new_objects_true()
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Configuration.DemoApp".to_string(),
             rights: vec![
@@ -66299,13 +66306,14 @@ fn calculation_period_alternative_scalars_remain_accepted_omissions() {
         .replace("\t\t\t<ActionPeriod>true</ActionPeriod>\r\n", "")
         .replace("\t\t\t<BasePeriod>true</BasePeriod>\r\n", "");
     // Slot 17 is `<ActionPeriod>` and separates both values on the corpus, so
-    // `0` is a reading and no longer an omission; every other scalar there,
-    // and every alternative on the two slots that stay checked constants,
-    // still refuses the block whole.
+    // `0` is a reading and no longer an omission; slot 18 is `<BasePeriod>`,
+    // whose `0` the calculation register of an extension separates (`false`).
+    // Every other scalar there, and every alternative on the slot that stays a
+    // checked constant, still refuses the block whole.
     let alternatives = [
         (16, vec!["0", "1", "3", "-1", "value", "{0}"]),
         (17, vec!["2", "-1", "value", "{0}"]),
-        (18, vec!["0", "2", "-1", "value", "{0}"]),
+        (18, vec!["2", "-1", "value", "{0}"]),
     ];
 
     for (slot, values) in alternatives {
@@ -66383,6 +66391,19 @@ fn calculation_period_alternative_scalars_remain_accepted_omissions() {
         fixed.replace(
             "\t\t\t<ActionPeriod>true</ActionPeriod>\r\n",
             "\t\t\t<ActionPeriod>false</ActionPeriod>\r\n",
+        )
+    );
+
+    // `0` in slot 18 is `<BasePeriod>false</BasePeriod>`: the calculation
+    // register of the `_ДемоРасширение` extension writes `0` in both slots.
+    let mut false_base = CalculationRegisterPresentationsFixture::exact();
+    false_base.fields[18] = "0".to_string();
+    let false_base_xml = false_base.xml().unwrap();
+    assert_eq!(
+        false_base_xml,
+        fixed.replace(
+            "\t\t\t<BasePeriod>true</BasePeriod>\r\n",
+            "\t\t\t<BasePeriod>false</BasePeriod>\r\n",
         )
     );
 }
@@ -74713,6 +74734,83 @@ fn task_direct_attribute_wrapper_is_the_code_three_form_the_platform_writes() {
         &["3", "{27}", "1", "1", "1", "0"],
         true
     ));
+}
+
+/// The accounting register of the `_ДемоРасширение` extension writes
+/// `...,1,1,0,1,{0},...` after its chart and list form and exports
+/// `Managed`, `EnableTotalsSplitting` true and `FullTextSearch` `DontUse`:
+/// header+6 is the lock mode, header+7 the full-text search, header+8 the
+/// totals splitting.
+#[test]
+fn an_accounting_registers_lock_mode_and_full_text_search_have_their_own_slots() {
+    let uuid = "bab02573-c189-4387-9496-059ee0f5d55f";
+    let nil = "00000000-0000-0000-0000-000000000000";
+    let mut fields = vec!["21".to_string()];
+    fields.extend((1..=14).map(|_| "11111111-1111-1111-1111-111111111111".to_string()));
+    fields.push(format!(
+        "{{0,{{3,{{1,0,{uuid}}},\"R\",{{0}},\"\",0,0,{nil},0}}}}"
+    ));
+    fields.extend(
+        [
+            "1",
+            "0",
+            "b4bcb6f1-afc2-464e-af01-038624d119d6",
+            nil,
+            "1",
+            "1",
+            "0",
+            "1",
+            "{0}",
+            nil,
+            "{0}",
+            "{0}",
+            "{0}",
+            "0",
+        ]
+        .map(String::from),
+    );
+    let view = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        parse_register_data_lock_control_mode("AccountingRegister", &view, uuid),
+        Some("Managed")
+    );
+    assert_eq!(
+        parse_register_full_text_search("AccountingRegister", &view, uuid),
+        Some("DontUse")
+    );
+}
+
+#[test]
+fn a_bound_of_another_value_type_keeps_its_xml_type() {
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"N",0}"#)).as_deref(),
+        Some("\u{1}xs:decimal\u{1}0")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"B",1}"#)).as_deref(),
+        Some("\u{1}xs:boolean\u{1}true")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"D",20240102030405}"#)).as_deref(),
+        Some("\u{1}xs:dateTime\u{1}2024-01-02T03:04:05")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"S","abc"}"#)).as_deref(),
+        Some("abc")
+    );
+    assert_eq!(parse_metadata_bound_value(Some(r#"{"U"}"#)), None);
+    assert_eq!(
+        format_constant_bound_xml("MinValue", Some("\u{1}xs:decimal\u{1}0")),
+        "<MinValue xsi:type=\"xs:decimal\">0</MinValue>"
+    );
+    assert_eq!(
+        format_constant_bound_xml("MinValue", Some("abc")),
+        "<MinValue xsi:type=\"xs:string\">abc</MinValue>"
+    );
+    assert_eq!(
+        parse_information_register_bound(r#"{"N",5}"#),
+        Some(Some("\u{1}xs:decimal\u{1}5".to_string()))
+    );
 }
 
 #[test]

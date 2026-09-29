@@ -11,6 +11,12 @@ pub(super) struct RoleRights {
 pub(super) struct RoleObjectRights {
     pub(super) name: String,
     pub(super) rights: Vec<RoleRight>,
+    /// The reference names an object the extension adopted (its tuple ends in
+    /// the adopted-object marker 3). The platform prints the `View`/`Edit`
+    /// rights of such an object's nested objects whatever their value, where
+    /// an ordinary object's rights equal to `setForAttributesByDefault` stay
+    /// unwritten.
+    pub(super) adopted: bool,
     /// True when this object's right-restrictions table carries at least one
     /// conditionless `{RIGHT_UUID,{0}}` entry (see
     /// `RoleRestrictionEntry::Conditionless`). The platform renders such
@@ -149,6 +155,10 @@ pub(super) fn parse_role_rights_blob(
             RoleObjectRights {
                 name: object_name,
                 rights,
+                adopted: super::extension::active().is_some()
+                    && object_ref
+                        .last()
+                        .is_some_and(|marker| marker.trim() == "3" && object_ref.len() > 3),
                 has_conditionless_restrictions,
             },
         ));
@@ -900,6 +910,8 @@ pub(super) fn parse_role_bool_field(value: &str) -> Option<bool> {
     match value.trim() {
         "0" | "4294967295" => Some(false),
         "1" => Some(true),
+        // An extension's role stores `false` of a defaulted flag as 2.
+        "2" if super::extension::active().is_some() => Some(false),
         _ => None,
     }
 }
@@ -1541,7 +1553,10 @@ pub(super) fn role_rights_for_xml<'a>(
         .rights
         .iter()
         .filter(|right| {
-            if action_like_category || !matches!(right.name.as_str(), "View" | "Edit") {
+            if object.adopted
+                || action_like_category
+                || !matches!(right.name.as_str(), "View" | "Edit")
+            {
                 return true;
             }
             !right.restrictions.is_empty() || right.value != rights.set_for_attributes_by_default

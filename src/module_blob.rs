@@ -31408,6 +31408,11 @@ fn scan_1c_quoted_string_end(text: &str, start: usize) -> Result<usize> {
         if bytes[index] == b'"' {
             if bytes.get(index + 1) == Some(&b'"') {
                 index += 2;
+            } else if is_1c_string_escape_unit(bytes, index + 1) {
+                // A quote, a backslash and four lowercase hex digits spell one
+                // UTF-16 unit of a character outside the basic plane; the
+                // literal goes on behind them.
+                index += 6;
             } else {
                 return Ok(index + 1);
             }
@@ -31418,13 +31423,91 @@ fn scan_1c_quoted_string_end(text: &str, start: usize) -> Result<usize> {
     Err(anyhow!("unterminated 1C string at byte {start}"))
 }
 
+/// Whether `bytes[at..]` starts with `\` and four lowercase hex digits (the
+/// rest of a `"\d83d`-style code unit escape inside a 1C string literal).
+fn is_1c_string_escape_unit(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at) == Some(&b'\\')
+        && bytes.get(at + 1..at + 5).is_some_and(|digits| {
+            digits
+                .iter()
+                .all(|digit| digit.is_ascii_digit() || (b'a'..=b'f').contains(digit))
+        })
+}
+
+/// The characters of the inside of a 1C string literal: `""` is a quote and
+/// `"\xxxx` one UTF-16 code unit, a high one waiting for its low partner.
+fn decode_1c_string_body(inner: &str) -> Result<String> {
+    let mut output = String::with_capacity(inner.len());
+    let mut pending_high: Option<u16> = None;
+    let mut rest = inner;
+    while let Some(character) = rest.chars().next() {
+        if character != '"' {
+            if pending_high.is_some() {
+                return Err(anyhow!("unpaired high surrogate in a 1C string"));
+            }
+            output.push(character);
+            rest = &rest[character.len_utf8()..];
+            continue;
+        }
+        let tail = &rest[1..];
+        if tail.starts_with('"') {
+            if pending_high.is_some() {
+                return Err(anyhow!("unpaired high surrogate in a 1C string"));
+            }
+            output.push('"');
+            rest = &tail[1..];
+            continue;
+        }
+        if is_1c_string_escape_unit(tail.as_bytes(), 0) {
+            let unit = u16::from_str_radix(&tail[1..5], 16)
+                .map_err(|_| anyhow!("bad code unit escape in a 1C string"))?;
+            match unit {
+                0xD800..=0xDBFF => {
+                    if pending_high.is_some() {
+                        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+                    }
+                    pending_high = Some(unit);
+                }
+                0xDC00..=0xDFFF => {
+                    let high = u32::from(
+                        pending_high
+                            .take()
+                            .ok_or_else(|| anyhow!("unpaired low surrogate in a 1C string"))?,
+                    );
+                    let scalar = 0x10000 + ((high - 0xD800) << 10) + (u32::from(unit) - 0xDC00);
+                    output.push(
+                        char::from_u32(scalar)
+                            .ok_or_else(|| anyhow!("bad surrogate pair in a 1C string"))?,
+                    );
+                }
+                _ => {
+                    if pending_high.is_some() {
+                        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+                    }
+                    output.push(
+                        char::from_u32(u32::from(unit))
+                            .ok_or_else(|| anyhow!("bad code unit in a 1C string"))?,
+                    );
+                }
+            }
+            rest = &tail[5..];
+            continue;
+        }
+        return Err(anyhow!("unexpected quote inside a 1C string"));
+    }
+    if pending_high.is_some() {
+        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+    }
+    Ok(output)
+}
+
 fn parse_1c_quoted_string(text: &str) -> Result<String> {
     let text = text.trim();
     let end = scan_1c_quoted_string_end(text, 0)?;
     if end != text.len() {
         return Err(anyhow!("unexpected trailing data after 1C string"));
     }
-    Ok(text[1..end - 1].replace("\"\"", "\""))
+    decode_1c_string_body(&text[1..end - 1])
 }
 
 fn scan_balanced_braces(text: &str, start: usize) -> Result<usize> {
@@ -32487,6 +32570,32 @@ mod tests {
         parse_common_command_representation,
     };
     use crate::v8_container::{V8Element, make_v8_element_header, parse_v8_container};
+
+    /// A character outside the basic plane is written inside a string literal
+    /// as two code unit escapes, each behind a quote (`"\d83d"\dcce`): the
+    /// literal goes on behind them, and neither the scan for the end of the
+    /// literal nor the decoding may stop at the quote.
+    #[test]
+    fn a_string_literal_holds_code_unit_escapes() {
+        let literal = "\"a>\"\\d83d\"\\dcce \"\" b\"";
+        assert_eq!(
+            super::scan_1c_quoted_string_end(literal, 0).unwrap(),
+            literal.len()
+        );
+        assert_eq!(
+            super::parse_1c_quoted_string(literal).unwrap(),
+            "a>\u{1F4CE} \" b"
+        );
+        // Lone halves are refused, not replaced.
+        assert!(super::parse_1c_quoted_string("\"\"\\d83d\"").is_err());
+        assert!(super::parse_1c_quoted_string("\"\"\\dcce\"").is_err());
+        // A closing quote followed by text that merely looks like an escape
+        // (uppercase digits, a short run) still closes the literal.
+        assert_eq!(
+            super::scan_1c_quoted_string_end("\"x\",\\D83D", 0).unwrap(),
+            3
+        );
+    }
 
     /// Every `<ExcludedCommand>` name the compiler accepts must be the name the
     /// export writes for the uuid it packs, and no accepted name may share its
