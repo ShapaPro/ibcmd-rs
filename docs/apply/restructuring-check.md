@@ -30,7 +30,16 @@ are summarised in section 9, they are not part of the product).
    refuses a change that needs restructuring. It does not (section 5.1): with no sessions it restructured
    dynamically every time, so "force succeeded" says nothing about the structure. The oracle is the native
    apply's own log (`Объект изменен`, `Новый объект`, `Реструктуризация …`) plus digests of the SQL schema.
-5. **Evidence.** @@EVIDENCE_SUMMARY@@
+5. **Evidence.** 159 single-property probes of 32 kinds and eight focused runs
+   gave the rules (6.1, 6.2). 34 further modifications of 12 kinds of object, staged by our import on fresh clones
+   and applied by the native platform, were judged by the check before the apply: it agrees with the platform on
+   all 34 (13 restructured or rewrote data, 21 did not) and never said "no restructuring" where the platform
+   restructured; one false alarm (an exchange plan's flag) led to a rule (6.3). The four reference exports
+   (БСП and ERP УХ, 8.3.27 and 8.5) give no reason against databases restored from the same corpora, and 17 596
+   real metadata files rewritten by the model's writer compare equal (6.4). The 8.5 dialect and the 8.3.27 one
+   both work. **Not achieved:** a native-imported ConfigSave of the corpus is refused as a whole (finding 9), and a
+   patch-mode stage is judged correctly but is not what the tree said (finding 1, why `--tree` exists). 82 unit
+   tests.
 
 ## 2. Commands and API
 
@@ -106,8 +115,10 @@ the list of plain rows (`sql::published_names`).
   templates, help, pictures, rights, command interfaces, schedules, packages) are **counted, not compared**.
   Roles that carry data (`Predefined`, `Flowchart`, `Content`, `Aggregates`, `AdditionalIndexes`) are compared by
   content; a difference is a reason of class `data` (or `structure` for `Content`, `Aggregates`,
-  `AdditionalIndexes`). The `Content` row of an exchange plan is compared as a **set** (the platform stores the
-  items in an order of its own and does not restructure when a stage writes another, section 6.2).
+  `AdditionalIndexes`). The `Content` row of an exchange plan is compared as a **set of objects with their flags**:
+  the same items in another order (the platform keeps an order of its own, a stage writes them in another; six
+  rows of the БСП differ in nothing else) and the same objects with another flag of automatic registration are
+  harmless; an object that joins or leaves is `structure` (a registration table comes or goes).
 * **Service** (`root`, `version`, `versions`). `root` and `version` must not change; `versions` is the inventory,
   and it also gives every file a version id. A file that the staged `versions` gives another version than the
   active one (or lists as new) and that the ConfigSave does not hold means a partial stage (the native import
@@ -182,17 +193,20 @@ added to a report and to a data processor (`p5_children`), a common module and a
 
 ### 4.2 Properties harmless on every kind that has them
 
-`Synonym`, `Comment`, `Explanation`, `ObjectPresentation`, `ListPresentation`, `IncludeHelpInContents`,
-`DefaultObjectForm`, `DefaultFolderForm`, `DefaultListForm`, `DefaultChoiceForm`, `DefaultFolderChoiceForm`,
-`DefaultRecordForm`, `DefaultForm`, `QuickChoice`, `ChoiceMode`, `EditType`, `CreateOnInput`,
-`ChoiceHistoryOnInput`, `DefaultPresentation`, `SearchStringModeOnInputByString`, `DataLockControlMode`,
-`FullTextSearch` @@P8_PRESENTATION@@.
+`Synonym`, `Comment`, `Explanation`, `ObjectPresentation`, `ExtendedObjectPresentation`, `ListPresentation`,
+`ExtendedListPresentation`, `IncludeHelpInContents`, `DefaultObjectForm`, `DefaultFolderForm`, `DefaultListForm`,
+`DefaultChoiceForm`, `DefaultFolderChoiceForm`, `DefaultRecordForm`, `DefaultForm`, `AuxiliaryObjectForm`,
+`AuxiliaryFolderForm`, `AuxiliaryListForm`, `AuxiliaryChoiceForm`, `AuxiliaryFolderChoiceForm`, `QuickChoice`,
+`ChoiceMode`, `EditType`, `CreateOnInput`, `ChoiceHistoryOnInput`, `DefaultPresentation`,
+`SearchStringModeOnInputByString`, `FullTextSearchOnInputByString`, `DataLockControlMode`, `FullTextSearch`.
+The Extended and Auxiliary ones were probed on catalogs (`p8`); `AuxiliaryRecordForm` and `AuxiliaryForm` were not
+and are `structure` until someone does.
 
 ### 4.3 Properties harmless on one kind
 
 | Kind | Properties |
 |---|---|
-| `Catalog` | `UseStandardCommands`, `Autonumbering`, `CheckUnique`, `PredefinedDataUpdate`, `UpdateDataHistoryImmediatelyAfterWrite`, `ExecuteAfterWriteDataHistoryVersionProcessing` |
+| `Catalog` | `UseStandardCommands`, `Autonumbering`, `CheckUnique`, `InputByString`, `PredefinedDataUpdate`, `UpdateDataHistoryImmediatelyAfterWrite`, `ExecuteAfterWriteDataHistoryVersionProcessing` |
 | `Document` | `UseStandardCommands`, `Autonumbering`, `PostInPrivilegedMode`, `UnpostInPrivilegedMode`, `RealTimePosting`, `RegisterRecordsDeletion`, `RegisterRecordsWritingOnPost`, `SequenceFilling`, `UpdateDataHistoryImmediatelyAfterWrite`, `ExecuteAfterWriteDataHistoryVersionProcessing` |
 | `Constant` | `UseStandardCommands`, `ExtendedEdit`, `FillChecking`, `MarkNegatives`, `MultiLine`, `PasswordMode`, `UpdateDataHistoryImmediatelyAfterWrite`, `ExecuteAfterWriteDataHistoryVersionProcessing` |
 | `InformationRegister` | `UseStandardCommands`, `UpdateDataHistoryImmediatelyAfterWrite`, `ExecuteAfterWriteDataHistoryVersionProcessing` |
@@ -311,7 +325,40 @@ acting, 20 made it restructure or rewrite stored data. `Applied` below means "no
 `Реструктуризация`, no change of columns, indexes or tables"; the rule tables of section 4 take from this only the
 properties that are also presentation or behaviour by meaning.
 
-@@PROBE_TABLE@@
+| Kind | Applied without touching tables or stored data | Made the platform restructure or rewrite stored data |
+|---|---|---|
+| AccountingRegister | `IncludeHelpInContents`, `UseStandardCommands` | - |
+| AccumulationRegister | `UseStandardCommands` | `RegisterType` |
+| BusinessProcess | `DefaultObjectForm`, `UseStandardCommands` | - |
+| CalculationRegister | `UseStandardCommands` | - |
+| Catalog | `Autonumbering`, `CheckUnique`, `ChoiceHistoryOnInput`, `ChoiceMode`, `Comment`, `CreateOnInput`, `DataLockControlMode`, `DefaultChoiceForm`, `DefaultFolderChoiceForm`, `DefaultFolderForm`, `DefaultListForm`, `DefaultObjectForm`, `DefaultPresentation`, `EditType`, `ExecuteAfterWriteDataHistoryVersionProcessing`, `FullTextSearch`, `HierarchyType`, `IncludeHelpInContents`, `LimitLevelCount`, `PredefinedDataUpdate`, `QuickChoice`, `SearchStringModeOnInputByString`, `UpdateDataHistoryImmediatelyAfterWrite`, `UseStandardCommands` | `CodeAllowedLength`, `CodeSeries`, `CodeType`, `DataHistory`, `FoldersOnTop`, `Hierarchical` |
+| ChartOfAccounts | `UseStandardCommands` | - |
+| ChartOfCalculationTypes | `UseStandardCommands` | - |
+| ChartOfCharacteristicTypes | `IncludeHelpInContents`, `UseStandardCommands` | `CodeAllowedLength`, `FoldersOnTop`, `Hierarchical` |
+| CommandGroup | `Category`, `Representation` | - |
+| CommonAttribute | `ExtendedEdit`, `FillFromFillingValue`, `MarkNegatives`, `MultiLine`, `PasswordMode` | - |
+| CommonCommand | `Comment`, `Group`, `IncludeHelpInContents`, `ModifiesData`, `ParameterUseMode`, `Representation` | - |
+| CommonForm | `Comment`, `IncludeHelpInContents`, `UseStandardCommands` | - |
+| CommonModule | `ClientManagedApplication`, `ClientOrdinaryApplication`, `Comment`, `ExternalConnection`, `Global`, `Privileged`, `ReturnValuesReuse`, `Server`, `ServerCall` | - |
+| CommonPicture | `AvailabilityForAppearance`, `AvailabilityForChoice`, `Comment` | - |
+| CommonTemplate | `Comment`, `TemplateType` | - |
+| Constant | `Comment`, `DataLockControlMode`, `DefaultForm`, `ExecuteAfterWriteDataHistoryVersionProcessing`, `ExtendedEdit`, `FillChecking`, `MarkNegatives`, `MultiLine`, `PasswordMode`, `UpdateDataHistoryImmediatelyAfterWrite`, `UseStandardCommands` | - |
+| DataProcessor | `Comment`, `DefaultForm`, `IncludeHelpInContents`, `UseStandardCommands` | - |
+| Document | `Autonumbering`, `DataLockControlMode`, `DefaultChoiceForm`, `DefaultListForm`, `DefaultObjectForm`, `ExecuteAfterWriteDataHistoryVersionProcessing`, `IncludeHelpInContents`, `PostInPrivilegedMode`, `RealTimePosting`, `RegisterRecordsDeletion`, `RegisterRecordsWritingOnPost`, `SequenceFilling`, `UnpostInPrivilegedMode`, `UpdateDataHistoryImmediatelyAfterWrite`, `UseStandardCommands` | `CheckUnique`, `NumberAllowedLength`, `NumberPeriodicity`, `Posting` |
+| DocumentJournal | `DefaultForm`, `IncludeHelpInContents` | `UseStandardCommands` |
+| Enum | `ChoiceHistoryOnInput`, `ChoiceMode`, `Comment`, `QuickChoice`, `UseStandardCommands` | - |
+| EventSubscription | `Comment` | - |
+| ExchangePlan | `DefaultObjectForm`, `DistributedInfoBase`, `IncludeHelpInContents`, `QuickChoice`, `UseStandardCommands` | - |
+| FilterCriterion | `UseStandardCommands` | - |
+| FunctionalOption | `Comment`, `Location`, `PrivilegedGetMode` | - |
+| InformationRegister | `Comment`, `DataLockControlMode`, `DefaultListForm`, `DefaultRecordForm`, `EditType`, `EnableTotalsSliceFirst`, `EnableTotalsSliceLast`, `ExecuteAfterWriteDataHistoryVersionProcessing`, `FullTextSearch`, `IncludeHelpInContents`, `MainFilterOnPeriod`, `UpdateDataHistoryImmediatelyAfterWrite`, `UseStandardCommands` | `InformationRegisterPeriodicity` |
+| Report | `Comment`, `DefaultForm`, `DefaultSettingsForm`, `IncludeHelpInContents`, `MainDataCompositionSchema`, `UseStandardCommands` | - |
+| Role | `Comment` | - |
+| ScheduledJob | `Comment` | `Description`, `Key`, `Predefined`, `Use` |
+| SessionParameter | `Comment` | - |
+| StyleItem | `Comment` | - |
+| Subsystem | `Comment`, `IncludeHelpInContents`, `IncludeInCommandInterface`, `UseOneCommand` | - |
+| Task | `UseStandardCommands` | - |
 
 The 20 that acted are exactly the storage properties of section 4: the hierarchy, the code type and length and the
 series of a catalog and of a chart of characteristic types, the history of data, the number length, periodicity,
@@ -332,7 +379,7 @@ change per object; the "native" column is the platform's log.
 | `p6_config`, `p6b_kinds` | `Version`, `UpdateCatalogAddress`, `Copyright`, `BriefInformation`, `Vendor`, `DetailedInformation`, `VendorInformationAddress`, `ConfigurationInformationAddress` of the configuration; three scheduled jobs (`MethodName`, `RestartCountOnFailure`, `RestartIntervalOnFailure`); an event of an event subscription; `Comment` of a job, a subscription, a web service, an HTTP service, an XDTO package, a settings storage, a sequence | only the three scheduled jobs | the configuration's information and the comments are harmless; the jobs are `data` |
 | `p7a_objects_add` | a common module, a catalog, a role added | the catalog (`Новый объект`, a new table) | the catalog is `structure`; the module and the role are harmless |
 | `p7b_objects_remove` | the same three dropped | the catalog (`Объект удален`, and 29 other objects restructured) | the catalog is `structure`; the module and the role are harmless |
-| `p8_catalog_presentation` | @@P8_ROW@@ |  |  |
+| `p8_catalog_presentation` | `ExtendedObjectPresentation`, `ExtendedListPresentation`, `FullTextSearchOnInputByString`, a field added to `InputByString`, and the auxiliary forms (`AuxiliaryObjectForm`, `AuxiliaryListForm`, `AuxiliaryChoiceForm`, `AuxiliaryFolderForm`, `AuxiliaryFolderChoiceForm`) of nine catalogs, one property each | none of them (Config and Params only) | all harmless after the rules were extended with `InputByString` (it was a `structure` reason before) |
 
 The two properties that a reader may distrust because they were changed in a run that also changed something
 structural, `ChoiceFoldersAndItems` and `DenyIncompleteValues`, sit in objects of their own in these runs (the
@@ -355,9 +402,102 @@ the objects it acts on, so each modification is judged on its own object. **Matc
 with the platform: `agree` (both restructure or both do not), `over` (we say restructuring, the platform did
 not: costs a native apply), `UNSAFE` (we say none, the platform restructured: must not happen).
 
-@@VALIDATION_TABLE@@
+**Harmless on the platform's side (it named no object): 21**
 
-@@VALIDATION_NOTES@@
+| # | Modification | ConfigSave check | Tree vs database | Native platform | Match |
+|---|---|---|---|---|---|
+| 1 | [8.5] synonym of Catalog._ДемоКассы | harmless | harmless | nothing named | agree |
+| 2 | EventSubscription _ДемоАвтономнаяРаботаРегистрация: Event: BeforeWrite -> OnWrite | harmless | harmless | nothing named | agree |
+| 3 | Configuration Version -> 3.1.11.467 | harmless | harmless | nothing named | agree |
+| 4 | StandardAttribute Description FillChecking: ShowError -> DontCheck | harmless | harmless | nothing named | agree |
+| 5 | a comment line appended to CommonModule._ДемоЗаметки | no change seen | no change seen | nothing named | agree |
+| 6 | WindowOpeningMode of Catalog._ДемоГруппыДоступаНоменклатуры.Form.ФормаЭлемента: LockOwnerWindow… | no change seen | no change seen | nothing named | agree |
+| 7 | a title in the composition schema of CommonTemplate.ДанныеПечатиРегистрСимволов | no change seen | no change seen | nothing named | agree |
+| 8 | synonym of Catalog._ДемоКассы | harmless | harmless | nothing named | agree |
+| 9 | a paragraph added to the help of Catalog._ДемоКассы | no change seen | no change seen | nothing named | agree |
+| 10 | the first right of Role._ДемоБазовыеПраваБСП: true -> false | no change seen | no change seen (bodies not compared) | nothing named | agree |
+| 11 | Attribute of Catalogs _ДемоВидыНоменклатуры: Comment set | harmless | harmless | nothing named | agree |
+| 12 | TabularSection СчетаНаОплату of _ДемоЗаказПокупателя: Comment set | harmless | harmless | nothing named | agree |
+| 13 | Command of Catalogs _ДемоБанковскиеСчета: Synonym Демо: Банковские счета -> Демо: Банковские сч… | harmless | harmless | nothing named | agree |
+| 14 | Catalogs _ДемоДоговорыКонтрагентов: Command КомандаRcheck added (copy of _ДемоДоговорыКонтраген… | harmless | harmless | nothing named | agree |
+| 15 | a new form ФормаRcheck of Catalog._ДемоГруппыДоступаПартнеров (a copy of the item form of _Демо… | harmless | harmless | nothing named | agree |
+| 16 | a new CommonModule МодульRcheck (a copy of _ДемоЗаметки) | harmless | harmless | nothing named | agree |
+| 17 | Catalog._ДемоКлючиАналитикиНоменклатуры: Attribute Номенклатура Name: Номенклатура -> Переимено… | harmless | harmless | nothing named | agree |
+| 18 | an attribute added to Report._ДемоФайлы | harmless | harmless | nothing named | agree |
+| 19 | CommonModule _ДемоСвойства removed (and its item in the content of _ДемоСвойства.xml) | harmless | harmless (3 changes seen) | nothing named | agree |
+| 20 | the first item of the content of ExchangePlan._ДемоАвтономнаяРабота: AutoRecord Allow -> Deny | harmless | no change seen (bodies not compared) | nothing named | agree |
+| 21 | [second run] a comment line appended to CommonModule._ДемоЗаметки | no change seen | no change seen (bodies not compared) | nothing named | agree |
+
+**The platform restructured or rewrote data: 13**
+
+| # | Modification | ConfigSave check | Tree vs database | Native platform | Match |
+|---|---|---|---|---|---|
+| 1 | [8.5] Catalog._ДемоКонтрагенты: CodeLength 9 -> 12 | structure: Catalog._ДемоКонтрагенты Properties/CodeLength | structure: Catalog._ДемоКонтрагенты Properties/CodeLength | changed: Справочник._ДемоКонтрагенты; restructured: Справочник._ДемоКонтрагенты | agree |
+| 2 | Catalog._ДемоДоговорыКонтрагентов: Attribute НомерДоговора Indexing: DontIndex -> Index | structure: Catalog._ДемоДоговорыКонтрагентов ChildObjects/Attribute[НомерДоговора]/… | structure: Catalog._ДемоДоговорыКонтрагентов ChildObjects/Attribute[НомерДоговора]/… | changed: Справочник._ДемоДоговорыКонтрагентов; restructured: Справочник._ДемоДогово… | agree |
+| 3 | Catalog._ДемоКонтрагенты: CodeLength 9 -> 12 | structure: Catalog._ДемоКонтрагенты Properties/CodeLength | structure: Catalog._ДемоКонтрагенты Properties/CodeLength | changed: Справочник._ДемоКонтрагенты; restructured: Справочник._ДемоКонтрагенты | agree |
+| 4 | Catalogs _ДемоКлючиАналитикиНоменклатуры: Attribute Комментарий removed | structure: Catalog._ДемоКлючиАналитикиНоменклатуры ChildObjects/Attribute[Комментар… | structure: Catalog._ДемоКлючиАналитикиНоменклатуры ChildObjects/Attribute[Комментар… | changed: Справочник._ДемоКлючиАналитикиНоменклатуры; restructured: Справочник._Демо… | agree |
+| 5 | Document.СообщениеSMS: CheckUnique true -> false | structure: Document.СообщениеSMS Properties/CheckUnique | structure: Document.СообщениеSMS Properties/CheckUnique | changed: Документ.СообщениеSMS; restructured: Документ.СообщениеSMS | agree |
+| 6 | a new Catalog СправочникRcheck (a copy of _ДемоКассы) | structure: Catalog.СправочникRcheck | structure: Catalog.СправочникRcheck | new: Справочник.СправочникRcheck | agree |
+| 7 | an attribute (String 20) added to Catalog._ДемоКассы | structure: Catalog._ДемоКассы ChildObjects/Attribute[РеквизитRcheck] | structure: Catalog._ДемоКассы ChildObjects/Attribute[РеквизитRcheck] | changed: Справочник._ДемоКассы; restructured: Справочник._ДемоКассы | agree |
+| 8 | the first string attribute of Catalog._ДемоФизическиеЛица: length 100 -> 120 | structure: Catalog._ДемоФизическиеЛица ChildObjects/Attribute[МестоРождения]/Proper… | structure: Catalog._ДемоФизическиеЛица ChildObjects/Attribute[МестоРождения]/Proper… | changed: Справочник._ДемоФизическиеЛица; restructured: Справочник._ДемоФизическиеЛи… | agree |
+| 9 | Documents _ДемоОприходованиеТоваров: tabular section ТСRcheck added (copied from _ДемоЗаказПоку… | structure: Document._ДемоОприходованиеТоваров ChildObjects/TabularSection[ТСRcheck] | structure: Document._ДемоОприходованиеТоваров ChildObjects/TabularSection[ТСRcheck] | changed: Документ._ДемоОприходованиеТоваров; restructured: Документ._ДемоОприходова… | agree |
+| 10 | AccumulationRegisters _ДемоОстаткиТоваровВМестахХранения: Dimension ИзмерениеRcheck added (copy… | structure: AccumulationRegister._ДемоОстаткиТоваровВМестахХранения ChildObjects/Dim… | structure: AccumulationRegister._ДемоОстаткиТоваровВМестахХранения ChildObjects/Dim… | changed: РегистрНакопления._ДемоОстаткиТоваровВМестахХранения; restructured: Регист… | agree |
+| 11 | ScheduledJob ЗагрузкаКурсовВалют: Use: false -> true | data: ScheduledJob.ЗагрузкаКурсовВалют Properties/Use | data: ScheduledJob.ЗагрузкаКурсовВалют Properties/Use | changed: РегламентноеЗадание.ЗагрузкаКурсовВалют | agree |
+| 12 | a predefined item added to Catalog.ГруппыПользователей | data: Catalog.ГруппыПользователей Predefined | no change seen | changed: Справочник.ГруппыПользователей; restructured: Справочник.ГруппыПользовател… | agree |
+| 13 | a value added to Enum._ДемоПолФизическогоЛица | data: Enum._ДемоПолФизическогоЛица ChildObjects/EnumValue[НеУказан] | data: Enum._ДемоПолФизическогоЛица ChildObjects/EnumValue[НеУказан] | changed: Перечисление._ДемоПолФизическогоЛица; restructured: Перечисление._ДемоПолФ… | agree |
+
+**Controls: the unchanged tree of a pristine clone, staged base-free: 2**
+
+| Database | ConfigSave check | Native platform | Match |
+|---|---|---|---|
+| b2 | data: BusinessProcess.Задание Flowchart | changed: БизнесПроцесс.Задание | agree |
+| b3 | data: BusinessProcess.Задание Flowchart | changed: БизнесПроцесс.Задание | agree |
+
+
+Result: **34 modifications of 12 kinds of object, and the ConfigSave check agrees with the platform on all 34**:
+13 were restructured or rewrote data and the check said so, 21 were not and the check said so. The check never said
+"no restructuring" where the platform restructured (0 `UNSAFE`). The check of the tree against the database, run
+before anything was staged, gave the same answer for every descriptor change; for the changes that are not in a
+descriptor (a module, a form, help, rights, a template, the data bodies) it has nothing to compare and says so
+(`bodies not compared`).
+
+Things to read in the table:
+
+* **The controls.** The very first apply of a base-free stage on a pristine clone always restructures the route
+  points of the business process `Задание`, even when the tree is unchanged: the flowchart row the stage compiles
+  differs from the stored one in a counter (finding 5), and the check says exactly that (`data:
+  BusinessProcess.Задание Flowchart`, no other reason). Each modification is judged on its own object; the
+  controls show what the first stage of a clone adds to any run. The runs of `b1` and `b2` that came first also
+  carry six exchange plan content rows written in another order, which the first build of the check took for
+  changes and the next ones for what they are (notes).
+* **One false alarm, then a rule.** Flipping `AutoRecord` of one item of the content of the exchange plan
+  `_ДемоАвтономнаяРабота` was first reported as `structure` (`over`) and the platform named nothing. The rule was
+  refined (a flag on the same objects is harmless, an object that joins or leaves is not) and the same
+  modification (Deny -> Allow first, Allow -> Deny the second time) agrees. The flag rule rests on that one
+  observation of one plan.
+* **Body-only changes** (the module, the form layout, the template, the help, the rights of a role) are counted
+  by role in the ConfigSave check and are not descriptors; the platform named none of them, and the whole
+  base-free stage carries 4 900 rows of these roles that it promotes every time.
+* **Rights of a role** cannot be staged by the base-free import (its rights writer refuses the row, "the written
+  row reads back into a different Rights.xml"): that change was staged as a partial stage of the role (`--path-prefix`).
+* **8.5** (the two `[8.5]` rows): XML 2.21, the native 8.5 platform, the administrator `Администратор (обычное
+  приложение)`. The check says `structure` for the code length with exactly one reason and the platform
+  restructures the catalog; the synonym is harmless on both sides. The first apply of that clone also rebuilt the
+  route points of `Задание` and the stage differed from the stored root and Configuration rows (finding 10).
+* **Runs lost and redone**, for the record: the controls of `b1`, the first `v19` and `bs3_safe` of `b3`
+  (a trial stage I made overwrote the ConfigSave of a run that was waiting for the native lock; the apply then
+  applied the trial, a module removal with its subsystem item, and changed `Config` and `Params` only; the base tree
+  was put right and both were run again), and three runs killed by a 60-minute limit of my own harness while
+  they waited for the lock (one of them left the lock held for 17 minutes; it was released by hand and the
+  limit is 3 hours now).
+* **The patch-mode import** is not in the table because it did not stage what it was given: the attribute of
+  `v14` on a pristine clone, staged in patch mode, never reached the ConfigSave (finding 1), and the native apply
+  of that stage changed `Config` and `Params` only. That run is the reason for `--tree`.
+* **The native import** did not get through: three attempts on the unchanged native export of the БСП (with and
+  without edits) ended with the predefined-item error of finding 11. The native-staged ConfigSave is therefore
+  the ddl track's own (case a2, an attribute added to `Catalog._ДемоПартнеры`, restored as `nat_a2`): our check
+  finds the attribute (`structure`) and the ddl track's native apply of the same stage rebuilt `_Reference20`, but
+  it cannot clear the stage (finding 9).
 
 ### 6.4 The reference trees against themselves and against their databases
 
@@ -406,14 +546,22 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
    counted in `stats.body_files_not_compared` (28 in the БСП, 271 in ERP УХ).
 9. **`DBSchema` is not consulted** (section 3.5): a property the whitelist does not know is `structure` even when
    the platform would find every table entry unchanged.
-10. **Speed.** ConfigSave check on the БСП: about 5 s; on ERP УХ (118 000 rows) not measured (a full УХ stage takes
+10. **Native-staged and 8.5 base-free ConfigSave.** The check refuses the ConfigSave of a native import of the
+    corpus БСП and the base-free stage of the 8.5 БСП as it is (findings 9 and 10 of section 8): the rows are in
+    a record format or shape the model does not decode completely. Fail closed, and not a corruption risk, but
+    the own apply cannot skip the platform for them until the model learns them.
+11. **Speed.** ConfigSave check on the БСП: about 5 s; on ERP УХ (118 000 rows) not measured (a full УХ stage takes
     minutes). Tree against database: 11 s (БСП 8.3.27), 14 s (БСП 8.5), 144 s (УХ 8.3.27), 202 s (УХ 8.5), of
     which the model's export of every descriptor is most.
 
 ## 8. Findings other tracks need
 
 1. **A ConfigSave alone cannot tell that a stage dropped a change** (import track, #388; ddl track finding 10.1,
-   reproduced): @@PATCH_FINDING@@. A stage must be checked against its input: `check_tree_against_db` before it,
+   reproduced): on a pristine БСП clone the patch-mode import of a tree with an attribute added to
+   `Catalog._ДемоКассы` staged 9 517 rows and not one changed descriptor (0 compared: all byte-equal to the active
+   ones); the ConfigSave check said `no restructuring`, the native apply then changed `Config` and `Params` only,
+   and `mssql-apply-check --tree` on the same tree and database said `structure: Catalog._ДемоКассы
+   ChildObjects/Attribute[РеквизитRcheck] added` (`runs_p1/v14_attribute_added`). A stage must be checked against its input: `check_tree_against_db` before it,
    or `--base-free`, which stages every row from the tree. The `objects` list of the verdict is the API for it: which
    descriptors differ, their uuid, kind and Config row, whether each difference is structural.
 2. **`--dynamic=force` writes an alias of every staged row and does not refuse structure** (apply track, #337):
@@ -424,7 +572,11 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
    reading `Config` through the derived table that publishes the aliased rows under their published names (the
    export's `dynamic_generation` overlay, 118 050 aliases here). The check reads rows in batches of 200 names and is
    not affected.
-4. **A patch-mode stage of a dynamically updated database reads the plain rows** (import track): @@STALE_FINDING@@.
+4. **A patch-mode stage of a dynamically updated database reads the plain rows** (import track): on `a`, a clone after 16 dynamic applies, the patch-mode import of its
+   own unchanged tree staged 9 516 rows, and the ConfigSave check found 149 of their descriptors different from the
+   active ones (40 reasons: `Catalog._ДемоКонтрагенты Properties/CodeLength 12 -> 9`, `ScheduledJob…
+   RestartIntervalOnFailure 601 -> 10`, ...). The stage carries the *plain* rows, the configuration as it was before
+   the online updates; applied, it would roll them back (`runs_demo/v00_control`).
 5. **The base-free stage of an unchanged БСП is not neutral** (import track): the flowchart row of the business
    process `Задание` differs from the stored one in a counter (37 stored, 23 compiled) and the platform rebuilds the
    route-point table for it at the first apply; the six exchange plans whose content row it writes in another
@@ -441,5 +593,62 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
    `Обработка данных Реструктуризация X [пересчет итогов | таблица регистрации изменений] [n]`,
    `Создано поколение конфигурации: <uuid>`. The first four are printed only for objects that own a table or
    stored data: a new common module or role prints nothing.
+9. **A native import rewrites the stage in the record format of its own edition** (import and model tracks). The
+   БСП of the corpus is stored in record version 56 (compatibility 8.3.24); the 8.3.27 import writes 57: in the
+   ddl track's case a2 (`ibcmd_rs_04_ddl_bsp8327_a_a2_staged.bak`, restored as `ibcmd_rs_04_rcheck_nat_a2`) 517 of
+   4 929 descriptors differ in bytes from the stored ones (one is the change of the case; 119 decode to the same
+   descriptor in the other format, 396 to the same XML in the same one), and the Configuration row is rewritten from
+   the `{67}` to the `{68}` shape with the compatibility mode at 80324 and the extension compatibility at 80327.
+   The model refuses that Configuration row ("fields 26 and 43 hold 80324 and 80327; no corpus shows which one the
+   platform prints"). The check reads a staged row in either format and does find the change of that case
+   (`structure: Catalog._ДемоПартнеры ChildObjects/Attribute[ДемоНовыйРеквизит] added`), but the Configuration row,
+   the 396 byte-only differences and a row `deleted` (content `0`: the native way to list deleted files, which the
+   check does not know yet) stay `unknown`, so the ConfigSave of a native import of this corpus is refused.
+   Two things would lift that: the model decoding a `{68}` Configuration row whose fields 26 and 43 differ, and a
+   way to tell a format upgrade from a field the model does not carry. Until then the source tree is the reliable
+   input: `mssql-apply-check --tree` on the import's input.
+10. **The 8.5 base-free stage of an unchanged БСП is not neutral either** (import track): the `root` row, the
+    Configuration row (139 204 -> 139 197 bytes), `Task.ЗадачаИсполнителя` (same size) and a 99 MB body row of the
+    configuration differ from the stored ones, and the flowchart of `Задание` as on 8.3.27; the check reports
+    them (`unknown`, fail closed) and the platform's apply rebuilt the route-point table of `Задание` only. The
+    8.5 БСП clones keep the administrator under the name `Администратор (обычное приложение)` with an empty
+    password (found by the ui track): `--user=Администратор` is refused there.
+11. **Native `config import` is flaky on a busy machine** (import and ddl tracks): twice in a row the import of the
+    unchanged native export of the БСП ended with "Ссылка на неизвестный предопределенный элемент -
+    ChartOfCharacteristicTypes.ОбъектыАдресацииЗадач.ВсеОбъектыАдресации" while other native runs were queued
+    (lane `n1`, 14:20-14:50); the tree is the very export the corpus came from.
 
-@@REPRODUCE@@
+## 9. Evidence files and how to reproduce
+
+In the repository, `docs/apply/evidence/restructuring-check/`:
+
+| file | what |
+|---|---|
+| `validation.md`, `validation.json` | section 6.3, one line per modification with the three verdicts and the native outcome |
+| `probes-auto-a.tsv` | the 159 probes of 6.1: kind, object, property, from, to, whether the platform acted |
+| `force-applies.md` | the native `--dynamic=force` applies of 5.1 and 6.2: exit, seconds, what changed, the objects named |
+| `selftest.md` | section 6.4: the four reference exports against databases restored from the same corpora |
+
+The lab is `F:\ibcmd\lab\04\restructure-check` (its scripts are not part of the product):
+
+* databases (`ibcmd_rs_04_rcheck_...`): `bsp_a` (cumulative, 16 dynamic generations; 6.1, 6.2), `bsp_b1`,
+  `bsp_b2`, `bsp_b3` (the validation lanes), `bsp_p1` (the patch-mode demonstration, a second control), `bsp85`
+  (the 8.5 dialect), `bsp_n1` (the lane of the native import; the import never got through), `nat_a2` (the ddl
+  track's native-staged case a2), `uha8327`, `uha85` (the self-tests of 6.4);
+* `tools/snapshot.ps1` digests the schema before and after an apply (the columns of every table, an index
+  signature by columns, the object ids of the tables, row counts); `tools/native.ps1` runs the native `ibcmd`
+  with a timeout and closed stdin, holds the lab's `native` lock for that one command and removes its 800 MB data
+  folder afterwards; `py/exp.py run <name>` is one experiment (edit the base tree, tree against database, stage,
+  ConfigSave check, native apply, digests, the result in `runs_*/<name>/result.json`); `py/lanes.py` runs the
+  lanes; `py/edits*.py` are the edits; `py/make_validation.py` and `py/make_evidence.py` write the tables;
+* one check by hand:
+
+```
+ibcmd-rs mssql-apply-check --database ibcmd_rs_04_rcheck_bsp_b2 --json
+ibcmd-rs mssql-apply-check --database ibcmd_rs_04_rcheck_bsp_b2 --tree F:\path\to\export --json
+ibcmd-rs apply-check-trees --old F:\path\to\export --new F:\path\to\edited --json
+```
+
+Tests: `cargo test -p ibcmd-rs --lib --no-default-features apply_check` (82 tests: every rule with synthetic XML, the
+row check with fake rows, the modes on synthetic trees); `... apply_check::corpus_tests -- --ignored` for the
+reference exports (6.4).
