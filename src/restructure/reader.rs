@@ -5,21 +5,48 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
+use crate::mssql_config_apply::model::quote_ident;
 use crate::restructure::plan::{Inputs, StagedImage};
 use crate::restructure::storage::SchemaStorageRow;
-use crate::sql::SqlRow;
 use crate::sql::mssql::{TdsConnection, sql_row};
+use crate::sql::{SqlClient, SqlRow};
+
+/// Where the plan's input is read from: a dedicated connection of the research command, or the client
+/// of the own apply (the structural gate reads through the apply's handle).
+pub trait RowSource {
+    fn rows(&mut self, query: &str, each: &mut dyn FnMut(SqlRow) -> Result<()>) -> Result<()>;
+}
+
+impl RowSource for TdsConnection {
+    fn rows(&mut self, query: &str, each: &mut dyn FnMut(SqlRow) -> Result<()>) -> Result<()> {
+        self.query_each(query, &[], |row| each(sql_row(row)))
+    }
+}
+
+/// The apply's SQL client on one database (`USE` in front of every query: the client is server-level).
+pub struct ClientSource<'a> {
+    pub client: &'a dyn SqlClient,
+    pub database: &'a str,
+}
+
+impl RowSource for ClientSource<'_> {
+    fn rows(&mut self, query: &str, each: &mut dyn FnMut(SqlRow) -> Result<()>) -> Result<()> {
+        let database = quote_ident(self.database)?;
+        self.client
+            .read_rows(&format!("USE {database}; {query}"), &[], each)
+    }
+}
 
 fn rows(
-    connection: &mut TdsConnection,
+    source: &mut dyn RowSource,
     query: &str,
     mut each: impl FnMut(SqlRow) -> Result<()>,
 ) -> Result<()> {
-    connection.query_each(query, &[], |row| each(sql_row(row)))
+    source.rows(query, &mut each)
 }
 
 /// Reads everything a plan needs, and the `SchemaStorage` rows.
-pub fn read_inputs(connection: &mut TdsConnection) -> Result<(Inputs, Vec<SchemaStorageRow>)> {
+pub fn read_inputs(connection: &mut dyn RowSource) -> Result<(Inputs, Vec<SchemaStorageRow>)> {
     let mut storage = Vec::new();
     rows(
         connection,
@@ -79,7 +106,7 @@ pub fn read_inputs(connection: &mut TdsConnection) -> Result<(Inputs, Vec<Schema
     .context("RefSInf tables")?;
     rows(
         connection,
-        "SELECT FileName, BinaryData FROM dbo.Params WHERE PartNo = 0 AND FileName LIKE N'%.si'",
+        "SELECT FileName, BinaryData FROM dbo.Params WHERE PartNo = 0 AND (FileName LIKE N'%.si' OR FileName = N'siVersions')",
         |mut row| {
             let name = row.take_text(0)?;
             inputs.cache_rows.push((name, row.take_binary(1)?));
@@ -87,11 +114,20 @@ pub fn read_inputs(connection: &mut TdsConnection) -> Result<(Inputs, Vec<Schema
         },
     )
     .context("Params *.si")?;
+    rows(
+        connection,
+        "SELECT BinaryData FROM dbo.Config WHERE FileName = N'root' AND PartNo = 0",
+        |mut row| {
+            inputs.root_row = row.take_binary(0)?;
+            Ok(())
+        },
+    )
+    .context("Config root")?;
     inputs.staged = read_staged(connection)?;
     Ok((inputs, storage))
 }
 
-fn read_staged(connection: &mut TdsConnection) -> Result<StagedImage> {
+fn read_staged(connection: &mut dyn RowSource) -> Result<StagedImage> {
     let mut image = StagedImage::default();
     for (table, files, descriptors) in [
         ("Config", &mut image.old_files, &mut image.old_descriptors),
@@ -117,7 +153,7 @@ fn read_staged(connection: &mut TdsConnection) -> Result<StagedImage> {
 }
 
 fn collect_files(
-    connection: &mut TdsConnection,
+    connection: &mut dyn RowSource,
     table: &str,
     files: &mut BTreeSet<String>,
 ) -> Result<()> {
@@ -134,7 +170,7 @@ fn collect_files(
 
 /// The rows named by a bare uuid: the object descriptors.
 fn collect_descriptors(
-    connection: &mut TdsConnection,
+    connection: &mut dyn RowSource,
     table: &str,
     descriptors: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {

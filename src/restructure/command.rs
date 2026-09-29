@@ -51,6 +51,10 @@ pub struct MssqlRestructureArgs {
     /// serialization until the platform rebuilds the cache.
     #[arg(long)]
     pub skip_xdto: bool,
+    /// Leave the object registry (`Params` `1a621f0f-....si`) as it is, stale: the new attribute is not
+    /// listed in the search information until the platform rebuilds it.
+    #[arg(long)]
+    pub skip_registry: bool,
     /// Write the JSON report here as well.
     #[arg(long)]
     pub report: Option<PathBuf>,
@@ -84,13 +88,22 @@ pub struct StatementReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ObjectReport {
+    pub kind: String,
+    pub object: String,
+    pub name: String,
+    pub uuid: String,
+    pub additions: Vec<AdditionReport>,
+    pub tables: Vec<TableReport>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RestructureReport {
     pub database: String,
     pub mode: String,
     pub summary: String,
-    pub object: String,
-    pub additions: Vec<AdditionReport>,
-    pub tables: Vec<TableReport>,
+    pub objects: Vec<ObjectReport>,
+    pub caches: Vec<String>,
     pub old_schema_sha256: String,
     pub new_schema_sha256: String,
     pub new_names_sha256: String,
@@ -198,6 +211,7 @@ fn make_plan(inputs: &Inputs, args: &MssqlRestructureArgs) -> Result<Plan> {
         &PlanOptions {
             names_version: args.names_version.clone(),
             skip_xdto: args.skip_xdto,
+            skip_registry: args.skip_registry,
             method: if args.alter_add {
                 Method::AlterAdd
             } else {
@@ -212,44 +226,58 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
         database: database.to_owned(),
         mode: mode.to_owned(),
         summary: plan.summary(),
-        object: plan.object.clone(),
-        additions: plan
-            .additions
+        objects: plan
+            .objects
             .iter()
-            .map(|addition| AdditionReport {
-                attribute: addition.name.clone(),
-                uuid: addition.uuid.clone(),
-                field: addition.field.name.clone(),
-                number: addition.number,
-                position: addition.position,
-            })
-            .collect(),
-        tables: plan
-            .tables
-            .iter()
-            .map(|table| TableReport {
-                table: table.table.name.clone(),
-                columns: table.table.columns.len(),
-                indexes: table
-                    .table
-                    .indexes
+            .map(|object| ObjectReport {
+                kind: object.kind.label().to_owned(),
+                object: object.object.clone(),
+                name: object.object_name.clone(),
+                uuid: object.object_uuid.clone(),
+                additions: object
+                    .additions
                     .iter()
-                    .map(|index| {
-                        format!(
-                            "{}{}{} ({})",
-                            if index.unique { "unique " } else { "" },
-                            if index.clustered { "clustered " } else { "" },
-                            if index.name.is_empty() {
-                                "primary key"
-                            } else {
-                                &index.name
-                            },
-                            index.columns.join(", ")
-                        )
+                    .map(|addition| AdditionReport {
+                        attribute: addition.name.clone(),
+                        uuid: addition.uuid.clone(),
+                        field: addition.field.name.clone(),
+                        number: addition.number,
+                        position: addition.position,
                     })
                     .collect(),
-                copy_columns: table.insert_columns.len(),
+                tables: object
+                    .tables
+                    .iter()
+                    .map(|table| TableReport {
+                        table: table.table.name.clone(),
+                        columns: table.table.columns.len(),
+                        indexes: table
+                            .table
+                            .indexes
+                            .iter()
+                            .map(|index| {
+                                format!(
+                                    "{}{}{} ({})",
+                                    if index.unique { "unique " } else { "" },
+                                    if index.clustered { "clustered " } else { "" },
+                                    if index.name.is_empty() {
+                                        "primary key"
+                                    } else {
+                                        &index.name
+                                    },
+                                    index.columns.join(", ")
+                                )
+                            })
+                            .collect(),
+                        copy_columns: table.insert_columns.len(),
+                    })
+                    .collect(),
             })
+            .collect(),
+        caches: plan
+            .caches
+            .iter()
+            .map(|cache| format!("{}: {}", cache.row_name, cache.what))
             .collect(),
         old_schema_sha256: plan.old_schema_sha256.clone(),
         new_schema_sha256: sha256_hex(&plan.new_schema),

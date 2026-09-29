@@ -27,6 +27,8 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | `snapdiff.py`, `schemadiff.py`, `dbnames_diff.py` | diffs of two snapshots: tables/columns/indexes, service rows, `DBSchema` entries, `DBNames` |
 | `xe_read.py`, `xe_shapes.py`, `timeline.py`, `extract_ddl.py` | XE file -> JSONL, normalised statement story per session, phase timeline, the structure statements as a readable SQL log |
 | `si_diff.py` | the `Params` `*.si` cache rows between two snapshots, after inflate (the XDTO model row is shown decoded from its base64 block) |
+| `compare_tables.ps1`, `compare_config.ps1`, `dbschema_cmp.py` | twin comparison (S1): the rows of tables of two databases with `EXCEPT` both ways (every column but the row version); the `Config` rows one twin has and the other has not, by name; `DBSchema` entries and `DBNames` text of two snapshots of two databases |
+| `params_row.ps1`, `cache_variant.ps1` | S1 cache experiments: read / replace / delete one `Params` `*.si` row of a lab database; start a server on a variant (a row absent or stale) and run a probe job (what the platform needs of each cache row, section 12.5) |
 
 ## Decode and check
 
@@ -51,7 +53,9 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 b: document attribute, c: new catalog, d: dimension + resource, e/g/f: widen / index / delete, h: attribute
 types and tabular sections). Each edit keeps the original and the edited file under `tree/patches/<case>/`.
 `edit85.py` makes case a on the 8.5 (2.21) dialect, `edit_second.py <tree> <catalog> <name> ...` adds a second / third attribute
-(the `ALTER TABLE` experiment).
+(the `ALTER TABLE` experiment). `edit_cases_s1.py` makes the types case of S1 (T1): attributes of every primitive type
+(boolean, strings of every kind, integer / fractional / non-negative numbers, dates, time) in five catalogs and a document,
+one stage; `jobs/types_t1.bsl` is the session job that reads, serializes, writes and queries them.
 
 ## Typical run
 

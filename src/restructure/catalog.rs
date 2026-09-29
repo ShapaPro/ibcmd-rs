@@ -18,6 +18,9 @@ use crate::metadata_model::objects::{layout, parts::Slot};
 pub const ATTRIBUTES: &str = "cf4abea7-37b2-11d4-940f-008048da11f9";
 /// The collection of a catalog's tabular sections.
 pub const TABULAR_SECTIONS: &str = "932159f9-95b2-4e76-a8dd-8849fe5c5ded";
+/// The collection of a document's attributes and of its tabular sections.
+pub const DOCUMENT_ATTRIBUTES: &str = "45e46cbc-3e24-4165-8b7b-cc98a6f80211";
+pub const DOCUMENT_TABULAR_SECTIONS: &str = "21c53e09-8950-4b5e-a6a0-1054f1bbc274";
 
 /// `v8:ValueStorage` and `v8:UUID`, the only type ids of a pattern that map to a field on their own.
 const VALUE_STORAGE_TYPE: &str = "e199ca70-93cf-46ce-a54b-6edc88c3a296";
@@ -37,6 +40,9 @@ pub struct AttributeFacts {
     pub usage: Option<i64>,
     /// The parsed `{"Pattern",...}`.
     pub pattern_node: Brace,
+    /// The synonyms as the search information lists them: `(language, text)`, the text as it stands
+    /// between the quotes (quotes doubled).
+    pub synonyms: Vec<(String, String)>,
 }
 
 /// What a tabular section contributes to the structure.
@@ -70,14 +76,14 @@ pub struct CatalogFacts {
 }
 
 /// The value of a slot of the owner record by property name.
-struct OwnerRecord<'a> {
-    values: &'a [Brace],
-    positions: HashMap<&'static str, usize>,
-    header: usize,
+pub(crate) struct OwnerRecord<'a> {
+    pub(crate) values: &'a [Brace],
+    pub(crate) positions: HashMap<&'static str, usize>,
+    pub(crate) header: usize,
 }
 
 impl OwnerRecord<'_> {
-    fn atom(&self, name: &str) -> Result<&str> {
+    pub(crate) fn atom(&self, name: &str) -> Result<&str> {
         let position = *self
             .positions
             .get(name)
@@ -88,14 +94,14 @@ impl OwnerRecord<'_> {
             .with_context(|| format!("slot {name} is not a plain value"))
     }
 
-    fn number(&self, name: &str) -> Result<i64> {
+    pub(crate) fn number(&self, name: &str) -> Result<i64> {
         self.atom(name)?
             .parse()
             .with_context(|| format!("slot {name} is not a number"))
     }
 
     /// The count of `{0,N,...}` (`References`).
-    fn reference_count(&self, name: &str) -> Result<i64> {
+    pub(crate) fn reference_count(&self, name: &str) -> Result<i64> {
         let position = *self
             .positions
             .get(name)
@@ -114,10 +120,13 @@ impl OwnerRecord<'_> {
 
 /// Walks the catalog layout for the positions of the named slots in a record
 /// of the given tag (`56` before compatibility 8.3.27, `57` from it).
-fn record_positions(tag: i64) -> Result<(HashMap<&'static str, usize>, usize)> {
-    let layout = layout("Catalog").context("no Catalog layout")?;
+pub(crate) fn record_positions(
+    kind: &str,
+    tag: i64,
+) -> Result<(HashMap<&'static str, usize>, usize)> {
+    let layout = layout(kind).with_context(|| format!("no {kind} layout"))?;
     let Some(Slot::Tag(old, new, latest)) = layout.slots.first().copied() else {
-        bail!("the Catalog layout does not start with its tag");
+        bail!("the {kind} layout does not start with its tag");
     };
     let modern = tag != old;
     let since_8_5_1 = tag == latest && latest != new;
@@ -136,7 +145,7 @@ fn record_positions(tag: i64) -> Result<(HashMap<&'static str, usize>, usize)> {
     }
     Ok((
         positions,
-        header.context("the Catalog layout has no header slot")?,
+        header.with_context(|| format!("the {kind} layout has no header slot"))?,
     ))
 }
 
@@ -180,8 +189,32 @@ fn walk(
     }
 }
 
+/// `{3,{1,0,<uuid>},"Name",{<n>,"ru","text",...},...}` -> the synonyms `(language, text)`.
+pub(crate) fn md_synonyms(node: &Brace) -> Vec<(String, String)> {
+    let Some(block) = node
+        .as_list()
+        .and_then(|items| items.get(3))
+        .and_then(Brace::as_list)
+    else {
+        return Vec::new();
+    };
+    block
+        .get(1..)
+        .unwrap_or_default()
+        .chunks(2)
+        .filter_map(
+            |pair| match (pair.first()?.as_str(), pair.get(1)?.as_str()) {
+                (Some(language), Some(text)) => {
+                    Some((language.to_owned(), text.replace('"', "\"\"")))
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 /// `{3,{1,0,<uuid>},"Name",...}` -> (uuid, name).
-fn md_base(node: &Brace) -> Result<(String, String)> {
+pub(crate) fn md_base(node: &Brace) -> Result<(String, String)> {
     let items = node.as_list().context("an md header is not a list")?;
     let uuid = items
         .get(1)
@@ -215,7 +248,7 @@ impl CatalogFacts {
         if tag != 56 && tag != 57 {
             bail!("not a catalog row (tag {tag})");
         }
-        let (positions, header) = record_positions(tag)?;
+        let (positions, header) = record_positions("Catalog", tag)?;
         let record = OwnerRecord {
             values,
             positions,
@@ -283,7 +316,7 @@ fn catalog_attribute(item: &Brace) -> Result<AttributeFacts> {
     Ok(facts)
 }
 
-fn number_at(record: &[Brace], index: usize, what: &str) -> Result<i64> {
+pub(crate) fn number_at(record: &[Brace], index: usize, what: &str) -> Result<i64> {
     record
         .get(index)
         .and_then(Brace::as_atom)
@@ -292,7 +325,7 @@ fn number_at(record: &[Brace], index: usize, what: &str) -> Result<i64> {
 }
 
 /// `{27,{2,<md base>,<pattern>},...}`.
-fn attribute_body(body: &Brace) -> Result<AttributeFacts> {
+pub(crate) fn attribute_body(body: &Brace) -> Result<AttributeFacts> {
     let slots = body.as_list().context("an attribute body is not a list")?;
     if slots.first().and_then(Brace::as_atom) != Some("27") {
         bail!("not an attribute body");
@@ -301,7 +334,8 @@ fn attribute_body(body: &Brace) -> Result<AttributeFacts> {
         .get(1)
         .and_then(Brace::as_list)
         .context("an attribute body has no typed header")?;
-    let (uuid, name) = md_base(typed.get(1).context("no md header in an attribute body")?)?;
+    let header = typed.get(1).context("no md header in an attribute body")?;
+    let (uuid, name) = md_base(header)?;
     let pattern = typed.get(2).context("an attribute body has no type")?;
     if pattern
         .as_list()
@@ -318,11 +352,12 @@ fn attribute_body(body: &Brace) -> Result<AttributeFacts> {
         indexing: None,
         usage: None,
         pattern_node: pattern.clone(),
+        synonyms: md_synonyms(header),
     })
 }
 
 /// A tabular section item: its own md header and every attribute body below it.
-fn section(item: &Brace) -> Result<SectionFacts> {
+pub(crate) fn section(item: &Brace) -> Result<SectionFacts> {
     let mut bodies = Vec::new();
     let mut headers = Vec::new();
     collect(item, &mut bodies, &mut headers);
@@ -376,9 +411,9 @@ fn collect<'a>(node: &'a Brace, bodies: &mut Vec<&'a Brace>, headers: &mut Vec<&
 // The type of an attribute -> the field's type entries.
 
 /// The field type entries of an attribute pattern. Only the types whose columns were
-/// verified against the platform (case h of the traces) are mapped: a boolean, a string, a
-/// number, a date or date-time, a value storage, a uuid. A reference, a composite type, a
-/// defined type or a time is refused.
+/// verified against the platform (case h of the traces, the types case) are mapped: a boolean, a
+/// string, a number, a date, a date and time or a time, a value storage, a uuid. A reference, a
+/// composite type or a defined type is refused.
 pub fn type_entries(pattern: &Brace) -> Result<Vec<crate::restructure::schema::TypeEntry>> {
     use crate::restructure::schema::TypeEntry;
 
@@ -431,10 +466,8 @@ pub fn type_entries(pattern: &Brace) -> Result<Vec<crate::restructure::schema::T
             }
             TypeEntry::new("N", digits, fraction, "", 0)
         }
-        "D" => match fields.get(1).and_then(Brace::as_str) {
-            Some("T") => bail!("a time-only value is not verified against the platform"),
-            _ => TypeEntry::new("T", 0, 0, "", 0),
-        },
+        // A date, a date and time and a time alone are the same field (`datetime2(0)`; measured).
+        "D" => TypeEntry::new("T", 0, 0, "", 0),
         "#" => match fields.get(1).and_then(Brace::as_atom) {
             Some(VALUE_STORAGE_TYPE) => TypeEntry::new("B", 0x8000_0000, 0, "", 0),
             Some(UUID_TYPE) => TypeEntry::new("B", 16, 0, "", 0),
@@ -533,6 +566,7 @@ mod tests {
         assert_eq!((number.tag.as_str(), number.a, number.b), ("N", 12, 3));
         assert_eq!(entry("{\"Pattern\",{\"D\",\"DT\"}}").tag, "T");
         assert_eq!(entry("{\"Pattern\",{\"D\",\"D\"}}").tag, "T");
+        assert_eq!(entry("{\"Pattern\",{\"D\",\"T\"}}").tag, "T");
         assert_eq!(
             entry("{\"Pattern\",{\"#\",fc01b5df-97fe-449b-83d4-218a090e681e}}").a,
             16
@@ -542,7 +576,6 @@ mod tests {
             0x8000_0000
         );
         for refused in [
-            "{\"Pattern\",{\"D\",\"T\"}}",
             "{\"Pattern\",{\"S\",10,1},{\"N\",5,0,0}}",
             "{\"Pattern\",{\"#\",a8034afe-1aa5-41d3-a773-0abf601f51ca}}",
             "{\"Pattern\",{\"N\",0,0,0}}",

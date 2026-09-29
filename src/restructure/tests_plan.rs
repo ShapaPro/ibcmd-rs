@@ -53,6 +53,7 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
         ],
         predefined_tables: BTreeSet::new(),
         cache_rows: Vec::new(),
+        root_row: Vec::new(),
         staged: StagedImage {
             old_files: files,
             new_files,
@@ -66,8 +67,9 @@ fn inputs(old: &[u8], new: &[u8]) -> Inputs {
 fn options() -> PlanOptions {
     PlanOptions {
         names_version: Some(VERSION.to_owned()),
-        // the fixtures hold no XDTO model row (the corpus test has the real one)
+        // the fixtures hold no cache rows (the corpus test has the real ones)
         skip_xdto: true,
+        skip_registry: true,
         ..PlanOptions::default()
     }
 }
@@ -93,9 +95,10 @@ fn the_fixtures_are_where_the_tests_expect_them() {
 #[test]
 fn plans_case_a2_like_the_platform_did() {
     let plan = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
-    assert_eq!(plan.object, "Reference20");
-    assert_eq!(plan.additions.len(), 1);
-    let addition = &plan.additions[0];
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(plan.objects[0].object, "Reference20");
+    assert_eq!(plan.objects[0].additions.len(), 1);
+    let addition = &plan.objects[0].additions[0];
     assert_eq!(addition.uuid, "c60cdc87-198a-4f6e-8f17-76bcb1b1914b");
     assert_eq!(addition.name, "ДемоНовыйРеквизит");
     // The counter is shared with the extensions: 11033 there, 10824 here.
@@ -194,6 +197,45 @@ fn the_statements_are_the_platforms_for_the_object() {
             "ConfigSave: emptied"
         ]
     );
+}
+
+#[test]
+fn the_phase_text_is_the_statements_with_assertions() {
+    let plan = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let text = plan.phase_sql("@now").unwrap();
+    let trace = lf(STATEMENTS);
+    // The DDL is the platform's, verbatim, in the platform's order.
+    let mut from = 0;
+    for statement in plan
+        .statements()
+        .iter()
+        .filter(|s| matches!(s.phase, Phase::Create | Phase::Indexes | Phase::DropOld))
+    {
+        assert!(trace.contains(&statement.sql), "{}", statement.sql);
+        let at = text[from..]
+            .find(&statement.sql)
+            .unwrap_or_else(|| panic!("not in the phase text, in order:\n{}", statement.sql));
+        from += at + statement.sql.len();
+    }
+    // Every rename, table and index.
+    assert_eq!(text.matches("EXEC sp_rename").count(), 13);
+    // No parameter marker: the values are literals.
+    assert!(!text.contains("@P1"), "a parameter marker");
+    // The guards and the assertions.
+    for number in [57400, 57401, 57402, 57403, 57404, 57405] {
+        assert!(text.contains(&format!("THROW {number},")), "{number}");
+    }
+    // The publication uses the caller's timestamp and touches neither Config nor the caches.
+    assert!(text.contains("Modified = @now WHERE FileName = N'DBNames'"));
+    assert!(!text.contains("dbo.Config"));
+    assert!(!text.contains(".si"));
+    // The old rows the guards compare with are the plan's inputs.
+    assert!(text.contains(&plan.old_schema_sha256.to_ascii_uppercase()));
+    assert!(text.contains(&plan.old_names_sha256.to_ascii_uppercase()));
+    // The alter method is not for the apply.
+    let mut alter = plan.clone();
+    alter.method = crate::restructure::plan::Method::AlterAdd;
+    assert!(alter.phase_sql("@now").is_err());
 }
 
 #[test]
