@@ -61,6 +61,9 @@ pub(super) struct HomePageWorkArea {
     pub(super) template: &'static str,
     pub(super) left_column: Vec<HomePageWorkAreaItem>,
     pub(super) right_column: Vec<HomePageWorkAreaItem>,
+    /// `<MACommandInterfaceDisplays>`, `None` when the blob stores `None`
+    /// (not printed) or predates the field.
+    pub(super) ma_command_interface_displays: Option<&'static str>,
 }
 
 pub(super) struct HomePageWorkAreaItem {
@@ -572,18 +575,52 @@ pub(super) fn parse_home_page_work_area_text(
         parse_home_page_work_area_column(&fields, &mut index, form_refs, metadata_refs)?;
     let right_column =
         parse_home_page_work_area_column(&fields, &mut index, form_refs, metadata_refs)?;
+    // A one-column page keeps an empty second column; items stored there
+    // would have nowhere to be printed.
+    if template == ONE_COLUMN_TEMPLATE && !right_column.is_empty() {
+        return None;
+    }
+    // 8.3.27.2214 stores one more field after the columns and refuses a blob
+    // without it ("Ошибка формата потока"); the reader still takes the older
+    // shape, which never carried the property.
+    let ma_command_interface_displays = match fields.get(index) {
+        None => None,
+        Some(code) => {
+            index += 1;
+            HOME_PAGE_MA_COMMAND_INTERFACE_DISPLAYS
+                .iter()
+                .find(|(stored, _)| *stored == code.trim())
+                .map(|(_, name)| *name)?
+        }
+    };
+    if index != fields.len() {
+        return None;
+    }
 
     Some(HomePageWorkArea {
         template,
         left_column,
         right_column,
+        ma_command_interface_displays,
     })
 }
 
 /// Stored work-area template codes and the names the platform exports them
-/// under.
-pub(crate) const HOME_PAGE_WORK_AREA_TEMPLATES: [(&str, &str); 1] =
-    [("2", "TwoColumnsVariableWidth")];
+/// under, read and written alike: 8.3.27.2214 stores OneColumn as 0,
+/// TwoColumnsEqualWidth as 1 and TwoColumnsVariableWidth as 2 (fixtures
+/// `home_page`).
+pub(crate) const HOME_PAGE_WORK_AREA_TEMPLATES: [(&str, &str); 3] = [
+    ("0", ONE_COLUMN_TEMPLATE),
+    ("1", "TwoColumnsEqualWidth"),
+    ("2", "TwoColumnsVariableWidth"),
+];
+
+const ONE_COLUMN_TEMPLATE: &str = "OneColumn";
+
+/// `<MACommandInterfaceDisplays>` codes: 0 Top, 1 Bottom, 2 None, which the
+/// platform does not print (fixtures `home_page`; 1Cv8 stores 0).
+const HOME_PAGE_MA_COMMAND_INTERFACE_DISPLAYS: [(&str, Option<&str>); 3] =
+    [("0", Some("Top")), ("1", Some("Bottom")), ("2", None)];
 
 pub(super) fn home_page_work_area_template_name(code: &str) -> Option<&'static str> {
     HOME_PAGE_WORK_AREA_TEMPLATES
@@ -1001,8 +1038,17 @@ pub(super) fn format_home_page_work_area_xml(
         "\t<WorkingAreaTemplate>{}</WorkingAreaTemplate>\r\n",
         work_area.template
     ));
-    push_home_page_work_area_column_xml(&mut xml, "LeftColumn", &work_area.left_column);
-    push_home_page_work_area_column_xml(&mut xml, "RightColumn", &work_area.right_column);
+    if work_area.template == ONE_COLUMN_TEMPLATE {
+        push_home_page_work_area_column_xml(&mut xml, "Column", &work_area.left_column);
+    } else {
+        push_home_page_work_area_column_xml(&mut xml, "LeftColumn", &work_area.left_column);
+        push_home_page_work_area_column_xml(&mut xml, "RightColumn", &work_area.right_column);
+    }
+    if let Some(displays) = work_area.ma_command_interface_displays {
+        xml.push_str(&format!(
+            "\t<MACommandInterfaceDisplays>{displays}</MACommandInterfaceDisplays>\r\n"
+        ));
+    }
     xml.push_str("</HomePageWorkArea>");
     xml
 }
@@ -1012,6 +1058,12 @@ pub(super) fn push_home_page_work_area_column_xml(
     tag: &str,
     items: &[HomePageWorkAreaItem],
 ) {
+    // 8.3.27.2214 closes an empty column on itself (fixture
+    // `home_page/two_equal_bottom`).
+    if items.is_empty() {
+        xml.push_str(&format!("\t<{tag}/>\r\n"));
+        return;
+    }
     xml.push_str(&format!("\t<{tag}>\r\n"));
     for item in items {
         xml.push_str(&format!(

@@ -167,6 +167,13 @@ pub(super) struct FormParseContext<'a> {
     object_ref_index: Option<&'a FormObjectRefIndex<'a>>,
     dcs_source_profile: ProfileId,
     dcs_target_profile: ProfileId,
+    /// Whether the root `<Form>` declares `xmlns:dcssch` -- it follows the
+    /// configuration's compatibility mode, see
+    /// `forms_declare_dcs_schema_namespace`. Declared by default.
+    dcs_schema_namespace: bool,
+    /// What the form spells by the configuration's compatibility mode
+    /// (`FormCompatibility`); the platform's own edition by default.
+    form_compatibility: FormCompatibility,
     trace_sink: Option<&'a dyn FormItemTraceSink>,
 }
 
@@ -224,6 +231,8 @@ impl<'a> FormParseContext<'a> {
             dcs_source_profile: ProfileId::parse("provider:mssql-legacy")
                 .expect("static MSSQL provider profile is valid"),
             dcs_target_profile: ProfileId::parse("xml-2.20").expect("static XML profile is valid"),
+            dcs_schema_namespace: true,
+            form_compatibility: FormCompatibility::default(),
             trace_sink: None,
         }
     }
@@ -275,6 +284,16 @@ impl<'a> FormParseContext<'a> {
     ) -> Self {
         self.dcs_source_profile = source_profile;
         self.dcs_target_profile = target_profile;
+        self
+    }
+
+    pub(super) fn with_dcs_schema_namespace(mut self, declared: bool) -> Self {
+        self.dcs_schema_namespace = declared;
+        self
+    }
+
+    pub(super) fn with_form_compatibility(mut self, compatibility: FormCompatibility) -> Self {
+        self.form_compatibility = compatibility;
         self
     }
 
@@ -375,7 +394,9 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         std::iter::once(body.layout.as_str()).chain(body.trailing.iter().map(String::as_str)),
     );
     let started = Instant::now();
-    let form_fields = split_1c_braced_fields(&body.layout, 0)?;
+    let numbered_layout = with_unidentified_form_items_numbered(&body.layout);
+    let form_fields =
+        split_1c_braced_fields(numbered_layout.as_deref().unwrap_or(&body.layout), 0)?;
     if let Some(timings) = timings.as_deref_mut() {
         timings.source_asset_form_split_cpu_ms += elapsed_ms(started);
     }
@@ -780,6 +801,9 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         return Some(DetailedFormBodyExtraction::Rejected { diagnostics, error });
     }
 
+    if !context.form_compatibility.usual_group_behavior {
+        without_usual_group_behavior(&mut child_items);
+    }
     let started = Instant::now();
     let xml = match format_form_body_xml_with_dcs_profiles(
         &properties,
@@ -794,15 +818,186 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         &context.dcs_source_profile,
         &context.dcs_target_profile,
     ) {
-        Ok(xml) => xml,
+        Ok(xml) if context.dcs_schema_namespace => xml,
+        Ok(xml) => without_root_dcs_schema_namespace(xml),
         Err(error) => {
             return Some(DetailedFormBodyExtraction::Rejected { diagnostics, error });
         }
+    };
+    let xml = if context
+        .form_compatibility
+        .no_main_table_default_picture_marked
+    {
+        xml
+    } else {
+        with_no_main_table_default_picture_unmarked(xml, &attributes)
+    };
+    let xml = if context.dcs_target_profile.as_str() == "xml-2.20" {
+        with_v85_only_events_by_identifier(xml)
+    } else {
+        xml
     };
     if let Some(timings) = timings.as_deref_mut() {
         timings.source_asset_form_format_cpu_ms += elapsed_ms(started);
     }
     Some(DetailedFormBodyExtraction::Emitted { xml, diagnostics })
+}
+
+/// Table events 8.3.27.2214 has no name for: 8.5 names them, an 8.3.27 dump
+/// keeps the identifier (ИТК x3: `OnHover` 21 bindings and
+/// `OnSelectedRowsSetChange` 3, every one by uuid in the 8.3.27.2214 dumps
+/// and by name in the 8.5.1.1529 ones; fixture `form_events`).
+const V85_ONLY_EVENTS: [(&str, &str); 2] = [
+    ("OnHover", "c676f87f-6c33-4dba-aad8-0526726d1bcf"),
+    (
+        "OnSelectedRowsSetChange",
+        "147fd867-8f22-4463-939d-4b48c5860c89",
+    ),
+];
+
+/// The form with every 8.5-only event spelled by its identifier, as the 2.20
+/// dialect (8.3.27) writes it.
+pub(super) fn with_v85_only_events_by_identifier(mut xml: String) -> String {
+    for (name, identifier) in V85_ONLY_EVENTS {
+        let spelled = format!("<Event name=\"{name}\"");
+        if xml.contains(&spelled) {
+            xml = xml.replace(&spelled, &format!("<Event name=\"{identifier}\""));
+        }
+    }
+    xml
+}
+
+/// The class uuid every form item's `{id, uuid}` identity carries.
+const FORM_ITEM_IDENTITY_UUID: &str = "02023637-7868-4a5f-8576-835a76e0c9ba";
+
+/// The layout with every item stored without an id (`{0}` in place of its
+/// `{id, uuid}` identity) given one, as the platform numbers them when it
+/// writes the form: from one past the greatest id the form holds, in
+/// document order. A form loaded from XML that names no table additions gets
+/// its tables' `SearchStringAddition`/`ViewStatusAddition`/
+/// `SearchControlAddition` (and their context menus and tooltips) created
+/// this way; 8.3.27.2214 dumps them numbered 33, 34, … behind items 1..7 and
+/// 20..32, the first table's nine before the second's (fixture
+/// `unnumbered_additions`). `None` when no item lacks an id.
+pub(super) fn with_unidentified_form_items_numbered(layout: &str) -> Option<String> {
+    const UNIDENTIFIED: &str = "{0},";
+    let identity_tail = format!(",{FORM_ITEM_IDENTITY_UUID}}}");
+    // An unidentified item: `{<wrapper>,{0},a,b,c,d,"<name>"` with four
+    // plain scalars between the identity and the name; answers the record's
+    // opening brace, its wrapper and its fourth scalar (the kind code of a
+    // `22` group).
+    let unidentified_at = |at: usize| -> Option<(usize, &str, &str)> {
+        let before = layout[..at].trim_end();
+        let wrapper_start = before.strip_suffix(',')?.rfind('{')?;
+        let wrapper = &before[wrapper_start + 1..before.len() - 1];
+        if wrapper.is_empty() || !wrapper.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let rest = &layout[at + UNIDENTIFIED.len()..];
+        let quote = rest.find('"')?;
+        let scalars = rest[..quote].trim_end().strip_suffix(',')?;
+        let scalars = scalars.split(',').map(str::trim).collect::<Vec<_>>();
+        (scalars.len() == 4
+            && scalars.iter().all(|scalar| {
+                !scalar.is_empty() && scalar.bytes().all(|byte| byte.is_ascii_digit())
+            }))
+        .then(|| (wrapper_start, wrapper, scalars[3]))
+    };
+    // The form's hidden navigator group (`22` of kind `7`, stored without an
+    // id with its tooltip) is never written, and nothing inside it is
+    // numbered.
+    let mut skip_until = 0;
+    let mut positions = Vec::new();
+    for (at, _) in layout.match_indices(UNIDENTIFIED) {
+        if at < skip_until {
+            continue;
+        }
+        let Some((start, wrapper, kind)) = unidentified_at(at) else {
+            continue;
+        };
+        if wrapper == "22" && kind == "7" {
+            skip_until = scan_1c_braced_value(layout, start).unwrap_or(layout.len());
+            continue;
+        }
+        positions.push(at);
+    }
+    if positions.is_empty() {
+        return None;
+    }
+    let greatest = layout
+        .match_indices(&identity_tail)
+        .filter_map(|(at, _)| {
+            let head = &layout[..at];
+            let start = head.rfind('{')?;
+            head[start + 1..].trim().parse::<i64>().ok()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(0);
+    let mut numbered = String::with_capacity(layout.len() + positions.len() * 48);
+    let mut copied = 0;
+    for (offset, at) in positions.into_iter().enumerate() {
+        numbered.push_str(&layout[copied..at]);
+        numbered.push_str(&format!(
+            "{{{},{FORM_ITEM_IDENTITY_UUID}}},",
+            greatest + 1 + offset as i64
+        ));
+        copied = at + UNIDENTIFIED.len();
+    }
+    numbered.push_str(&layout[copied..]);
+    Some(numbered)
+}
+
+/// The items with every explicit `Usual` behavior dropped, as the platform
+/// writes them under a compatibility mode before 8.3.20 (see
+/// `forms_write_usual_group_behavior`).
+pub(super) fn without_usual_group_behavior(items: &mut [FormChildItem]) {
+    for item in items {
+        if item.behavior == Some("Usual") {
+            item.behavior = None;
+        }
+        without_usual_group_behavior(&mut item.child_items);
+    }
+}
+
+/// The form with every `~List.DefaultPicture` of a dynamic list that
+/// declares no main table written unmarked, as the platform writes it under a
+/// compatibility mode before 8.3.19 (see
+/// `forms_mark_no_main_table_default_picture`). The path is element text
+/// wherever it occurs (`RowPictureDataPath`, `DataPath`, `UseAlways/Field`).
+pub(super) fn with_no_main_table_default_picture_unmarked(
+    mut xml: String,
+    attributes: &[FormAttribute],
+) -> String {
+    for attribute in attributes {
+        let Some(settings) = attribute.settings.as_ref() else {
+            continue;
+        };
+        if settings.main_table.is_some() {
+            continue;
+        }
+        let marked = format!(">~{}.DefaultPicture<", attribute.name);
+        if xml.contains(&marked) {
+            xml = xml.replace(&marked, &format!(">{}.DefaultPicture<", attribute.name));
+        }
+    }
+    xml
+}
+
+const ROOT_DCS_SCHEMA_NAMESPACE: &str =
+    r#" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema""#;
+
+/// The form without the root's `xmlns:dcssch` declaration, as the platform
+/// writes it under a compatibility mode before 8.3.19. A form that still uses
+/// the prefix keeps the declaration: no evidence says where the platform
+/// would declare it then, and the document must stay well formed.
+pub(super) fn without_root_dcs_schema_namespace(xml: String) -> String {
+    let dropped = xml.replacen(ROOT_DCS_SCHEMA_NAMESPACE, "", 1);
+    if dropped.contains("dcssch:") {
+        xml
+    } else {
+        dropped
+    }
 }
 
 pub(super) fn collect_opaque_choice_list_diagnostics(
@@ -3624,6 +3819,27 @@ pub(super) fn collect_form_body_events(
             continue;
         };
         if is_form_child_item_fields(&nested) {
+            continue;
+        }
+        // The whole event block, when the field is one: every handler of every
+        // event, the ones after the first included (an adopted form's `After`
+        // interceptors). See `form_extension`.
+        if let Some(bindings) = super::form_extension::parse_form_event_block(field) {
+            for binding in bindings {
+                let Some(name) = parse_form_root_event_identifier(&binding.event, write_extension)
+                else {
+                    continue;
+                };
+                if !is_probable_form_event_handler(&binding.handler) {
+                    continue;
+                }
+                if seen.insert((name.clone(), binding.handler.clone())) {
+                    events.push(FormBodyEvent {
+                        name,
+                        handler: binding.handler,
+                    });
+                }
+            }
             continue;
         }
         for event in parse_form_body_event_fields(&nested, write_extension) {
@@ -17512,15 +17728,17 @@ pub(super) fn parse_form_usual_group_property_bag_behavior(
 pub(super) fn parse_form_usual_group_compact_bag_behavior(
     options: &[&str],
 ) -> Option<&'static str> {
-    let value = options.get(10).map(|value| value.trim())?;
-    if options.get(24).map(|field| field.trim()) != Some(value) {
-        return None;
-    }
-    match value {
-        "0" => Some("Usual"),
-        "1" => Some("Collapsible"),
-        _ => None,
-    }
+    // Slot 24 carries the code itself (`2` PopUp, observed on seven groups of
+    // a real configuration, all with slot 10 `1`); slot 10 only says whether
+    // the code is anything but `Usual`.
+    let not_usual = options.get(10).map(|value| value.trim())?;
+    let (behavior, expected_flag) = match options.get(24).map(|field| field.trim())? {
+        "0" => ("Usual", "0"),
+        "1" => ("Collapsible", "1"),
+        "2" => ("PopUp", "1"),
+        _ => return None,
+    };
+    (not_usual == expected_flag).then_some(behavior)
 }
 
 pub(super) fn parse_form_usual_group_horizontal_stretch(fields: &[&str]) -> Option<bool> {
@@ -21333,12 +21551,41 @@ fn normalize_form_property_bag_revision<'a>(options: &[&'a str]) -> Option<Vec<&
     Some(normalized)
 }
 
+/// A `Button` record that declares `30` but already carries the canonical
+/// `31`'s full length: 52 members with the name at slot 5, or 53 with the
+/// conditional prefix pushing it to slot 6. A real configuration writes 379
+/// such buttons and every one matches `31` member for member --
+/// `ToolTipRepresentation` at slot 30, the `CommandUniqueness` flag `1` two
+/// slots from the end -- so padding it as the short `30`/51 (or its prefixed
+/// `30`/52, name at slot 6) shifted the tail and wrote a spurious
+/// `ToolTipRepresentation None` and `CommandUniqueness false`. The name slot
+/// tells the two 52-member shapes apart.
+fn form_button_record_is_full_length_30(fields: &[&str]) -> bool {
+    if fields.first().map(|field| field.trim()) != Some("30") {
+        return false;
+    }
+    let quoted = |slot: usize| {
+        fields
+            .get(slot)
+            .is_some_and(|field| field.trim().starts_with('"'))
+    };
+    match fields.len() {
+        52 => quoted(5),
+        53 => quoted(6),
+        _ => false,
+    }
+}
+
 /// Rewrite a short item-record revision into its canonical one, or `None` when
 /// the record already declares the canonical revision (the overwhelmingly
 /// common case, which stays allocation-free).
 fn normalize_form_item_record_revision<'a>(fields: &[&'a str]) -> Option<Vec<&'a str>> {
     let wrapper = fields.first()?.trim();
-    let (canonical, dropped_trailing) = form_item_record_canonical_revision(wrapper, fields.len())?;
+    let (canonical, dropped_trailing) = if form_button_record_is_full_length_30(fields) {
+        ("31", 0)
+    } else {
+        form_item_record_canonical_revision(wrapper, fields.len())?
+    };
     let mut normalized = Vec::with_capacity(fields.len() + dropped_trailing);
     normalized.push(canonical);
     normalized.extend(fields[1..].iter().copied());
@@ -25250,8 +25497,8 @@ fn form_bound_chain_collection_path(path: &str) -> String {
 /// `1` is `UserSettings` on the composer itself but `Filter` on its settings,
 /// and `10002` is `LeftValue` on a filter but `Setting` on a user setting. Each
 /// table below lists only the ids its own type was observed to carry.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum FormSettingsComposerType {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FormSettingsComposerType {
     SettingsComposer,
     Settings,
     Filter,
@@ -25294,7 +25541,7 @@ fn form_settings_composer_row_type(
 /// `SettingsStorages/ХранилищеВариантовОтчетов/Forms/ЭлементУсловногоОформления`
 /// carries `{5,{1},{4},{0,e67e2953-…},{10002},{10003}}` and the platform writes
 /// `КомпоновщикНастроек.Settings.ConditionalAppearance[0].Filter.ComparisonType`.
-fn form_settings_composer_member(
+pub(super) fn form_settings_composer_member(
     owner: FormSettingsComposerType,
     member_id: &str,
 ) -> Option<(&'static str, Option<FormSettingsComposerType>)> {
@@ -25396,10 +25643,24 @@ fn form_settings_composer_member(
             ("10009", "ViewMode", None),
             ("10010", "Presentation", None),
         ],
-        Selection => &[("0", "SelectionAvailableFields", Some(AvailableFields))],
+        // `1000x` of `Selection`, `Order` and `GroupFields`: ИТК
+        // `CommonForms/ИТК_КонструкторНастроекКомпоновкиДанных`, one table per
+        // collection, each column's stored chain against the name the
+        // 8.3.27.2214 dump writes for it (`{4,{3},{0},{2},{10002}}` ->
+        // `КомпоновщикНастроек.Settings.Selection.Title`,
+        // `{3,{286,…},{10009},{10002}}` -> `…CurrentData.ItemGroupFields.Field`).
+        Selection => &[
+            ("0", "SelectionAvailableFields", Some(AvailableFields)),
+            ("10001", "TitlePicture", None),
+            ("10002", "Title", None),
+            ("10003", "Placement", None),
+            ("10004", "FieldPicture", None),
+            ("10005", "Field", None),
+        ],
         Order => &[
             ("0", "OrderAvailableFields", Some(AvailableFields)),
             ("10000", "Use", None),
+            ("10001", "FieldPicture", None),
             ("10002", "Field", None),
             ("10003", "OrderType", None),
         ],
@@ -25426,7 +25687,17 @@ fn form_settings_composer_member(
             ("10006", "EditInReportForm", None),
             ("10007", "Filter", Some(Filter)),
         ],
-        GroupFields => &[("0", "GroupFieldsAvailableFields", Some(AvailableFields))],
+        GroupFields => &[
+            ("0", "GroupFieldsAvailableFields", Some(AvailableFields)),
+            ("10001", "FieldPicture", None),
+            ("10002", "Field", None),
+            ("10003", "GroupType", None),
+            ("10004", "AdditionType", None),
+            ("10005", "BeginOfPeriodPicture", None),
+            ("10006", "BeginOfPeriod", None),
+            ("10007", "EndOfPeriodPicture", None),
+            ("10008", "EndOfPeriod", None),
+        ],
         // Evidence: UT 11.5.27.75, all 13 slots whose owner is a table bound to
         // a `Settings` collection -- `CommonForms/ФормаВариантаОтчета` (12) and
         // `CommonForms/ФормаВыбораДоступногоПоля` (1). The `Item` prefix is the
@@ -28344,6 +28615,8 @@ pub(super) struct FormTableCommandOwnership {
     pub(super) row_set_unchangeable: bool,
     /// The table shows a dynamic list that declares no `<MainTable>`.
     pub(super) list_without_main_table: bool,
+    /// The table selects one row at a time (`<SelectionMode>SingleRow`).
+    pub(super) single_row: bool,
     /// The family of the dynamic list's declared main table, when one is
     /// present. The command record itself carries only the table-item id, so
     /// this is the structural fact that lets its system-command revision be
@@ -28376,6 +28649,7 @@ fn collect_form_table_command_ownership(
                     row_set_unchangeable: settings.is_some() && item.change_row_set == Some(false),
                     list_without_main_table: settings
                         .is_some_and(|settings| settings.main_table.is_none()),
+                    single_row: item.table_selection_mode == Some("SingleRow"),
                     main_table_family: settings
                         .and_then(|settings| settings.main_table.as_deref())
                         .and_then(|table| {
@@ -28446,6 +28720,12 @@ pub(super) fn form_table_owns_button_standard_command(
         return false;
     }
     if ownership.list_without_main_table && FORM_LIST_MAIN_TABLE_ROW_COMMANDS.contains(&command) {
+        return false;
+    }
+    // A table that selects one row at a time has no `SelectAll`: the native
+    // 8.3.27.2214 and 8.5.1.1529 trees name it on 132 tables of the default
+    // mode and keep `1:51c99108-...` on all 6 `SingleRow` ones (ИТК).
+    if ownership.single_row && command == "SelectAll" {
         return false;
     }
     // The platform has two system UUIDs that both render as a table `Delete`.
@@ -30594,11 +30874,12 @@ fn format_form_body_xml_with_dcs_profiles(
     if !commands.is_empty() {
         xml.push_str("\t<Commands>\r\n");
         for command in commands {
-            xml.push_str(&format!(
+            let open_tag = format!(
                 "\t\t<Command name=\"{}\" id=\"{}\">\r\n",
                 escape_xml_text(&command.name),
                 escape_xml_text(&command.id)
-            ));
+            );
+            xml.push_str(&open_tag);
             xml.push_str(&format_form_localized_section("Title", &command.title, 3));
             xml.push_str(&format_form_localized_section(
                 "ToolTip",
@@ -30694,7 +30975,15 @@ fn format_form_body_xml_with_dcs_profiles(
                     ));
                 }
             }
-            xml.push_str("\t\t</Command>\r\n");
+            // A command that carries nothing -- no title, action or other
+            // property -- is written as an empty element (fixture
+            // `empty_command`).
+            if xml.ends_with(&open_tag) {
+                xml.truncate(xml.len() - 3);
+                xml.push_str("/>\r\n");
+            } else {
+                xml.push_str("\t\t</Command>\r\n");
+            }
         }
         xml.push_str("\t</Commands>\r\n");
     }
@@ -32116,7 +32405,7 @@ pub(super) fn format_form_child_item_xml(
     // `Pages` and `UsualGroup` - therefore write it there, next to their title.
     if !matches!(
         item.tag,
-        "UsualGroup" | "Table" | "Page" | "Popup" | "Pages"
+        "UsualGroup" | "Table" | "Page" | "Popup" | "Pages" | "ButtonGroup"
     ) && let Some(title_font_xml) = &item.title_font_xml
     {
         xml.push_str(&format!("{tab}\t{title_font_xml}\r\n"));
@@ -33366,6 +33655,12 @@ pub(super) fn format_form_child_item_xml(
                 &item.title,
                 indent + 1,
             ));
+            // `TitleFont` sits behind `Title` and ahead of `ToolTip` on every
+            // one of the 10 button groups of two real configurations that
+            // carry it; it used to be written ahead of the title.
+            if let Some(title_font_xml) = &item.title_font_xml {
+                xml.push_str(&format!("{tab}\t{title_font_xml}\r\n"));
+            }
             xml.push_str(&format_form_localized_section(
                 "ToolTip",
                 &item.tooltip,

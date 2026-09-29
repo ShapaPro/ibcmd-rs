@@ -482,6 +482,16 @@ const CONFIGURATION_SECTIONS: [ConfigurationSectionLayout; 7] = [
     },
 ];
 
+/// The metadata kind a configuration root family holds, by the family's
+/// class id (`{<class>,<count>,<object uuids>…}` in the root row).
+pub(crate) fn configuration_family_kind(class_id: &str) -> Option<&'static str> {
+    CONFIGURATION_SECTIONS
+        .iter()
+        .flat_map(|section| section.slots.iter())
+        .find(|slot| slot.class_id.eq_ignore_ascii_case(class_id))
+        .and_then(|slot| slot.kind)
+}
+
 /// Compiles the exact evidence-backed native `root` row.
 ///
 /// Plaintext is UTF-8 BOM followed by `{2,<configuration UUID>,}`. The empty

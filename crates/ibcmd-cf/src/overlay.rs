@@ -50,6 +50,13 @@ pub trait OverlayCodec {
         base: &StorageEntry,
         changed_keys: &[String],
     ) -> Result<Vec<u8>, String>;
+
+    /// Whether a base without a `versions` entry is refused when entries
+    /// change. A configuration extension (.cfe) container carries none, so a
+    /// codec loading into one answers `false` and the entry stays absent.
+    fn requires_versions(&self) -> bool {
+        true
+    }
 }
 
 /// One payload changed by an overlay plan.
@@ -397,7 +404,8 @@ pub fn apply_overlay<C: OverlayCodec>(
     codec: &mut C,
     limits: ResourceLimits,
 ) -> Result<(StorageImage, OverlayReport), OverlayError> {
-    let plan = preflight(base, patch).map_err(OverlayError::Preflight)?;
+    let plan =
+        preflight(base, patch, codec.requires_versions()).map_err(OverlayError::Preflight)?;
     let mut entries = base.entries().to_vec();
     let mut changes = Vec::with_capacity(patch.len().saturating_add(1));
 
@@ -449,7 +457,9 @@ pub fn apply_overlay<C: OverlayCodec>(
         )?;
     }
 
-    let image = StorageImage::new(entries)?;
+    // The retained budget the caller derived from its input, not the 512 MiB
+    // floor: a 187 MB configuration retains more (2.1.34.1.cf: 537 MB).
+    let image = StorageImage::with_retained_byte_limit(entries, limits.max_retained_bytes_usize())?;
     let changed_physical = changes
         .iter()
         .map(|change| (change.logical_key.as_str(), change.part_index))
@@ -505,6 +515,7 @@ struct OverlayPlan {
 fn preflight(
     base: &StorageImage,
     patch: &StoragePatch,
+    requires_versions: bool,
 ) -> Result<OverlayPlan, OverlayPreflightError> {
     let mut exact = BTreeMap::<(&str, u32), usize>::new();
     let mut by_key = BTreeMap::<&str, Vec<usize>>::new();
@@ -590,7 +601,9 @@ fn preflight(
     } else {
         match by_key.get(VERSIONS_KEY) {
             None => {
-                blockers.push(OverlayBlocker::MissingVersions);
+                if requires_versions {
+                    blockers.push(OverlayBlocker::MissingVersions);
+                }
                 None
             }
             Some(candidates) if candidates.len() != 1 => {

@@ -5667,8 +5667,7 @@ fn writes_configuration_module_text_to_source_layout_without_metadata_row() {
 \t\t\t</Visibility>\r\n\
 \t\t</Item>\r\n\
 \t</LeftColumn>\r\n\
-\t<RightColumn>\r\n\
-\t</RightColumn>\r\n\
+\t<RightColumn/>\r\n\
 </HomePageWorkArea>"
             .as_bytes()
             .to_vec();
@@ -8915,6 +8914,7 @@ fn table_delete_command_revision_uses_the_main_table_family() {
         excluded_commands: Vec::new(),
         row_set_unchangeable: false,
         list_without_main_table: false,
+        single_row: false,
         main_table_family: Some("InformationRegister".to_string()),
     };
     let document_table = FormTableCommandOwnership {
@@ -30185,12 +30185,27 @@ fn writes_scheduled_job_schedule_to_source_layout() {
     let schedule = deflate_for_test(
             b"{00010101000000,00010101000000,00010101080000,00010101170000,00010101000000,0,60,0,2,6,7,0,1,12,1,2,3,4,5,6,7,8,9,10,11,12,1,0}",
         );
+    // The common module the job's method names: without it the job is
+    // refused rather than written without MethodName.
+    let module_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+    let module = deflate_for_test(
+            format!(
+                "\u{feff}{{1,\r\n{{12,\r\n{{3,\r\n{{1,0,{module_uuid}}},\"Rates\",{{1,\"en\",\"Rates\"}},\"\",0,0,00000000-0000-0000-0000-000000000000,0}},0,1,0,1,1,1,2,0}}\r\n}},0}}"
+            )
+            .as_bytes(),
+        );
     let rows = vec![
         ConfigRow {
             file_name: uuid.to_string(),
             part_no: 0,
             data_size: metadata.len() as i64,
             binary_hex: encode_hex_for_test(&metadata),
+        },
+        ConfigRow {
+            file_name: module_uuid.to_string(),
+            part_no: 0,
+            data_size: module.len() as i64,
+            binary_hex: encode_hex_for_test(&module),
         },
         ConfigRow {
             file_name: format!("{uuid}.0"),
@@ -30202,7 +30217,7 @@ fn writes_scheduled_job_schedule_to_source_layout() {
 
     let dumped = dump_table_rows(&root, "Config", rows, false, false, true).unwrap();
 
-    assert_eq!(dumped.metadata_xml_rows, 1);
+    assert_eq!(dumped.metadata_xml_rows, 2);
     assert_eq!(dumped.source_asset_rows, 1);
     let bytes = fs::read(root.join("ScheduledJobs/LoadRates/Ext/Schedule.xml")).unwrap();
     assert!(bytes.starts_with(b"\xEF\xBB\xBF"));
@@ -32798,6 +32813,7 @@ fn spreadsheet_extract_formats_horizontal_unmerge_and_merge_columns_id() {
             columns_id: None,
         }],
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -32945,6 +32961,7 @@ fn spreadsheet_extract_omits_default_print_settings() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -33413,6 +33430,7 @@ fn formats_moxel_renumbers_formats_by_usage_order() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -33506,6 +33524,7 @@ fn formats_moxel_output_count_includes_sparse_referenced_indices() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -33813,6 +33832,7 @@ fn parses_and_formats_moxel_vertical_groups() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -34536,6 +34556,7 @@ fn formats_moxel_zero_column_slots_emit_first_row_format_index() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -34646,6 +34667,7 @@ fn moxel_palette_index_control_keeps_column_and_cell_references() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -34713,6 +34735,7 @@ fn moxel_zero_column_semantic_height_and_vertical_group_are_not_suppressed() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -35500,6 +35523,7 @@ fn formats_moxel_embedded_f527_colors_resolve_by_property() {
             merges: Vec::new(),
             horizontal_unmerges: Vec::new(),
             vertical_unmerges: Vec::new(),
+            page_breaks: MoxelPageBreaks::default(),
             named_items: Vec::new(),
             areas: Vec::new(),
             internal_sources: Vec::new(),
@@ -35620,6 +35644,7 @@ fn formats_moxel_minus21_slot_uses_button_text_color() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -35672,6 +35697,7 @@ fn formats_moxel_minus14_slot_uses_field_selection_back_color_in_spreadsheets() 
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -35724,6 +35750,7 @@ fn formats_moxel_minus13_slot_uses_field_alternative_back_color() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -35776,6 +35803,7 @@ fn formats_moxel_field_selected_text_color_style() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -35860,6 +35888,7 @@ fn formats_moxel_report_back_color_styles() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -36009,6 +36038,7 @@ fn formats_moxel_preserve_hidden_false_and_legacy_bottom_alignment() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -36063,6 +36093,7 @@ fn formats_moxel_preserve_explicit_empty_number_and_edit_formats() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -37173,6 +37204,7 @@ fn formats_moxel_explicit_sparse_column_offset_preserves_internal_order() {
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -37279,6 +37311,7 @@ fn formats_moxel_sparse_source_output_order_skips_when_explicit_default_format_e
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -37373,6 +37406,7 @@ fn formats_moxel_sparse_source_output_order_leads_with_external_shared_default()
         merges: Vec::new(),
         horizontal_unmerges: Vec::new(),
         vertical_unmerges: Vec::new(),
+        page_breaks: MoxelPageBreaks::default(),
         named_items: Vec::new(),
         areas: Vec::new(),
         internal_sources: Vec::new(),
@@ -39401,18 +39435,22 @@ fn role_rights_blob_configuration_root_inverts_when_set_for_new_objects_true() {
 }
 
 #[test]
-fn role_rights_blob_configuration_root_refuses_unnamed_right_diverging_from_default() {
+fn role_rights_blob_configuration_root_names_the_unnamed_right_diverging_from_default() {
     let cfg_uuid = "dddddddd-dddd-4ddd-dddd-dddddddddddd";
-    // Identical to the always-tolerated shape except the still-unnamed right
+    // Identical to the always-tolerated shape except the unnamed right
     // (`4df6d046…`) is true while `setForNewObjects` is false. Every
-    // occurrence of that UUID in the ERP УХ corpus matched the role's own
-    // default (2026-08-24, 1,679/1,679), so a value that doesn't is an
-    // unproven shape: the whole blob is refused rather than guessing a name.
+    // occurrence in the ERP УХ corpus matched the role's own default
+    // (2026-08-24, 1,679/1,679) and printed nothing; ИТК
+    // `Roles/ИТК_СтруктураХранения` diverges and the platform prints
+    // `ExclusiveModeTerminationAtSessionStart` -- the `3762abec…` story again.
     let rights_text = "{10,{1,{{1,dddddddd-dddd-4ddd-dddd-dddddddddddd,0,0},{0,900e3c92-6e18-4874-846a-b28780b5b54c,-1,3c00c6ee-844e-4620-85e4-671e72f114d9,1,4df6d046-3bf8-4dda-991c-53ba664296a5,1,d8682bbb-7800-4aa0-8590-d3cb11fe2a29,1,31c3d4f6-7d02-4654-a14e-06aacafcb4fa,1}}},{0},0,1,0,4294967295}";
     let rights_blob = deflate_for_test(rights_text.as_bytes());
     let object_refs = BTreeMap::from([(cfg_uuid.to_string(), "Configuration.DemoApp".to_string())]);
 
-    assert!(parse_role_rights_blob(&rights_blob, &object_refs, &BTreeMap::new()).is_none());
+    let rights = parse_role_rights_blob(&rights_blob, &object_refs, &BTreeMap::new()).unwrap();
+    let xml = format_role_rights_xml(&rights);
+    assert!(xml.contains("<name>ExclusiveModeTerminationAtSessionStart</name>"));
+    assert!(!xml.contains("4df6d046"));
 }
 
 #[test]
@@ -43483,7 +43521,7 @@ fn rejects_malformed_information_register_standard_attribute_envelopes_and_bags(
     let mut unknown = fields.clone();
     unknown[2] = "1183c14f-f814-49c6-9233-a3c26b3f64ce";
     assert!(parse_information_register_standard_attribute_bag(&rebuild(&unknown)).is_none());
-    let wrong_tag = modern_bag.replacen("{14,25,", "{13,25,", 1);
+    let wrong_tag = modern_bag.replacen("{14,25,", "{12,25,", 1);
     assert!(parse_information_register_standard_attribute_bag(&wrong_tag).is_none());
     let wrong_count = modern_bag.replacen("{14,25,", "{14,24,", 1);
     assert!(parse_information_register_standard_attribute_bag(&wrong_count).is_none());
@@ -52130,12 +52168,22 @@ fn extracts_additional_simple_service_metadata_xml_from_blobs() {
             PathBuf::from("ScheduledJobs").join("LoadRates.xml"),
         ),
     ] {
-        let extracted = extract_metadata_source_xml(
+        // A scheduled job's method names its common module: without it the
+        // job is refused rather than written without MethodName.
+        let object_refs = BTreeMap::from([(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            "CommonModule.Rates".to_string(),
+        )]);
+        let extracted = extract_metadata_source_xml_with_refs(
             blob,
             uuid,
             &BTreeMap::new(),
+            &object_refs,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            InfobaseConfigSourceVersion::V2_20,
         )
         .unwrap();
         let properties = parse_simple_metadata_xml_properties(&extracted.xml).unwrap();
@@ -62188,21 +62236,32 @@ fn document_data_paths_are_owner_checked_with_cpl_only_structural_fallback() {
         "Document.Invoice.TabularSection.Lines.Attribute.Product"
     );
     assert_eq!(parsed_lbt.link_item, 3);
+    // A link to another object's attribute is printed raw (fixture
+    // `adopted/foreign_links`); a bare code still is not.
+    let foreign = parse_document_link_by_type(
+        &format!("{{3,1,{{0,{unknown_uuid}}},1}}"),
+        "Invoice",
+        &object_refs,
+        &proof,
+    )
+    .unwrap()
+    .1
+    .unwrap();
     assert!(
-        parse_document_link_by_type(
-            &format!("{{3,1,{{0,{unknown_uuid}}},1}}"),
-            "Invoice",
-            &object_refs,
-            &proof,
-        )
-        .is_none()
+        foreign.data_path.contains(unknown_uuid),
+        "{}",
+        foreign.data_path
     );
     assert!(parse_document_link_by_type("{3,1,{-8},1}", "Invoice", &object_refs, &proof).is_none());
 
     let nested_cpl = format!("{{5006,1,\"Filter\",2,{{0,{tabular_uuid}}},{{0,{nested_uuid}}},1}}");
-    assert!(
-        parse_document_choice_parameter_links(&nested_cpl, "Invoice", false, &object_refs, &proof,)
-            .is_none()
+    // Two segments are read for a direct attribute too (fixture
+    // `adopted/foreign_links`).
+    assert_eq!(
+        parse_document_choice_parameter_links(&nested_cpl, "Invoice", false, &object_refs, &proof)
+            .unwrap()[0]
+            .data_path,
+        "Document.Invoice.TabularSection.Lines.Attribute.Product"
     );
     let links =
         parse_document_choice_parameter_links(&nested_cpl, "Invoice", true, &object_refs, &proof)
@@ -63037,7 +63096,7 @@ fn catalog_attribute_layouts_and_nested_omissions_fail_closed() {
     );
     assert_eq!(catalog_direct_attribute_wrapper_code("56"), Some(5));
     assert!(parse(&direct5, first_uuid, 5).is_some());
-    assert!(parse(&direct5, first_uuid, 6).is_none());
+    assert!(parse(&direct5, first_uuid, 6).is_some());
 
     let wrapper6 = catalog_attribute_wrapper_for_test(
         6,
@@ -78609,6 +78668,34 @@ fn renders_gantt_chart_with_elements_init_to_platform_proven_xml() {
     );
 }
 
+/// Evidence: fixture `moxel-ganttchart-v18` -- the same two templates as
+/// stored by the Библиотека стандартных подсистем release: version 18, member
+/// 30 stored `0` (`1` in every version-19 record), published `Auto` all the
+/// same. The reader demanded `1` and dropped both drawings without a note.
+#[test]
+fn renders_version_18_gantt_chart_with_elements_not_init_to_platform_proven_xml() {
+    assert_platform_proven_moxel_gantt_chart(
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/moxel-ganttchart-v18/raw/dlitelnost-otlozhennogo-obnovleniya-object-payload.txt"
+        ),
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/moxel-ganttchart-v18/native/dlitelnost-otlozhennogo-obnovleniya-object.xml"
+        ),
+    );
+}
+
+#[test]
+fn renders_version_18_gantt_chart_with_elements_init_to_platform_proven_xml() {
+    assert_platform_proven_moxel_gantt_chart(
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/moxel-ganttchart-v18/raw/analiz-zhurnala-registratsii-object-payload.txt"
+        ),
+        include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/moxel-ganttchart-v18/native/analiz-zhurnala-registratsii-object.xml"
+        ),
+    );
+}
+
 /// Evidence: this is the ONE test in this whole wave that goes through
 /// `parse_moxel_drawings`/`push_moxel_drawing_xml` -- the real
 /// `<drawing>...</drawing>` entry point `parse_moxel_spreadsheet_text` calls
@@ -79206,3 +79293,6 @@ fn ws_definition_publishes_schema_local_qnames_with_the_later_prefix() {
     // A document that already spells it that way is left exactly as stored.
     assert!(normalize_ws_definition_own_namespace_prefixes(text.as_bytes()).is_none());
 }
+
+// Tests of the onecdec fork, kept apart from the upstream file.
+mod onecdec;

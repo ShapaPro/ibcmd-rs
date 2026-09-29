@@ -587,6 +587,8 @@ impl FormChoiceListItem {
 pub enum FormChoiceListValue {
     Boolean(bool),
     Decimal(String),
+    /// A date, already in the `xs:dateTime` spelling (`YYYY-MM-DDThh:mm:ss`).
+    DateTime(String),
     Nil,
     /// A value list with no items at all. The platform names the class in the
     /// `xsi:type` and writes the element empty, and nothing the payload carries
@@ -667,6 +669,11 @@ impl FormChoiceListValue {
             },
             Self::Decimal(value) => FormChoiceListValueWireShape {
                 xml_opening: Cow::Borrowed("<Value xsi:type=\"xs:decimal\">"),
+                xml_closing: "</Value>",
+                text: Some(value),
+            },
+            Self::DateTime(value) => FormChoiceListValueWireShape {
+                xml_opening: Cow::Borrowed("<Value xsi:type=\"xs:dateTime\">"),
                 xml_closing: "</Value>",
                 text: Some(value),
             },
@@ -933,6 +940,16 @@ where
                 _ => return None,
             }
         }
+        // A date: fourteen digits under the nil identifier pair, printed as
+        // `xs:dateTime` (fixture `choice_list_dates`, 8.3.27.2214; 1Cv8's
+        // empty dates). Only the input-field layout has been observed.
+        ("D", [_, date])
+            if layout == FormChoiceListLayoutProfile::InputFieldExtendedOptions
+                && mode.trim() == "1"
+                && literal_ids_are(type_id, value_id, NIL_UUID_TEXT) =>
+        {
+            FormChoiceListValue::DateTime(choice_list_date_time(date.trim())?)
+        }
         ("U", [_]) => {
             let type_uuid = Uuid::parse_str(type_id.trim()).ok()?;
             let value_uuid = Uuid::parse_str(value_id.trim()).ok()?;
@@ -1137,6 +1154,24 @@ fn reference_ids_are_set(type_id: &str, value_id: &str) -> bool {
 /// Whether the item type/value pair is the one a *literal* value writes: no
 /// object identifier at all, and a type slot that is either unset or a repeat
 /// of the value's own type.
+const NIL_UUID_TEXT: &str = "00000000-0000-0000-0000-000000000000";
+
+/// `YYYYMMDDhhmmss` -> `YYYY-MM-DDThh:mm:ss`; anything else is refused.
+fn choice_list_date_time(stored: &str) -> Option<String> {
+    if stored.len() != 14 || !stored.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!(
+        "{}-{}-{}T{}:{}:{}",
+        &stored[0..4],
+        &stored[4..6],
+        &stored[6..8],
+        &stored[8..10],
+        &stored[10..12],
+        &stored[12..14]
+    ))
+}
+
 fn literal_ids_are(type_id: &str, value_id: &str, own_type_id: &str) -> bool {
     let nil = Uuid::nil();
     let Ok(type_uuid) = Uuid::parse_str(type_id.trim()) else {
@@ -1243,6 +1278,35 @@ mod form_choice_list_tests {
         .unwrap();
         assert!(empty.is_empty());
         assert_eq!(empty.empty_sidecar_proof().count(), 0);
+    }
+
+    #[test]
+    fn a_date_decodes_only_as_fourteen_digits_under_the_nil_pair() {
+        let date = parse(
+            &envelope(&item("1", r#"{"D",20240517134510}"#, NIL, NIL)),
+            FormChoiceListLayoutProfile::InputFieldExtendedOptions,
+        )
+        .unwrap();
+        assert_eq!(
+            date.items()[0].value(),
+            &FormChoiceListValue::DateTime("2024-05-17T13:45:10".to_owned())
+        );
+        for (value, layout) in [
+            (
+                r#"{"D",202405171345}"#,
+                FormChoiceListLayoutProfile::InputFieldExtendedOptions,
+            ),
+            (
+                r#"{"D",2024051713451x}"#,
+                FormChoiceListLayoutProfile::InputFieldExtendedOptions,
+            ),
+            (
+                r#"{"D",20240517134510}"#,
+                FormChoiceListLayoutProfile::RadioButtonOptions,
+            ),
+        ] {
+            assert!(parse(&envelope(&item("1", value, NIL, NIL)), layout).is_none());
+        }
     }
 
     #[test]
@@ -5807,18 +5871,25 @@ impl ConfigurationPropertiesEvidencedDefaultBlockPolicy {
         32
     }
 
+    /// Tuple field of `<DefaultSearchForm>`: 1Cv8 carries the design-time
+    /// uuid of `CommonForm.ФормаПоиска` there and prints it; the clean-room
+    /// fixture `search_form` (8.3.27.2214) pins it again.
+    pub fn default_search_form_tuple_field(&self) -> usize {
+        37
+    }
+
     /// Tuple fields of the 61-field Configuration `<Properties>` tuple that
     /// no reader decodes and that therefore stay proven -- rather than
     /// assumed -- only by requiring byte identity with the evidenced
     /// all-default reference. Everything not listed here is either decoded
     /// from its own coordinate (fields
-    /// 1..8, 10, 13, 14, 15, 16, 22..26, 28..33, 36, 38, 39, 41, 43, 53, 59) or
+    /// 1..8, 10, 13, 14, 15, 16, 22..26, 28..33, 36..39, 41, 43, 53, 59) or
     /// carries no `<Properties>` output at all (fields 12, 40 and 51 -- see
     /// [`Self::tuple_fields_without_properties_output`]).
     pub fn unproven_tuple_fields(&self) -> &'static [usize] {
         &[
-            0, 9, 11, 17, 18, 19, 20, 21, 27, 34, 35, 37, 42, 44, 45, 46, 47, 48, 49, 50, 52, 54,
-            55, 56, 57, 58, 60,
+            0, 9, 11, 17, 18, 19, 20, 21, 27, 34, 35, 42, 44, 45, 46, 47, 48, 49, 50, 52, 54, 55,
+            56, 57, 58, 60,
         ]
     }
 

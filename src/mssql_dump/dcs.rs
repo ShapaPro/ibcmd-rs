@@ -45,7 +45,7 @@ const XCF_READABLE_NS: &[u8] = b"http://v8.1c.ru/8.3/xcf/readable";
 const DCS_AREA_TEMPLATE_URI: &str = "http://v8.1c.ru/8.1/data-composition-system/area-template";
 const ENTERPRISE_URI: &str = "http://v8.1c.ru/8.1/data/enterprise";
 const CURRENT_CONFIG_URI: &str = "http://v8.1c.ru/8.1/data/enterprise/current-config";
-const ANY_IB_REF_TYPE_ID: &str = "280f5f0e-9c8a-49cc-bf6d-4d296cc17a63";
+pub(super) const ANY_IB_REF_TYPE_ID: &str = "280f5f0e-9c8a-49cc-bf6d-4d296cc17a63";
 const CFG_PREFIX: &str = "cfg:";
 const SETTINGS_ROOT_UI_NAMESPACES: &str = " xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\" xmlns:web=\"http://v8.1c.ru/8.1/data/ui/colors/web\" xmlns:win=\"http://v8.1c.ru/8.1/data/ui/colors/windows\"";
 
@@ -713,7 +713,12 @@ pub(crate) fn data_composition_type_id_xml(
     characteristic_type_set_as_type: bool,
 ) -> Option<String> {
     let (element, qname) = if type_id.eq_ignore_ascii_case(ANY_IB_REF_TYPE_ID) {
-        ("TypeSet", "cfg:AnyIBRef")
+        // The configuration's compatibility may respell it (`cfg:AnyRef`,
+        // see `compatibility_mode_spells_any_ref`).
+        match type_index.get(ANY_IB_REF_TYPE_ID) {
+            Some(DcsTypeResolution::TypeSet { qname }) => ("TypeSet", qname.as_str()),
+            _ => ("TypeSet", "cfg:AnyIBRef"),
+        }
     } else {
         match type_index.get(&type_id.to_ascii_lowercase())? {
             DcsTypeResolution::KeepId => return None,

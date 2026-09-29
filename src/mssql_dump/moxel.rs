@@ -707,6 +707,7 @@ pub(super) struct MoxelSpreadsheet {
     pub(super) merges: Vec<MoxelMerge>,
     pub(super) horizontal_unmerges: Vec<MoxelMerge>,
     pub(super) vertical_unmerges: Vec<MoxelMerge>,
+    pub(super) page_breaks: MoxelPageBreaks,
     pub(super) named_items: Vec<MoxelNamedItem>,
     #[allow(dead_code)]
     pub(super) areas: Vec<MoxelArea>,
@@ -775,7 +776,9 @@ pub(super) fn parse_moxel_language_settings(text: &str) -> Option<MoxelLanguageS
     let current = parse_1c_string(fields.first()?)?;
     let default = parse_1c_string(fields.get(1)?)?;
     let count = fields.get(3)?.trim().parse::<usize>().ok()?;
-    if count > 64 || fields.len() != count * 3 + 5 {
+    // The older root revision `8` stores the record without its closing `0`
+    // (see `compiler::bodies::mxl::decode_plain`, which admits it only there).
+    if count > 64 || (fields.len() != count * 3 + 5 && fields.len() != count * 3 + 4) {
         return None;
     }
     if current == "#" {
@@ -2810,6 +2813,7 @@ fn parse_moxel_spreadsheet_text_with_line_trace(
         merges,
         horizontal_unmerges,
         vertical_unmerges,
+        page_breaks: parse_moxel_page_breaks(&fields),
         named_items,
         areas,
         internal_sources,
@@ -4951,8 +4955,22 @@ fn moxel_font_mask_has(mask: usize, bit: usize) -> bool {
     mask >> bit & 1 == 1
 }
 
-/// Style items a font descriptor can name by predefined index.
-fn moxel_predefined_font_style_ref(index: &str) -> Option<&'static str> {
+/// Style items a font descriptor can name by predefined index. A code no
+/// row names stays the code itself -- what 8.3.27.2214 writes for every one
+/// of them -- rather than dropping the font and shifting every later index.
+fn moxel_predefined_font_style_ref(index: &str) -> Option<String> {
+    moxel_named_predefined_font_style_ref(index)
+        .map(str::to_owned)
+        .or_else(|| {
+            index
+                .parse::<i32>()
+                .ok()
+                .filter(|code| *code < 0)
+                .map(|code| code.to_string())
+        })
+}
+
+fn moxel_named_predefined_font_style_ref(index: &str) -> Option<&'static str> {
     match index {
         "-20" => Some("style:TextFont"),
         "-30" => Some("style:SmallTextFont"),
@@ -4961,6 +4979,9 @@ fn moxel_predefined_font_style_ref(index: &str) -> Option<&'static str> {
         "-33" => Some("style:ExtraLargeTextFont"),
         // Platform 8.5 standard style fonts (see `standard_style_item_for_code`).
         "-50" => Some("style:TitleLevel3"),
+        // 8.5.1.1529 ИТК `Reports/ИТК_СравнениеОбъектов/Templates/Макет`
+        // against the 8.3.27.2214 dump of the same template (`-51`).
+        "-51" => Some("style:TitleLevel4"),
         "-52" => Some("style:TitleLevel5"),
         "-53" => Some("style:TextLevel1"),
         "-54" => Some("style:TextLevel2"),
@@ -4969,6 +4990,41 @@ fn moxel_predefined_font_style_ref(index: &str) -> Option<&'static str> {
         "-59" => Some("style:TitleLevel2"),
         _ => None,
     }
+}
+
+/// Standard style fonts 8.5 names and 8.3.27.2214 writes by code: the
+/// 8.3.27.2214 native trees spell none of them by name (ИТК: -50, -51, -54,
+/// -55, -59), the 8.5.1.1529 ones every one.
+const V85_STYLE_FONT_CODES: [(&str, &str); 8] = [
+    ("TitleLevel2", "-59"),
+    ("TitleLevel3", "-50"),
+    ("TitleLevel4", "-51"),
+    ("TitleLevel5", "-52"),
+    ("TextLevel1", "-53"),
+    ("TextLevel2", "-54"),
+    ("TextLevel3", "-55"),
+    ("SubtitleLevel1", "-56"),
+];
+
+/// A spreadsheet's XML with the 8.5 standard style fonts written by code, as
+/// the 2.20 dialect does. A configuration style item of the same name keeps
+/// its name.
+pub(super) fn with_v85_style_fonts_by_code(
+    mut xml: String,
+    object_refs: &BTreeMap<String, String>,
+) -> String {
+    for (name, code) in V85_STYLE_FONT_CODES {
+        let spelled = format!("<font ref=\"style:{name}\"");
+        if !xml.contains(&spelled) {
+            continue;
+        }
+        let own = format!("StyleItem.{name}");
+        if object_refs.values().any(|reference| *reference == own) {
+            continue;
+        }
+        xml = xml.replace(&spelled, &format!("<font ref=\"{code}\""));
+    }
+    xml
 }
 
 /// System fonts a Windows-font descriptor can name by index.
@@ -6086,8 +6142,13 @@ pub(super) fn parse_moxel_picture(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<MoxelPicture> {
     let fields = split_1c_braced_fields(text, 0)?;
-    if fields.first()?.trim() != "4" {
-        return None;
+    // The older spreadsheets (root revisions 8/9) store the record one member
+    // shorter under the leading `3` (`{3,0,{0},"",-1,-1,1,0}`), every member
+    // up to the transparency flag at the same position.
+    match fields.first()?.trim() {
+        "4" => {}
+        "3" if fields.len() == 8 => {}
+        _ => return None,
     }
     // A picture record always reaches its transparency member, so a shorter
     // `{4,...}` is some other record wearing the same leading token - which is
@@ -7296,9 +7357,13 @@ fn parse_moxel_gantt_chart(
     // `showData` (`Auto`) and `intervalTextRepresentation` (`Auto`):
     // literals, unvaried over all eleven records -- see
     // `push_moxel_gantt_chart_xml`.
+    // Member 30 is `1` in every version-19 record and `0` in the two
+    // version-18 records of the Библиотека стандартных подсистем release
+    // (fixture `moxel-ganttchart-v18`); the platform publishes `Auto` for
+    // both.
     if compact_moxel_chart_token(fields.get(27)?) != "{0,0,0}"
         || fields.get(29)?.trim() != "0"
-        || fields.get(30)?.trim() != "1"
+        || !matches!(fields.get(30)?.trim(), "0" | "1")
     {
         return None;
     }
@@ -11409,6 +11474,64 @@ pub(super) fn parse_moxel_line(text: &str) -> Option<MoxelLine> {
     })
 }
 
+/// A document's page breaks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct MoxelPageBreaks {
+    pub(super) vertical: Vec<usize>,
+    pub(super) horizontal: Vec<usize>,
+}
+
+/// The page breaks, read off the root behind the grouping block.
+///
+/// Shape, from platform probes (`_onecdec/make_template_probe.py`, fixture
+/// `page_breaks`): the grouping block `{rowGroups…, columnGroups…, 0, 0}` is
+/// followed by the vertical breaks `count, position * count`, the horizontal
+/// breaks `count, (position, -1) * count`, and then the braced merge list. A
+/// document with breaks at rows 2 and 3 and at column 1 stores
+/// `…,0,0,2,2,3,1,1,-1,{<merges>}` where one without stores `…,0,0,0,0,{…}`;
+/// the platform writes every `<verticalPageBreak>` before any
+/// `<horizontalPageBreak>`, both behind the groups and ahead of `<merge>`.
+/// Two real configurations write 11 documents each with one vertical break.
+///
+/// The block is found from the back: the last root position at which empty
+/// or parsed group runs, the two zeros and both break lists end exactly at a
+/// braced member.
+pub(super) fn parse_moxel_page_breaks(fields: &[&str]) -> MoxelPageBreaks {
+    let token = |index: usize| fields.get(index).map(|field| field.trim());
+    let count_at = |index: usize| token(index).and_then(|value| value.parse::<usize>().ok());
+    let parse_at = |start: usize| -> Option<MoxelPageBreaks> {
+        let (_, cursor) = parse_moxel_group_run(fields, start)?;
+        let (_, cursor) = parse_moxel_group_run(fields, cursor)?;
+        if token(cursor)? != "0" || token(cursor + 1)? != "0" {
+            return None;
+        }
+        let mut cursor = cursor + 2;
+        let vertical_count = count_at(cursor)?;
+        let mut vertical = Vec::with_capacity(vertical_count.min(4096));
+        for index in 0..vertical_count {
+            vertical.push(count_at(cursor + 1 + index)?);
+        }
+        cursor += 1 + vertical_count;
+        let horizontal_count = count_at(cursor)?;
+        let mut horizontal = Vec::with_capacity(horizontal_count.min(4096));
+        for index in 0..horizontal_count {
+            horizontal.push(count_at(cursor + 1 + index * 2)?);
+            if token(cursor + 2 + index * 2)? != "-1" {
+                return None;
+            }
+        }
+        cursor += 1 + horizontal_count * 2;
+        token(cursor)?.starts_with('{').then_some(MoxelPageBreaks {
+            vertical,
+            horizontal,
+        })
+    };
+    (0..fields.len())
+        .rev()
+        .find_map(parse_at)
+        .unwrap_or_default()
+}
+
 pub(super) fn parse_moxel_merge_regions(
     fields: &[&str],
 ) -> (Vec<MoxelMerge>, Vec<MoxelMerge>, Vec<MoxelMerge>) {
@@ -11944,6 +12067,16 @@ fn render_moxel_spreadsheet_xml(
     // store level 0.
     for group in &spreadsheet.horizontal_groups {
         push_moxel_group_xml(&mut xml, "hg", group);
+    }
+    for position in &spreadsheet.page_breaks.vertical {
+        xml.push_str(&format!(
+            "\t<verticalPageBreak>\r\n\t\t<position>{position}</position>\r\n\t</verticalPageBreak>\r\n"
+        ));
+    }
+    for position in &spreadsheet.page_breaks.horizontal {
+        xml.push_str(&format!(
+            "\t<horizontalPageBreak>\r\n\t\t<position>{position}</position>\r\n\t</horizontalPageBreak>\r\n"
+        ));
     }
     for merge in &spreadsheet.merges {
         push_moxel_merge_xml(&mut xml, merge);
@@ -13827,7 +13960,16 @@ pub(super) fn push_moxel_drawing_xml(
             );
         }
     }
-    if let Some(detail_parameter) = &drawing.members.detail_parameter {
+    // An empty detail parameter is not written: no native tree of the stand
+    // spells `<detailParameter>` empty, and the drawings of older spreadsheets
+    // (root revisions 8/9) that store an empty one are written without it
+    // (4 in a real configuration).
+    if let Some(detail_parameter) = drawing
+        .members
+        .detail_parameter
+        .as_ref()
+        .filter(|parameter| !parameter.is_empty())
+    {
         _ = write!(
             xml,
             "\t\t<detailParameter>{}</detailParameter>\r\n",
@@ -15951,6 +16093,7 @@ mod moxel_exact_parity_tests {
             merges: Vec::new(),
             horizontal_unmerges: Vec::new(),
             vertical_unmerges: Vec::new(),
+            page_breaks: MoxelPageBreaks::default(),
             named_items: Vec::new(),
             areas: Vec::new(),
             internal_sources: Vec::new(),

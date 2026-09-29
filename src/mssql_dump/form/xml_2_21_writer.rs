@@ -1387,6 +1387,31 @@ fn upgrade_button(edits: &mut XmlEdits<'_>, button: usize) -> Result<()> {
     Ok(())
 }
 
+/// An 8.5 button record whose `ButtonImportance` member holds code `1` (no
+/// importance of its own) on a default button: 8.5.1.1529 writes `Main`, as
+/// it does for the 8.3.27 default button [`upgrade_button`] reads (fixture
+/// `v85_extension/v85_form`: a button saved by 8.5 with `DefaultButton`
+/// `true` and code `1`).
+fn default_button_importance(
+    edits: &mut XmlEdits<'_>,
+    button: usize,
+    item: &FormItemFactsV8_5_1,
+) -> Result<()> {
+    let own_importance = item.tail.get(5).and_then(Node::as_leaf);
+    if edits.elements[button].tag != "Button"
+        || item.revision != "34"
+        || own_importance != Some("1")
+    {
+        return Ok(());
+    }
+    if child_text(edits, button, "ButtonImportance")?.is_none()
+        && child_text(edits, button, "DefaultButton")?.is_some_and(|(_, value)| value == "true")
+    {
+        add_simple(edits, button, "ButtonImportance", "Main")?;
+    }
+    Ok(())
+}
+
 fn upgrade_usual_group(edits: &mut XmlEdits<'_>, group: usize) -> Result<()> {
     if child_text(edits, group, "Representation")?.is_none() {
         add_simple(edits, group, "Representation", "WeakSeparation")?;
@@ -1529,6 +1554,7 @@ pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
                 object_refs,
                 &mut assets,
             )?;
+            default_button_importance(&mut edits, element, item)?;
         }
     }
     for (element, id) in commands {
