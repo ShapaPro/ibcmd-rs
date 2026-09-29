@@ -18,6 +18,8 @@ written** by this apply; see [known differences](#known-differences-from-the-nat
 Contents: [what the native apply does](#what-the-native-apply-does-measured) -
 [what this apply does](#what-this-apply-does) -
 [what it does not write](#what-it-does-not-write) -
+[known differences](#known-differences-from-the-native-apply) -
+[which writes are required](#which-per-apply-writes-are-required) -
 [safety](#safety) - [the structural gate](#the-structural-gate) -
 [command line](#command-line) - [verification](#verification) -
 [limits and open points](#limits-and-open-points).
@@ -253,17 +255,22 @@ the platform does not mind (S2, S3, S4, and the probe below):
   that the platform opens the database without warnings: `ibcmd infobase config check`
   succeeds on the result (S2, S4, probe); the native `config apply` afterwards answers
   "Обновление конфигурации базы данных не требуется" (S2, S4); a **standalone server
-  (`ibsrv`) started cold on the probe database** (a new process, new sessions; the 1C server
-  cannot be used here, see limits) answers an HTTP web-service call with status 200 and the
-  marker of the module change the apply moved, with an empty error stream. Track ui measures
-  the same for 8.5 and licensing; its result replaces this paragraph when it lands.
+  (`ibsrv`) started cold on the probe database** answers an HTTP web-service call with status 200
+  and the marker of the module change the apply moved, with an empty error stream; and **new
+  sessions in the 1C cluster** read the changed module (see [Verification](#verification) and
+  `docs/apply/evidence/own-apply/cluster-sessions.md`). Track ui measures the same for 8.5 and
+  licensing; its result replaces this paragraph when it lands.
 - **All `.si` rows and their versions** are rewritten by the native apply even when their
   content is unchanged; we write only what changes (S4: the rows are identical in text).
 - **`_IDRRef`** of `_ConfigChngR` is renumbered by the native apply on the long path (S1-S3);
   we keep the ids (the short path, S4, does not renumber either). Ids of new registrations
   differ by construction.
-- **Help index, ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and
-  scratch of the native apply, see the table above.
+- **Help index**: the native apply rebuilds `userDocs_ru`, `userVocabulary_ru` and `userPostings_ru`
+  when help pages are staged (S5A printed «Построение индекса справки»); this one leaves them, so a
+  new or changed help page is not found by the help search until a native apply rebuilds the index.
+  Nothing in the platform's checks, sessions or exports reads the index.
+- **ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and scratch of the native apply,
+  see the table above.
 - **`Creation`/`Modified` of `Files.MobileVersions.dat`** and the random head guid differ.
 
 ### Which per-apply writes are required
@@ -436,7 +443,7 @@ stage of 9 517 rows -- the 227 S2 edits and a marker added to `Поддержи�
 in `СтандартныеПодсистемыСервер`): a standalone server (`ibsrv`, integrated SQL login, `tools\srv.ps1`)
 started cold on the staged, unapplied database answers the web service
 `InterfaceVersion.GetVersions("UiProbe")` with status 200 and no version; after the own apply
-(a rehearsal-free run, dry-run gate passed, 9 517 rows) a server started cold again answers 200 with
+(the gate passed, 9 517 rows) a server started cold again answers 200 with
 `ibcmd-rs-apply-probe-v1` and an empty error stream (`tools\probe_http.py`). The own apply ran
 under load from other tracks' native runs (transaction 120 s against 5.6 s on an idle machine).
 
