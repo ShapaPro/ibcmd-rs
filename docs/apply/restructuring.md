@@ -223,7 +223,7 @@ continued by the next apply.
   *facts* (section 9.2), not diff rows.
 - Other writes of an apply, none derived from the structure change alone: `Params` `DBNames` and
   `DBNamesVersion-DBNames` (only when names were allocated), the `*.si` cache rows and `siVersions`
-  (rewritten with new version guids on **every** apply), two `*.ui` rows, `_ExtensionsRestruct(NGS)` rows
+  (rewritten, with new version guids, on every apply that promotes something; a no-change apply leaves them), two `*.ui` rows, `_ExtensionsRestruct(NGS)` rows
   (state of the extensions' restructure), `Files` help-index rows, and on the first apply of a lineage the
   garbage collection of `ConfigCAS`/`Files` (12797 -> 636 rows, 353 -> 44 rows).
 
