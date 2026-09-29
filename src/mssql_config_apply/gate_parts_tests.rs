@@ -89,6 +89,7 @@ fn check(
         active.iter().map(|row| (row.key(), row.clone())).collect();
     let accepted_new_rows = HashSet::new();
     let accepted_owner_descriptors = HashSet::new();
+    let consumed_rows = HashSet::new();
     let new_object_kinds: HashMap<String, &'static str> = kinds
         .iter()
         .map(|(uuid, kind)| ((*uuid).to_owned(), *kind))
@@ -102,6 +103,7 @@ fn check(
             accepted_new_rows: &accepted_new_rows,
             accepted_owner_descriptors: &accepted_owner_descriptors,
             new_object_kinds: &new_object_kinds,
+            consumed_rows: &consumed_rows,
         })
         .unwrap()
 }
@@ -228,6 +230,39 @@ fn a_single_part_over_a_row_of_several_parts_is_refused_the_same_way() {
         blocker_reasons(&verdict)
             .iter()
             .any(|reason| reason.contains("several parts"))
+    );
+}
+
+#[test]
+fn a_consumed_row_is_not_judged_and_an_unconsumed_one_is_refused() {
+    let client = Canned::default();
+    let staged = [meta("deleted", 0, "a")];
+    let judge = |consumed: &HashSet<String>| {
+        let active: HashMap<(String, i32), RowMeta> = HashMap::new();
+        let accepted = HashSet::new();
+        let kinds = HashMap::new();
+        ConservativeGate::default()
+            .check(&GateInput {
+                client: &client,
+                database: "testdb",
+                staged: &staged,
+                active: &active,
+                accepted_new_rows: &accepted,
+                accepted_owner_descriptors: &accepted,
+                new_object_kinds: &kinds,
+                consumed_rows: consumed,
+            })
+            .unwrap()
+    };
+    let refused = judge(&HashSet::new());
+    assert!(refused.restructuring_required);
+    let mut consumed = HashSet::new();
+    consumed.insert("deleted".to_owned());
+    let passed = judge(&consumed);
+    assert!(
+        !passed.restructuring_required,
+        "{:?}",
+        blocker_reasons(&passed)
     );
 }
 

@@ -2087,6 +2087,24 @@ pub enum MssqlConfigApplyExclusivityArg {
     Assumed,
 }
 
+/// Which structural gate judges the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyGateArg {
+    /// The restructure check (`mssql-apply-check`): refuses on a
+    /// restructuring and on anything it cannot place.
+    ApplyCheck,
+    /// Modules, forms, templates, pictures and help pages only.
+    Conservative,
+}
+
+/// A class of restructuring the apply may let through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyRestructureArg {
+    /// S1 of the restructure track: attributes, tabular sections, string
+    /// widening, the index flag, plain new catalogs and documents.
+    S1,
+}
+
 /// Which overwritten rows the recovery artifact keeps the bytes of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MssqlConfigApplyRecoveryArg {
@@ -2134,9 +2152,31 @@ pub struct MssqlConfigApplyArgs {
     pub recovery_dir: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = MssqlConfigApplyRecoveryArg::Changed)]
     pub recovery_blobs: MssqlConfigApplyRecoveryArg,
-    /// Pass changed body rows of command-interface, rights, package and
-    /// similar roles without proving their text unchanged: for a stage made
-    /// by `infobase config import` of a tree exported from this database.
+    /// With no --recovery-dir: how many recovery artifacts of the database the
+    /// default directory (%TEMP%\ibcmd-rs\config-apply-recovery) keeps after a
+    /// successful run; older ones are removed. 0 keeps all of them.
+    #[arg(long, default_value_t = 5)]
+    pub recovery_keep: usize,
+    /// Let a class of restructuring through, run inside the apply's transaction,
+    /// instead of refusing it. Needs `--i-have-a-backup` or `--recovery-backup`.
+    #[arg(long, value_enum)]
+    pub allow_restructure: Option<MssqlConfigApplyRestructureArg>,
+    /// A restructuring drops the old tables in the transaction: say you have a
+    /// SQL Server backup to go back to.
+    #[arg(long)]
+    pub i_have_a_backup: bool,
+    /// Take `BACKUP DATABASE ... WITH COPY_ONLY` to this file (a path the SQL
+    /// Server service can write) before a restructuring.
+    #[arg(long)]
+    pub recovery_backup: Option<PathBuf>,
+    /// The structural gate: the restructure check of `mssql-apply-check`
+    /// (default), or the conservative rule.
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyGateArg::ApplyCheck)]
+    pub gate: MssqlConfigApplyGateArg,
+    /// With `--gate conservative`: pass changed body rows of
+    /// command-interface, rights, package and similar roles without proving
+    /// their text unchanged (a stage made by `infobase config import` of a
+    /// tree exported from this database).
     #[arg(long)]
     pub admit_unverified_roles: bool,
     /// Write the rendered SQL transaction here.

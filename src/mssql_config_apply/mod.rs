@@ -21,6 +21,8 @@
 //! - the recovery artifact ([`recovery`]) keeps the rows the apply overwrites;
 //! - [`apply_staged_configuration`] runs the script and checks the result.
 
+pub mod check_gate;
+pub mod errors;
 pub mod gate;
 pub mod model;
 pub mod objects;
@@ -41,11 +43,16 @@ use uuid::Uuid;
 use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 
-use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate};
+use check_gate::ApplyCheckGate;
+pub use errors::{
+    BackupRequired, ExclusiveAccessRefused, ExclusiveAccessUnprovable, NativeCommand,
+    NeedsNativeApply,
+};
+use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase};
 use model::{RowMeta, hex_lower, quote_ident, quote_string};
 use sqlgen::{
-    AppendedFile, FilesRewrite, Fingerprint, NewRegistration, NodeLiteral, ScriptInputs,
-    fingerprint_select, render_apply_script, replaced_source, special_config_source,
+    AppendedFile, FilesRewrite, Fingerprint, NewRegistration, NodeLiteral, ParamsRewrite,
+    ScriptInputs, fingerprint_select, render_apply_script, replaced_source, special_config_source,
     special_params_source, staged_source,
 };
 
@@ -72,6 +79,43 @@ pub enum RecoveryBlobs {
     None,
 }
 
+/// A class of restructuring the apply lets through instead of refusing it
+/// (`--allow-restructure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AllowRestructure {
+    /// S1 of the restructure track (#391): attributes, tabular sections, string widening, the
+    /// index flag and plain new catalogs and documents, rebuilt inside the apply's transaction.
+    S1,
+}
+
+/// What the operator says about a copy to go back to. A restructuring drops the
+/// old tables inside the transaction; the recovery artifact keeps the `Config`
+/// rows and the cache rows only, so the way back is a SQL Server backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupPolicy {
+    /// Nothing said: a structural apply is refused.
+    None,
+    /// `--i-have-a-backup`: the operator has one.
+    Acknowledged,
+    /// `--recovery-backup <file>`: the apply takes `BACKUP DATABASE ... WITH COPY_ONLY`
+    /// to this file (a path the SQL Server service can write) before the transaction.
+    File(PathBuf),
+}
+
+/// Which structural gate judges the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateChoice {
+    /// The restructure check of track rcheck (`apply_check::check_staged`):
+    /// the default. It refuses on a restructuring and on anything it cannot
+    /// place.
+    ApplyCheck,
+    /// The conservative rule of [`gate::ConservativeGate`]: modules, forms,
+    /// templates, pictures and help pages, nothing else.
+    Conservative,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigApplyOptions {
     pub database: String,
@@ -85,9 +129,65 @@ pub struct ConfigApplyOptions {
     pub exclusivity: Exclusivity,
     pub recovery_dir: Option<PathBuf>,
     pub recovery_blobs: RecoveryBlobs,
+    /// With no `recovery_dir`: how many artifacts of this database the default
+    /// directory keeps after a successful run (0: all of them).
+    pub recovery_keep: usize,
     pub script_output: Option<PathBuf>,
-    /// See [`ConservativeGate::admit_unverified_roles`].
+    /// The gate; [`GateChoice::ApplyCheck`] unless asked otherwise.
+    pub gate: GateChoice,
+    /// A class of restructuring to let through; it replaces the gate by the
+    /// restructure track's, which starts from the same checks.
+    pub allow_restructure: Option<AllowRestructure>,
+    /// The backup a structural apply needs (see [`BackupPolicy`]).
+    pub backup: BackupPolicy,
+    /// See [`ConservativeGate::admit_unverified_roles`]; only with
+    /// [`GateChoice::Conservative`].
     pub admit_unverified_roles: bool,
+}
+
+/// The XML dialect the restructure check decodes descriptors with.
+fn xml_version_of(profile: MssqlNativePlatformProfile) -> Option<&'static str> {
+    match profile {
+        MssqlNativePlatformProfile::Platform8_3_27_1989
+        | MssqlNativePlatformProfile::Platform8_3_27_2214 => Some("2.20"),
+        MssqlNativePlatformProfile::Platform8_5_1_1150 => Some("2.21"),
+    }
+}
+
+/// The ONE place that picks the structural gate. Callers that need another
+/// (a test, a caller with its own check) use [`plan_with_gate`] and
+/// [`apply_with_gate`].
+pub fn structural_gate<'a>(
+    sql: &'a SqlExec,
+    options: &ConfigApplyOptions,
+) -> Result<Box<dyn StructuralGate + 'a>> {
+    if let Some(kind) = options.allow_restructure {
+        return restructure_gate(kind, sql, options);
+    }
+    Ok(match options.gate {
+        GateChoice::ApplyCheck => Box::new(ApplyCheckGate::new(
+            sql,
+            xml_version_of(options.platform_profile),
+        )),
+        GateChoice::Conservative => Box::new(options.conservative_gate()),
+    })
+}
+
+/// The gate that lets a class of restructuring through. The restructure track's
+/// S1 gate (`restructure::s1::S1Gate`, #391) starts from the same checks, prepares
+/// the structure phase and hands it over through [`StructuralGate::take_structure`];
+/// it is built here, in the one place that builds gates.
+fn restructure_gate<'a>(
+    kind: AllowRestructure,
+    _sql: &'a SqlExec,
+    _options: &ConfigApplyOptions,
+) -> Result<Box<dyn StructuralGate + 'a>> {
+    match kind {
+        AllowRestructure::S1 => Err(NeedsNativeApply::apply(
+            "--allow-restructure s1: the S1 gate of the restructure track (#391) is not part of this build; run the native `ibcmd infobase config apply`",
+        )
+        .into()),
+    }
 }
 
 impl ConfigApplyOptions {
@@ -106,7 +206,11 @@ impl ConfigApplyOptions {
             exclusivity: Exclusivity::SqlSessions,
             recovery_dir: None,
             recovery_blobs: RecoveryBlobs::Changed,
+            recovery_keep: recovery::KEEP_DEFAULT,
             script_output: None,
+            gate: GateChoice::ApplyCheck,
+            allow_restructure: None,
+            backup: BackupPolicy::None,
             admit_unverified_roles: false,
         }
     }
@@ -119,8 +223,22 @@ pub struct ApplyTimings {
     pub gate_ms: u128,
     pub fingerprints_ms: u128,
     pub recovery_ms: u128,
+    /// The copy-only backup a structural apply takes before its transaction.
+    pub backup_ms: u128,
     pub sql_ms: u128,
     pub total_ms: u128,
+}
+
+/// The way back the operator gave a structural apply, as the report and the
+/// recovery artifact name it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupRecord {
+    /// `file`: the apply took the backup; `acknowledged`: the operator says they
+    /// have one.
+    pub kind: &'static str,
+    pub path: Option<String>,
+    /// How long the backup took (`file` only).
+    pub seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +254,9 @@ pub struct StageSummary {
     pub identical_rows: usize,
     pub replaced_rows: usize,
     pub replaced_parts_dropped: usize,
+    /// Staged rows consumed without being moved into `Config` (an empty or
+    /// dynamic-only `deleted` list).
+    pub consumed_rows: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +293,10 @@ pub struct ConfigApplyReport {
     pub stage: Option<StageSummary>,
     pub dynamic: Option<DynamicSummary>,
     pub gate: Option<GateVerdict>,
+    /// The restructuring the gate let through and the script runs in its transaction.
+    pub structure: Option<StructurePhase>,
+    /// The backup taken, or the operator's word that they have one.
+    pub backup: Option<BackupRecord>,
     pub new_objects: Option<NewObjectsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
@@ -194,6 +319,10 @@ pub struct StructuralRefusal {
 
 impl std::fmt::Display for StructuralRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // a gate with words of its own (the restructure check) speaks first
+        if let Some(refusal) = &self.verdict.refusal {
+            return write!(formatter, "{refusal}");
+        }
         write!(
             formatter,
             "the staged configuration needs the platform's own config apply (a restructuring or a change this apply does not do): {} blocker(s)",
@@ -268,44 +397,102 @@ fn read_blob(
     }
 }
 
-/// What a stage's `deleted` row lists, for the refusal that names it. The row
-/// is `<count>,"<row name>",<flag>,...` (a byte order mark first; `0` when
-/// nothing is removed).
-fn describe_removals(plain: &[u8]) -> String {
+/// The list in a stage's `deleted` row: `<BOM><count>,"<row name>",<flag>,...`
+/// (`0` when nothing is removed), as (name, flag) pairs. `None` when the text
+/// is no such list.
+fn parse_removals(plain: &[u8]) -> Option<Vec<(String, String)>> {
     let text = String::from_utf8_lossy(versions::strip_bom(plain)).into_owned();
-    let mut tokens = text.trim().split(',');
-    let count = tokens
-        .next()
-        .and_then(|token| token.trim().parse::<usize>().ok());
-    let names: Vec<&str> = tokens
-        .filter_map(|token| {
-            token
-                .trim()
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-        })
-        .collect();
-    match count {
-        Some(0) if names.is_empty() => {
+    let mut tokens = text.trim().split(',').map(str::trim);
+    let count: usize = tokens.next()?.parse().ok()?;
+    let rest: Vec<&str> = tokens.collect();
+    if rest.len() != count * 2 {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(count);
+    for pair in rest.chunks(2) {
+        let name = pair[0].strip_prefix('"')?.strip_suffix('"')?;
+        entries.push((name.to_owned(), pair[1].to_owned()));
+    }
+    Some(entries)
+}
+
+/// A row of an online (dynamic) update: an alias, `versions_dynupdate_<g>`,
+/// or the marker.
+fn is_dynamic_update_row(name: &str) -> bool {
+    name == "DynamicallyUpdated" || name.contains("_dynupdate_")
+}
+
+/// Whether a `deleted` list asks for nothing this apply does not do already:
+/// no entry, or entries that all name (flag 0) a row of a dynamic update that
+/// `Config` carries now (`overlay_rows`, lower-cased). The fold removes those
+/// rows whether or not the stage lists them.
+fn removals_ask_for_nothing(
+    entries: &[(String, String)],
+    overlay_rows: &std::collections::HashSet<String>,
+) -> bool {
+    entries.iter().all(|(name, flag)| {
+        flag == "0"
+            && is_dynamic_update_row(name)
+            && !name.to_ascii_lowercase().starts_with("deleted_dynupdate_")
+            && overlay_rows.contains(&name.to_ascii_lowercase())
+    })
+}
+
+/// What a stage's `deleted` row lists, for the message that names it.
+fn describe_removals(plain: &[u8]) -> String {
+    match parse_removals(plain) {
+        None => "a list this apply cannot read".to_owned(),
+        Some(entries) if entries.is_empty() => {
             "it is empty (the platform's own import writes one to every stage)".to_owned()
         }
-        Some(count) if count == names.len() => {
-            let overlay = names
+        Some(entries) => {
+            let count = entries.len();
+            let overlay = entries
                 .iter()
-                .filter(|name| **name == "DynamicallyUpdated" || name.contains("_dynupdate_"))
+                .filter(|(name, _)| is_dynamic_update_row(name))
                 .count();
-            let first = names
+            let first = entries
                 .iter()
-                .find(|name| **name != "DynamicallyUpdated" && !name.contains("_dynupdate_"))
-                .map(|name| format!(", the first of them {name}"))
+                .find(|(name, _)| !is_dynamic_update_row(name))
+                .map(|(name, _)| format!(", the first of them {name}"))
                 .unwrap_or_default();
             format!(
                 "{count} row name(s), {overlay} of them rows of a dynamic update and {} others{first}",
                 count - overlay
             )
         }
-        _ => "a list this apply cannot read".to_owned(),
     }
+}
+
+/// The cache rows a restructuring rewrites joined with the search information a
+/// new form or template rewrites. Both edit the same stored bytes (the object
+/// registry `1a621f0f`, `siVersions`); chaining the two edits is not built, so a
+/// row both want is a refusal: the stage is applied in two steps.
+fn merge_params_rewrites(
+    mut own: Vec<ParamsRewrite>,
+    phase: &[ParamsRewrite],
+) -> Result<Vec<ParamsRewrite>> {
+    if let Some(clash) = phase
+        .iter()
+        .find(|rewrite| own.iter().any(|other| other.file_name == rewrite.file_name))
+    {
+        bail!(
+            "the restructuring and the new forms or templates of the stage both rewrite Params.{}: apply them in two steps",
+            clash.file_name
+        );
+    }
+    own.extend(phase.iter().cloned());
+    Ok(own)
+}
+
+/// A structural apply that writes needs the operator's word about a way back:
+/// the old tables are dropped in the transaction. A dry run and a rehearsal
+/// write nothing that stays.
+fn require_backup(policy: &BackupPolicy, structural: bool, writes: bool) -> Result<()> {
+    if structural && writes && *policy == BackupPolicy::None {
+        return Err(BackupRequired.into());
+    }
+    Ok(())
 }
 
 fn scalar_i64(client: &dyn SqlClient, query: &str) -> Result<i64> {
@@ -333,9 +520,10 @@ pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<Othe
         "SELECT CONVERT(bigint, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER STATE'))",
     )?;
     if permitted != 1 {
-        bail!(
-            "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible"
-        );
+        return Err(ExclusiveAccessUnprovable {
+            reason: "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible".to_owned(),
+        }
+        .into());
     }
     let pid = i64::from(std::process::id());
     let mut sessions = Vec::new();
@@ -370,22 +558,17 @@ pub struct ConfigApplyPlan {
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
-    plan_with_gate(sql, options, &options.conservative_gate())
+    let gate = structural_gate(sql, options)?;
+    plan_with_gate(sql, options, gate.as_ref())
 }
 
-/// [`plan`] with another structural gate (the restructure-check track's
-/// `check_staged` plugs in here).
+/// [`plan`] with another structural gate.
 pub fn plan_with_gate(
     sql: &SqlExec,
     options: &ConfigApplyOptions,
     structural_gate: &dyn StructuralGate,
 ) -> Result<ConfigApplyPlan> {
     let total = Instant::now();
-    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
-        bail!(
-            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`"
-        );
-    }
     let client = require_client(sql)?;
     let database = options.database.as_str();
     let db = quote_ident(database)?;
@@ -419,6 +602,8 @@ pub fn plan_with_gate(
         stage: None,
         dynamic: None,
         gate: None,
+        structure: None,
+        backup: None,
         new_objects: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
@@ -477,27 +662,77 @@ pub fn plan_with_gate(
         ),
     )?;
     if left_over != 0 {
-        bail!(
+        return Err(NeedsNativeApply::repair(format!(
             "{left_over} row(s) of an unfinished operation (commit / dynamicCommit / dbStruFinal / convertPhase / erase_save / deleted / *.new) are recorded in Config or ConfigSave; run the native `ibcmd infobase config repair` first"
-        );
+        ))
+        .into());
     }
-    // Removals are not honored: this apply deletes no row that a staged row
-    // does not replace, as the native apply does not, and a `deleted` list is
-    // how a stage asks for more (docs/apply/own-apply.md, "Removals").
+    // The stage's list of removals (`deleted`). This apply deletes no row that a
+    // staged row does not replace, as the native apply does not. A list that
+    // asks for nothing more -- empty, or naming only rows of a dynamic update
+    // that `Config` carries, which the fold removes anyway -- is consumed the
+    // way the native apply does it: not moved into `Config`, dropped with the
+    // rest of `ConfigSave`. Any other list is a removal and is refused
+    // (docs/apply/own-apply.md, "Removals").
+    let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut consumed_note = None;
+    // the dynamic-update rows the list names: dropped, not folded
+    let mut dropped_rows: Vec<String> = Vec::new();
     if staged
         .iter()
         .any(|row| row.name.eq_ignore_ascii_case("deleted"))
     {
-        let description = match read_blob(client, database, "ConfigSave", "deleted")? {
-            Some(bytes) => match versions::inflate_row(&bytes) {
-                Ok(plain) => describe_removals(&plain),
-                Err(_) => "a list this apply cannot read".to_owned(),
-            },
-            None => "a list this apply cannot read".to_owned(),
+        let several_parts = staged
+            .iter()
+            .any(|row| row.name.eq_ignore_ascii_case("deleted") && row.part != 0);
+        let plain = if several_parts {
+            None
+        } else {
+            read_blob(client, database, "ConfigSave", "deleted")?
+                .and_then(|bytes| versions::inflate_row(&bytes).ok())
         };
-        bail!(
-            "the stage carries a `deleted` row, the list of removals: {description}. This apply takes the stage of this repository's `infobase config import`, which writes no such row yet, and removes nothing that a staged row does not replace; the stage of the platform's own `config import` and any removal need the native `ibcmd infobase config apply`"
-        );
+        let overlay_rows: std::collections::HashSet<String> = special
+            .iter()
+            .map(|row| row.name.to_ascii_lowercase())
+            .collect();
+        let entries = plain.as_deref().and_then(parse_removals);
+        match entries {
+            Some(entries) if removals_ask_for_nothing(&entries, &overlay_rows) => {
+                // A list that names dynamic-update rows must name every one that
+                // `Config` carries: the native apply then deletes them without
+                // folding (measured on E3 of docs/apply/own-apply.md), and what a
+                // list that names only some of them does is not measured.
+                let named: std::collections::HashSet<String> = entries
+                    .iter()
+                    .map(|(name, _)| name.to_ascii_lowercase())
+                    .collect();
+                if !entries.is_empty() && named != overlay_rows {
+                    return Err(NeedsNativeApply::apply(format!(
+                        "the stage's `deleted` list names {} of the {} rows of the dynamic update that Config carries; the native apply's answer to a partial list is not measured: run the native `ibcmd infobase config apply`",
+                        named.len(),
+                        overlay_rows.len()
+                    ))
+                    .into());
+                }
+                dropped_rows = entries.iter().map(|(name, _)| name.clone()).collect();
+                let mut note = describe_removals(plain.as_deref().unwrap_or_default());
+                if !dropped_rows.is_empty() {
+                    note.push_str("; the dynamic-update rows it names are deleted, not folded");
+                }
+                consumed_note = Some(note);
+                consumed.insert("deleted".to_owned());
+            }
+            _ => {
+                let description = plain
+                    .as_deref()
+                    .map(describe_removals)
+                    .unwrap_or_else(|| "a list this apply cannot read".to_owned());
+                return Err(NeedsNativeApply::apply(format!(
+                    "the stage carries a `deleted` row, the list of removals: {description}. This apply consumes an empty list and a list of the rows of a dynamic update, takes the stage of this repository's `infobase config import`, and removes nothing that a staged row does not replace; any other removal, and the stage of the platform's own `config import`, need the native `ibcmd infobase config apply`"
+                ))
+                .into());
+            }
+        }
     }
     // An overlay of a dynamic update in Params (a `.si` row under an alias name)
     // is folded by the native apply's `.si` promotion; this apply only folds
@@ -510,9 +745,10 @@ pub fn plan_with_gate(
         ),
     )?;
     if params_overlays != 0 {
-        bail!(
+        return Err(NeedsNativeApply::apply(format!(
             "Params holds {params_overlays} dynamic-update overlay row(s) (names with _dynupdate_): run the native `ibcmd infobase config apply`"
-        );
+        ))
+        .into());
     }
     // The schema storage of a settled infobase is at Status 100; the native apply
     // walks it through 200, 400 and 500 and back, so any other value is an
@@ -522,9 +758,10 @@ pub fn plan_with_gate(
         &format!("SELECT COUNT_BIG(*) FROM {db}.dbo.SchemaStorage WHERE Status <> 100"),
     )?;
     if unsettled != 0 {
-        bail!(
+        return Err(NeedsNativeApply::repair(format!(
             "SchemaStorage is not settled ({unsettled} row(s) with Status other than 100): an interrupted restructuring or apply; run the native `ibcmd infobase config repair` first"
-        );
+        ))
+        .into());
     }
     timings.inventory_ms = ms(started);
 
@@ -544,6 +781,7 @@ pub fn plan_with_gate(
         identical_rows: 0,
         replaced_rows: replaced.len(),
         replaced_parts_dropped: 0,
+        consumed_rows: 0,
     };
     for row in &staged {
         match model::classify_name(&row.name) {
@@ -551,6 +789,10 @@ pub fn plan_with_gate(
             model::RowName::Descriptor(_) => stage.descriptors += 1,
             model::RowName::Body { .. } => stage.bodies += 1,
             model::RowName::Other => {}
+        }
+        if consumed.contains(&row.name.to_ascii_lowercase()) {
+            stage.consumed_rows += 1;
+            continue;
         }
         match active.get(&row.key()) {
             None => stage.new_rows += 1,
@@ -600,7 +842,11 @@ pub fn plan_with_gate(
         .collect();
     let unlisted = staged
         .iter()
-        .filter(|row| row.part == 0 && !listed.contains(&row.name.to_lowercase()))
+        .filter(|row| {
+            row.part == 0
+                && !listed.contains(&row.name.to_lowercase())
+                && !consumed.contains(&row.name.to_ascii_lowercase())
+        })
         .count();
     if unlisted > 0 {
         report.warnings.push(format!(
@@ -612,9 +858,10 @@ pub fn plan_with_gate(
             .to_ascii_lowercase()
             .starts_with("deleted_dynupdate_")
     }) {
-        bail!(
-            "a deleted_dynupdate_* row records deleted objects of a dynamic generation; the own apply cannot fold deletions"
-        );
+        return Err(NeedsNativeApply::apply(
+            "a deleted_dynupdate_* row records deleted objects of a dynamic generation; the own apply cannot fold deletions: run the native `ibcmd infobase config apply`",
+        )
+        .into());
     }
     let alias_rows = special
         .iter()
@@ -655,6 +902,11 @@ pub fn plan_with_gate(
             .collect(),
         alias_rows,
     });
+    if let Some(description) = consumed_note {
+        report.warnings.push(format!(
+            "the stage's `deleted` list asks for nothing this apply does not do ({description}); the row is consumed, not moved into Config, as the native apply does"
+        ));
+    }
     report.stage = Some(stage);
 
     // The change registrations exist with their file lists or not at all.
@@ -675,6 +927,45 @@ pub fn plan_with_gate(
         has_change_registrations,
     })?;
     let new = analysis.new;
+    let mut analysis_blockers = analysis.blockers;
+    // New objects are measured on 8.3.27 only: their registrations, node rule and
+    // search records were compared with the native apply there.
+    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 && !new.is_empty()
+    {
+        let first = new
+            .objects
+            .first()
+            .map(|object| object.uuid.clone())
+            .or_else(|| new.bodies.first().map(|body| body.file_name.clone()))
+            .unwrap_or_default();
+        analysis_blockers.push(gate::GateBlocker {
+            row: first,
+            reason: "a new form, template or body is measured on 8.3.27 only; on 8.5 the platform's own apply registers it".to_owned(),
+        });
+    }
+    // A new object on a change register that has no rows at all (the ERP УХ
+    // corpus): the native apply writes nothing there for existing objects and
+    // what it does for a new one is not measured, so the apply does not guess.
+    if !new.is_empty() && has_change_registrations {
+        let register_has_rows = scalar_i64(
+            client,
+            &format!(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM {db}.dbo._ConfigChngR) THEN 1 ELSE 0 END"
+            ),
+        )? == 1;
+        if !register_has_rows {
+            let first = new
+                .objects
+                .first()
+                .map(|object| object.uuid.clone())
+                .or_else(|| new.bodies.first().map(|body| body.file_name.clone()))
+                .unwrap_or_default();
+            analysis_blockers.push(gate::GateBlocker {
+                row: first,
+                reason: "the change register has no rows: how the native apply registers a new form, template or body there is not measured (docs/apply/own-apply.md)".to_owned(),
+            });
+        }
+    }
 
     // The structural gate.
     let mut verdict = structural_gate.check(&GateInput {
@@ -685,9 +976,10 @@ pub fn plan_with_gate(
         accepted_new_rows: &new.rows,
         accepted_owner_descriptors: &new.owners,
         new_object_kinds: &new.kinds,
+        consumed_rows: &consumed,
     })?;
     timings.gate_ms = ms(started);
-    for blocker in analysis.blockers {
+    for blocker in analysis_blockers {
         verdict.block(&blocker.row, blocker.reason);
     }
     if verdict.restructuring_required {
@@ -697,6 +989,9 @@ pub fn plan_with_gate(
         return Err(anyhow::Error::new(StructuralRefusal { verdict }));
     }
     report.gate = Some(verdict);
+    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
+    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
+    let structure = structural_gate.take_structure();
 
     // Fingerprints the script asserts.
     let started = Instant::now();
@@ -752,7 +1047,10 @@ pub fn plan_with_gate(
     // The `Params` rows to rewrite: the search information of new objects.
     // The `.ui` rows (the platform's configuration-licensing records) are never
     // written.
-    let params_rewrites = new.search_info.clone();
+    let mut params_rewrites = new.search_info.clone();
+    if let Some(phase) = &structure {
+        params_rewrites = merge_params_rewrites(params_rewrites, &phase.params_rewrites)?;
+    }
 
     let mut touched = vec!["Config", "ConfigSave"];
     if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
@@ -768,6 +1066,12 @@ pub fn plan_with_gate(
         touched.push("Files");
     }
     report.tables_touched = touched.into_iter().map(str::to_owned).collect();
+    if let Some(phase) = &structure {
+        report
+            .tables_touched
+            .extend(["SchemaStorage", "DBSchema"].map(str::to_owned));
+        report.tables_touched.extend(phase.tables.iter().cloned());
+    }
     let nodes_seen = if new.is_empty() || !has_change_registrations {
         0
     } else {
@@ -822,13 +1126,29 @@ pub fn plan_with_gate(
     report.not_written = vec![
         "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written; the native apply re-encrypts two of them on every apply".to_owned(),
     ];
+    if structure.is_some() && options.backup == BackupPolicy::None {
+        report.warnings.push(
+            "the stage restructures tables: a real run needs --recovery-backup <file> (recommended) or --i-have-a-backup".to_owned(),
+        );
+    }
+    if structure.is_some() {
+        report.not_written.push(
+            "the pre-image of the rebuilt tables: the old tables are dropped inside the transaction, so a committed restructuring is taken back from a SQL Server backup (the recovery artifact keeps the Config rows and the cache rows only)".to_owned(),
+        );
+    }
     report.not_written.extend([
-        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
+        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records or a restructuring changes a cache (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
         "the extension CAS garbage collection (ConfigCAS, Files CAS_GC_Info, extd_props_cached/gc.mrk)".to_owned(),
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
     ]);
 
+    let consumed_row_count = staged
+        .iter()
+        .filter(|row| consumed.contains(&row.name.to_ascii_lowercase()))
+        .count() as i64;
+    let mut consumed_names = consumed.iter().cloned().collect::<Vec<_>>();
+    consumed_names.sort();
     let inputs = ScriptInputs {
         database: options.database.clone(),
         client_pid: std::process::id(),
@@ -850,7 +1170,12 @@ pub fn plan_with_gate(
         nodes,
         nodes_seen,
         appended_files,
+        consumed_names,
+        consumed_row_count,
+        dropped_rows,
+        structure_sql: structure.as_ref().map(|phase| phase.sql.clone()),
     };
+    report.structure = structure;
     let script = render_apply_script(&inputs)?;
     let script_sha = hex_lower(&Sha256::digest(script.as_bytes()));
     report.script_sha256 = Some(script_sha.clone());
@@ -873,7 +1198,8 @@ pub fn apply_staged_configuration(
     sql: &SqlExec,
     options: &ConfigApplyOptions,
 ) -> Result<ConfigApplyReport> {
-    apply_with_gate(sql, options, &options.conservative_gate())
+    let gate = structural_gate(sql, options)?;
+    apply_with_gate(sql, options, gate.as_ref())
 }
 
 pub fn apply_with_gate(
@@ -898,26 +1224,12 @@ pub fn apply_with_gate(
     if options.exclusivity == Exclusivity::SqlSessions {
         let sessions = other_sessions(client, &options.database)?;
         if !sessions.is_empty() {
-            let listing = sessions
-                .iter()
-                .take(5)
-                .map(|session| {
-                    format!(
-                        "  session {} ({}, {}, {}, {})",
-                        session.session_id,
-                        session.login,
-                        session.host,
-                        session.program,
-                        session.status
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!(
-                "exclusive access is not established: {} other session(s) are connected to {}:\n{listing}\nclose them (or, when a working process merely keeps a pooled connection, stop it) and retry",
-                sessions.len(),
-                options.database
-            );
+            return Err(ExclusiveAccessRefused {
+                database: options.database.clone(),
+                sessions,
+                in_transaction: false,
+            }
+            .into());
         }
     }
     if options.dry_run {
@@ -925,7 +1237,59 @@ pub fn apply_with_gate(
         return Ok(plan.report);
     }
 
-    // The recovery artifact first: the pre-image of what the script overwrites.
+    // A restructuring needs the operator's word about a way back, and a backup asked
+    // for is taken before anything is written (a rehearsal and a dry run write
+    // nothing that stays).
+    require_backup(
+        &options.backup,
+        plan.report.structure.is_some(),
+        !options.rehearse,
+    )?;
+    let mut backup = None;
+    let mut backup_ms = 0u128;
+    match &options.backup {
+        BackupPolicy::None => {}
+        BackupPolicy::Acknowledged => {
+            backup = Some(BackupRecord {
+                kind: "acknowledged",
+                path: None,
+                seconds: None,
+            });
+        }
+        BackupPolicy::File(file) if !options.rehearse => {
+            if file.exists() {
+                bail!(
+                    "the backup file {} exists already: the apply does not overwrite a backup; name another file",
+                    file.display()
+                );
+            }
+            let started = Instant::now();
+            let db = quote_ident(&options.database)?;
+            client
+                .execute(
+                    &format!(
+                        "BACKUP DATABASE {db} TO DISK = N'{}' WITH COPY_ONLY, COMPRESSION",
+                        quote_string(&file.display().to_string())
+                    ),
+                    &[],
+                )
+                .with_context(|| {
+                    format!(
+                        "the backup to {} failed; nothing was changed",
+                        file.display()
+                    )
+                })?;
+            backup_ms = ms(started);
+            backup = Some(BackupRecord {
+                kind: "file",
+                path: Some(file.display().to_string()),
+                seconds: Some(backup_ms as f64 / 1000.0),
+            });
+        }
+        BackupPolicy::File(_) => {}
+    }
+
+    // The recovery artifact: the pre-image of what the script overwrites.
     let started = Instant::now();
     let token = plan
         .report
@@ -933,11 +1297,10 @@ pub fn apply_with_gate(
         .clone()
         .ok_or_else(|| anyhow!("the plan has no recovery token"))?;
     let dir = options.recovery_dir.clone().unwrap_or_else(|| {
-        std::env::temp_dir()
-            .join("ibcmd-rs")
-            .join("config-apply-recovery")
-            .join(format!("{}-{token}", safe_stem(&options.database)))
+        recovery::artifact_dir(&recovery::default_root(), &options.database, &token)
     });
+    plan.report.backup = backup;
+    plan.report.timings.backup_ms = backup_ms;
     recovery::write_recovery(
         client,
         &recovery::RecoveryRequest {
@@ -957,15 +1320,26 @@ pub fn apply_with_gate(
                 .inputs
                 .as_ref()
                 .map_or(&[][..], |inputs| inputs.params_rewrites.as_slice()),
+            backup: plan.report.backup.as_ref(),
         },
     )?;
     plan.report.recovery_dir = Some(dir);
     plan.report.timings.recovery_ms = ms(started);
 
     let started = Instant::now();
-    client
-        .run_script(&script, ScriptVariables::Refuse)
-        .context("the config apply transaction failed; the database is unchanged")?;
+    if let Err(error) = client.run_script(&script, ScriptVariables::Refuse) {
+        // the refusals of the transaction's own checks are typed; a drifted
+        // fingerprint or a failed postcondition stays an ordinary failure
+        if let Some((number, message)) = errors::server_error_of(&error)
+            && let Some(typed) =
+                errors::from_transaction_code(number, &message, &options.database, || {
+                    other_sessions(client, &options.database).unwrap_or_default()
+                })
+        {
+            return Err(typed);
+        }
+        return Err(error.context("the config apply transaction failed; the database is unchanged"));
+    }
     plan.report.timings.sql_ms = ms(started);
     plan.report.executed = !options.rehearse;
 
@@ -978,6 +1352,28 @@ pub fn apply_with_gate(
         )?;
         if left != 0 {
             bail!("ConfigSave still holds {left} row(s) after the apply");
+        }
+    }
+
+    // The default directory keeps the last few artifacts of a database: the run
+    // succeeded, so the older ones go. A directory the caller named is theirs.
+    if options.recovery_dir.is_none() && options.recovery_keep > 0 {
+        match recovery::prune(
+            &recovery::default_root(),
+            &options.database,
+            options.recovery_keep,
+        ) {
+            Ok(removed) if !removed.is_empty() => plan.report.warnings.push(format!(
+                "{} older recovery artifact(s) of {} removed from {} (the newest {} are kept)",
+                removed.len(),
+                options.database,
+                recovery::default_root().display(),
+                options.recovery_keep
+            )),
+            Ok(_) => {}
+            Err(error) => plan.report.warnings.push(format!(
+                "could not prune older recovery artifacts: {error:#}"
+            )),
         }
     }
     plan.report.timings.total_ms = ms(total);
@@ -1017,11 +1413,31 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         MssqlConfigApplyExclusivityArg::Assumed => Exclusivity::Assumed,
     };
     options.recovery_dir = args.recovery_dir.clone();
+    options.recovery_keep = args.recovery_keep;
     options.recovery_blobs = match args.recovery_blobs {
         MssqlConfigApplyRecoveryArg::Changed => RecoveryBlobs::Changed,
         MssqlConfigApplyRecoveryArg::None => RecoveryBlobs::None,
     };
     options.script_output = args.script_output.clone();
+    options.allow_restructure = args
+        .allow_restructure
+        .map(|crate::cli::MssqlConfigApplyRestructureArg::S1| AllowRestructure::S1);
+    options.backup = match (&args.recovery_backup, args.i_have_a_backup) {
+        (Some(file), _) => BackupPolicy::File(file.clone()),
+        (None, true) => BackupPolicy::Acknowledged,
+        (None, false) => BackupPolicy::None,
+    };
+    options.gate = match args.gate {
+        crate::cli::MssqlConfigApplyGateArg::ApplyCheck => GateChoice::ApplyCheck,
+        crate::cli::MssqlConfigApplyGateArg::Conservative => GateChoice::Conservative,
+    };
+    if args.admit_unverified_roles
+        && (options.gate != GateChoice::Conservative || options.allow_restructure.is_some())
+    {
+        bail!(
+            "--admit-unverified-roles is a switch of the conservative gate: add --gate conservative"
+        );
+    }
     options.admit_unverified_roles = args.admit_unverified_roles;
     match apply_staged_configuration(&sql, &options) {
         Ok(report) => {
@@ -1034,12 +1450,8 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
             Ok(())
         }
         Err(error) => {
-            if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
-                let json = serde_json::to_string_pretty(&serde_json::json!({
-                    "refused": "needs_native_apply",
-                    "database": args.database,
-                    "gate": refusal.verdict,
-                }))?;
+            if let Some(refusal) = refusal_report(&error, &args.database) {
+                let json = serde_json::to_string_pretty(&refusal)?;
                 if let Some(path) = &args.report {
                     std::fs::write(path, &json)
                         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -1049,6 +1461,52 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
             Err(error)
         }
     }
+}
+
+/// What the command prints when the apply refuses by type: the same fields
+/// whatever the refusal, `refused` naming the kind.
+fn refusal_report(error: &anyhow::Error, database: &str) -> Option<serde_json::Value> {
+    if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
+        return Some(serde_json::json!({
+            "refused": "needs_native_apply",
+            "database": database,
+            "gate": refusal.verdict,
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<NeedsNativeApply>() {
+        return Some(serde_json::json!({
+            "refused": "needs_native_apply",
+            "database": database,
+            "native_command": match refusal.command {
+                NativeCommand::Apply => "apply",
+                NativeCommand::Repair => "repair",
+            },
+            "reason": refusal.reason,
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<ExclusiveAccessRefused>() {
+        return Some(serde_json::json!({
+            "refused": "exclusive_access",
+            "database": database,
+            "in_transaction": refusal.in_transaction,
+            "sessions": refusal.sessions,
+        }));
+    }
+    if error.downcast_ref::<BackupRequired>().is_some() {
+        return Some(serde_json::json!({
+            "refused": "backup_required",
+            "database": database,
+            "message": error.to_string(),
+        }));
+    }
+    if let Some(refusal) = error.downcast_ref::<ExclusiveAccessUnprovable>() {
+        return Some(serde_json::json!({
+            "refused": "exclusive_access_unprovable",
+            "database": database,
+            "reason": refusal.reason,
+        }));
+    }
+    None
 }
 
 fn safe_stem(value: &str) -> String {
@@ -1083,14 +1541,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_8_5_profile_is_refused_before_anything_is_read() {
+    fn the_8_5_profile_is_planned_like_any_other() {
+        // it needs a server, and says so; it is not turned away by its version
         let sql = SqlExec::detached("no server in a unit test");
         let options = ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_5_1_1150);
-        let error = plan(&sql, &options).err().expect("8.5 is refused");
+        let error = plan(&sql, &options).err().expect("a detached handle fails");
         assert!(
-            error.to_string().contains("measured on 8.3.27 only"),
+            !error.to_string().contains("measured on 8.3.27 only"),
             "{error}"
         );
+        assert!(error.downcast_ref::<NeedsNativeApply>().is_none());
     }
 
     #[test]
@@ -1125,5 +1585,182 @@ mod tests {
         // a count that disagrees with the names, and text that is no list
         assert!(describe_removals(b"2,\"a\",0").contains("cannot read"));
         assert!(describe_removals(b"{1,2}").contains("cannot read"));
+    }
+
+    #[test]
+    fn a_deleted_list_asks_for_nothing_when_it_is_empty_or_only_a_dynamic_update() {
+        let alias =
+            "ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let versions = "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let carried: std::collections::HashSet<String> = [alias, versions, "DynamicallyUpdated"]
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        let ask = |text: &str| {
+            parse_removals(text.as_bytes())
+                .map(|entries| removals_ask_for_nothing(&entries, &carried))
+        };
+        // empty
+        assert_eq!(ask("\u{feff}0"), Some(true));
+        // the rows of a dynamic update that Config carries
+        let overlay = format!("\u{feff}3,\"{alias}\",0,\"DynamicallyUpdated\",0,\"{versions}\",0");
+        assert_eq!(ask(&overlay), Some(true));
+        // a dynamic-update row Config does not carry now
+        let other = "\u{feff}1,\"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0";
+        assert_eq!(ask(other), Some(false));
+        // an ordinary row: a removal
+        assert_eq!(
+            ask("\u{feff}1,\"5ff28850-03db-4a0f-b95e-c2ea4d8c516d\",0"),
+            Some(false)
+        );
+        // a name with flag 1 (a nested object, not a row)
+        let flagged = format!("\u{feff}1,\"{alias}\",1");
+        assert_eq!(ask(&flagged), Some(false));
+        // the removal list of a dynamic update itself is never folded
+        let mut with_removals = carried.clone();
+        with_removals.insert("deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b".to_owned());
+        let entries =
+            parse_removals(b"1,\"deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0")
+                .unwrap();
+        assert!(!removals_ask_for_nothing(&entries, &with_removals));
+        // text that is no list
+        assert_eq!(ask("{1,2}"), None);
+        assert_eq!(ask("2,\"a\",0"), None);
+    }
+
+    #[test]
+    fn a_refusal_is_reported_by_its_type() {
+        let structural = anyhow::Error::new(StructuralRefusal {
+            verdict: GateVerdict::default(),
+        });
+        assert_eq!(
+            refusal_report(&structural, "db").unwrap()["refused"],
+            "needs_native_apply"
+        );
+        let native = anyhow::Error::new(NeedsNativeApply::repair("unfinished"));
+        let report = refusal_report(&native, "db").unwrap();
+        assert_eq!(report["native_command"], "repair");
+        assert_eq!(report["reason"], "unfinished");
+        let sessions = anyhow::Error::new(ExclusiveAccessRefused {
+            database: "db".to_owned(),
+            sessions: Vec::new(),
+            in_transaction: true,
+        });
+        let report = refusal_report(&sessions, "db").unwrap();
+        assert_eq!(report["refused"], "exclusive_access");
+        assert_eq!(report["in_transaction"], true);
+        let blind = anyhow::Error::new(ExclusiveAccessUnprovable {
+            reason: "cannot prove".to_owned(),
+        });
+        assert_eq!(
+            refusal_report(&blind, "db").unwrap()["refused"],
+            "exclusive_access_unprovable"
+        );
+        assert!(refusal_report(&anyhow::anyhow!("plain"), "db").is_none());
+    }
+
+    fn rewrite(name: &str) -> ParamsRewrite {
+        ParamsRewrite {
+            file_name: name.to_owned(),
+            old_data_size: 1,
+            old_sha256_hex: String::new(),
+            new_bytes: Vec::new(),
+            set_creation: false,
+        }
+    }
+
+    #[test]
+    fn a_cache_row_both_the_restructuring_and_a_new_form_want_is_a_refusal() {
+        // distinct rows join
+        let joined = merge_params_rewrites(
+            vec![rewrite("2203278d-ef4f-4f68-98f1-feb257d53ecc.si")],
+            &[rewrite("ea13a2c9-0c2f-40fa-b855-710387e3271d.si")],
+        )
+        .unwrap();
+        assert_eq!(joined.len(), 2);
+        // the object registry row (1a621f0f) is rewritten by both: two steps
+        let error = merge_params_rewrites(
+            vec![
+                rewrite("1a621f0f-5568-4183-bd9f-f6ef670e7090.si"),
+                rewrite("siVersions"),
+            ],
+            &[
+                rewrite("ea13a2c9-0c2f-40fa-b855-710387e3271d.si"),
+                rewrite("1a621f0f-5568-4183-bd9f-f6ef670e7090.si"),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Params.1a621f0f-5568-4183-bd9f-f6ef670e7090.si")
+                && error.to_string().contains("in two steps"),
+            "{error}"
+        );
+        // a restructuring alone brings its own rows
+        assert_eq!(
+            merge_params_rewrites(Vec::new(), &[rewrite("siVersions")])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_structural_apply_that_writes_needs_a_word_about_a_backup() {
+        // no restructuring: nothing is asked
+        assert!(require_backup(&BackupPolicy::None, false, true).is_ok());
+        // a restructuring that writes and no backup said: refused, by type, in Russian, naming both
+        let error = require_backup(&BackupPolicy::None, true, true).unwrap_err();
+        assert!(error.downcast_ref::<BackupRequired>().is_some(), "{error}");
+        assert!(error.to_string().contains("--i-have-a-backup"), "{error}");
+        assert!(error.to_string().contains("--recovery-backup"), "{error}");
+        assert!(error.to_string().contains("резервная копия"), "{error}");
+        let report = refusal_report(&error, "db").unwrap();
+        assert_eq!(report["refused"], "backup_required");
+        // said either way, or nothing kept (a rehearsal, a dry run)
+        assert!(require_backup(&BackupPolicy::Acknowledged, true, true).is_ok());
+        assert!(require_backup(&BackupPolicy::File(PathBuf::from("x.bak")), true, true).is_ok());
+        assert!(require_backup(&BackupPolicy::None, true, false).is_ok());
+    }
+
+    #[test]
+    fn the_s1_class_is_not_built_into_this_binary_and_says_so() {
+        let sql = SqlExec::detached("no server in a unit test");
+        let mut options =
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214);
+        options.allow_restructure = Some(AllowRestructure::S1);
+        let error = structural_gate(&sql, &options)
+            .err()
+            .expect("no S1 gate here");
+        assert!(
+            error.downcast_ref::<NeedsNativeApply>().is_some(),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("--allow-restructure s1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_backup_is_named_in_the_report() {
+        let taken = BackupRecord {
+            kind: "file",
+            path: Some("F:/b.bak".to_owned()),
+            seconds: Some(1.5),
+        };
+        let json = serde_json::to_value(&taken).unwrap();
+        assert_eq!(json["kind"], "file");
+        assert_eq!(json["path"], "F:/b.bak");
+        assert_eq!(json["seconds"], 1.5);
+        let said = serde_json::to_value(BackupRecord {
+            kind: "acknowledged",
+            path: None,
+            seconds: None,
+        })
+        .unwrap();
+        assert_eq!(said["kind"], "acknowledged");
+        assert!(said["path"].is_null());
     }
 }

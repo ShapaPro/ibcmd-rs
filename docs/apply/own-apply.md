@@ -7,24 +7,47 @@ platform. It applies a configuration that needs **no restructuring**: changed
 modules, forms, templates, pictures and help pages of any object, and a **new
 form or template of an existing object**, from a full stage or a delta stage (a
 few objects and `versions`). Anything that changes the database's structure is
-refused with the list of the rows that would (use the native apply for it).
+refused with the list of the rows that would (use the native apply for it), unless the
+caller asks for the restructuring seam (`--allow-restructure s1`, see
+[Restructuring inside the apply](#restructuring-inside-the-apply-s1-a-397); the gate that
+fills the seam comes with track ddl).
 
 **Which stages it takes: those of this repository's importers only.** The stage
 of the platform's own `ibcmd infobase config import` is refused: it carries a
 `deleted` row (a list of removals, written to every stage), about 600 descriptors
 rewritten in another record shape (format 56 to 57, a `{68}` Configuration row),
 new version guids for every name and values above 10 MB cut into parts. The plan
-stops at the `deleted` row with a message that says so; the conservative gate
-would stop at the descriptors. The restructure check of track rcheck (#338,
-`apply_check::check_staged`, which replaces the gate on the next branch) refuses
-such a stage as unknown, too. Measured on the stages the import and rcheck tracks
-left in the lab: `ibcmd_rs_04_import_bsp_nat` and `ibcmd_rs_04_rcheck_nat_a2`
-(9 846 and 9 842 rows, each with a `deleted` row) are refused at once, read-only.
+stops at a `deleted` row that names anything but the rows of a dynamic update, with
+a message that says so; the conservative gate would stop at the descriptors. The
+restructure check of track rcheck (#338, `apply_check::check_staged`, the default gate
+since checkpoint 2) refuses such a stage as unknown, too. Measured on the stages the
+import and rcheck tracks left in the lab: `ibcmd_rs_04_import_bsp_nat` and
+`ibcmd_rs_04_rcheck_nat_a2` (9 846 and 9 842 rows, each with a `deleted` row) are
+refused at once, read-only.
 
-Platform: 8.3.27 (profile `platform-8.3.27.2214`), Microsoft SQL Server. The 8.5
-profile is refused: the apply is measured on 8.3.27 only. The `Params` `.ui` rows
+Platform: Microsoft SQL Server; 8.3.27 (profile `platform-8.3.27.2214`) and, since
+checkpoint 2, 8.5 (profile `platform-8.5.1.1150`, capability `mssql.config.apply`;
+[measured](#85-392) on the БСП 8.5 corpus; new forms, templates and bodies stay 8.3.27
+only). The `Params` `.ui` rows
 (the platform's configuration-licensing records, track ui #340) are **never
 written** by this apply; see [known differences](#known-differences-from-the-native-apply).
+
+**Checkpoint 2 (#392, #393, #397) in short.**
+
+- The restructure check of track rcheck is the **default gate** (`--gate apply-check`);
+  the conservative rule is the explicit option ([the default gate](#the-default-gate)).
+- A staged `deleted` row that is **empty** or names **all** the dynamic-update rows of the
+  base is consumed as the native apply consumes it ([removals](#removals-the-stages-deleted-row));
+  any other list is still refused.
+- **Typed refusals** for callers that sort them ([refusals](#refusals-a-caller-can-sort)).
+- The recovery artifact is **one file** and the newest five per database are kept
+  ([recovery](#recovery-artifact-and-its-retention)).
+- A **restructuring seam** in the apply's own transaction and the **backup policy** of
+  structural applies ([S1-A](#restructuring-inside-the-apply-s1-a-397)).
+- Measured on the **ERP УХ clone** (118 377 rows, 4.3 GB; [scale](#erp-uh-8327-at-scale-392)):
+  300 edited modules 34.8 s against 639.8 s natively, Config equal row for row; a stage of the
+  whole configuration (1.6 GB) 699 s with a log peak of 9.2 GB.
+- **8.5** admitted ([8.5](#85-392)).
 
 Contents: [what the native apply does](#what-the-native-apply-does-measured) -
 [what this apply does](#what-this-apply-does) -
@@ -32,7 +55,11 @@ Contents: [what the native apply does](#what-the-native-apply-does-measured) -
 [known differences](#known-differences-from-the-native-apply) -
 [which writes are required](#which-per-apply-writes-are-required) -
 [safety](#safety) - [the structural gate](#the-structural-gate) -
+[the default gate](#the-default-gate) - [refusals](#refusals-a-caller-can-sort) -
+[recovery](#recovery-artifact-and-its-retention) -
+[restructuring seam and backup policy](#restructuring-inside-the-apply-s1-a-397) -
 [command line](#command-line) - [verification](#verification) -
+[ERP UH at scale](#erp-uh-8327-at-scale-392) - [8.5](#85-392) -
 [limits and open points](#limits-and-open-points).
 
 ## What the native apply does (measured)
@@ -249,6 +276,14 @@ One serializable transaction, data moves inside the server only:
 
 A rehearsal (`--rehearse`) runs the same script and ends it with `ROLLBACK`.
 
+Also in the script since checkpoint 2: a staged `deleted` row that the plan consumed is
+left out of step 5 (it is not moved into `Config`), out of the moved-row count and of the
+postconditions, and the in-transaction check for unfinished operations does not count it as
+one; the dynamic rows a consumed list names are deleted instead of folded in step 4
+([removals](#removals-the-stages-deleted-row)); and a structure phase from a gate that lets a
+restructuring through runs between the assertions and step 4, in the same transaction
+([S1-A](#restructuring-inside-the-apply-s1-a-397)).
+
 ## What it does not write
 
 Derived state the native apply rewrites and this one leaves alone (each is
@@ -290,6 +325,25 @@ the platform does not mind (S2, S3, S4, and the probe below):
 - **ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and scratch of the native apply,
   see the table above.
 - **`Creation`/`Modified` of `Files.MobileVersions.dat`** and the random head guid differ.
+- **`_ConfigChngR._MessageNo` of objects the stage does not touch (first apply after a restore)**:
+  on a base whose register holds NULL for such objects (a clone restored from a corpus backup:
+  17 280 of 20 685 rows on the 8.3.27 twin, 17 374 of 21 219 on the 8.5 twin) the native apply
+  writes 0 to them; this apply writes NULL for the staged objects only (42 of 42 rows equal on
+  8.5). Measured equal from a register that held 0 (S2-S4, E1-E4). Nothing in the platform's
+  checks, the exports or the cluster sessions reads it; it matters to the exchange plans of a
+  base that has nodes with pending messages, and is untested there.
+- **`.si` rows on 8.5**: the native apply rewrites all 16 with their records in another order
+  (2 identical, 13 the same lines permuted, and the 29 MB XDTO-model row `ea13a2c9` at the same
+  length in another base64 layout); on 8.3.27 the same rows come back with identical text. This
+  apply leaves them; check, export and a cluster session are the same.
+- **`DBSchema` after a native structural apply (T1, BSP 8.3.27)**: the native apply also rewrites
+  the entries of the two service tables `DbCopies` and `DbCopiesUpdates` (+53 and +166 bytes,
+  `DbCopiesSettings` appears); the table lists (1 761 tables), all columns and indexes of the 11
+  rebuilt tables are equal but for the names SQL Server generates for primary keys. A native
+  `config check` and `config apply` on this apply's result accept it.
+- **Help index files on the first apply of a restored clone**: native removes the old chunk rows
+  (`userdocs_ru_<hash>.bin`, 309 to 327 rows on the БСП twins) while rebuilding the index; this
+  apply leaves them (the help-index difference above, seen in `Files` as 44 rows against 353).
 
 ### Which per-apply writes are required
 
@@ -355,20 +409,43 @@ removed objects. The native apply copies the row as `deleted.new` and deletes it
 the removal of the column" when an attribute is removed (trace 4.1). The platform's own import writes the row
 to every stage; the importers of this repository do not yet (import track, step 2).
 
-**What this apply does today.** It removes nothing that a staged row does not replace: every `DELETE` on
-`Config` in its script names its rows by a staged row, by the alias of a folded generation or by a
-marker (`DynamicallyUpdated`, `versions_dynupdate_<g>`). A stage that carries a `deleted` row is refused,
-empty or not, before anything is read further, with a message that says what the list holds (row count, how
-many are dynamic-update rows, the first other name) and that the native apply is the tool.
+**What this apply does today (step 1 below is done).** The `deleted` row is read as the list it is.
+Three cases:
 
-**The plan to honor it**, in the order the evidence allows; each step is enabled only after the own apply
-reproduces the native end state on a twin of the same stage:
+1. *Empty* (`0`, no text: what the platform's own import writes): the row is consumed.
+2. *Names only rows of the dynamic update that `Config` carries, and all of them* (the six rows of a
+   generation: two alias descriptors, two alias bodies, `DynamicallyUpdated`, `versions_dynupdate_<g>`): the
+   row is consumed, and the named rows are **deleted, not folded**; the ordinary rows keep the text from
+   before the online update, as the native apply leaves them. A list that names only some of the
+   overlay rows, or names them for a generation `Config` does not carry, is refused.
+3. *Anything else*: refused before anything is read further, with `NeedsNativeApply::apply` and a message
+   that says what the list holds (row count, how many are dynamic-update rows, the first other name).
 
-1. *Empty list, or only dynamic-update rows that `Config` carries.* Both are no-ops for this apply (the fold
-   removes those rows anyway). The row is consumed: left out of the moved rows, of the moved-row count and of the
-   postconditions, and `ConfigSave` is emptied as ever. Needed from the import track: a stage of its importer with
-   `deleted` on a БСП clone with an overlay, applied natively and by this apply, `Config` equal. This unblocks
-   every stage the importer writes once it writes `deleted` at all.
+"Consumed" means: left out of the moved rows, out of the moved-row count and out of the postconditions;
+`ConfigSave` is emptied as ever; the in-transaction check for unfinished operations does not count it
+(`deleted` is one of the unfinished-operation names, and a first version of the script refused its own
+consumed row with code 57307 -- safe, a rollback -- before this was fixed). Every `DELETE` on `Config`
+still names its rows by a staged row, by the alias of a folded or dropped generation or by a marker.
+
+**Evidence: twins of БСП 8.3.27 (`tools\verify_new.py`, native against own on byte-equal stages).** A delta stage
+of four modules and their `versions`; E1 and E2 on a base without an overlay, E3, E3b and E4 on a base that
+carries the dynamic generation `06cb0442` (two objects, `a627e390` and `ab132638`).
+
+| Case | `deleted` | Native | This apply | End state, own against native |
+|---|---|---|---|---|
+| E1 | `0`, base without overlay | consumed | consumed | `Config` 9 841 of 9 841, `_ConfigChngR`, `ExtProps` (16 343 objects), all 16 `.si` texts, `Params`, `Files` equal |
+| E2 | empty text, base without overlay | consumed | consumed | the same |
+| E3 (first try) | the 6 overlay names, base with overlay | rows deleted, **no fold** | folded | `Config` differed for the two objects: the native apply keeps the plain text |
+| E3b | the 6 overlay names | rows deleted, no fold | deleted, not folded | `Config` 9 841 of 9 841; `.si`, `siVersions`, `Params` equal; **8 register rows differ**: the native apply also sets `_MessageNo` NULL for the two objects and appends their alias file names to `_ConfigChngR_ExtProps` (2 objects x 4 nodes), this apply does not |
+| E4 | `0`, base with overlay | consumed, **folded** | consumed, folded | `Config`, register, `ExtProps`, `.si`, `Params` equal (the alias text is the ordinary row afterwards) |
+
+The `Files` rows differ in E3b and E4 by the help-index chunks only (known difference). The E3b
+difference is written down and not reproduced: the case needs a list that names overlay rows, which
+neither importer of this repository writes yet.
+
+**What is left, in the order the evidence allows; each step is enabled only after the own apply
+reproduces the native end state on a twin of the same stage:**
+
 2. *A removed form, template or body.* The rows the list names (the descriptor `<uuid>` and the bodies
    `<uuid>.<n>`) are deleted in the same transaction, only when the owner's staged descriptor differs from the
    active one by exactly the removed references (the inverse of the new-object analysis in `objects::analyze`) and
@@ -380,7 +457,8 @@ reproduces the native end state on a twin of the same stage:
 3. *A name that has a table or a column* (catalog, attribute, tabular section, register): structural, refused as
    before; the native apply removes the column.
 
-Until step 2 lands nothing is deleted that `deleted` does not name, because nothing is deleted at all.
+Until step 2 lands the only rows this apply deletes that a staged row does not replace are the dynamic-update rows
+a consumed list names.
 
 ### Which native path these writes correspond to, and why
 
@@ -423,8 +501,9 @@ writing any long extra, and to run once on a long stage of 21 to 30 rows if a re
 
 - **Fail closed**: an unknown storage layout (table fingerprint of the profile), an
   unsupported platform profile, a `deleted_dynupdate_*` row, an unfinished operation,
-  a `deleted` row in the stage (removals), a reused generation, an unlisted staged row
-  (warning), any structural blocker: no write.
+  a `deleted` row that asks for more than the dynamic rows (removals), a reused generation,
+  an unlisted staged row (warning), any structural blocker, a restructuring without a stated
+  way back: no write.
 - **Plan without locks, verify under locks**: the plan reads metadata and server-side
   fingerprints only; the transaction re-checks them after taking the locks.
 - **Exclusive access** is proven by SQL Server's session list, not assumed. A working
@@ -435,10 +514,17 @@ writing any long extra, and to run once on a long stage of 21 to 30 rows if a re
   changes (`--recovery-blobs changed`, default) or a hash manifest (`none`), the special
   rows, `MobileVersions.dat`, the `_MessageNo` values, the `Params` rows rewritten for new
   objects with their old bytes (`params_replaced.tsv`) and the registrations added
-  (`new_registrations.tsv`).
+  (`new_registrations.tsv`); the bytes in one file, the newest five artifacts per database
+  kept ([recovery](#recovery-artifact-and-its-retention)).
+- **Typed refusals**: a caller sorts them by type, not by text
+  ([refusals](#refusals-a-caller-can-sort)).
 - **Dry run** writes nothing at all; **rehearsal** writes nothing that survives.
 
 ## The structural gate
+
+Two gates stand behind the `StructuralGate` trait; `structural_gate()` is the one function that picks
+(`ConfigApplyOptions::gate`, `--gate`). The default is `ApplyCheckGate`
+([below](#the-default-gate)). `--gate conservative` selects the rule described here.
 
 `ConservativeGate` (module `mssql_config_apply::gate`, one call site in `plan`) admits:
 
@@ -470,19 +556,65 @@ writing any long extra, and to run once on a long stage of 21 to 30 rows if a re
 It refuses new objects of every other kind (a catalog, an attribute, a command, a subsystem),
 new bodies of nested objects or of the configuration, owners whose descriptor changes more
 than the lists, descriptors whose text differs, predefined data, rights, interface, package
-and unknown bodies, and unknown row names. The restructure-check track's `check_staged`
-replaces the gate behind the `StructuralGate` trait; the new-row analysis is the plan's,
-not the gate's, and applies whichever gate is used.
+and unknown bodies, and unknown row names. Its rows read from a consumed `deleted` list are
+skipped. The new-row analysis is the plan's, not the gate's, and applies whichever gate is used.
+
+### The default gate
+
+`ApplyCheckGate` (`mssql_config_apply::check_gate`) holds the plan's `SqlExec` and calls track
+rcheck's `apply_check::check_staged`, the code behind `ibcmd-rs mssql-apply-check`. The check reads
+what it compares (the old and the staged descriptors and bodies of the changed names) from SQL
+itself, set-wise. The gate refuses when the verdict says `needs_restructuring`, when **any** reason is
+of class `unknown`, and when the verdict is not conclusive (files left out); the refusal text is
+`Verdict::refusal()` (the Russian «требуется штатный config apply: ...»), the blockers are listed
+as `[class] summary` (at most 200), and the check's figures (`staged_rows`, `descriptors_compared`,
+`body_rows_compared`, `objects_changed`, `notes`) are in the report at `gate.stats.restructure_check`.
+Reasons that name a consumed `deleted` row are dropped before the verdict is read. New forms and
+templates are judged by the plan's `objects::analyze` whichever gate runs. Tests: the verdict
+conversion (six), the plan with each gate, and the consumed-row skip.
+
+**Regression with a new form and a new template.** The base-free stage of S1 (9 841 rows, every row staged, a new
+form and a new template of one owner; the route-point flowchart body of the business process left out, which the
+conservative gate refused in S1) passes the default gate (`objects_changed` 3, ten notes, no blocker) and the
+new-object analysis (the two objects, three registration nodes, two search-information records). Own against native
+on twins: `Config` **9 842 of 9 842**, `_ConfigChngR` 20 691 rows equal (messages too), `.si` 15 identical and one
+permuted, `siVersions` and `Params` equal; `_ConfigChngR_ExtProps` equal as sets, but the native long path lists the
+files of one object (the business process, on its five nodes) in another order (`.7` first). Native 1 463 s and own
+430 s, both under load from other tracks' runs (own: 13 s in a dry run, 331 s of SQL under load).
+
+**Finding for the import track: `versions` must be based on the effective row.** A base that carries
+a dynamic overlay has `versions_dynupdate_<g>` next to `versions`; for the names the overlay updated
+the overlay row holds the current version ids. A stage whose `versions` was built from `Config`'s
+plain `versions` lists stale ids for those names, and `check_staged` flags every one as `unknown`.
+Measured on the S3 delta stage on the overlay base: refused until `versions` was rebased onto the
+overlay's row (4 entries changed); then the gate passed and the result equals the native apply's
+(E3b/E4 above). The conservative gate does not look at ids.
+
+**The gate's share of the time** (ERP УХ clone, 118 377 `Config` rows, 4.3 GB; the iter build of this
+branch): 20.0 s of 34.8 s for 300 modules (57 %), 24.9 s of 33.8 s for one module of 4 MB, 27.8 s of
+226 s for a dry run of the whole configuration (12 %), 21.2 s of 699 s for its real run (3 %); on the
+БСП clone 1 to 5 s. It is a fixed cost of the size of the base, not of the stage: one scan of
+`Config` by name, `SELECT FileName, COUNT_BIG(*), SUM(DataSize) ... GROUP BY FileName`, takes 9.8 s
+on this clone alone, and the check runs it for `Config` and `ConfigSave`, after the plan's own
+inventory has run the same scan (11 s). One shared scan would cut 20 to 30 s from a small apply on a
+base this size; proposal for track rcheck (their `Db::names`), not done here.
 
 ## Command line
 
 ```
-ibcmd-rs mssql-config-apply --platform-profile platform-8.3.27.2214 --database <db>
+ibcmd-rs mssql-config-apply --platform-profile platform-8.3.27.2214|platform-8.5.1.1150 --database <db>
     [--server localhost] [--sql-user U --sql-pwd P | --sql-pwd-env IBCMD_DB_PSW]
     [--dry-run | --rehearse] --allow-non-lab
     [--exclusivity sql|assumed] [--recovery-dir DIR] [--recovery-blobs changed|none]
+    [--recovery-keep N]                       (default 5; 0 keeps every artifact)
+    [--gate apply-check|conservative]         (default apply-check)
+    [--allow-restructure s1] [--recovery-backup FILE | --i-have-a-backup]
     [--script-output FILE] [--report FILE]
 ```
+
+`--allow-restructure` needs one of the two backup options when the stage restructures and the run
+writes; a stage that does not restructure needs neither
+([S1-A](#restructuring-inside-the-apply-s1-a-397)).
 
 ## Verification
 
@@ -611,6 +743,198 @@ another session on the database makes the apply refuse with the session named; t
 artifacts verify against the before-snapshots (`tools\verify_recovery.py`: every manifest row equals
 the snapshot row, every saved file hashes to its manifest entry).
 
+## Refusals a caller can sort
+
+The refusals a caller has to tell apart are types in `mssql_config_apply` (`anyhow::Error::downcast_ref`),
+with the messages they always had. The drop-in `ibcmd infobase config apply` (`src/dropin/apply.rs`) and
+any other caller sort by type, not by text; `run_command` prints the same distinction as a JSON report with a
+`refused` key. Nothing was written in any of them.
+
+| Type | Fields | When | `refused` in the report |
+|---|---|---|---|
+| `StructuralRefusal` | the gate's verdict | the gate refuses the stage (message: the gate's own text, for the default gate `Verdict::refusal()`) | `needs_native_apply` |
+| `NeedsNativeApply` | `command` (`NativeCommand::Apply` or `Repair`), `reason` | the stage or the base needs the native tool: a `deleted` list that asks for more, an overlay in `Params`, a `deleted_dynupdate_*` row, a new object on an empty change register, a new object on 8.5, an unfinished operation (`Repair`) | `needs_native_apply` (with `native_command`, `reason`) |
+| `ExclusiveAccessRefused` | `database`, `sessions` (id, login, host, program, ...), `in_transaction` | other user sessions on the database; `in_transaction` is true when the in-transaction check (`THROW 57302`) found them after the plan had not | `exclusive_access` |
+| `ExclusiveAccessUnprovable` | `reason` | exclusivity cannot be proved: no `VIEW SERVER STATE` (57301) | `exclusive_access_unprovable` |
+| `BackupRequired` | none | a restructuring that writes, without `--recovery-backup` or `--i-have-a-backup` (Russian message naming both) | `backup_required` |
+
+Refusals raised inside the transaction are mapped from the SQL Server error **code** of the `THROW` (57302
+other sessions, 57301 no `VIEW SERVER STATE`, 57307 and 57316 an unfinished operation or schema state), not from
+text. One test per type checks the message, the downcast and, for the transaction codes, the mapping; the drop-in's
+tests (its side) switch from message matching to these types.
+
+## Recovery artifact and its retention
+
+The artifact went from thousands of files to **one**: the saved row bytes are appended to `rows.pack` and the
+`.tsv` manifests refer to them as `rows.pack@<offset>+<length>`. A stage of the whole tree saved 9 176 files
+(78 MB) in `%TEMP%` and took 14 s of a 62 s apply (Defender scans every file). Next to the pack: `manifest.json`
+(schema 2: `pack`, counts, and `backup` when the apply took or was told of one), `config_replaced.tsv`,
+`special_rows.tsv`, `change_registrations_before.tsv`, `MobileVersions.dat.before`, the new-object files, and a
+`README.txt` that says how to read them back. `tools\verify_recovery.py` (lab) checks every manifest row against the
+before-snapshot and every pack range against its hash.
+
+**Retention.** Without `--recovery-dir` the artifact goes to
+`%TEMP%\ibcmd-rs\config-apply-recovery\<database>-<16 hex digits>`; after a **successful** run the older
+artifacts of **that database** beyond the newest five are removed (`--recovery-keep N`; 0 keeps all). Only
+directories with that name pattern are candidates; a directory the caller names with `--recovery-dir` is never
+touched, and a failed run deletes nothing. The volume that remains is what one apply saves (the replaced rows
+and the manifests): 78 MB for a whole-tree stage of a 9 500-row base.
+
+## Restructuring inside the apply (S1-A, #397)
+
+The restructuring that track ddl developed (rebuilding the tables of a catalog or document for new attributes,
+tabular sections, wider strings, the index flag, plain new catalogs and documents) runs **inside this apply's
+transaction**, so a failed assertion rolls the rebuilt tables back with the rest and `ConfigSave` is emptied only at
+the commit. Ported from `feat/0.4-restructure-s1` (not merged), where their spike does it in a transaction of its own.
+
+**The seam.** A gate that lets a restructuring through hands the apply a `StructurePhase` through
+`StructuralGate::take_structure` (default: none; the conservative gate and `ApplyCheckGate` refuse
+restructurings and have none):
+
+- `sql`: the structure work as T-SQL. The script runs it after the fingerprint assertions and `@now`, before the fold
+  and the move; the text assumes the transaction, `XACT_ABORT ON`, the exclusive table locks, the variable `@now`,
+  declares variables with the prefix `@ddl_` only and does not read `Config`.
+- `params_rewrites`: the `Params` cache rows the phase makes stale (the XDTO model `.si`, the object registry `.si`,
+  `siVersions`). They are merged with the apply's own guarded rewrites (`merge_params_rewrites`); a row **both**
+  want -- the object registry `1a621f0f` and `siVersions` when one stage adds a form and an attribute -- is a
+  **refusal** (`NeedsNativeApply`): apply the two changes in two steps.
+- `tables`, `objects`, `caches`: what the report names (`structure`), and the apply's `tables_touched` and
+  `not_written` follow from it.
+
+`--allow-restructure s1` (`ConfigApplyOptions::allow_restructure`) picks track ddl's gate in `structural_gate()`. That
+gate is **not merged yet**: until it is, the choice refuses with «the S1 restructuring gate is not part of this build»,
+and the wiring is one line in `structural_gate()`. The seam is tested by the script tests (the phase runs inside the
+transaction, between the assertions and the move, also ahead of a dynamic fold; without a phase the script is what it
+was) and by the acceptance run below.
+
+**Acceptance: the T1 types case through `mssql-config-apply` equals native.** Twins of the БСП 8.3.27 base with the
+restructure track's T1 stage (attributes of every basic type on five catalogs and a document: 9 rows, 361 KB), restored
+from their backup (`F:\ibcmd\lab\04\restructure\bak\...t1_staged.bak`); the phase was wired to the apply with a
+temporary local overlay of ddl's gate (the merge is theirs):
+
+| | Native | This apply |
+|---|---|---|
+| Time | 269.6 s | **10.1 s** in all (transaction 7.8 s) |
+| The 11 rebuilt tables (`_Reference569`, `16`, `20` with two `_VT`, `2598`, `9367`; `_Document39` with three `_VT`) | | rows, columns and indexes equal; only the names SQL Server generates for two primary keys differ |
+| `Config` | | **9 841 of 9 841 rows identical** |
+| `Params` | | 34 of 38 rows with the same inflated content, among them the XDTO model and the object registry `.si` that the phase rewrites; the other 4 are the two `.ui`, `siVersions` and `DBNamesVersion-DBNames` (native extras) |
+| Tables of the database | 2 234 | 2 234, the same names; `DBSchema` lists the same 1 761 tables |
+| `DBSchema` | | equal but for the two entries `DbCopies` and `DbCopiesUpdates` the native apply rewrites (known difference) |
+| Native `config check` on our result | | «успешно завершена» (6.4 s) |
+| Native `config apply` afterwards | | «Обновление конфигурации базы данных не требуется» (7.9 s) |
+| Native `config export` of both twins | | **12 198 files, all identical** |
+
+Without a backup option the same run refused before writing anything (exit 1). The register (`_ConfigChngR`) was not
+compared on this case.
+
+**Backup policy for structural applies.** A restructuring drops the old tables inside the transaction; the recovery
+artifact keeps the `Config` rows and the caches, not the tables. So an apply that **restructures and writes** refuses
+unless the operator names a way back:
+
+- `--recovery-backup <file>` (recommended): before the transaction the apply takes
+  `BACKUP DATABASE ... TO DISK = <file> WITH COPY_ONLY, COMPRESSION` (a path the SQL Server service can write),
+  refuses if the file exists, fails without touching the database if the backup fails, and names the file in the
+  report (`backup`: kind `file`, `path`, `seconds`; `timings.backup_ms`) and in the recovery artifact
+  (`manifest.json` `backup`, `README.txt`). Measured on the 8.5 twin: 5.2 s for a 1 GB database, the backup taken
+  before the recovery artifact.
+- `--i-have-a-backup`: the operator says they have one; recorded in the report as `backup` kind `acknowledged`.
+
+A stage that does not restructure needs neither. `--dry-run` and `--rehearse` need neither and write nothing that
+stays (the plan prints a warning that a real run will need one). The refusal is `BackupRequired`, in Russian, exit 1,
+and names both options; the drop-in accepts the same two options (its side, `ConfigApplyOptions::backup`,
+`BackupPolicy::{None, Acknowledged, File}`). Tests: the rule, the type and its text, the report, the ordering of the
+backup before the recovery artifact and of both before the transaction.
+
+## ERP UH 8.3.27 at scale (#392)
+
+**Base.** The corpus `uha8327` (ERP УХ on 8.3.27), restored with `restore-clone.ps1 -Corpus uha8327`: 118 377 `Config`
+rows (51 second parts, 1 638 572 555 bytes), database 4.3 GB, 21 187 tables, no infobase users, `SchemaStorage` state
+100, 156 dynamic alias rows of two generations with no `DynamicallyUpdated` marker (the plan warns that they belong to no
+generation and leaves them), `_ConfigChngR` **empty** (no change registrations, so `_MessageNo` has nothing to reset and
+a new form or template is refused; no register row is inserted for an existing object). The twin of the staged clone is
+a `BACKUP ... COPY_ONLY` of it, restored (`uha_stage_a.bak`, 1.7 GB); native runs took the heavy lock and the native lock,
+one command per hold; ours the heavy lock.
+
+**Stage A: 300 edited common modules** (a comment line appended; 603 rows, 5.5 MB).
+
+| | Native `config apply --force --dynamic=disable` | This apply |
+|---|---|---|
+| Time | 639.8 s | **34.8 s** in all: transaction 1.4 s, gate 20.0 s, inventory 11.0 s, recovery 1.4 s, fingerprints 0.2 s |
+| Transaction log | | +17.5 MB |
+| `Config` | | **118 377 of 118 377 rows identical** (per-row SHA-256 of name, part, size, attributes, timestamps and bytes) |
+| `Params` | | differ only in what the native apply writes at every apply: 16 `.si` rows re-encoded with unchanged text and `siVersions`, the two `.ui` rows, and the identity GUIDs of `ibparams.inf` and `locale.inf` |
+| `Files` | | `MobileVersions.dat` only |
+
+The native `config export` of the own-applied twin (887 s, 140 709 files) against the reference export of the same
+corpus: exactly the 300 edited files differ, and each equals the edited source (300 of 300). The native twin's export was
+not made: `Config` is equal row for row, and the export is a function of it.
+
+**Are native's extra writes needed?** Tested on the own-applied twin, in this order:
+
+1. native `ibcmd infobase config check`: succeeds (121.2 s);
+2. a probe stage (one module of 4 MB, marker `v1`) applied by this apply (33.8 s in all), then a **new session in the 8.3.27
+   cluster** (the twin registered with `register-ib.ps1`, COM connector, no user): it reads `ibcmd-rs-uh-probe-v1` (opening
+   a session on this base takes 55 to 75 s);
+3. a **later native apply** of a second probe stage (`v2`) on the same twin: exit 0 in 70.3 s ("Проверка корректности
+   метаданных", "Принятие изменений", a new generation; no structure phase, no help index), and a new cluster session reads
+   `ibcmd-rs-uh-probe-v2` (63 s).
+
+So the minimal write set is enough on this base: the `.ui` rows, the `.si` re-encodings and `siVersions`, the identity
+GUIDs of `ibparams.inf`/`locale.inf` and the `_DbCopies*` entries are not needed for a check, for a session or for a later native
+apply, which writes what it wants. This apply never copies the identity GUIDs.
+
+**Stage B: the whole configuration** (every published row, no aliases, a new `versions` generation: the worst case of the
+importer that stages nearly all rows; 118 221 rows, 56 758 descriptors, 61 460 bodies, 1 634 192 780 bytes):
+
+| Phase | Dry run (cold cache) | Real run |
+|---|---|---|
+| storage check | 1.3 s | 0.1 s |
+| inventory | 141.5 s | 40.0 s |
+| gate | 27.8 s | 21.2 s |
+| fingerprints | 54.3 s | 91.0 s |
+| recovery artifact | - | 19.5 s |
+| SQL (the transaction, with its own re-verification and the move) | - | 526.9 s |
+| **total** | **226.1 s** | **699.4 s** |
+
+Transaction log (recovery model SIMPLE, sampled every 5 s from `master` so that the sampler holds no connection to the
+target): the log file grew from 72 MB to **9 224 MB**; peak used **9 162 MB**, of it the transaction's own 4 894 MB used
+and 3 496 MB reserved -- about **5.6 times the bytes moved**. The data file grew from 4 296 to 5 704 MB. A whole-tree apply
+therefore needs log space of about six times the stage and data space of about its size, on the volume of the log file
+(F: had 540 GB free). The gate's share of a whole-tree run is small (3 %); the plan's hashing is not: inventory and
+fingerprints together take 131 s of the 699 s (and the transaction hashes the same rows again for its assertions).
+Proposals: skip rows byte-identical to `Config` (all but 300 of the 118 221 in stage A are), and reuse the plan's hashes in
+the transaction; neither is done.
+
+## 8.5 (#392)
+
+The blanket refusal of the 8.5 profile is lifted. Capability `mssql.config.apply` (profiles/platform/*.json; documented in
+`profiles/README.md`) admits the own apply per build; it is independent of `mssql.main.write`, which stays unsupported on
+8.5. `8.3.27.1989` declares neither. New forms, templates and bodies are measured on 8.3.27 only and are **refused on
+8.5** (`NeedsNativeApply`). `verify_mssql_storage_profile` checks the new capability.
+
+**Evidence: twins of the БСП 8.5.1.1150 corpus** (`bsp85_*`, 9 948 `Config` rows, 1 GB), the same stages given to the
+native apply on one twin and to this apply on the other:
+
+| Stage | Native | This apply |
+|---|---|---|
+| A: 12 edited modules, 27 rows, 412 KB | 233.8 s | **13.0 s** in all (transaction 8.0 s) |
+| C: one module, 5 rows, 366 KB | short (no structure phase) | 6.3 s |
+
+After both: `Config` **9 948 of 9 948 rows identical**; `_ConfigChngR` (21 219 rows): the 42 rows of the staged objects equal,
+the others differ by the `_MessageNo` normalisation of the first native apply (known difference); `ExtProps` (16 769
+objects) and `Params` (39 rows) equal, `siVersions` 16 entries equal; `.si` texts permuted by the native apply (known
+difference); `Files` 42 rows against 369 (help-index chunks). The native `config export` of both twins: **12 337 files, all
+identical**. A **new session in the 8.5 cluster** (`register-ib.ps1 -Platform 8.5`, COM connector `V85.COMConnector`,
+`localhost:3541`, user «Администратор (обычное приложение)») reads the applied change: `ibcmd-rs-85-probe-v1` after the first
+own apply and `ibcmd-rs-85-probe-v2` after a second one (`--exclusivity assumed`: the cluster's working process holds
+SQL connections while a session is open). The backup policy
+(`--recovery-backup`) was also run end to end on this twin (5.2 s).
+
+Two remarks for the lab tools, not for this program: `register-ib.ps1 unregister -Platform 8.5` fails for an infobase
+whose administrator is «Администратор (обычное приложение)» (it falls back to the name `Администратор`); the twin was
+removed with `rac infobase drop` under its own name and uuid. And the drop-in keeps a refusal of 8.5 of its own
+(`src/dropin/apply.rs`); with this branch it can go.
+
 ## Limits and open points
 
 - **New rows**: only a new form or template of an existing object (bodies `.0`, and `.1` for
@@ -626,15 +950,23 @@ the snapshot row, every saved file hashes to its manifest entry).
 - **Dynamic-update overlays in `Params`** (a `.si` row under a `_dynupdate_` name, left by a native
   dynamic apply) are refused: this apply folds only `Config` overlays.
 - **Big stages**: a row above 10 MB (several parts) is moved as the stage has it (S6, a hand-made stage); one of the roles that
-  need a text comparison is refused when it has parts. The whole apply is one transaction: the log space a stage of
-  hundreds of MB needs is not measured (the S2 stage, 9 517 rows and 81 MB, took 5.6 s of SQL on an idle machine and 120 s under load from other tracks). The importer stages every row of the tree
+  need a text comparison is refused when it has parts. The whole apply is one transaction: a stage of 1.6 GB (the whole
+  ERP УХ configuration) needs a log of about six times its size (9.2 GB measured) and took 699 s; see
+  [scale](#erp-uh-8327-at-scale-392). (The S2 stage, 9 517 rows and 81 MB, took 5.6 s of SQL on an idle machine and 120 s under load from other tracks.) The importer stages every row of the tree
   although only the edited ones differ from `Config` (9 517 staged, 9 515 identical in the cluster proof); the native apply
   moves them all too. A mode that would leave the byte-identical rows out is possible, and would differ from the native
   apply only in `Creation`/`Modified` of those rows -- a proposal, not done.
-- **Removals** are not honored: a stage with a `deleted` row is refused, and no row is deleted that a
-  staged row does not replace (see "Removals"). The stage of the platform's own import is refused for the same
-  reason and for its rewritten descriptors.
-- **8.5** is refused: the apply is measured on 8.3.27 only.
+- **Removals** are honored only as the native apply consumes an empty list or the dynamic rows (step 1); a `deleted`
+  list that names a removed form, template or body is refused (step 2 waits for a native twin of the `formdel` edit), and
+  no row is deleted that a staged row does not replace, apart from the dynamic rows a consumed list names (see
+  "Removals"). The stage of the platform's own import is refused for its non-empty list and for its rewritten descriptors.
+- **8.5** is admitted for the same stages as 8.3.27 minus new objects (see [8.5](#85-392)); on any other 8.x profile the apply
+  is refused.
+- **Restructuring**: the seam is in place and tested, the gate that fills it (`--allow-restructure s1`) waits for track ddl's
+  merge; a structural apply needs `--recovery-backup` or `--i-have-a-backup`.
+- **Exchange plans**: `_MessageNo` is reset for the owners of staged rows only; an object whose message number the native
+  apply turns from NULL to 0 (first apply of a restored clone) or to NULL (owners of a dropped overlay row, E3b) is not
+  touched. Untested on a base with pending node messages.
 - The help index and the extension CAS garbage are left as they are; they are caches.
 - A working process that keeps a pooled connection makes the SQL exclusivity check refuse; the
   native standalone `ibcmd` does not check at all.

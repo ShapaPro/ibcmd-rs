@@ -32,6 +32,7 @@ use crate::metadata_model::export::names::{
 use crate::sql::{SqlClient, SqlParam};
 
 use super::model::{RowMeta, RowName, classify_name, quote_ident};
+use super::sqlgen::ParamsRewrite;
 use super::versions::{inflate_row, strip_bom};
 
 /// One reason the staged configuration is not for the own apply.
@@ -52,6 +53,20 @@ pub struct GateStats {
     pub new_objects: usize,
     /// Changed body rows by the role the registry gives them.
     pub bodies_by_role: BTreeMap<String, usize>,
+    /// What the restructure check looked at (the `apply-check` gate only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restructure_check: Option<RestructureCheckStats>,
+}
+
+/// The figures of the restructure check's verdict that a report keeps.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RestructureCheckStats {
+    pub staged_rows: usize,
+    pub descriptors_compared: usize,
+    pub body_rows_compared: usize,
+    /// Objects whose descriptor differs, harmless or not.
+    pub objects_changed: usize,
+    pub notes: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -64,12 +79,19 @@ pub struct GateVerdict {
     pub blockers_omitted: usize,
     pub stats: GateStats,
     pub gate: String,
+    /// The refusal in the words the gate has for it (the restructure check
+    /// speaks Russian: «требуется штатный config apply: ...»); the
+    /// conservative gate leaves it to the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
-const MAX_LISTED_BLOCKERS: usize = 200;
+pub(super) const MAX_LISTED_BLOCKERS: usize = 200;
 
 impl GateVerdict {
-    pub(super) fn block(&mut self, row: &str, reason: impl Into<String>) {
+    /// Adds a blocker. Public: a gate outside this module blocks what it does not
+    /// cover, too.
+    pub fn block(&mut self, row: &str, reason: impl Into<String>) {
         self.restructuring_required = true;
         if self.blockers.len() < MAX_LISTED_BLOCKERS {
             self.blockers.push(GateBlocker {
@@ -101,11 +123,46 @@ pub struct GateInput<'a> {
     /// The kind of every accepted new object, by uuid, for the role check of
     /// its bodies.
     pub new_object_kinds: &'a HashMap<String, &'static str>,
+    /// Staged rows the caller consumes without moving them into `Config`
+    /// (lower-cased names): the `deleted` list, when it is empty or names
+    /// only the rows of a dynamic update. A gate does not judge them.
+    pub consumed_rows: &'a HashSet<String>,
+}
+
+/// What a gate that lets a restructuring through hands to the apply: the structure work as T-SQL for
+/// the apply's own transaction, and the `Params` cache rows it makes stale. The apply runs the text
+/// after its fingerprint assertions and before it folds the dynamic generations and moves the rows
+/// (one transaction: a failed assertion rolls the rebuilt tables back with everything else), and
+/// writes the cache rows through its guarded rewrite ([`ParamsRewrite`]), together with its own.
+///
+/// The text assumes what the script gives it: a transaction with `XACT_ABORT ON`, the exclusive locks
+/// on `Config`, `ConfigSave`, `Params` and `Files`, exclusive access to the database, the variable
+/// `@now` (the timestamp the platform writes). It declares variables with the prefix `@ddl_` only and
+/// does not read `Config`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StructurePhase {
+    #[serde(skip)]
+    pub sql: String,
+    #[serde(skip)]
+    pub params_rewrites: Vec<ParamsRewrite>,
+    /// The tables the phase rebuilds or creates.
+    pub tables: Vec<String>,
+    /// One line per changed object.
+    pub objects: Vec<String>,
+    /// One line per cache row the phase rewrites (`Params.<row>: what`).
+    pub caches: Vec<String>,
 }
 
 pub trait StructuralGate {
     fn name(&self) -> &'static str;
     fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict>;
+
+    /// The structure phase the last [`StructuralGate::check`] prepared for the stage, when the gate
+    /// lets a restructuring through instead of refusing it. Taken once; a gate that refuses
+    /// restructurings (the conservative one, the restructure check) has none.
+    fn take_structure(&self) -> Option<StructurePhase> {
+        None
+    }
 }
 
 /// The rule above.
@@ -140,6 +197,9 @@ impl StructuralGate for ConservativeGate {
         let mut multi_part: HashSet<String> = HashSet::new();
         for row in input.staged {
             let name = row.name.to_ascii_lowercase();
+            if input.consumed_rows.contains(&name) {
+                continue;
+            }
             if row.part == 0 {
                 first_parts.insert(name.clone());
             } else {
@@ -162,6 +222,9 @@ impl StructuralGate for ConservativeGate {
             let active = input.active.get(&row.key());
             let identical = active.is_some_and(|active| active.sha256 == row.sha256);
             let name_key = row.name.to_ascii_lowercase();
+            if input.consumed_rows.contains(&name_key) {
+                continue;
+            }
             match classify_name(&row.name) {
                 RowName::Service(name) => {
                     verdict.stats.service_rows += 1;

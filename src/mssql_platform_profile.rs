@@ -21,6 +21,9 @@ use crate::sql::{SqlExec, SqlLogin, SqlTarget};
 
 /// Capability that admits main-configuration writes for a platform profile.
 pub const CAPABILITY_MAIN_WRITE: &str = "mssql.main.write";
+/// The own exclusive `config apply` (`mssql-config-apply`): a stage that needs no
+/// restructuring moved from `ConfigSave` into `Config` in one transaction.
+pub const CAPABILITY_CONFIG_APPLY: &str = "mssql.config.apply";
 /// Capability that admits extension writes for a platform profile.
 pub const CAPABILITY_EXTENSION_WRITE: &str = "mssql.extension.write";
 /// Profile fingerprint key for `IBVersion`/`PlatformVersionReq`.
@@ -85,6 +88,12 @@ impl MssqlNativePlatformProfile {
     /// Main writes require an evidenced activation protocol for the build.
     pub fn require_main_write_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_MAIN_WRITE)
+    }
+
+    /// The own exclusive apply requires that its end state was compared with
+    /// the native apply on this build.
+    pub fn require_config_apply_supported(self) -> Result<()> {
+        self.require_capability(CAPABILITY_CONFIG_APPLY)
     }
 
     /// Extension mutation requires an evidenced CAS/registry protocol.
@@ -630,14 +639,15 @@ pub struct MssqlStorageVerification {
 /// The storage half of [`verify_mssql_native_profile`] for commands that run
 /// against the database alone (no cluster, no RAS): the live column layout of
 /// the five configuration tables and `IBVersion` must equal what the claimed
-/// profile declares, and the profile must admit main-configuration writes.
+/// profile declares, and the profile must admit the own exclusive apply
+/// (`mssql.config.apply`).
 /// The platform *build* is then the caller's claim, not an observation.
 pub fn verify_mssql_storage_profile(
     claimed: MssqlNativePlatformProfile,
     client: &dyn crate::sql::SqlClient,
     database: &str,
 ) -> Result<MssqlStorageVerification> {
-    claimed.require_main_write_supported()?;
+    claimed.require_config_apply_supported()?;
     let db = format!("[{}]", database.replace(']', "]]"));
     let sql_text = format!(
         "SET NOCOUNT ON;
@@ -735,6 +745,24 @@ mod tests {
             .require_extension_write_supported()
             .expect_err("8.5 extension writes must fail closed");
         assert!(explicit_extension.to_string().contains("8.5.1.1150"));
+    }
+
+    #[test]
+    fn the_own_apply_is_declared_per_build_and_apart_from_main_write() {
+        // the own exclusive apply has a capability of its own: 8.5.1 leaves
+        // main-configuration writes (the live generation switch) unsupported and
+        // still admits the apply, once it was compared with the native one there
+        MssqlNativePlatformProfile::Platform8_3_27_2214
+            .require_config_apply_supported()
+            .expect("8.3.27.2214 apply is compared with the native one");
+        MssqlNativePlatformProfile::Platform8_5_1_1150
+            .require_config_apply_supported()
+            .expect("8.5.1.1150 apply is compared with the native one");
+        // 8.3.27.1989 declares no write capability of any kind
+        let undeclared = MssqlNativePlatformProfile::Platform8_3_27_1989
+            .require_config_apply_supported()
+            .expect_err("an undeclared capability must fail closed");
+        assert!(undeclared.to_string().contains("is not declared"));
     }
 
     #[test]
