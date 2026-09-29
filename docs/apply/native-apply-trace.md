@@ -10,7 +10,7 @@ configuration with its extensions (2 234 tables in the database) restored from t
 create` (section 11). Not measured: multi-part rows (> 10 MB), extensions being changed by the apply, `--dynamic=auto`.
 
 Scope of the acceptance of #336 (agreed with the coordinator on 2026-09-29): the БСП cases 1-3 of this document, the
-ERP УХ case 1 (modules only; planned, section 12) and the ERP УХ end-to-end runs of ibcmd-rs 0.3 (native create, our
+ERP УХ case 1 (modules only; measured, section 12) and the ERP УХ end-to-end runs of ibcmd-rs 0.3 (native create, our
 import, native apply, native export identical) as the new-database evidence on УХ. The УХ cases 2 (attribute) and 3
 (new database) are not traced.
 
@@ -29,9 +29,9 @@ The full captures (traces of 17 000 - 110 000 statements, snapshots, diffs) are 
 2. **Two paths.** The apply runs either the LONG path of section 3.2 (prepare, name tables, bookkeeping and rebuild of the change
    register through "new generation" tables, the `commit` marker and the switch, promotion, tail) or a SHORT one (no structure
    phase, no register rebuild, no name tables, no CAS garbage collection: 2 322 statements against 17 126 on the БСП). Measured
-   on 37 applies (section 6.4): the long path is taken when a **staged descriptor row differs in content** from `Config`
+   on 37 applies (section 6.4): the long path is taken when a **staged descriptor row of a catalog or document differs in content** from `Config`
    (a changed synonym or attribute; a native `import files` of a catalog or document module, which re-saves the object in the current
-   format) **or when more than 20 rows are staged**, otherwise the short path. The kind of the module, the state of the database
+   format; not a data processor's descriptor, which stays short) **or when more than 20 rows are staged**, otherwise the short path. The kind of the module, the state of the database
    and the staging tool as such do not matter. What changes with the change is only the *content* of a few rows (section 4) and,
    for structure changes, the DDL of `restructuring.md`.
 3. **Rows rewritten on every apply of an existing infobase, whatever the change (both paths)**: `Params <guid>.ui` (3 rows),
@@ -56,7 +56,12 @@ The full captures (traces of 17 000 - 110 000 statements, snapshots, diffs) are 
    everything was committed; a second apply is a no-op with exit 0 (section 6.3).
 7. **Dates.** Native writes `Creation`/`Modified` with the `_YearOffset` (+2000 years: `4026-09-29`); the rows our
    import stages carry `2026-...`. `infobase create` itself writes real years. (Section 8.)
-8. Findings for other tracks and the open questions are in sections 8 and 9.
+8. **ERP УХ (21 187 tables, 118 k `Config` rows; section 12).** The same kind of apply (10 module bodies, 23 staged rows) took 522 s and
+   28 701 statements, 99 % of them reads (52 k descriptors in batches, 20 k bodies one by one, 6 k `_DataHistoryMetadata` probes); the
+   writes were 228 statements in 28 s. No CAS garbage collection (`ConfigCAS` is empty), no register rebuild (the register is empty), no
+   `SchemaStorage` walk: the structure line is in the log, the write set is the short path's plus `DBNames.New` passes, `_DbCopies*`
+   housekeeping and, because no native apply had completed on that base, `ibparams.inf`, `locale.inf` and two new `.ui` rows.
+9. Findings for other tracks and the open questions are in sections 8 and 9.
 
 ## 2. Method and cases
 
@@ -385,16 +390,29 @@ the scripts are `scripts/apply-trace/lab/run_paths*.ps1`.
 The traced applies (sections 2, 6.1 - 6.3, 11) fit the same rule: 2n (9 rows, no change) short; 1x, 1d, 1x', 1d' (38 rows),
 c1c (28), the 8.5 pair (41), E01, 2a, 2c and case 3 long.
 
-**The rule that fits all 37 applies.**
+Seven stages of track apply (S1 - S5C, `docs/apply/own-apply.md` on feat/0.4, their native logs in
+`F:\ibcmd\lab\04\apply\logs\native_*.out`) were staged by that track (with its own tools or the native import) and applied by the native `config apply`; this track did not
+run them and uses them only to test the rule: S1, S2, S3 (30 rows) and S5B (4 rows, the descriptor of a **catalog** gains a form reference) long; S4 (16 rows), S5A (15 rows) and
+S5C (2 rows) short, S4 and S5A although they stage changed descriptors of a **data processor** (rule 1 below). The evidence
+file lists six of them (S1 has no row count in that document).
 
-1. **A staged descriptor row (`<guid>`, no suffix) whose content differs from the row in `Config` gives the long path.**
-   Changed synonym (X4), added attribute (2a), new object (2c), a new infobase (3); and every native `import files` of
+**The rule that fits all 37 applies, qualified by those seven stages.**
+
+1. **A staged descriptor row (`<guid>`, no suffix) of a catalog or a document (an object that owns tables) whose content differs
+   from the row in `Config` gives the long path.** Changed synonym (X4), added attribute (2a), new catalog (2c), a new infobase (3),
+   a form reference added to the descriptor of a catalog (track apply, S5B: 4 rows, long); and every native `import files` of
    a catalog or document module (X3, Y8, Y10, Y11), because the platform **re-saves such an object in the current
    serialization**: on the corpus the document descriptor grows from 14 983 to 15 947 B and the catalog descriptor from
    42 266 to 44 219 B (field counts `13 -> 14`, `24 -> 25`, `5 -> 6`, a block `3b10624f-... {"#", 502b7765-...}` and a `0 {1
    00000000-...}` added, the header count `56 -> 57`). A form or a common module is not re-saved that way: their descriptors
    stay byte-identical after a native import (Y9, Y12, Y14; compared with a pristine clone) and the apply is short. Our patch-mode
    stage never changes the descriptor of an object whose descriptor did not change (all our arms but X4).
+   **The rule does not hold for a data processor.** Track apply's S4 (16 rows) and S5A (15 rows) staged changed descriptors of a data
+   processor (its active text and the references to the new forms and templates) together with the descriptors of the new forms
+   and templates, and both stayed on the short path; only the row limit of rule 2 sends a data-processor stage to the long path.
+   So rule 1 is proven for **catalogs and documents** (every arm of this document with a changed descriptor is of that kind, plus
+   S5B), refuted for data processors, and **untested for every other kind** of object (registers, enumerations, common modules,
+   reports, ...) and for the descriptors of forms and templates other than as new objects.
 2. **With unchanged descriptors the number of staged rows decides: up to 20 rows short, from 21 rows long.**
    The last short ones have 19 rows (Y20: eight common modules) and 20 rows (Y2, Y15: a common module and a catalog with its
    forms); the first long ones 21 (Y17: nine common modules), 23 and 25 (Y18, Y19). The kind of the rows does not matter: a common
@@ -411,7 +429,8 @@ used clones: Y5, Y7 against c1c, X3).
 
 **Not known.** Why the platform switches at that number of rows: the statements of the two paths are the same up to the first
 write and the check phase reads the same rows, so the decision is taken in memory. Also not known: whether the limit counts rows or
-objects; other kinds of objects (registers, enumerations, ...); whether the limit is the same on 8.5 (there only the long case was
+objects; the descriptor rule for kinds of objects other than catalogs and documents (a data processor's does not count: S4, S5A;
+registers, enumerations, common modules, ... untested); whether the limit is the same on 8.5 (there only the long case was
 measured, section 11); Y14 asked for a common module and a catalog module, but the native import staged the common module only
 (5 rows; the reason is not established), so it counts as a one-object set.
 
@@ -423,8 +442,11 @@ the register ids alone. Times (indicative; other tracks were working): the short
 
 **For the own apply.** The long path does everything the short one does and more, so it is safe for any set; every database of these
 experiments, after either path, took the next native apply. The rule above is the selector if the short path is wanted as an
-optimization: a changed descriptor or more than 20 staged rows means long. The rule describes what native does; a
-database produced by our apply has to be accepted by native whichever path we take.
+optimization: a changed descriptor of a catalog or a document, or more than 20 staged rows, means long (a data processor's
+descriptor does not). The rule describes what native does; a
+database produced by our apply has to be accepted by native whichever path we take. The ERP УХ apply (section 12) confirms rule 2 at
+twelve times the size (23 staged rows: the structure line appeared) and shows that "long" names a set of phases, not a fixed write set:
+with an empty change register and no extensions it wrote the short path's rows plus a few small items.
 
 ## 7. Which of it is required (classification, mostly hypothesis)
 
@@ -464,9 +486,10 @@ native `config export` and `infobase config check`.
 
 ## 9. Open questions
 
-1. **What decides the long or the short path** - answered empirically in section 6.4: a staged descriptor row that differs from
-   `Config` (also the native re-save of a catalog or document in the current format), or more than 20 staged rows. Left open: why
-   the platform switches at that number of rows (rows or objects), the rule for other kinds of objects, and on 8.5.
+1. **What decides the long or the short path** - answered empirically in section 6.4: a staged descriptor row of a catalog or document that differs from
+   `Config` (also the native re-save of a catalog or document in the current format), or more than 20 staged rows. A data processor's
+   descriptor does not count (track apply, S4 and S5A). Left open: why the platform switches at that number of rows (rows or
+   objects), the descriptor rule for kinds of objects other than catalogs, documents and data processors, and on 8.5.
 2. **`_ConfigChngR`**: the `_MessageNo` rule of section 4.4 is exact on six applies (1x, 1d, 1x', 1d', 2a, 2c); open: which objects and nodes a
    register holds at all (20 685 rows, five nodes; a new object went to three nodes), and the generator of the
    row ids.
@@ -479,13 +502,14 @@ native `config export` and `infobase config check`.
 6. **`ConfigCAS` GC**: the reference rule; does it run when nothing is unreferenced?
 7. **The failed first apply** (6.3): is the `_Const3050` row needed (the constant's default value)? Does a second
    apply with a real change write the missing `.ui`/help index rows?
-8. **Multi-part rows** and **extension changes** in an apply, `--dynamic=auto`, **ERP УХ** (case 1 is planned, section 12):
-   not traced.
+8. **Multi-part rows** and **extension changes** in an apply, `--dynamic=auto`, **ERP УХ cases 2 and 3** (case 1 is measured, section
+   12): not traced. Also open from the УХ run: a new object on an empty register, the bare 13-row stage, a steady-state apply, a base with
+   extensions or users (12.7).
 
 **Proposed next step for the apply track:** implement the exclusive apply in two layers: first the SHORT path (the phases of
 2n: small and fully known), then the LONG extras (name tables, register rebuild through `..NG` tables, garbage collection: section
-3.2 and `restructuring.md`). Take the long path when a staged descriptor differs from `Config` or when more than 20 rows are
-staged (section 6.4), or always: it is a superset and safe. Use `compare_traces.py` to check each layer against a native oracle on a
+3.2 and `restructuring.md`). Take the long path when a staged descriptor of a catalog or document differs from `Config` or when more than 20 rows are
+staged (section 6.4; a data processor's descriptor does not count), or always: it is a superset and safe. Use `compare_traces.py` to check each layer against a native oracle on a
 twin (the diff of both `after` snapshots must show only random guids, timestamps and the ids of `_ConfigChngR`); test the
 hypotheses of section 7 by dropping the cache writes one at a time.
 
@@ -510,6 +534,11 @@ hypotheses of section 7 by dropping the cache writes one at a time.
   `stage_vs_config.ps1`, `dump_rows.ps1`, `row_sha.ps1`, `run_uh_case1.ps1` (section 12).
 * Evidence of the path experiment: `docs/apply/evidence/native-apply-8.3.27/path-experiment.tsv` (one line per apply of 6.4:
   staged rows, time, phases seen in the log, whether the register ids changed).
+* Evidence of the ERP УХ case (section 12): `docs/apply/evidence/native-apply-uh/` - `trace-summary.md` and `write-phases.md` (the kit's
+  reports), `matrix-uh-vs-bsp.md` (`compare_traces.py` against the БСП long, short and 8.5 applies), `diff-condensed.md` (the
+  snapshot diff without the module texts), `reads-profile.md` (the statements by class and by 30 s), `params-before-after.md`
+  (`ibparams.inf`, `locale.inf`, `log.inf`, the ring). The full capture stays in the lab as
+  `captures\20260929-171426-uh-case1-forms-exclusive` (123 MB with the two snapshots).
 * Evidence of platform 8.5.1.1150 (section 11): `docs/apply/evidence/native-apply-8.5/` - `matrix-first-apply-8.3.27-vs-8.5.md`
   and `matrix-steady-8.3.27-vs-8.5.md` (`compare_traces.py` output, `--skip-config-copies`) and the `write-phases-*.md` of both
   8.5 applies; for `infobase create` `docs/apply/evidence/native-create-8.5/`.
@@ -555,8 +584,9 @@ the extension `DBNames` 49 KB against 37 KB, the help index 47 / 104 / 512 KB ag
 
 ### 11.3 What differs
 
-1. **`_DbCopies*` housekeeping on every apply** (permanent on 8.5, absent on 8.3.27): right after the first pass of the
-   name tables and before the `CREATE TABLE _ConfigChngRNG`: `UPDATE _DbCopiesInfoBaseUse` (1 row), `DELETE FROM
+1. **`_DbCopies*` housekeeping on every apply of a base that has the `_DbCopies*` tables** (the 8.5 БСП corpus; absent from the 8.3.27
+   БСП apply, whose corpus predates `_DbCopiesInfoBaseUse`, but **not a version feature**: the 8.3.27 apply of the УХ base does the same,
+   section 12.4): right after the first pass of the name tables and before the `CREATE TABLE _ConfigChngRNG`: `UPDATE _DbCopiesInfoBaseUse` (1 row), `DELETE FROM
    _DbCopiesInitialLast`, `DELETE FROM _DbCopiesUpdates` and `TRUNCATE TABLE` of `_DbCopiesTrChObj` and `_DbCopiesTrChanges`;
    the tables are empty in the corpus. It is 2 more DDL statements in the steady state (21 against 19).
 2. **Lock options, first apply only** (not in the steady state, measured on the second apply): after the register switch
@@ -580,13 +610,146 @@ Consequence for the own apply: one implementation serves both platforms, with th
 is an upgrade step that a correct apply on a corpus clone does not need to reproduce (hypothesis, not tested: a database
 without the options works).
 
-## 12. ERP УХ case 1 (planned, not run)
+## 12. ERP УХ 8.3.27, case 1 (measured)
 
-The traced native apply of a modules-only change on the ERP УХ base (118 k `Config` rows, twelve times the БСП) waits for
-the coordinator's go, because it holds the `native` lock for a long time while other tracks depend on it, and for the
-coordinator's OK for one УХ clone (4.2 GB of data). The plan - the staged clone plan, the five edits, the capture settings
-for 100 k+ statements, the expected statement count (50 000 to 270 000, most of the upper part being the CAS garbage
-collection of a first apply), the expected lock hold (6 - 15 min, up to about 60 min with the garbage collection) and the
-disk use (peak 10 - 12 GB, retained about 0.6 GB plus the clone) - is `uh-case1-plan.md`; the runner is
-`scripts/apply-trace/lab/run_uh_case1.ps1` and refuses to start without `-Go`. Scope of the acceptance of #336: the note at
-the beginning of this document. The УХ cases 2 and 3 are not traced.
+Measured on 2026-09-29 as planned in `uh-case1-plan.md`, with the go and the OK for one clone of the coordinator. This is the
+size class the own apply has to handle: 21 187 tables and 118 377 `Config` rows, twelve times the БСП. Together with the БСП
+cases 1 - 3 and the end-to-end runs of ibcmd-rs 0.3 it is the acceptance evidence of #336 for УХ; the УХ cases 2 and 3 are not
+traced.
+
+### 12.1 Set-up
+
+* **Clone** `ibcmd_rs_04_trace_uha_c1`, restored from `uha_parity2_20260924.bak` (37 s; data file 4 296 MB, log shrunk to 72 MB).
+  The corpus looks like a base on which no native apply has completed (its service rows are what `infobase create` writes, see
+  12.4): `ConfigCAS` **0 rows**, the change register
+  `_ConfigChngR` and `_ConfigChngR_ExtProps` **0 rows**, `v8users` 0 rows (so the commands need no `--user`), no extensions
+  (`Params` has no `DBNames-Ext-*`), `Files` 14 rows (the help index in Russian and English, `MobileVersions.dat` of 43 B,
+  `CAS_GC_Info`, `gc.mrk`, `ib.pfl`, ...), `Params` 23 rows (16 `.si` rows of 25.5 MB in all, `DBNames` 3.0 MB stored, no `.ui`),
+  `SchemaStorage` with a 14.9 MB schema text, `ibparams.inf` of 292 B in the 8.5 form and `locale.inf` with zero GUIDs.
+* **Stage**: the five modules of case 1 (common module, catalog object module, document manager module, managed form module, common
+  form module) and five padding common modules, one comment line appended to each; staged by the **native** `import files
+  --base-dir <sparse> --partial` from a sparse directory of 10 files (457 KB; 40 s), 23 `ConfigSave` rows (10 descriptors, 10
+  bodies, `root`, `version`, `versions`). `check_stage.py`: COMPLETE (118 170 `versions` entries, 23 differ). The ten descriptors are
+  **identical** to `Config` (native did not re-save them in another serialization, as it did on the БСП corpus), so rule 1 of 6.4 does not apply and rule 2
+  (23 rows, more than 20) predicted the long path.
+* **Apply**: `ibcmd infobase config apply --force --dynamic=disable`, platform 8.3.27.2214, `heavy` then `native` held from 17:24:42
+  to 17:33:25 (8.7 min), released the moment the command returned; kit capture with `-DataChecksum counts -MaxStatementKB 32
+  -ContentMaxKB 256 -ContentBudgetMB 512`. Capture `20260929-171426-uh-case1-forms-exclusive`; evidence in
+  `docs/apply/evidence/native-apply-uh/`. The runner: `scripts/apply-trace/lab/run_uh_case1.ps1 -Go -SkipRestore -Database
+  ibcmd_rs_04_trace_uha_c1`.
+
+### 12.2 Numbers
+
+| | estimate in the plan | measured | БСП 8.3.27 steady (1x') |
+|---|---|---|---|
+| command | 6 - 15 min (up to 60 with the CAS GC) | **522.1 s** (8.7 min), exit 0 | 30.2 s |
+| statements | 50 000 - 270 000 | **28 701** (28 326 SELECT) | 4 627 |
+| writes to service tables | about 350 + 8 per staged row | **228** in 20 blocks, 26 user transactions | 351 |
+| DDL | register rebuild expected | **2** (`TRUNCATE` of two `_DbCopies*` tables) | 19 |
+| CAS garbage collection | none to 220 000 deletes | **0** (`ConfigCAS` is empty) | 0 (done in the first apply) |
+| trace | 27 min for 500 k events | 28 753 events, 0 dropped, XE file 66.7 MB; **export of the events to XML 7.5 min** (64 events/s, the slow step of the kit), report 8 s | - |
+| snapshots | 15 - 45 min each | 613 s before, 1 077 s after (60 MB each); diff 80 KB | - |
+| disk | peak 10 - 12 GB | clone 4.3 GB (the data file did not grow; log 136 MB), `ibdata` 0.77 GB, capture 123 MB; peak about 5.5 GB | - |
+
+The estimate of the number of statements was too high twice over: there is no garbage collection here, and the reads are 0.24 per
+`Config` row against 0.40 on the БСП. The time and the lock hold were inside the estimate; the disk was well below it.
+
+**Where the time goes** (`evidence/native-apply-uh/reads-profile.md`, times relative to the first statement of the trace):
+99 % of the statements are reads, and 95 % of the 518 s pass before the first write or between write groups; the write groups take about 28 s,
+11.5 s of them for the `.sinew` rows. The platform reads every descriptor (52 154 distinct `<guid>` rows in 115 `IN`-list statements)
+and then **20 376 body rows one by one, each exactly once** (17 390 of them `<guid>.<n>`): 6.4 k of them in the first 245 s
+(«Проверка корректности метаданных»), 13.9 k more between 275 and 500 s. Their statement time is 129 s (6.3 ms each, against 0.84 ms on
+the БСП: the buffer cache of the fresh clone was cold); the rest is the platform's own processing between the statements. In order:
+
+| time | what |
+|---|---|
+| 0 - 245 s | check: 6.4 k single-row `Config` reads, then 30 s (245 - 275) without statements |
+| 275.5 - 281 s | first writes: the `.new` copy of the 23 staged rows (3.8 s, `versions` is 4.0 MB stored), the ring `MobileVersions.datNEW` (once), `DBNames.New` (3.0 MB, first pass) |
+| 281 - 344 s | reads: 1 492 `_ExtensionsRestruct` reads (on a base without extensions), 5 974 `_DataHistoryMetadata` probes (659 on the БСП), 111 aggregate-mode probes of accumulation registers, more `Config` bodies |
+| 344 - 346 s | `_DbCopies*` housekeeping, `_ExtensionsRestructNGS` `DELETE` (0 rows), `DBNames.New` second pass |
+| 346 - 492 s | 146 s of reads only: about 12 k more `Config` bodies («Сбор служебной информации») |
+| 492.5 - 504 s | 16 x `.sinew` (25.5 MB written, 11.5 s) |
+| 504.6 - 509 s | `commit`, promotion of `.si` and `siVersions`, promotion of the 23 rows (0.8 s), clean-up |
+| 510 - 513 s | `.ui`, `ibparams.inf`, `locale.inf`; the help index promotion (all no-ops) |
+
+### 12.3 Which path
+
+The log has the long path's line «Обработка структуры базы данных…», and the rule of 6.4 predicted it (23 rows), but what the
+apply **wrote** is the short path's set plus a few items (12.4): no `..NG` table, no `sp_rename`, no `SchemaStorage` walk
+(`SchemaStorage` and `DBSchema` are only read), no `gc.mrk`, the ring written once, the register untouched. The register has
+no rows on this base, so there is nothing to rebuild or to update: `UPDATE _ConfigChngR SET _MessageNo = NULL` is not even
+issued (the БСП short path issues it). So "long" and "short" name the phases the platform runs; what they write depends on the
+base: the register rebuild and the extension bookkeeping of the БСП long path need a register with rows and extensions.
+
+### 12.4 Families beyond the БСП's, and the ones missing
+
+`evidence/native-apply-uh/matrix-uh-vs-bsp.md` has one row per family against the БСП long, short and 8.5 applies.
+
+**New on УХ** (in no БСП trace):
+
+1. `Params ibparams.inf` rewritten (292 -> 324 B): the platform's own (8.3.27) long form, in place of the 8.5 short form of the
+   corpus, and the two zero GUIDs of the outer group replaced by two new GUIDs; `Params locale.inf` (112 B): its two zero GUIDs replaced by
+   **the same two GUIDs** (`150607a8-...`, `58a6e802-...`). The rows are written by `infobase create` with zeros
+   (`native-infobase-create.md`); consistent with the first native apply on a base whose rows are still in the state `create` left them (`params-before-after.md`).
+2. `Params <guid>.ui`: **two rows inserted** (94 B and 24.7 KB Base64 text), not updated; the БСП bases had them.
+3. The **English** help index (`userDocs_en`, `userVocabulary_en`, `userPostings_en`) is handled next to the Russian one, but the
+   promotions are no-ops on both (`DELETE ... AND EXISTS(<n>.new)` and the rename affect 0 rows): the help build wrote no `.new` rows, and the old
+   index stays.
+4. `_DbCopiesInfoBaseUse` replaced (`_Id` new, `_Description` `localhost:3541 : uha` -> `DESKTOP-SMI5N4O : DefAlias`, the computer name
+   and the alias), two `DELETE`s and two `TRUNCATE`s on `_DbCopies*`: the same steps as on the 8.5 БСП. They are therefore **not an 8.5
+   feature** (section 11.3, item 1 is corrected): they run on every apply of a base that has the `_DbCopies*` tables; the БСП 8.3.27 corpus is older and has
+   no `_DbCopiesInfoBaseUse`.
+5. Reads only: 111 aggregate-mode probes (`SELECT MIN(_AGGMODE), MAX(_AGGMODE), COUNT_BIG(*)`). The other reads exist on the БСП too but
+   scale: 5 974 `_DataHistoryMetadata` probes (659), 1 492 `_ExtensionsRestruct` reads (268, here on a base without extensions), 115
+   `IN`-list statements for 52 154 descriptors (23 for 4 916).
+
+**In the БСП long path and missing here**: the register rebuild through `..NG` tables and its DDL (`_ConfigChngR` is empty), the
+`SchemaStorage`/`DBSchema` walk and rewrite, `gc.mrk`, `CAS_GC_Info` and the ConfigCAS garbage collection, the `_ExtensionsRestruct` /
+`_ExtensionsRestructNGS` inserts, the two extra rewrites of the ring, `DBNames-Ext-*`, the content of the help index (see 3), the `_MessageNo` update.
+
+**The same as on the БСП**: the `.new` copy and the promotion in `Config`, `commit`, the 16 `.sinew` -> `.si` rows and `siVersions` (new
+random guids; the 16 rows keep their decoded content), `DBNames.New` in two passes that end in `DELETE` (nothing changed), the ring
+`MobileVersions.dat` (`{1,g0}` -> `{2,g1,g0}`), `DELETE DynamicallyUpdated` (no overlay here). End state (`diff-condensed.md`): no schema
+change, 10 body rows and `versions` changed in `Config`, the 10 descriptors and `root`, `version` rewritten with the same content (only
+`Creation`/`Modified` move), 23 `ConfigSave` rows deleted, the ring, `siVersions`, the 16 `.si` rows (same content), `ibparams.inf`, `locale.inf`, two new `.ui` rows, one
+`_DbCopiesInfoBaseUse` row.
+
+### 12.5 How big the CAS garbage collection is
+
+**None on this base**: `ConfigCAS` has 0 rows, so the apply issues no `DELETE FROM ConfigCAS` and no `Files` clean-up, and leaves
+`CAS_GC_Info` and `gc.mrk` alone. The collections measured on the БСП (12 160 and 18 627 single-row deletes, 74 s and 219 s) are the
+content store of the **extensions**: a base without extensions has nothing to collect. The size for a УХ base with extensions is not
+measured.
+
+### 12.6 Recommendation for the apply track: what the own apply must write on УХ
+
+In the terms of the table "Which per-apply writes are required" of `docs/apply/own-apply.md`:
+
+| Native write on УХ | Verdict |
+|---|---|
+| `Config`: the 10 bodies and `versions` (4.0 MB stored, 9.1 MB decoded: one part, below the limit of 10 000 000 B), the 10 descriptors and `root`/`version` promoted with the same content | **required** (the rows); the promotion is 0.8 s for 23 rows |
+| `_ConfigChngR._MessageNo := NULL`, registrations of new objects | **required only where the register has rows**: here 0 rows, native issues no update and inserts nothing. Update the existing rows of the owners; never insert registrations for existing objects; a new object on an empty register is **untested** (native probably registers at the nodes the register knows: none) |
+| `Params` 16 `.si` + `siVersions`: 25.5 MB written, 11.5 s, content unchanged | **not required** (write only for new objects, as now): the largest avoidable cost of a native apply on УХ |
+| `MobileVersions.dat` ring: `{2,g1,g0}` | keep, as now (80 B) |
+| `DBNames.New` two passes over 3.0 MB, both discarded | **not required**: `DBNames` is unchanged for a body edit |
+| `SchemaStorage`/`DBSchema` walk, `..NG` rebuild | **not run by native either** on this base |
+| `gc.mrk`, `CAS_GC_Info`, ConfigCAS collection, `_ExtensionsRestruct*` | **not written by native**; nothing to do |
+| help index | native wrote nothing; **not required** |
+| `Params <guid>.ui` (two rows, created) | as in the БСП verdict: not written. The end state then differs from native's by **two rows that exist**; measure `config check`, a cold `ibsrv` session and an export on an own-applied twin before relying on it |
+| `ibparams.inf`, `locale.inf` (identity GUID pair, own-format text) | **hypothesis: not required** (written by the first completed native apply of a base whose rows the platform did not write). Never copy the GUIDs from another base. Test on the twin like the `.ui` rows |
+| `_DbCopies*` housekeeping, `_ExtensionsRestructNGS` `DELETE` | scratch / registration of the copy; **hypothesis: not required** |
+
+**Answer: on УХ the own apply must write nothing beyond the minimal set it already has** (the promotion of the staged rows, the fold of
+overlays when the base has any, the ring, the `_MessageNo` update of existing register rows - none here). Everything else native wrote
+is in the rows marked "not required" or "hypothesis: not required", and the hypotheses need one test on a twin. Two things it must
+**not** do: insert registrations for existing objects, and copy the identity GUIDs of `ibparams.inf` / `locale.inf` from another base.
+What matters at this scale is not the write set (228 statements natively, a few dozen for ours) but the **check**: native spends
+95 % of its 518 s before the first write or between write groups, reading 72 k of the 118 k rows (52 k descriptors in batches, 20 k bodies one by one); the own gate should not do
+20 k single-row round trips (read the changed rows and their dependents set-wise), and a 4 MB `versions` row is copied and promoted
+(the `.new` copy of the 23 rows, `versions` being 4 MB of it, took 3.8 s natively). The limit of 20 staged rows of 6.4 held at this scale (23 rows: the structure
+line appeared); what happens below 20 on УХ (the bare variant stages 13 rows) was not run.
+
+### 12.7 What the run does not show
+
+Cases 2 and 3 on УХ (an attribute, a new object: the DDL of a 21 187-table base, a new object on an empty register); a second
+(steady-state) apply, which would show the warm-cache time; a base with extensions or users; the bare 13-row stage; the 8.5 platform on УХ.

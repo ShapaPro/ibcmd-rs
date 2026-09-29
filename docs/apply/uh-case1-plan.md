@@ -1,10 +1,10 @@
 # ERP УХ, case 1 (modules only): plan for the traced native apply
 
 Part of [#336](https://github.com/Untru/ibcmd-rs/issues/336); the БСП measurements this plan scales from are in
-`native-apply-trace.md`. **Status: prepared on 2026-09-29, not started.** The run holds the `native` lock for a long
-time while other tracks depend on it, so it waits for the coordinator's go, and it needs the coordinator's OK for one УХ
-clone. Nothing was restored and no database was touched for this plan. Every number below is either **measured offline**
-(the reference export, the backup header) or **scaled from the БСП traces and marked as an estimate**.
+`native-apply-trace.md`. **Status: run on 2026-09-29 (17:14 - 17:59); the result is section 12 of `native-apply-trace.md`**, this
+file keeps the plan and, at the end, what the run showed against it. The run held the `native` lock for 8.7 min. Every number
+below is the estimate made before the run: either **measured offline** (the reference export, the backup header) or **scaled from
+the БСП traces**.
 
 ## 1. Purpose and scope
 
@@ -152,3 +152,21 @@ of statements (the CAS garbage collection is one block of `write-phases.md`); `s
   bounds; the row diff is unaffected.
 * Another track needs `native` while the hold lasts: FIFO makes it wait; the hold cannot be shortened after the command
   has started. This is the reason for the go.
+
+## 9. What the run showed against the plan (2026-09-29)
+
+| | plan | measured |
+|---|---|---|
+| statements | 50 000 - 270 000 | 28 701 (no garbage collection: `ConfigCAS` of the corpus is empty; 0.24 reads per `Config` row against the assumed 0.40) |
+| CAS garbage collection | none to 220 000 deletes | none |
+| lock hold (`heavy` + `native`) | 6 - 15 min, up to 60 | 8.7 min (522.1 s), released when the command returned |
+| stage | 23 rows with `-Pad 5`, predicted long | 23 rows, native `import files` 40 s, COMPLETE; the structure line appeared |
+| disk peak | 10 - 12 GB | about 5.5 GB (clone 4.3 GB, `ibdata` 0.77 GB, capture 123 MB) |
+| snapshots | 15 - 45 min each | 10 and 18 min |
+| export of the trace | (not estimated separately) | 7.5 min for 28 753 events: the slow step of the kit (64 events/s) |
+| `--user` | needed on БСП | not needed: `v8users` of the corpus is empty |
+
+Two things the plan did not foresee: the corpus has no register rows, no extensions, no CAS rows and no users, so the apply wrote
+less than the БСП long path although the structure line appeared; and it wrote a few rows the БСП applies do not
+(`ibparams.inf`, `locale.inf`, two `.ui` rows). Both are in `native-apply-trace.md` sections 12.3 and 12.4. The runner grew
+`-SkipRestore` (the clone was restored by hand first, to look at it) and needs no `--user` here.
