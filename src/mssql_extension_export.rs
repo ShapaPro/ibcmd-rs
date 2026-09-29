@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use ibcmd_cf::export::StorageExportPlan;
+use ibcmd_core::storage::StorageImage;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -70,6 +72,7 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
                 .with_context(|| format!("failed to fetch extension {:?}", extension.name))?;
         fetched.push((extension, image));
     }
+    write_lab_rows_out(&fetched)?;
 
     let staging_root = prepare_atomic_staging_root(&args.output_dir)?;
     let export_result = (|| -> Result<Vec<MssqlExtensionDumpEntry>> {
@@ -85,10 +88,9 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
             } else {
                 args.output_dir.clone()
             };
-            let export = crate::mssql_dump::export_storage_image_to_source(
+            let export = crate::mssql_dump::extension::export_extension_image_to_source(
                 image,
                 &staging_dir,
-                false,
                 args.source_version,
             )
             .with_context(|| format!("failed to export extension {:?}", extension.name))?;
@@ -142,6 +144,35 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
         all_extensions: args.all_extensions,
         extensions,
     })
+}
+
+/// Lab aid: `IBCMD_RS_EXTENSION_ROWS_OUT=<dir>` also writes every fetched
+/// extension's logical rows as `<dir>/<extension>/<name>__part0.bin`, the
+/// layout `mssql-dump-config --rows-dir` reads (the packed payload exactly as
+/// the CAS keeps it). Nothing is written without the variable.
+fn write_lab_rows_out(fetched: &[(&MssqlExtensionInfo, StorageImage)]) -> Result<()> {
+    let Some(root) = std::env::var_os("IBCMD_RS_EXTENSION_ROWS_OUT").filter(|v| !v.is_empty())
+    else {
+        return Ok(());
+    };
+    for (extension, image) in fetched {
+        let dir = PathBuf::from(&root).join(&extension.name);
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        let plan = StorageExportPlan::from_image(image);
+        for record in plan.records() {
+            let payload = record.packed_payload().map_err(|error| {
+                anyhow!(
+                    "row {} of {:?}: {error}",
+                    record.logical_name(),
+                    extension.name
+                )
+            })?;
+            let path = dir.join(format!("{}__part0.bin", record.logical_name()));
+            fs::write(&path, &*payload)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn prepare_atomic_staging_root(output: &Path) -> Result<PathBuf> {

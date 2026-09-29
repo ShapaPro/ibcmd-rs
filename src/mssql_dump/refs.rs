@@ -3664,6 +3664,47 @@ fn insert_configuration_properties_8_5_1_xml(
     Some(())
 }
 
+/// The parts of a configuration extension's root row that the extension export
+/// prints itself (`extension::root`): the header, the properties tuple as
+/// trimmed member texts, the contained objects and the root's children.
+pub(super) struct ExtensionRootParts {
+    pub(super) header: MetadataHeader,
+    /// The uuid of the md header (the row's own uuid names the element).
+    pub(super) header_uuid: String,
+    pub(super) fields: Vec<String>,
+    pub(super) contained_objects: Vec<ConfigurationContainedObject>,
+    pub(super) child_objects: Option<Vec<ConfigurationRootChildObject>>,
+}
+
+pub(super) fn extension_root_parts(
+    text: &str,
+    uuid: &str,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<ExtensionRootParts> {
+    let header_uuid = parse_configuration_header_uuid(text)?;
+    let mut header = parse_metadata_header_from_text(text, &header_uuid)?;
+    header.uuid = uuid.to_string();
+    let layout = parse_configuration_root_layout(text, uuid)?;
+    let envelope = parse_configuration_root_envelope(text)?;
+    let contained_fields = split_1c_braced_fields(envelope.sections.first()?.trim(), 0)?;
+    let payload_fields = split_1c_braced_fields(contained_fields.get(1)?.trim(), 0)?;
+    if payload_fields.first()?.trim() != "1" {
+        return None;
+    }
+    let fields = split_1c_braced_fields(payload_fields.get(1)?.trim(), 0)?
+        .iter()
+        .map(|field| field.trim().to_owned())
+        .collect();
+    let child_objects = resolve_configuration_root_child_objects(&layout, object_refs);
+    Some(ExtensionRootParts {
+        header,
+        header_uuid,
+        fields,
+        contained_objects: layout.contained_objects,
+        child_objects,
+    })
+}
+
 pub(super) fn extract_configuration_source_xml(
     text: &str,
     uuid: &str,
@@ -3672,6 +3713,16 @@ pub(super) fn extract_configuration_source_xml(
 ) -> Option<String> {
     if !text.trim_start().starts_with("{2,") {
         return None;
+    }
+    if let Some(extension) = super::extension::active() {
+        // A configuration extension prints its root object its own way.
+        return super::extension::root::extension_root_xml(
+            &extension,
+            text,
+            uuid,
+            object_refs,
+            source_version,
+        );
     }
     let fields = split_1c_braced_fields(text, 0)?;
     if fields.first()?.trim() != "2" {

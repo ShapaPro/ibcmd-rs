@@ -900,6 +900,8 @@ pub(super) fn parse_role_bool_field(value: &str) -> Option<bool> {
     match value.trim() {
         "0" | "4294967295" => Some(false),
         "1" => Some(true),
+        // An extension's role stores `false` of a defaulted flag as 2.
+        "2" if super::extension::active().is_some() => Some(false),
         _ => None,
     }
 }

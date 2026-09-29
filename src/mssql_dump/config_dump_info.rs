@@ -85,7 +85,17 @@ impl VersionsBlobOrigin {
 
 struct ConfigVersionEntry {
     id: String,
-    version: Uuid,
+    version: ConfigVersion,
+}
+
+/// The version stamp of one storage entry. A configuration keeps a 16-byte
+/// uuid per entry in its `versions` row (printed padded to 40 hex digits); an
+/// extension has no `versions` row, and the platform prints the SHA-1 of the
+/// entry's packed bytes instead.
+#[derive(Clone, Copy)]
+enum ConfigVersion {
+    Uuid(Uuid),
+    Sha1([u8; 20]),
 }
 
 struct ConfigDumpMetadata {
@@ -145,7 +155,67 @@ pub(super) fn write_config_dump_info(
 ) -> Result<bool> {
     let versions = parse_versions_blob(versions_blob, versions_blob_origin)?;
     validate_versions_inventory(&versions, inventory.file_names)?;
+    write_config_dump_info_entries(
+        output,
+        output_dir,
+        source_version,
+        versions,
+        partial_inventory_policy,
+        inventory,
+    )
+}
 
+/// `ConfigDumpInfo.xml` of an extension: the entries are the CAS rows, stamped
+/// with the SHA-1 of their packed bytes (the digest the CAS manifest holds).
+pub(super) fn write_extension_config_dump_info(
+    output: &OutputWriter,
+    output_dir: &Path,
+    source_version: InfobaseConfigSourceVersion,
+    packed_sha1: &BTreeMap<String, [u8; 20]>,
+    partial_inventory_policy: ConfigDumpInfoPartialInventoryPolicy,
+    inventory: ConfigDumpInfoInventory<'_>,
+) -> Result<bool> {
+    let rows = inventory
+        .file_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let versioned = packed_sha1
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if rows != versioned {
+        bail!(
+            "extension storage rows and their CAS digests differ: {} rows, {} digests",
+            rows.len(),
+            versioned.len()
+        );
+    }
+    let versions = packed_sha1
+        .iter()
+        .map(|(id, digest)| ConfigVersionEntry {
+            id: id.clone(),
+            version: ConfigVersion::Sha1(*digest),
+        })
+        .collect::<Vec<_>>();
+    write_config_dump_info_entries(
+        output,
+        output_dir,
+        source_version,
+        versions,
+        partial_inventory_policy,
+        inventory,
+    )
+}
+
+fn write_config_dump_info_entries(
+    output: &OutputWriter,
+    output_dir: &Path,
+    source_version: InfobaseConfigSourceVersion,
+    versions: Vec<ConfigVersionEntry>,
+    partial_inventory_policy: ConfigDumpInfoPartialInventoryPolicy,
+    inventory: ConfigDumpInfoInventory<'_>,
+) -> Result<bool> {
     let mut canonical_refs = inventory.object_refs.clone();
     for (id, form_ref) in inventory.form_refs {
         let name = form_source_reference_name(form_ref)
@@ -250,7 +320,7 @@ pub(super) fn write_config_dump_info(
         metadata.push(ConfigDumpMetadata {
             name,
             id: entry.id,
-            config_version: config_version(entry.version),
+            config_version: config_version(&entry.version),
             children,
         });
     }
@@ -350,7 +420,10 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
     Ok(named
         .into_iter()
         .filter(|(name, _)| !VERSIONS_EMBEDDED_SERVICE_NAMES.contains(&name.as_str()))
-        .map(|(id, version)| ConfigVersionEntry { id, version })
+        .map(|(id, version)| ConfigVersionEntry {
+            id,
+            version: ConfigVersion::Uuid(version),
+        })
         .collect())
 }
 
@@ -735,12 +808,21 @@ fn build_config_dump_children(
     Ok(Some(children_by_owner))
 }
 
-fn config_version(version: Uuid) -> String {
+fn config_version(version: &ConfigVersion) -> String {
     let mut value = String::with_capacity(40);
-    for byte in version.to_bytes_le() {
-        value.push_str(&format!("{byte:02x}"));
+    match version {
+        ConfigVersion::Uuid(uuid) => {
+            for byte in uuid.to_bytes_le() {
+                value.push_str(&format!("{byte:02x}"));
+            }
+            value.push_str("00000000");
+        }
+        ConfigVersion::Sha1(digest) => {
+            for byte in digest {
+                value.push_str(&format!("{byte:02x}"));
+            }
+        }
     }
-    value.push_str("00000000");
     value
 }
 
@@ -786,7 +868,7 @@ mod tests {
     fn dynamic_update_service_marker_is_not_an_object_inventory_entry() {
         let versions = vec![ConfigVersionEntry {
             id: "object.0".to_owned(),
-            version: Uuid::nil(),
+            version: ConfigVersion::Uuid(Uuid::nil()),
         }];
         let names = [
             "object.0",

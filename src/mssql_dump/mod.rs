@@ -967,6 +967,7 @@ mod config_rows;
 mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
+pub(crate) mod extension;
 mod fetch;
 mod form;
 mod form_body;
@@ -2074,6 +2075,13 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
 }
 
 fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    // Lab aid: `IBCMD_RS_EXTENSION_MODE=1` runs this export as an extension
+    // export's converters run (rows written by `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT`),
+    // to probe one row without a database.
+    let _extension_probe = std::env::var_os("IBCMD_RS_EXTENSION_MODE")
+        .filter(|value| !value.is_empty())
+        .map(|_| extension::activate(extension::ExtensionContext::default()))
+        .transpose()?;
     // `--rows-dir`: every Config read of this run comes from the folder and
     // no query reaches a server.
     let _offline_rows = match &args.rows_dir {
@@ -3128,6 +3136,9 @@ fn dump_table_rows_with_options_mode(
     } else {
         MetadataObjectReferenceIndexes::default()
     };
+    if let Some(extension) = extension::active() {
+        extension.note_indexes(&type_index, &object_refs);
+    }
     let (
         ((configuration_root_object_refs, role_rights_object_refs), (metadata_order, field_refs)),
         (
@@ -3534,6 +3545,11 @@ fn dump_table_rows_with_options_mode(
         }
         manifests.push(dumped.manifest);
     }
+    if let Some(extension) = extension::active() {
+        for (file_name, diagnostic) in &metadata_extraction_diagnostics {
+            extension.note_diagnostic(file_name, extension::describe_diagnostic(diagnostic));
+        }
+    }
     for (source_row_id, reason) in &source_asset_discovery_misses {
         source_asset_completeness.record_affected_reason(source_asset_audit_entry(
             table,
@@ -3630,6 +3646,30 @@ fn dump_table_rows_with_options_mode(
                 source_version,
                 &versions_blob,
                 VersionsBlobOrigin::CfStorageImage,
+                ConfigDumpInfoPartialInventoryPolicy::Skip,
+                ConfigDumpInfoInventory {
+                    file_names: &file_names_owned,
+                    metadata_texts: &metadata_audit.rows,
+                    object_refs: &object_refs,
+                    form_refs: &form_refs,
+                    template_refs: &template_refs,
+                    subsystem_refs: &subsystem_refs,
+                    module_text_paths: &module_text_paths,
+                    source_assets: &source_assets,
+                    emitted_source_asset_paths: &emitted_source_asset_paths,
+                    configuration_module_groups: &configuration_module_groups,
+                },
+            )?;
+        } else if let Some(extension) = extension::active()
+            && let Some(packed_sha1) = extension.packed_sha1()
+        {
+            // A configuration extension has no `versions` row: its CAS
+            // manifest holds the digest of every row instead.
+            config_dump_info::write_extension_config_dump_info(
+                &output,
+                output_dir,
+                source_version,
+                packed_sha1,
                 ConfigDumpInfoPartialInventoryPolicy::Skip,
                 ConfigDumpInfoInventory {
                     file_names: &file_names_owned,
@@ -8139,7 +8179,9 @@ fn configuration_module_body_paths(file_names: &BTreeSet<&str>) -> BTreeMap<Stri
 
     let mut paths = BTreeMap::new();
     for (metadata_id, suffixes) in suffixes_by_id {
-        if file_names.contains(metadata_id) || !is_configuration_module_group(&suffixes) {
+        if file_names.contains(metadata_id)
+            || !is_configuration_module_group(metadata_id, &suffixes)
+        {
             continue;
         }
         for route in
@@ -8179,8 +8221,16 @@ fn form_module_body_paths(
     paths
 }
 
-fn is_configuration_module_group(suffixes: &BTreeSet<&str>) -> bool {
+fn is_configuration_module_group(owner: &str, suffixes: &BTreeSet<&str>) -> bool {
     let registry = crate::compiler::families::assets::SourceAssetRegistry;
+    if let Some(extension) = extension::active() {
+        // An extension keeps only the blocks of its root object that it
+        // overrides (the managed application module, say), not the whole set.
+        return extension.is_root_header(owner)
+            && registry
+                .configuration_routes()
+                .any(|route| suffixes.contains(route.suffix().trim_start_matches('.')));
+    }
     registry
         .module_routes("Configuration")
         .all(|route| suffixes.contains(route.suffix().trim_start_matches('.')))
@@ -20125,11 +20175,18 @@ fn parse_information_register_type_pattern_element(
         }),
         (r##""#""##, 2) => {
             let type_id = parse_uuid_field(fields.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
                 .or_else(|| information_register_builtin_reference(&type_id).map(str::to_string))
-                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))?;
+                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))
+            else {
+                // A type of the extended configuration (see
+                // `parse_metadata_type_pattern_element_with_builtin`).
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             if metadata_reference_is_type_set(&reference) {
                 Some(ConstantValueType::ReferenceTypeSet { reference })
             } else {
@@ -31172,7 +31229,13 @@ fn parse_catalog_form_ref(
     form_refs: &BTreeMap<String, FormSourceReference>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    form_refs.get(&uuid).and_then(form_source_reference_name)
+    match form_refs.get(&uuid) {
+        Some(form) => form_source_reference_name(form),
+        // A form of the extended configuration: the extension does not hold
+        // it, and the platform prints the identifier the row stores.
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 fn parse_default_list_form_ref(
@@ -31264,7 +31327,12 @@ fn parse_metadata_object_ref(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    object_refs.get(&uuid).cloned()
+    match object_refs.get(&uuid) {
+        Some(reference) => Some(reference.clone()),
+        // An object of the extended configuration (see `parse_catalog_form_ref`).
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 fn parse_report_child_templates_from_text(
@@ -33644,7 +33712,8 @@ fn parse_defined_type_properties_from_text(
     let defined_type_start = text[..marker_start].rfind("{0,")?;
     let fields = split_1c_braced_fields(text, defined_type_start)?;
     let value_types = parse_metadata_type_pattern(fields.get(4)?, type_index)?;
-    if value_types.is_empty() {
+    // An adopted defined type of an extension keeps no type of its own.
+    if value_types.is_empty() && extension::active().is_none() {
         return None;
     }
     let header = parse_metadata_header_from_text(text, uuid)?;
@@ -35594,10 +35663,17 @@ fn parse_metadata_type_pattern_element_with_builtin(
         }),
         r##""#""## if element.len() >= 2 => {
             let type_id = parse_uuid_field(element.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
-                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))?;
+                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))
+            else {
+                // A type of the extended configuration, which an extension
+                // does not hold: the platform prints its identifier.
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             Some(ConstantValueType::Reference { reference })
         }
         _ => None,
