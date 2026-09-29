@@ -19,8 +19,12 @@ native reference exports against ours with `ibcmd-rs source-diff`
 
 "Before" is the export of commit 08de112f (the state the issue was opened
 against). The ordinary export is unchanged: the offline export of the main
-configuration from saved rows still equals the native one in all 12198 files of
-the БСП 8.3.27 corpus and in all 140709 files of the ERP УХ 8.3.27 corpus.
+configuration from saved rows (`mssql-dump-config --rows-dir`) still equals the
+native one in all 12198 files of the БСП 8.3.27 corpus and in all 140709 files
+of the ERP УХ 8.3.27 corpus. The default export writes descriptors through the
+metadata model, which the extension work does not touch; the extension export
+shares the *legacy converters* with `--legacy-export`, so that path was measured
+too: the БСП 8.3.27 corpus is identical in all 12198 files and the ERP УХ 8.3.27 corpus in all 140709 files (the only extra entry is the dump's own manifest.json).
 
 The export reports `native_xml_parity: true` when no storage row is opaque or
 failed. That is a claim about the readers and not a proof: they read fail-closed
