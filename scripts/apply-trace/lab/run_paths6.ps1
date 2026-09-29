@@ -6,7 +6,8 @@
 #   Y10 common module + document manager module (one non-data object + one data object)
 #   Y11 object modules of two catalogs (two data objects of one kind)
 #   Y12 two common modules (two objects without tables)
-param([Parameter(Mandatory = $true)][ValidateSet('Y8', 'Y9', 'Y10', 'Y11', 'Y12')][string]$Id)
+#   Y14 common module + catalog object module staged natively (Y2 staged the same set with our tool and went short)
+param([Parameter(Mandatory = $true)][ValidateSet('Y8', 'Y9', 'Y10', 'Y11', 'Y12', 'Y14')][string]$Id)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $lab = 'F:\ibcmd\lab\04\trace'
@@ -24,6 +25,8 @@ $plans = @{
              Note = 'native sparse stage: common module + document manager module (one object without tables, one with)' }
     Y11 = @{ Db = 'ibcmd_rs_04_trace_c4_x4'; Files = @('Catalogs/_ДемоКонтрагенты/Ext/ObjectModule.bsl', 'Catalogs/_ДемоОрганизации/Ext/ObjectModule.bsl')
              Note = 'native sparse stage: object modules of two catalogs (two data objects of one kind)' }
+    Y14 = @{ Db = 'ibcmd_rs_04_trace_c5_union'; Files = @('CommonModules/_ДемоЛокализацияКлиентСервер/Ext/Module.bsl', 'Catalogs/_ДемоКонтрагенты/Ext/ObjectModule.bsl')
+             Note = 'native sparse stage: common module + catalog object module (Y2 staged the same set with our tool)' }
     Y12 = @{ Db = 'ibcmd_rs_04_trace_c4_paths'; Files = @('CommonModules/_ДемоЛокализацияКлиентСервер/Ext/Module.bsl', 'CommonModules/_ДемоЛокализация/Ext/Module.bsl')
              Note = 'native sparse stage: two common modules (two objects without tables)' }
 }

@@ -2,12 +2,16 @@
 # PREPARED, NOT STARTED.  Needs the coordinator's go and OK for the УХ clone (about 5 GB of data files) and refuses to
 # run without -Go.  The plan and the numbers behind the settings are in docs/apply/uh-case1-plan.md.
 #
-#   pwsh -NoProfile -File run_uh_case1.ps1 -Go [-Variant forms|containers] [-Database ibcmd_rs_04_trace_uh_mod]
+#   pwsh -NoProfile -File run_uh_case1.ps1 -Go [-Variant forms|containers] [-Pad 0..12] [-Database ibcmd_rs_04_trace_uh_mod]
 #
-# Variants: forms      five modules, two of them form modules (their text sits in the form row): the LONG path, like
-#                      case 1 of the БСП (1x); this is the case whose statement count is asked for.
-#           containers three modules of the container kind (common module, object module, manager module):
-#                      predicted SHORT path (X1/X2 of native-apply-trace.md, section 6.4).
+# Variants: forms      five modules (common module, catalog object module, document manager module, managed form module,
+#                      common form module): like case 1 of the БСП (1x).
+#           containers the first three only.
+# -Pad N   N extra small common modules (default 5): the stage then has 3 + 2 x (modules + N) rows, more than 20, which the
+#          experiment of native-apply-trace.md section 6.4 shows to take the LONG path (the case whose statement count is
+#          asked for) whatever the descriptors do.  The runner prints the predicted path before the apply: rule 1 (a staged
+#          descriptor differs from Config; the native import re-saved the catalog and document descriptors on the БСП)
+#          or rule 2 (more than 20 staged rows).
 #
 # Steps (each native command holds its lock alone; the snapshots, the trace report and the diff run without a lock):
 #   0 guards: -Go, free space on F: at least 40 GB, the database must not exist
@@ -20,6 +24,9 @@
 param(
     [switch]$Go,
     [ValidateSet('forms', 'containers')][string]$Variant = 'forms',
+    # extra small common modules (one comment line appended each): the long path starts above 20 staged rows (rule 2 of
+    # native-apply-trace.md section 6.4); 3 rows + 2 per edited module.  0 = the bare variant.
+    [ValidateRange(0, 12)][int]$Pad = 5,
     [string]$Database = 'ibcmd_rs_04_trace_uh_mod',
     [string]$Platform = '8.3.27.2214',
     [int]$MinFreeGB = 40
@@ -57,6 +64,13 @@ if ($Variant -eq 'forms') {
     )
 }
 
+$padNames = @('ОплатаСервисаКлиентПереопределяемый', 'СообщенияВМоделиСервисаПовтИсп', 'ЭлектроннаяПодписьВМоделиСервисаПереопределяемый', 'ОповещениеПользователейБТСПереопределяемый',
+    'ТарификацияВызовСервера', 'ТрансляцияXDTOПереопределяемый', 'ФайлыБТСВызовСервера', 'РаботаСКурсамиВалютВызовСервера', 'РаботаСБанкамиВызовСервера',
+    'ДополнительныеОтчетыИОбработкиГлобальный', 'ОбращенияВТехническуюПоддержкуГлобальный', 'БТС')
+foreach ($n in ($padNames | Select-Object -First $Pad)) {
+    $edits += @{ Kind = 'padding common module'; Path = "CommonModules\$n\Ext\Module.bsl"; Add = "`r`n// ibcmd-rs trace, case 1 (УХ): padding module edited`r`n" }
+}
+
 # 1 clone
 Log "restore $Database from the uha8327 corpus (free $([Math]::Round($free, 1)) GB)"
 & pwsh -NoProfile -File 'F:\ibcmd\lab\04\tools\restore-clone.ps1' -Corpus uha8327 -Name $Database -Track trace -Purpose "trace phase 3: ERP УХ 8.3.27 case 1 ($Variant), native exclusive apply traced"
@@ -86,6 +100,12 @@ Log "ConfigSave rows: $rows; the completeness test (versions entries against Con
 $env:PYTHONIOENCODING = 'utf-8'
 & python (Join-Path $PSScriptRoot 'check_stage.py') $Database
 if ($LASTEXITCODE -ne 0) { throw 'the native stage is not complete (check_stage.py)' }
+# which path will the apply take?  (native-apply-trace.md section 6.4: a staged descriptor that differs from Config, or more than 20 staged rows)
+$diff = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'stage_vs_config.ps1') -Database $Database | Where-Object { $_ -notmatch '`tsame$' })
+$descDiff = @($diff | Where-Object { $_ -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`t' }).Count
+$predicted = if ($descDiff -gt 0) { "LONG (rule 1: $descDiff staged descriptor row(s) differ from Config)" } elseif ([int]$rows -gt 20) { "LONG (rule 2: $rows staged rows)" } else { "SHORT ($rows staged rows, descriptors unchanged)" }
+Log "predicted path: $predicted"
+$diff | Out-File -Encoding utf8 -LiteralPath "$lab\uh-stage-vs-config.txt"
 
 # 4 traced apply: heavy first, then native, both around the native command only
 $cap = @{ Database = $Database; Tag = "uh-case1-$Variant-exclusive"; OutRoot = "$lab\captures"; BlobStore = "$lab\blobs"; Track = 'trace'

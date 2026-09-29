@@ -228,5 +228,5 @@ experiment: `run_paths*.ps1`, `make_case1*_tree*.ps1`, `stage_vs_config.ps1`), 1
 | `make_case1_tree*.ps1` | hard-link trees of a reference export with a few module texts edited (no disk cost) |
 | `run_paths.ps1` ... `run_paths6.ps1` | the path experiment (which staged sets make the native apply take the long path) |
 | `validate_sparse_import.ps1`, `check_stage.py` | native staging from a sparse base directory; the `versions` completeness test of a stage |
-| `stage_vs_config.ps1`, `dump_rows.ps1`, `row_sha.ps1` | read-only row comparisons (ConfigSave against Config, decoded rows, hashes) |
+| `stage_vs_config.ps1`, `dump_rows.ps1`, `row_sha.ps1`, `probe_stages.ps1`, `find_refs.ps1` | read-only row comparisons (ConfigSave against Config, decoded rows, hashes, which rows of a stage differ, which rows mention a guid) |
 | `run_uh_case1.ps1` | the ERP УХ case 1 (prepared) |
