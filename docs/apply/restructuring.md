@@ -785,7 +785,7 @@ structural change shows up. The S1 gate (`restructure::s1::S1Gate`) starts from 
 ```
 ConservativeGate verdict            blockers = the descriptors that differ
   -> check_staged (rcheck)          reasons {class, object, row, property, change}
-  -> classify                       reason -> S1 operation | refusal                       (12.2.1)
+  -> apply_check::s1::classify      typed reason -> S1 operation | refusal                (12.2.1)
   -> plan (restructure::plan)       reads the same descriptors itself: new DBSchema, DBNames, caches, statements
   -> agreement                      the planned objects and attributes == the check's       (12.2.2)
   -> the planned descriptors' blockers are withdrawn; any other blocker left = refusal
@@ -891,15 +891,21 @@ whole 9.3 MB script, rolled back) left the database as it was.
 
 #### 12.4.2 The seam (a proposal; the apply track owns `mssql_config_apply`, the patch is a spike on this branch)
 
+The seam is the apply track's (S1-A, #397): `StructurePhase`, `StructuralGate::take_structure`, `ScriptInputs.structure_sql`,
+the merge of the cache rewrites (a clash on the same row is a refusal), `--allow-restructure s1`, the backup policy
+(`BackupPolicy`: `--recovery-backup <path>` takes a COPY_ONLY backup first, `--i-have-a-backup` acknowledges one, neither
+refuses) and the apply's own handling of a consumed `deleted` row (`consumed_names`, `consumed_row_count`: the row is not
+moved into `Config`, is not an unfinished-operation marker, and goes with the rest of `ConfigSave`). What the S1 work adds
+on top of it is small and additive (the port of wave 1, S1-B):
+
 | file | change |
 |---|---|
-| `gate.rs` | `StructurePhase {sql, consumed_staged_rows, params_rewrites, tables, objects, caches}`; `StructuralGate::take_structure(&self) -> Option<StructurePhase>` with a default `None` (the conservative gate is untouched); `StructuralGate::judges_deleted_row(&self) -> bool` with a default `false` (the stage's `deleted` row lists removed attributes: the apply refuses it before the gate unless the gate judges it); `GateVerdict::block` becomes `pub` so that a gate outside the module can block what it does not cover |
-| `sqlgen.rs` | `ScriptInputs.structure_sql: Option<String>` and `consumed_staged_rows`; `render_apply_script` puts the text after `@now` and before the fold; the unfinished-operation check does not count a `deleted` row of `ConfigSave` when the phase consumes it, and the two `@@ROWCOUNT` assertions of the move and the cleanup expect `staged.rows - consumed_staged_rows`; a test that the text sits between the assertions and the move |
-| `mod.rs` | the refusal of a `deleted` row is skipped when the gate judges it; after the gate: `let structure = structural_gate.take_structure()`; its `params_rewrites` join the apply's (**a clash on the same row is a refusal**: the search-information row `1a621f0f` is also rewritten for a new form or template, and chaining the two edits is not built); `tables_touched`, `not_written`, `ConfigApplyReport.structure` |
-| `restructure/s1.rs` | `S1Gate` (holds the `SqlExec`, the conservative gate and the plan options): `check` = conservative verdict -> `check_staged` -> `classify` -> plan -> `decide`; `take_structure` |
+| `gate.rs` | `StructuralGate::judges_deleted_row(&self) -> bool`, default `false`: the stage's `deleted` row lists the removed attributes (ids, flag 1); the apply consumes an empty list and a list of the rows of a dynamic update itself and refuses every other, unless the gate says it judges the list. `StructurePhase::consumed_staged_rows`: the staged rows the phase answers for |
+| `mod.rs` | a `deleted` list the gate judges is consumed like an empty one -- but only when, after the gate, the phase answers for it (`consumed_staged_rows > 0`); otherwise the apply refuses it after all. `restructure_gate` builds `restructure::s1::S1Gate` for `--allow-restructure s1` |
+| `restructure/s1.rs` | `S1Gate`: conservative verdict -> `check_staged` (the reasons that name a consumed row are dropped, as the apply's own check gate does) -> `apply_check::s1::classify` -> plan -> `decide`; `take_structure`; `judges_deleted_row` is `true`. `AddAttribute`, `DeleteAttribute` and `WidenString` are built; `SwitchIndex`, `AddTabularSection` and `AddObject` are refused as designed but not built |
 | `restructure/script.rs` | `Plan::phase_sql(now)`: the plan as T-SQL with `THROW` assertions (57400..57405) |
 | `restructure/reader.rs` | `RowSource`: the plan's input read through the apply's client (`ClientSource`) as well as through a dedicated connection |
-| CLI | `ibcmd-rs mssql-restructure --through-apply [--dry-run \| --rehearse] [--script-output f] [--recovery-dir d]` drives `apply_with_gate(&S1Gate)`; the apply track adds the flag to `mssql-config-apply` (one line where it builds its gate) |
+| CLI | `ibcmd-rs mssql-config-apply --allow-restructure s1 (--recovery-backup <path> \| --i-have-a-backup) [--dry-run \| --rehearse]`; `mssql-restructure --through-apply` is the same run driven from the research command (it takes the plan options of the kit: fixed `DBNamesVersion`, skipped caches) |
 
 Direction of the dependencies: `restructure` uses `mssql_config_apply::{gate, sqlgen, model, si}`; the apply knows the
 gate only as a trait object. The unit of change in the apply is the structure phase as an opaque, self-contained T-SQL
@@ -929,8 +935,7 @@ The apply's recovery artifact keeps the `Config` rows and the cache rows; for th
 backup taken before (`BACKUP DATABASE ... WITH COPY_ONLY`), which is also how the lab makes twins. **Decided** (the
 coordinator, after Pavel): a structural apply **refuses unless** `--recovery-backup <path>` (the apply takes a COPY_ONLY
 backup first; recommended) **or** `--i-have-a-backup` is given; a dry run and a rehearsal write nothing and need neither.
-Track apply implements it in S1-A (#397); `mssql-restructure --through-apply` has both flags already (`S1Gate` refuses
-with `BACKUP_REQUIRED` and the backup is taken only when the plan has a structure phase). The log of the whole copy is
+Track apply implemented it in S1-A (#397); the S1 gate does not look at it. The log of the whole copy is
 in one transaction: fine for a catalog, not for 100 GB, so the gate refuses when the rebuilt tables exceed a limit
 (S1-J) and points to the native apply.
 
@@ -1048,8 +1053,8 @@ to three days, L ~ a week of an agent.
 
 Where an operation plugs in (all in `src/restructure/`): `plan.rs::find_changes` (detects new, removed and retyped
 attributes; it refuses re-indexed ones), `check_object` (what else may differ), `plan_object` (fields -> the new entry -> the
-tables -> the copy), `xdto_update` / `registry_update` (the caches), `s1.rs::classify_reason` (flip `NotBuilt` to a built
-operation) and `decide` (the agreement of the two decoders), `script.rs` (nothing to change unless a new kind of statement
+tables -> the copy), `xdto_update` / `registry_update` (the caches), `s1.rs::decide` (a built operation is one more arm of the
+match of `S1Operation` and one more set in the agreement of the two decoders; `apply_check::s1::classify` names it), `script.rs` (nothing to change unless a new kind of statement
 appears). Each sub-issue starts with the corpus test of its case (`tests_corpus.rs`: the plan made offline from the staged
 snapshot against the native result), which is the quick loop; the twin run of 12.6 closes it.
 
@@ -1148,7 +1153,7 @@ types case from the ConfigSave, the other cases from `--tree`, and the whole nat
 checks of 12.6 on the types case, with the numbers of 12.8), `s1-t1-session.txt` (the job output of the cluster session, native and
 ours), `s1-cache-necessity.txt` (the cache experiment of 12.5), `s1-seam-script.sql` (the generated transaction with the
 binary values shortened), and for wave 1 (12.11) `s2-wave1-twin-compare.txt` (the checks of 12.6 for b1, b2, c1) and
-`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
+`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal). `s1-port-acceptance.txt` (12.12: the four cases through `mssql-config-apply --allow-restructure s1`). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
 `out/except_*`, `out/si_diff_*`, `out/dbschema_cmp_*`, `out/config_cmp_*`, `out/export_diff_*`, `out/session_t1_*`, `logs/cache_bisect*.log`,
 `xe/s1_t1/`, `snap/ibcmd_rs_04_ddl_s1_*`. Tools: `scripts/restructure-lab/` (`compare_tables.ps1`, `compare_config.ps1`,
 `dbschema_cmp.py`, `params_row.ps1`, `cache_variant.ps1`, `edit_cases_s1.py`, `jobs/types_t1.bsl`). Tests: `tests_s1.rs` (the gate),
@@ -1187,7 +1192,8 @@ What wave 1 taught:
 * **The stage of a deletion carries a `deleted` row** (`<n>,"<attribute id>",1,...`, one id per removed attribute). The apply
   refused every such row before it asked the gate and its script refused it as an unfinished-operation marker. The seam
   grew `StructuralGate::judges_deleted_row` and `StructurePhase::consumed_staged_rows` (12.4.2); the gate accepts only ids of
-  attributes the same stage removes, the phase deletes the row under its content hash.
+  attributes the same stage removes, and the apply then consumes the row like an empty list (on the first, spike form of the
+  seam the phase deleted the row itself under its content hash; the apply's own consumed-rows machinery replaced that).
 * **Indexes are renumbered** after a deletion (`_Reference22_4`, ...): the physical names are `_<Table>_<ordinal>`; the model
   recomputes them from the entry, which is why the byte-level comparison works.
 * **`ByDocDate` is not an attribute index**: it lists the additional-order attribute last, and the platform keeps it, one
@@ -1202,3 +1208,24 @@ What wave 1 taught:
   see code: deleting an attribute breaks the modules that use it, whichever route deleted it.
 * The plan judges the *direction* of a limit change, the restructuring check names both directions the same way
   (`Length: a -> b`); the two decoders agree on which attribute, the plan refuses a shorter limit, a fixed or unlimited string.
+
+### 12.12 The port onto feat/0.4: the apply's seam and rcheck's classification
+
+Wave 1 was built on the spike form of the seam (12.4.2). `feat/0.4` has the apply track's seam (S1-A, #397) and rcheck's typed
+classification (`apply_check::s1::classify`, #404); the S1 work was ported onto it (branch `feat/0.4-s1-port`):
+
+* `src/mssql_config_apply` is the apply's version plus two additive pieces for the `deleted` row of a deletion
+  (`StructuralGate::judges_deleted_row`, `StructurePhase::consumed_staged_rows`) and the wiring of `--allow-restructure s1`
+  (`restructure_gate` builds `S1Gate`). The apply's own machinery consumes the row (`consumed_names`, `consumed_row_count`),
+  so the structure phase no longer deletes it and the script's `@@ROWCOUNT` assertions need no change; the apply refuses the
+  list after all when no phase answers for it.
+* `s1.rs` maps `S1Operation` (`AddAttribute`, `DeleteAttribute`, `WidenString` built; `SwitchIndex`, `AddTabularSection`,
+  `AddObject` refused as designed but not built) instead of the wording of the reasons, drops the reasons that name the
+  consumed `deleted` row (as the apply's own check gate does) and has no backup logic of its own: the apply refuses a
+  structural apply without `--recovery-backup` / `--i-have-a-backup` and takes the COPY_ONLY backup itself.
+* Acceptance, `mssql-config-apply --allow-restructure s1 --i-have-a-backup` on twins of the staged backups against the native
+  `config apply` (`s1-port-acceptance.txt`): the types case T1 (11 tables), b1 (8), c1 (10) and b2 (4). Checks 3-8 of 12.6 pass
+  in all four: `EXCEPT` both ways 0 rows in every rebuilt table, `Config` 0 rows on either side, `DBSchema` equal but
+  `DbCopies*`, `DBNames` text equal, 16 of 16 `.si` rows, a native `config apply` afterwards «не требуется», native export
+  12 198 of 12 198 files identical. Without a backup flag the apply refuses with its own message; with `--recovery-backup` it
+  takes the backup (1.5 s for the БСП clone) and applies.

@@ -10,19 +10,26 @@ param(
     [Parameter(Mandatory = $true)][string]$Report,
     [string]$NatLabel = 'nat_after',
     [string]$OwnLabel = 'own_after',
-    [switch]$SkipSnapshot
+    [switch]$SkipSnapshot,
+    [switch]$SnapshotNat
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'
 $lab = if ($env:DDL_LAB) { $env:DDL_LAB } else { 'F:\ibcmd\lab\04\restructure' }
-$out = "$lab\out\s2_${Case}_twin"
+$out = if ($env:TWIN_OUT) { "$env:TWIN_OUT\${Case}_twin" } else { "$lab\out\s2_${Case}_twin" }
 New-Item -ItemType Directory -Force $out | Out-Null
 $json = Get-Content -LiteralPath $Report -Raw -Encoding UTF8 | ConvertFrom-Json
-$tables = @($json.through_apply.structure.tables) -join ','
+# the report of mssql-restructure --through-apply nests the apply's report; mssql-config-apply prints it as it is
+$structure = if ($json.through_apply) { $json.through_apply.structure } else { $json.structure }
+$tables = @($structure.tables) -join ','
 "rebuilt tables: $tables"
 Push-Location $PSScriptRoot
 try {
+    if ($SnapshotNat) {
+        "snapshot $Nat $NatLabel"
+        python snapshot.py $Nat $NatLabel | Select-Object -Last 1
+    }
     if (-not $SkipSnapshot) {
         "snapshot $Own $OwnLabel"
         python snapshot.py $Own $OwnLabel | Select-Object -Last 1
