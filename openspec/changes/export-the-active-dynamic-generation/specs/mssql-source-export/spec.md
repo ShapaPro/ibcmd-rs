@@ -81,9 +81,10 @@ object from `Config`, and `ConfigDumpInfo.xml` SHALL follow the staged
 ### Requirement: A Config versions row is read by its pairs
 
 A `versions` row of a `Config` or `ConfigSave` table SHALL be read by its
-name/version pairs. The pair count in its header and the service pairs
-(`root`, `version`, `versions`) SHALL NOT be required, because a row the
-platform's own import stages, and an apply of it leaves behind, has neither.
+name/version pairs. The pair count in its header SHALL NOT be required to equal
+the number of pairs (it SHALL NOT exceed it), and the service pairs (`root`,
+`version`, `versions`) SHALL NOT be required, because a row the platform's own
+import stages, and an apply of it leaves behind, has neither.
 
 #### Scenario: A row a native apply left behind
 
@@ -103,3 +104,32 @@ sentinel instead of a synthesized `Constant.<name>.StandardCommand.Open`.
 - **AND** a subsystem whose command interface hides its `Open` command
 - **WHEN** the export writes the subsystem's `Ext/CommandInterface.xml`
 - **THEN** the command is written as `100:<constant uuid>`
+
+### Requirement: ConfigDumpInfo lists the first count pairs of a versions row
+
+`ConfigDumpInfo.xml` SHALL list the entries among the first `count` pairs of the
+`versions` row, the generation entry being the first, where `count` is the
+number the row's header declares. The pairs beyond it belong to the
+configuration all the same: they take part in the inventory check and in the
+decision what a stage publishes, and their files are written.
+
+#### Scenario: A row a native import staged
+
+- **GIVEN** a `ConfigSave` `versions` row whose header declares 9 834 pairs and which holds 9 836
+- **WHEN** the export builds `ConfigDumpInfo.xml`
+- **THEN** the last two entries of the row are not listed
+- **AND** the files of their modules are written
+
+### Requirement: The extension compatibility of a staged Configuration row is field 43
+
+A Configuration row in the shape the platform writes (`{68,…}`) whose fields 26
+and 43 differ SHALL be exported with field 26 as `CompatibilityMode` and field
+43 as `ConfigurationExtensionCompatibilityMode`; a row whose fields agree is
+exported as before.
+
+#### Scenario: A native stage of an older configuration
+
+- **GIVEN** a staged Configuration row with 80324 in field 26 and 80327 in field 43
+- **WHEN** the export writes `Configuration.xml` for platform 8.3.27
+- **THEN** `CompatibilityMode` is `Version8_3_24`
+- **AND** `ConfigurationExtensionCompatibilityMode` is `Version8_3_27`

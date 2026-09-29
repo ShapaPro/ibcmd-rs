@@ -12,6 +12,7 @@
 - [x] 10. Publish the main configuration in `infobase config export`: the rows a completed import staged in `ConfigSave` in place of the `Config` rows of the same names, and the staged `versions`.
 - [x] 11. Read a `versions` row of a `Config` or `ConfigSave` table by its pairs, and keep the platform's sentinel for the command of a constant that uses no standard commands.
 - [x] 12. Re-run the database with 17 generations and 127 885 aliases against the native export, the БСП database with an active generation and the corpora, and record the evidence (`evidence/many-generations-and-main-configuration-20260929.md`).
+- [x] 13. List in `ConfigDumpInfo.xml` the first `count` pairs of a `versions` row, as the platform does after a native stage, and read the extension compatibility of a staged `{68}` Configuration row from field 43 (#411).
 
 ## Notes
 

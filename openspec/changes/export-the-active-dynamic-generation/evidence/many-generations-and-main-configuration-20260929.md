@@ -116,18 +116,55 @@ the narrow columns of the table once), 1.15 million logical reads; process CPU
 19-22 s; 24 s wall on a quiet machine, 89 s on a loaded one. The old
 expression does not run at all (12 s to the error).
 
-## What is left
+## The two files a native stage still differed in (#411, 30.09.2026)
 
-The same two files differ on `nat_a2` and on the clean stage `exdg_c`.
+Both were found on native stages and both have a cause of their own; the fix
+touches only rows of that shape.
 
-- `Configuration.xml`: `ConfigurationExtensionCompatibilityMode` is
-  `Version8_3_27` in the native export and `Version8_3_24` in ours. The stage
-  rewrites the Configuration row from the `{67}` to the `{68}` shape with the
-  compatibility mode 80324 and the extension compatibility 80327; the model
-  refuses that row and the legacy converter reads the wrong slot. The native
-  export tells which one the platform prints: 80327 (field 43).
-- `ConfigDumpInfo.xml`: after a native stage the native export omits the entry
-  of `Catalog.НастройкиАвторизацииИнтернетСервисов.ManagerModule`
-  (`ffd14055-….3`; on `nat_a2` also `.ObjectModule`, `.0`), which the staged
-  `versions` lists and whose file it writes. The staged descriptor of that catalog is in the
-  record format 57.
+- `Configuration.xml`: the platform prints field 26 of a staged `{68}`
+  Configuration row as `CompatibilityMode` and field 43 as
+  `ConfigurationExtensionCompatibilityMode`. The stage of the БСП demo holds 80324
+  and 80327 there, the platform prints `Version8_3_24` and `Version8_3_27`; the model
+  refused rows whose two fields differ and the legacy converter took the
+  extension mode from field 26. The model now reads field 43 for it (only for
+  the `{68}` shape on 8.3.27, the one shape the platform writes there). All four
+  corpora have the same value in both fields (БСП 8.3.27: 80324/80324 in the
+  short `{67}` shape, УХ 8.3.27 and 8.5: 80327/80327, БСП 8.5: 80501/80501 in
+  `{76}`), so no corpus row can change.
+- `ConfigDumpInfo.xml`: the platform lists in it the first `count` pairs of
+  the `versions` row, the generation entry counting as the first, and the
+  staged row states a count below the pairs it holds. What lies beyond it is
+  left out, an object's children with it, while the files are still written:
+
+| row | declared / pairs | omitted by the platform |
+|---|---|---|
+| the БСП stage of the ddl track (`nat_a2`) | 9 834 / 9 836 | `ffd14055-….0`, `….3` |
+| a clean native stage, first recipe (`exdg_c`; 9 836 pairs, the count was not read before the database was dropped) | 9 835 / 9 836 | `ffd14055-….3` |
+| a clean native stage, second recipe (`exdg_e`) | 9 833 / 9 836 | `ffd14055-…` with `….0`, `….3` and its attributes |
+| the `Config` an apply of a native stage left (`import_bsp_nat2`) | 9 830 / 9 831 | one entry |
+
+  The four corpora state their count exactly (БСП 8.3.27 9 839 / 9 839, УХ
+  118 171 / 118 171, БСП 8.5 9 936 / 9 936, УХ 8.5 118 171 / 118 171), so
+  every entry of them is listed as before. The inventory check, the decision
+  what a stage publishes and the children of an object read all the pairs.
+
+Results with the fixed build against the native export of the same database:
+
+| database | before | after |
+|---|---|---|
+| `exdg_d`: the `nat_a2` fixture (`F:/ibcmd/lab/04/restructure-check/fixtures/nat_a2`) loaded into a restore of the corpus | 12 196 of 12 198 (`Configuration.xml`, `ConfigDumpInfo.xml`) | 12 198 of 12 198 |
+| `exdg_e`: a clean stage, a module edited in the tree, native `config import` until `ConfigSave` held 9 842 rows | 12 196 of 12 198 (the same two files) | 12 198 of 12 198 |
+| `ibcmd_rs_04_import_bsp_nat2`, the `Config` of another track after a native apply, no `ConfigSave` | 12 189 of 12 191 (the same two) | 12 191 of 12 191 |
+| `ibcmd_rs_04_rcheck_bsp_a`, the database of #390 | 12 198 of 12 198 | 12 198 of 12 198 |
+| `ibcmd_rs_bsp_8327_native_20260919`, from SQL, against the stored native tree | 12 198 of 12 198 | 12 198 of 12 198 |
+| БСП 8.3.27 and 8.5 offline, old binary against the fixed one | | 12 199 and 12 338 files identical; both equal the native reference trees |
+
+The first attempt at the fix listed only the counted entries and failed on
+`exdg_e`: there the omitted object is a whole catalog and its attributes, known
+from the descriptors, were left without an owner. The writer now reads every
+entry and leaves the uncounted ones, and their children, out of the file.
+
+ERP УХ 8.3.27 from its stored rows, whole (140 709 files, default path, heavy
+lock, 30.09.2026 before this change): 140 709 of 140 709 identical to the
+native reference; the fixed build cannot move a УХ file (count stated exactly,
+fields 26 and 43 equal), and no second full УХ export was made.
