@@ -75,6 +75,8 @@ def fmt_col(c):
         s += " IDENTITY"
     if cmp_ == "1":
         s += f" AS {cdef}"
+    if coll:
+        s += f" COLLATE {coll}"
     if ddef:
         s += f" DEFAULT {ddef}"
     return s
@@ -323,13 +325,51 @@ def shape_counts(rows, key="FileName"):
     return ", ".join(f"`{s}` x{n}" for s, n in c.most_common(12)) + (" ..." if len(c) > 12 else "")
 
 
+def _chngr_key(sm):
+    return (sm.get("_NodeTRef", ""), sm.get("_NodeRRef", ""), sm.get("_MDObjID", ""), sm.get("_ExtensionID", ""))
+
+
+def changereg_diff(t, ra, rb, add, js, max_list):
+    """_ConfigChngR / _ExtsChngR: the platform rebuilds these tables with new row ids, so compare by
+    (node, object[, extension]) and report what really changed: rows and _MessageNo."""
+    def load(rows):
+        d = {}
+        for r in rows.values():
+            sm = parse_summary(r["summary"])
+            d[_chngr_key(sm)] = (sm.get("_MessageNo", ""), sm.get("_IDRRef", ""))
+        return d
+    da, db = load(ra), load(rb)
+    ins = [k for k in db if k not in da]
+    dele = [k for k in da if k not in db]
+    msg = [(k, da[k][0], db[k][0]) for k in db if k in da and da[k][0] != db[k][0]]
+    regen = sum(1 for k in db if k in da and da[k][1] != db[k][1])
+    add(f"### {t}: {len(ra)} -> {len(rb)} rows (compared by node and object, not by the row id)")
+    add("")
+    add(f"- rows only after: {len(ins)}; rows only before: {len(dele)}; `_MessageNo` changed: {len(msg)}; "
+        f"row id `_IDRRef` differs in {regen} of {len(db) - len(ins)} common rows")
+    for k, a_, b_ in msg[:max_list]:
+        add(f"    - object {k[2]} node {k[0]}/{k[1][:12]}: _MessageNo {a_} -> {b_}")
+    if len(msg) > max_list:
+        add(f"    - ... {len(msg) - max_list} more")
+    for k in ins[:max_list]:
+        add(f"- + object {k[2]} node {k[0]}/{k[1][:12]} _MessageNo {db[k][0]}")
+    for k in dele[:max_list]:
+        add(f"- - object {k[2]} node {k[0]}/{k[1][:12]} _MessageNo {da[k][0]}")
+    add("")
+    js["service"][t] = {"inserted": len(ins), "deleted": len(dele), "message_no_changed": len(msg), "id_regenerated": regen}
+
+
+CHANGE_REGISTERS = ("_ConfigChngR", "_ExtsChngR")
+
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--before", required=True)
     ap.add_argument("--after", required=True)
     ap.add_argument("--out", default="")
     ap.add_argument("--blobs", default="")
-    ap.add_argument("--max-list", type=int, default=80, help="rows listed per category and table")
+    ap.add_argument("--max-list", type=int, default=30, help="rows listed per category and table")
     ap.add_argument("--max-lines", type=int, default=30, help="diff lines per changed row")
     ap.add_argument("--max-diff-rows", type=int, default=25, help="changed rows per table that get a content diff")
     args = ap.parse_args(argv)
@@ -450,6 +490,17 @@ def main(argv=None):
                 for o, r in meta_only[:args.max_list]:
                     add(f"- = `{r['FileName']}` creation {o['creation'][:19]} -> {r['creation'][:19]}, modified {o['modified'][:19]} -> {r['modified'][:19]}, attributes {o['attributes']} -> {r['attributes']}")
                 add("")
+        elif t in CHANGE_REGISTERS:
+            if ra and rb and all(ra.get(k, {}).get("row_sha256") == v.get("row_sha256") for k, v in rb.items()) and len(ra) == len(rb):
+                js["service"][t] = {"unchanged": len(rb)}
+                continue
+            changereg_diff(t, ra, rb, add, js, args.max_list)
+        elif t.endswith("_ExtProps") and t[: -len("_ExtProps")] in CHANGE_REGISTERS:
+            # rows are keyed by the row id of the register, which is regenerated: the count is what is comparable
+            if len(ra) != len(rb):
+                add(f"### {t}: {len(ra)} -> {len(rb)} rows")
+                add("")
+            js["service"][t] = {"rows_before": len(ra), "rows_after": len(rb)}
         else:
             ins, dele, upd, unchanged = generic_rows_diff(ra, rb)
             if not (ins or dele or upd):

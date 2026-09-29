@@ -35,6 +35,9 @@ param(
     [string]$Predicate = '',
     [switch]$KeepXel,
     [int]$TimeoutMinutes = 0,
+    # script blocks run right before / after the command under trace (e.g. take and release a lab lock)
+    [scriptblock]$BeforeCommand,
+    [scriptblock]$AfterCommand,
     [int]$MaxStatementKB = 1024,
     [int]$ContentMaxKB = 512,
     [int]$ContentBudgetMB = 1024,
@@ -73,6 +76,8 @@ if ($IncludeStatements) { $traceArgs['IncludeStatements'] = $true }
 if ($AllDatabases) { $traceArgs['AllDatabases'] = $true }
 if ($Predicate) { $traceArgs['Predicate'] = $Predicate }
 if ($KeepXel) { $traceArgs['KeepXel'] = $true }
+if ($BeforeCommand) { $traceArgs['BeforeCommand'] = $BeforeCommand }
+if ($AfterCommand) { $traceArgs['AfterCommand'] = $AfterCommand }
 $traceError = $null
 try {
     if ($Command) { & (Join-Path $PSScriptRoot 'trace.ps1') @traceArgs -Command $Command }

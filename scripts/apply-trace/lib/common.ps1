@@ -113,9 +113,9 @@ namespace ApplyTraceKit
     public sealed class BlobPack : IDisposable
     {
         private readonly string dir;
+        private readonly string indexPath;
         private readonly string packName;
         private readonly FileStream pack;
-        private readonly FileStream indexStream;
         private readonly System.Collections.Generic.HashSet<string> known = new System.Collections.Generic.HashSet<string>();
         private readonly StringBuilder pending = new StringBuilder();
         public long AddedBytes;
@@ -125,7 +125,7 @@ namespace ApplyTraceKit
         {
             dir = storeDir;
             Directory.CreateDirectory(dir);
-            string indexPath = Path.Combine(dir, "index.tsv");
+            indexPath = Path.Combine(dir, "index.tsv");
             if (File.Exists(indexPath))
             {
                 using (FileStream fs = new FileStream(indexPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -141,7 +141,6 @@ namespace ApplyTraceKit
             }
             packName = "pack-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss") + "-" + System.Diagnostics.Process.GetCurrentProcess().Id + ".bin";
             pack = new FileStream(Path.Combine(dir, packName), FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-            indexStream = new FileStream(indexPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
         }
 
         public bool Has(string sha) { return known.Contains(sha); }
@@ -164,13 +163,32 @@ namespace ApplyTraceKit
             return true;
         }
 
+        // Appends the pending index lines.  A FileStream does not append atomically on Windows, so two
+        // snapshots writing to one store would overwrite each other's lines: a named mutex serializes them.
         private void FlushIndex()
         {
             if (pending.Length == 0) return;
             pack.Flush();
             byte[] b = new UTF8Encoding(false).GetBytes(pending.ToString());
-            indexStream.Write(b, 0, b.Length);
-            indexStream.Flush();
+            // string.GetHashCode differs per process in .NET Core: use a fixed hash of the path
+            uint h = 2166136261;
+            foreach (char ch in dir.ToLowerInvariant()) { h = (h ^ ch) * 16777619; }
+            string mutexName = "Global\\ibcmd_rs_blobstore_" + h.ToString("x8");
+            using (System.Threading.Mutex m = new System.Threading.Mutex(false, mutexName))
+            {
+                bool owned = false;
+                try { owned = m.WaitOne(60000); } catch (System.Threading.AbandonedMutexException) { owned = true; }
+                try
+                {
+                    using (FileStream fs = new FileStream(indexPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        fs.Seek(0, SeekOrigin.End);
+                        fs.Write(b, 0, b.Length);
+                        fs.Flush();
+                    }
+                }
+                finally { if (owned) m.ReleaseMutex(); }
+            }
             pending.Length = 0;
         }
 
@@ -178,7 +196,6 @@ namespace ApplyTraceKit
         {
             FlushIndex();
             pack.Dispose();
-            indexStream.Dispose();
         }
     }
 
@@ -515,8 +532,13 @@ function Export-XelEvents {
 # -TimeoutMinutes N: a watchdog on its own thread kills every process that
 # descends from this PowerShell process N minutes after the start (exit code -9,
 # TimedOut = true), so a hung native tool cannot stall a capture for hours.
+#
+# -Before / -After: script blocks run right before and after the command (After also when the command
+# fails), outside its stopwatch and timeout: e.g. take and release a lab lock for the native command only.
 function Invoke-Observed {
-    param([scriptblock]$Command, [string]$Exe, [string[]]$ArgumentList, [string]$LogPath, [int]$TimeoutMinutes = 0)
+    param([scriptblock]$Command, [string]$Exe, [string[]]$ArgumentList, [string]$LogPath, [int]$TimeoutMinutes = 0,
+          [scriptblock]$Before, [scriptblock]$After)
+    if ($Before) { & $Before | Out-Host }
     $global:LASTEXITCODE = 0
     $code = 0
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -556,6 +578,7 @@ function Invoke-Observed {
         $sw.Stop()
         $sync.Stop = $true
         if ($dog) { try { [void]$dog.Stop() } catch { } ; $dog.Dispose() }
+        if ($After) { try { & $After | Out-Host } catch { Write-Log "the -After hook failed: $_" } }
     }
     if ($sync.Fired) { $code = -9; Write-Log "the command was killed after $TimeoutMinutes minutes (-TimeoutMinutes)" }
     return [pscustomobject]@{ ExitCode = $code; Seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 1); TimedOut = [bool]$sync.Fired }

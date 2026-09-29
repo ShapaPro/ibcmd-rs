@@ -57,6 +57,9 @@ param(
     [switch]$NoReport,
     # kill the command (and its child processes) after this many minutes; 0 = no limit
     [int]$TimeoutMinutes = 0,
+    # script blocks run right before / after the command (After also on failure), outside its timeout
+    [scriptblock]$BeforeCommand,
+    [scriptblock]$AfterCommand,
     # drop sessions named ibcmd_rs_04_<Track>_* left behind by a killed run and exit
     [switch]$Cleanup,
     [string]$Note = ''
@@ -117,7 +120,9 @@ try {
     if ($IncludeStatements) {
         $events += "ADD EVENT sqlserver.sql_statement_completed (ACTION ($actions) WHERE $dbFilter)"
     }
-    $xelBase = Join-Path $xelDir ($session + '.xel')
+    # a time stamp in the file name: files left by an earlier run with the same session name are never read
+    $xelBase = Join-Path $xelDir ('{0}_{1}.xel' -f $session, (Get-Date -Format 'yyyyMMddHHmmss'))
+    $xelPrefix = [System.IO.Path]::GetFileNameWithoutExtension($xelBase)
     $create = "CREATE EVENT SESSION [$session] ON SERVER`n" + ($events -join ",`n") + @"
 
 ADD TARGET package0.event_file (SET filename = N'$xelBase', max_file_size = 256, max_rollover_files = 64)
@@ -134,7 +139,7 @@ WITH (MAX_MEMORY = 128 MB, MAX_EVENT_SIZE = 128 MB, EVENT_RETENTION_MODE = ALLOW
         $startedUtc = [DateTime]::UtcNow
         Write-Log "trace $session started on '$Database' (id $dbId); running the command"
         $logPath = Join-Path $OutDir 'command.log'
-        $observed = Invoke-Observed -Command $Command -Exe $Exe -ArgumentList $ArgumentList -LogPath $logPath -TimeoutMinutes $TimeoutMinutes
+        $observed = Invoke-Observed -Command $Command -Exe $Exe -ArgumentList $ArgumentList -LogPath $logPath -TimeoutMinutes $TimeoutMinutes -Before $BeforeCommand -After $AfterCommand
         $endedUtc = [DateTime]::UtcNow
         Write-Log ("command finished: exit {0}, {1} s" -f $observed.ExitCode, $observed.Seconds)
         $ds = Invoke-SqlRows $master "SELECT dropped_event_count, dropped_buffer_count, largest_event_dropped_size, total_bytes_generated FROM sys.dm_xe_sessions WHERE name = N'$session'"
@@ -148,7 +153,7 @@ WITH (MAX_MEMORY = 128 MB, MAX_EVENT_SIZE = 128 MB, EVENT_RETENTION_MODE = ALLOW
     $eventCount = Export-XelEvents -Conn $master -Pattern (($xelBase -replace '\.xel$', '') + '*.xel') -OutPath $xmlPath
     Write-Log "$eventCount events exported to events.xml.gz"
 
-    $xelFiles = @(Get-ChildItem -LiteralPath $xelDir -Filter "$session*.xel" -ErrorAction SilentlyContinue)
+    $xelFiles = @(Get-ChildItem -LiteralPath $xelDir -Filter "$xelPrefix*.xel" -ErrorAction SilentlyContinue)
     $xelBytes = ($xelFiles | Measure-Object -Property Length -Sum).Sum
     $meta = [ordered]@{
         kit_version      = $script:KitVersion

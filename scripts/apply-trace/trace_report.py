@@ -429,6 +429,11 @@ def statement_facts(sql):
         if m and re.match(r"^\s*(CREATE|ALTER|DROP)\b", s, re.I):
             ops.append((f"{m.group(1).upper()} {m.group(2).upper()}", clean_table(m.group(3)), s))
             continue
+        # IF OBJECT_ID(...) IS NULL BEGIN EXEC('CREATE FUNCTION ...') END and the like
+        mo = re.search(r"\bEXEC(?:UTE)?\s*\(\s*N?'\s*(CREATE|ALTER)\s+(FUNCTION|PROCEDURE|PROC|VIEW|TRIGGER)\s+([\w\.\[\]]+)", s, re.I)
+        if mo:
+            ops.append((f"{mo.group(1).upper()} {mo.group(2).upper()}", clean_table(mo.group(3)), s))
+            continue
         if re.match(r"^\s*TRUNCATE\b", s, re.I):
             m = _RE_TRUNC.search(s)
             if m:
@@ -747,6 +752,7 @@ def build_transactions(events, stmts):
 def collect_writes(stmts, t0_us):
     """Every write statement as a record; file-table writes carry FileName/PartNo/payload."""
     recs = []
+    last_delete = {}   # spid -> (table, name) of the last "DELETE ... PartNo <> 0": the row the next UPDATE writes
     for s in stmts:
         e = s.ev
         for op, table, stext in s.ops:
@@ -759,6 +765,17 @@ def collect_writes(stmts, t0_us):
             if table in FILE_TABLES and op in ("INSERT", "UPDATE", "DELETE"):
                 d = dml_detail(op, table, stext, s.params)
                 r.update(d)
+                # a parameter after the 1,000,000-byte payload is cut off by SQL Server: take the row name
+                # from the DELETE of the other parts that the platform sends right before (same session)
+                if r["name"].startswith("@P") and (s.trunc or s.cut):
+                    prev = last_delete.get(e.spid)
+                    if op == "UPDATE" and prev and prev[0] == table:
+                        r["name"] = prev[1]
+                        r["note"] = (r["note"] + "; " if r["note"] else "") + "name taken from the preceding DELETE (parameter cut off by SQL Server)"
+                    else:
+                        r["name"] = "<row name cut off by SQL Server>"
+                if op == "DELETE" and r["partno"] == "<>0":
+                    last_delete[e.spid] = (table, r["name"])
             recs.append(r)
     return recs
 
@@ -937,10 +954,12 @@ def write_service_writes(out, recs, t0):
             pl = r["payload"]
             plen = pl.nbytes() if pl is not None else ""
             psha = ""
-            trunc = r["stmt"].trunc
+            # the statement text is cut by SQL Server (2,000,000 chars) or by the kit (-MaxStatementKB):
+            # the payload is then incomplete, which the declared size shows
+            cutoff = r["stmt"].trunc or r["stmt"].cut
             if pl is not None:
-                if trunc and plen >= 999_000:
-                    psha = "(truncated by SQL Server)"
+                if cutoff and (r["size"] is None or plen < r["size"]):
+                    psha = f"(incomplete: {plen} of {r['size']} bytes visible)"
                 else:
                     data = bytes.fromhex(pl.value) if len(pl.value) % 2 == 0 else b""
                     psha = sha256_hex(data)
@@ -1189,7 +1208,8 @@ def write_summary(out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, 
         f"(first statement start to last statement end)")
     dropped = meta.get("dropped_events")
     add(f"- events {len(events)}; dropped by XE: {dropped if dropped is not None else '?'}"
-        + (" **(events were lost: the report is incomplete)**" if dropped else ""))
+        + (" **(events were lost: the report is incomplete)**" if dropped else "")
+        + (f"; {meta['events_before_start_dropped']} older events in the file (an earlier run) were ignored" if meta.get("events_before_start_dropped") else ""))
     cut = sum(1 for s in stmts if s.cut)
     trunc = sum(1 for s in stmts if s.trunc)
     if cut or trunc:
@@ -1299,6 +1319,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--meta", default="")
     ap.add_argument("--focus-db", default="", help="keep only the sessions that touched this database (traces taken with -AllDatabases)")
+    ap.add_argument("--since", default="", help="drop events older than this UTC time (ISO 8601): the start of the traced command")
     args = ap.parse_args(argv)
     meta = {}
     if args.meta and os.path.isfile(args.meta):
@@ -1313,6 +1334,14 @@ def main(argv=None):
     if not events_path:
         raise SystemExit("give --events events.tsv or --xml events.xml.gz")
     events = load_events(events_path)
+    since = args.since or meta.get("started_utc", "")
+    if since:
+        cut = parse_ts(since) - 1_000_000
+        older = sum(1 for e in events if e.us < cut)
+        if older:
+            events = [e for e in events if e.us >= cut]
+            meta["events_before_start_dropped"] = older
+            print(f"dropped {older} events older than the start of the command ({since})")
     events, dropped_sessions = focus_events(events, args.focus_db)
     if args.focus_db:
         meta["focus_db"] = args.focus_db
