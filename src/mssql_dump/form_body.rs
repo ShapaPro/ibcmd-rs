@@ -388,33 +388,9 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     context: &FormParseContext<'_>,
     timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
-    let extraction = extract_form_body_xml_from_body_detailed_single(body, context, timings)?;
-    // A form an extension adopted carries the form of the extended
-    // configuration after its own tree; the platform writes it as `<BaseForm>`.
-    let Some(base_body) = super::extension::base_form_body(body) else {
-        return Some(extraction);
-    };
-    let DetailedFormBodyExtraction::Emitted {
-        xml,
-        mut diagnostics,
-    } = extraction
-    else {
-        return Some(extraction);
-    };
-    match extract_form_body_xml_from_body_detailed_single(&base_body, context, None) {
-        Some(DetailedFormBodyExtraction::Emitted {
-            xml: base_xml,
-            diagnostics: base_diagnostics,
-        }) => {
-            let Some(xml) = super::extension::splice_base_form(&xml, &base_xml) else {
-                return Some(DetailedFormBodyExtraction::OpaqueNotEmitted { diagnostics });
-            };
-            diagnostics.extend(base_diagnostics);
-            Some(DetailedFormBodyExtraction::Emitted { xml, diagnostics })
-        }
-        // A form whose base form does not read is not emitted without it.
-        _ => Some(DetailedFormBodyExtraction::OpaqueNotEmitted { diagnostics }),
-    }
+    // The base form an adopted form carries is written after its own tree by
+    // `form_extension::with_adopted_form_parts`, for every source of forms.
+    extract_form_body_xml_from_body_detailed_single(body, context, timings)
 }
 
 fn extract_form_body_xml_from_body_detailed_single(
@@ -835,7 +811,10 @@ fn extract_form_body_xml_from_body_detailed_single(
         return Some(DetailedFormBodyExtraction::Rejected { diagnostics, error });
     }
 
-    if !context.form_compatibility.usual_group_behavior {
+    if !writes_usual_group_behavior(
+        context.form_compatibility.usual_group_behavior,
+        super::extension::active().as_deref(),
+    ) {
         without_usual_group_behavior(&mut child_items);
     }
     let started = Instant::now();
@@ -985,6 +964,26 @@ pub(super) fn with_unidentified_form_items_numbered(layout: &str) -> Option<Stri
 /// The items with every explicit `Usual` behavior dropped, as the platform
 /// writes them under a compatibility mode before 8.3.20 (see
 /// `forms_write_usual_group_behavior`).
+/// Whether a group's explicit `Usual` behavior is written. The forms of an
+/// extension follow the compatibility mode of the configuration it EXTENDS,
+/// not the extension's own: the native 8.3.27.2214 export of `VAExtension`
+/// (extension mode 8.3.14, extended configuration 8.3.27) writes it, and so do
+/// the extensions of upstream PR 387's fixture `group_behavior_extension`. A
+/// configuration follows its own mode (`own_mode_writes`, from its rows). When
+/// the extended configuration cannot be read the platform's own edition
+/// applies: written.
+pub(super) fn writes_usual_group_behavior(
+    own_mode_writes: bool,
+    extension: Option<&super::extension::ExtensionContext>,
+) -> bool {
+    match extension {
+        Some(extension) => {
+            super::refs::forms_write_usual_group_behavior(extension.extended_compatibility_mode())
+        }
+        None => own_mode_writes,
+    }
+}
+
 pub(super) fn without_usual_group_behavior(items: &mut [FormChildItem]) {
     for item in items {
         if item.behavior == Some("Usual") {

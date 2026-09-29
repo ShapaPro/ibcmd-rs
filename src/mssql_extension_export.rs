@@ -95,6 +95,7 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
                 Some(crate::mssql_dump::extension::base_index_provider(
                     &sql,
                     &args.database,
+                    args.source_version,
                 )),
             )
             .with_context(|| format!("failed to export extension {:?}", extension.name))?;

@@ -1,76 +1,34 @@
 //! The forms of an extension.
 //!
-//! An extension keeps its forms in the ordinary form body, with three
-//! differences the body does not state and the platform writes anyway:
-//!
-//! * a form the extension adopted carries the form as it was in the extended
-//!   configuration (the *base form*) after its own tree; [`base_form_body`]
-//!   finds the record and [`splice_base_form`] writes it as `<BaseForm>`;
-//! * every event and command handler of an adopted form is written with the
-//!   call type `Before` ([`add_call_types`]);
-//! * a form saved by an older platform lacks members its items have since
-//!   received. The platform completes them in memory on load, taking the ids of
-//!   the new items from the id after the largest one of the form
-//!   ([`upgrade_items`]).
-
-use crate::module_blob::{ParsedFormBodyBlob, parse_form_body_plain};
+//! An extension keeps its forms in the ordinary form body. A form saved by an
+//! older platform lacks members its items have since received: the platform
+//! completes them in memory on load, taking the ids of the new items from the
+//! id after the largest one of the form ([`upgrade_items`]). (The base form of
+//! an adopted form and the call types of its handlers are written with the form
+//! itself, by `form_extension::with_adopted_form_parts`; [`add_call_types`]
+//! covers the adopted form that has no base form record.)
 
 const EOL: &str = "\r\n";
-
-/// The base form record of an adopted form, read as a form body of its own.
-///
-/// The container of a form that carries one has eight trailing sections where
-/// an ordinary form has seven: the sixth (`1`) declares the record and the
-/// seventh is the record itself, a complete `{4,{layout},"",...}` form body.
-pub(crate) fn base_form_body(body: &ParsedFormBodyBlob) -> Option<ParsedFormBodyBlob> {
-    super::active()?;
-    if body.trailing.len() != 8 || body.trailing.get(5)?.trim() != "1" {
-        return None;
-    }
-    let record = body.trailing.get(6)?.trim();
-    if !record.starts_with("{4,") {
-        return None;
-    }
-    parse_form_body_plain(record).ok()
-}
-
-/// `xml` with the rendering of the base form written as its last element.
-pub(crate) fn splice_base_form(xml: &str, base_xml: &str) -> Option<String> {
-    let root_start = base_xml.find("<Form ")?;
-    let root_end = root_start + base_xml[root_start..].find('>')?;
-    let root = &base_xml[root_start..root_end];
-    let version = attribute(root, "version")?;
-    let content_start =
-        root_end + 1 + base_xml[root_end + 1..].starts_with(EOL) as usize * EOL.len();
-    let content_end = base_xml.rfind("</Form>")?;
-    let content = base_xml.get(content_start..content_end)?;
-    let close = xml.rfind("</Form>")?;
-    let mut spliced = String::with_capacity(xml.len() + content.len() * 2);
-    spliced.push_str(&xml[..close]);
-    spliced.push_str(&format!("\t<BaseForm version=\"{version}\">{EOL}"));
-    for line in content.split(EOL) {
-        if !line.is_empty() {
-            spliced.push('\t');
-            spliced.push_str(line);
-            spliced.push_str(EOL);
-        }
-    }
-    spliced.push_str(&format!("\t</BaseForm>{EOL}"));
-    spliced.push_str(&xml[close..]);
-    Some(spliced)
-}
 
 /// The call type written with every handler of an adopted form.
 const CALL_TYPE: &str = " callType=\"Before\"";
 
-/// Writes `callType="Before"` on the event and command handlers of the form
-/// itself (the base form, kept as it was, has none).
+/// Writes `callType="Before"` on the event and command handlers of an adopted
+/// form that carries no base form record (one on record: the common form
+/// `СвязанныеДокументы` of the БСП 8.3.27 ServiceDesk, six commands and three
+/// events, all `Before`). A form with a base form record gets its call types
+/// from the event blocks of its body, with the base form, in
+/// `form_extension::with_adopted_form_parts`.
 pub(crate) fn add_call_types(xml: &str) -> Option<String> {
     let lines: Vec<&str> = xml.split(EOL).collect();
     let limit = lines
         .iter()
         .position(|line| line.starts_with("\t<BaseForm"))
         .unwrap_or(lines.len());
+    // A form with a base form record has its call types written with it.
+    if limit != lines.len() {
+        return None;
+    }
     let mut changed = false;
     let mut rewritten = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
@@ -517,28 +475,21 @@ mod tests {
     #[test]
     fn handlers_of_the_form_are_called_before() {
         let xml = crlf(
-            "<Form>\n\t<Events>\n\t\t<Event name=\"OnCreateAtServer\">Обработчик</Event>\n\t</Events>\n\t<Commands>\n\t\t<Command name=\"К\" id=\"1\">\n\t\t\t<Action>Действие</Action>\n\t\t</Command>\n\t</Commands>\n\t<BaseForm version=\"2.20\">\n\t\t<Events>\n\t\t\t<Event name=\"OnOpen\">Открытие</Event>\n\t\t</Events>\n\t</BaseForm>\n</Form>",
+            "<Form>\n\t<Events>\n\t\t<Event name=\"OnCreateAtServer\">Обработчик</Event>\n\t</Events>\n\t<Commands>\n\t\t<Command name=\"К\" id=\"1\">\n\t\t\t<Action>Действие</Action>\n\t\t</Command>\n\t</Commands>\n</Form>",
         );
         let adjusted = add_call_types(&xml).unwrap();
         assert!(
             adjusted.contains("<Event name=\"OnCreateAtServer\" callType=\"Before\">Обработчик")
         );
         assert!(adjusted.contains("<Action callType=\"Before\">Действие"));
-        assert!(adjusted.contains("<Event name=\"OnOpen\">Открытие"));
     }
 
+    /// A form with a base form record has its call types written with it.
     #[test]
-    fn the_base_form_is_indented_and_wrapped() {
-        let main = crlf("<Form version=\"2.20\">\n\t<Title/>\n</Form>");
-        let base = crlf(
-            "<?xml?>\n<Form xmlns=\"x\" version=\"2.20\">\n\t<Title>\n\t\t<A/>\n\t</Title>\n</Form>",
+    fn a_form_with_a_base_form_is_left_to_its_own_writer() {
+        let xml = crlf(
+            "<Form>\n\t<Events>\n\t\t<Event name=\"OnOpen\">Обработчик</Event>\n\t</Events>\n\t<BaseForm version=\"2.20\">\n\t</BaseForm>\n</Form>",
         );
-        let spliced = splice_base_form(&main, &base).unwrap();
-        assert_eq!(
-            spliced,
-            crlf(
-                "<Form version=\"2.20\">\n\t<Title/>\n\t<BaseForm version=\"2.20\">\n\t\t<Title>\n\t\t\t<A/>\n\t\t</Title>\n\t</BaseForm>\n</Form>"
-            )
-        );
+        assert!(add_call_types(&xml).is_none());
     }
 }

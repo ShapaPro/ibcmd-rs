@@ -191,6 +191,14 @@ pub(super) fn with_event_call_types(xml: &str, call_types: &EventCallTypes) -> S
     out
 }
 
+/// `xml` with `callType="Before"` on every command handler. The commands of
+/// an adopted form on record (six of an extension's common form in the БСП
+/// 8.3.27 ServiceDesk) all say `Before`; where the command record keeps a code
+/// for an interceptor that would say otherwise is not on record.
+pub(super) fn with_action_call_types(xml: &str) -> String {
+    xml.replace("<Action>", "<Action callType=\"Before\">")
+}
+
 fn unescape_xml_text(text: &str) -> String {
     text.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -224,6 +232,7 @@ pub(super) fn with_adopted_form_parts(
         return Ok(xml);
     };
     let xml = with_event_call_types(&xml, &form_event_call_types(&body.layout));
+    let xml = with_action_call_types(&xml);
     let v85 = source_version == InfobaseConfigSourceVersion::V2_21;
     let (base, facts) = if v85 && super::form::layout_8_5_1::is_form_body_8_5_1(&base) {
         let (converted, facts) = super::form::layout_8_5_1::down_convert_form_body_8_5_1(&base)
@@ -313,6 +322,14 @@ mod tests {
                      9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b,0,1}";
         assert_eq!(parse_form_event_block(block).unwrap().len(), 1);
         assert!(parse_form_event_block("{1,x,\"h\",1,0,y,0,1}").is_none());
+    }
+
+    #[test]
+    fn command_handlers_are_called_before() {
+        assert_eq!(
+            with_action_call_types("<Command><Action>Действие</Action></Command>"),
+            "<Command><Action callType=\"Before\">Действие</Action></Command>"
+        );
     }
 
     #[test]

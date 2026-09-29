@@ -49,7 +49,6 @@ mod project;
 mod properties;
 pub(super) mod root;
 
-pub(crate) use form::{base_form_body, splice_base_form};
 pub(crate) use project::project_object_xml;
 
 pub(crate) const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
@@ -431,6 +430,9 @@ impl std::fmt::Debug for ExtensionContext {
 pub(crate) struct ResolvedIndexes {
     pub type_index: BTreeMap<String, String>,
     pub object_refs: BTreeMap<String, String>,
+    /// The compatibility mode of the configuration the indexes were read from
+    /// (`Version8_3_27`), when they were read from a whole configuration.
+    pub compatibility_mode: Option<String>,
 }
 
 impl ExtensionContext {
@@ -481,11 +483,20 @@ impl ExtensionContext {
         let _ = self.indexes.set(ResolvedIndexes {
             type_index: type_index.clone(),
             object_refs: object_refs.clone(),
+            compatibility_mode: None,
         });
     }
 
     pub(crate) fn indexes(&self) -> Option<&ResolvedIndexes> {
         self.indexes.get()
+    }
+
+    /// The compatibility mode of the configuration the extension extends
+    /// (`Version8_3_27`), read with the references of that configuration; none
+    /// when they cannot be read. Read before the rows are converted in
+    /// parallel (see `export_extension_image_to_source`).
+    pub(crate) fn extended_compatibility_mode(&self) -> Option<&str> {
+        self.base_indexes()?.compatibility_mode.as_deref()
     }
 
     /// Remembers why the converters printed nothing for `row`.
@@ -649,6 +660,12 @@ pub fn export_extension_image_to_source(
             .with_root_header(root_header)
             .with_base_provider(base_provider),
     )?;
+    // The forms follow the compatibility mode of the configuration the
+    // extension extends. Read it here: the read converts rows on the export's
+    // own thread pool, so a worker asking for it first would wait on itself.
+    if let Some(context) = active() {
+        let _ = context.extended_compatibility_mode();
+    }
     let exported = export_direct_storage_rows_to_source(
         rows,
         records,
@@ -707,29 +724,44 @@ pub fn export_extension_image_to_source(
 /// The reference indexes of the configuration the extensions of `database`
 /// extend: the type ids and object ids of its metadata rows (the `Config`
 /// table, one read of every row without a dot in its name).
-pub(crate) fn fetch_base_indexes(sql: &SqlExec, database: &str) -> Result<ResolvedIndexes> {
+pub(crate) fn fetch_base_indexes(
+    sql: &SqlExec,
+    database: &str,
+    source_version: InfobaseConfigSourceVersion,
+) -> Result<ResolvedIndexes> {
     let rows = super::fetch::fetch_metadata_rows(sql, database, "Config")
         .with_context(|| format!("failed to read the metadata rows of {database}"))?;
-    Ok(base_indexes_from_rows(&rows))
+    Ok(base_indexes_from_rows(&rows, source_version))
 }
 
 /// The provider of [`fetch_base_indexes`] for an export to hand over: it reads
 /// the rows when the export first asks and answers nothing when they cannot be
 /// read (a reference to the extended configuration then stays an id).
-pub(crate) fn base_index_provider(sql: &SqlExec, database: &str) -> BaseIndexProvider {
+pub(crate) fn base_index_provider(
+    sql: &SqlExec,
+    database: &str,
+    source_version: InfobaseConfigSourceVersion,
+) -> BaseIndexProvider {
     let sql = sql.clone();
     let database = database.to_owned();
-    Arc::new(move || fetch_base_indexes(&sql, &database).ok())
+    Arc::new(move || fetch_base_indexes(&sql, &database, source_version).ok())
 }
 
 /// The indexes of [`fetch_base_indexes`] over metadata rows already read.
-pub(crate) fn base_indexes_from_rows(rows: &[super::ConfigRow]) -> ResolvedIndexes {
+pub(crate) fn base_indexes_from_rows(
+    rows: &[super::ConfigRow],
+    source_version: InfobaseConfigSourceVersion,
+) -> ResolvedIndexes {
     let texts = super::build_metadata_text_rows(rows);
     let types = super::build_metadata_type_indexes_from_texts(&texts);
     let objects = super::refs::build_metadata_object_reference_indexes_from_texts(&texts);
     ResolvedIndexes {
         type_index: types.references,
         object_refs: objects.references,
+        compatibility_mode: super::refs::configuration_compatibility_mode_from_texts(
+            &texts,
+            source_version,
+        ),
     }
 }
 
@@ -823,9 +855,11 @@ const SCHEMA_NAMESPACE_DECLARATION: &str =
 
 /// What the platform does to the form XML of an extension beyond what the
 /// stored body states: the older shape of a form in an old compatibility mode
-/// (no schema namespace on the root of `Ext/Form.xml`), the call type of the
-/// handlers of an adopted form and the completion of items saved by an older
-/// platform (see [`form`]).
+/// (no schema namespace on the root of `Ext/Form.xml`) and the completion of
+/// items saved by an older platform (see [`form`]), and the call types of an
+/// adopted form that has no base form record. The base form of the others and
+/// their call types are written with the form itself
+/// (`form_extension::with_adopted_form_parts`).
 fn adjust_form_files(
     output_dir: &Path,
     entry: &StorageExportEntryReport,

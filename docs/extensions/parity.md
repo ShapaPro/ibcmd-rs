@@ -133,11 +133,26 @@ relaxed for an extension export only unless noted.
   the root of `Ext/Form.xml`.
 * **`BaseForm`.** A form the extension adopted carries the extended
   configuration's form after its own tree (container section 6 is `1`, section 7
-  is a complete form record). It is rendered by the ordinary form reader and
-  written as `<BaseForm version="...">` after `</Parameters>`, one level deeper.
-  A form whose base form does not read is not emitted at all.
-* **`callType`.** Every event and command handler of an adopted form is written
-  with `callType="Before"`.
+  is a complete form record). `form_extension::with_adopted_form_parts` (upstream
+  PR 387) writes it as `<BaseForm version="...">` after `</Parameters>`, one
+  level deeper, for every source of forms: the `.cfe` container and the SQL
+  export share it. A form whose base form does not read is not emitted at all.
+* **`callType`.** The event block of a form body stores every handler of every
+  event (`{N,(event,"first handler")xN,1,0,(event,code,n,("handler",code)x(n-1))xN}`,
+  code `0` Before, `1` After, `2` Override), and the platform writes one
+  `<Event>` per handler with its call type, the base form's events included
+  (upstream fixtures `adopted/form_events`, `form_events_shared`). The command
+  handlers (`<Action>`) of an adopted form are written `Before`: all six on
+  record say so, and where a command record keeps an interceptor code is not on
+  record. An adopted form that carries no base form record (the common form
+  `СвязанныеДокументы` of the БСП 8.3.27 ServiceDesk) gets `Before` on all its
+  events and commands from the export's own pass (`extension::form`), for lack
+  of a second sample.
+* **`Usual` group behavior.** An explicit `<Behavior>Usual</Behavior>` follows
+  the compatibility mode of the configuration the extension EXTENDS, not the
+  extension's own: `VAExtension` (mode 8.3.14) extends a configuration in 8.3.27
+  and the native export writes it. The extended configuration's mode is read
+  with its references, before the rows are converted (`ExtensionContext`).
 * **Forms saved by an older platform.** Items the platform completes on load are
   completed in the XML, in document order, with the ids taken from the largest
   item id plus one: a table without an extended tooltip gets one, and each of its
@@ -169,8 +184,8 @@ These are read off a single native sample; the evidence is in the lab folder
 * the `dcssch` boundary: 8.3.14 writes none, 8.3.21 and 8.3.24 write it, 8.3.15 is
   assumed;
 * `EnableDrag` of a planner field is option slot 6 (the only planner on record);
-* `callType="Before"` on *every* handler of an adopted form (two adopted forms on
-  record, one with handlers);
+* `callType="Before"` on the events and commands of an adopted form without a
+  base form record (one form on record);
 * the completion of old items is proved on 8 forms of one extension (ids, order,
   the dynamic list defaults); other kinds of items (pages, groups) that an older
   platform completed may exist;
