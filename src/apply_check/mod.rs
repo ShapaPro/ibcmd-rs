@@ -33,6 +33,7 @@
 //! generator of those entries is not part of this module.
 
 mod check;
+pub mod cli;
 mod dbtree;
 mod descriptor;
 mod model;

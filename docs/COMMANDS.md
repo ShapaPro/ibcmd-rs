@@ -355,6 +355,8 @@ ibcmd-rs source-diff -o diff.json C:\export\native C:\export\ours
 |---|---|
 | `mssql-apply-source-change` | Собрать, записать и опубликовать изменение одного модуля или управляемой формы без штатного `ibcmd` (режимы `--mode exclusive\|online\|live\|worker`). |
 | `mssql-activate-staged-main` | Опубликовать уже записанное изменение основной конфигурации, не требующее реструктуризации. |
+| `mssql-apply-check` | Проверить, нужна ли реструктуризация: ConfigSave базы против действующей конфигурации, а с `--tree <каталог>` — дерево XML против базы (какие описания отличаются и чем). Только чтение; `--json` печатает вердикт, `--fail-on-restructuring` возвращает код 10, если нужен штатный `config apply`. Описание: [restructuring-check.md](apply/restructuring-check.md). |
+| `apply-check-trees` | То же для двух деревьев XML: `--old` (выгрузка) и `--new` (то, что её заменит). Базы не нужно. |
 | `mssql-activation-snapshot` | Снять снимок служебных таблиц до и после применения (исследование протокола применения). |
 | `mssql-activation-diff` | Сравнить два снимка без подключения к серверу. |
 

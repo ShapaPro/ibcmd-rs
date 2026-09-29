@@ -163,6 +163,10 @@ pub enum Commands {
     MssqlActivationDiff(MssqlActivationDiffArgs),
     /// Publish an already staged non-structural main-configuration change without native ibcmd.
     MssqlActivateStagedMain(MssqlActivateStagedMainArgs),
+    /// Tell whether the ConfigSave of a database (with --tree: a source tree against the database) needs the platform's own apply, a restructuring; read-only.
+    MssqlApplyCheck(crate::apply_check::cli::MssqlApplyCheckArgs),
+    /// Tell whether the change from one XML tree to another needs the platform's own apply.
+    ApplyCheckTrees(crate::apply_check::cli::ApplyCheckTreesArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
     /// Dry-run source load parity and bootstrap base-blob readiness without writing ConfigSave.
