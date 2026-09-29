@@ -45607,6 +45607,33 @@ fn install_storage_overlay(
     headers: Vec<ConfigRowHeader>,
     main_configuration: bool,
 ) -> Result<Vec<ConfigRowHeader>> {
+    let (overlay, headers) = resolve_storage_overlay(
+        sql,
+        database,
+        table,
+        selected_file_names,
+        headers,
+        main_configuration,
+    )?;
+    if let Some(overlay) = overlay {
+        dynamic_generation::install_storage_generation_overlay(table, overlay);
+    }
+    Ok(headers)
+}
+
+/// The overlay [`install_storage_overlay`] installs, if there is one, and the
+/// row headers under their published names. Reads the table, installs nothing.
+fn resolve_storage_overlay(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+    headers: Vec<ConfigRowHeader>,
+    main_configuration: bool,
+) -> Result<(
+    Option<std::sync::Arc<dynamic_generation::StorageGenerationOverlay>>,
+    Vec<ConfigRowHeader>,
+)> {
     let history = generation_history(sql, database, table, selected_file_names, &headers)?;
     // Only a full run publishes the staged rows: a run that selected a few
     // rows by name reads them from the table, as it always did.
@@ -45616,7 +45643,7 @@ fn install_storage_overlay(
         None
     };
     if history.is_none() && staged.is_none() {
-        return Ok(headers);
+        return Ok((None, headers));
     }
 
     // The overlay is a property of the whole table, so a run that selected a
@@ -45668,12 +45695,11 @@ fn install_storage_overlay(
     }
     if !inventoried {
         if overlay.is_empty() {
-            return Ok(headers);
+            return Ok((None, headers));
         }
         overlay = drop_unlisted_names(sql, database, table, overlay, names)?;
     }
     let overlay = std::sync::Arc::new(overlay);
-    dynamic_generation::install_storage_generation_overlay(table, overlay.clone());
 
     let mut published = headers
         .into_iter()
@@ -45691,7 +45717,7 @@ fn install_storage_overlay(
         })
         .collect::<Vec<_>>();
     published.extend(staged_headers);
-    Ok(published)
+    Ok((Some(overlay), published))
 }
 
 /// The generation history the table's `DynamicallyUpdated` row records, or
@@ -45721,6 +45747,15 @@ fn generation_history(
         .map(Some)
         .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))
 }
+
+/// The row that lists a whole configuration, in `Config` and in a stage.
+const STAGE_INVENTORY_ROW: &str = "versions";
+
+/// The row an import or an apply keeps while it is not finished.
+const STAGE_COMMIT_ROW: &str = "commit";
+
+/// The suffix of a row an import or an apply has copied and not yet promoted.
+const STAGE_NEW_SUFFIX: &str = ".new";
 
 /// What a completed import left in `ConfigSave`: the main configuration.
 struct StagedConfiguration {
@@ -45763,8 +45798,9 @@ fn staged_configuration(
         .iter()
         .map(|row| row.file_name.clone())
         .collect::<BTreeSet<_>>();
-    let unfinished = names.contains("commit") || names.iter().any(|name| name.ends_with(".new"));
-    if !names.contains("versions") || unfinished {
+    let unfinished = names.contains(STAGE_COMMIT_ROW)
+        || names.iter().any(|name| name.ends_with(STAGE_NEW_SUFFIX));
+    if !names.contains(STAGE_INVENTORY_ROW) || unfinished {
         eprintln!(
             "{saved} holds no complete stage (no `versions` row, or the markers of an unfinished import or apply); the export publishes the {table} table"
         );
@@ -45774,7 +45810,7 @@ fn staged_configuration(
         sql,
         database,
         saved,
-        &BTreeSet::from(["versions".to_owned()]),
+        &BTreeSet::from([STAGE_INVENTORY_ROW.to_owned()]),
         false,
     )?
     .into_iter()
@@ -45808,7 +45844,7 @@ fn drop_unlisted_names(
     overlay: dynamic_generation::StorageGenerationOverlay,
     stored: &[ConfigRowHeader],
 ) -> Result<dynamic_generation::StorageGenerationOverlay> {
-    let versions_row = BTreeSet::from([overlay.stored_name("versions").to_owned()]);
+    let versions_row = BTreeSet::from([overlay.stored_name(STAGE_INVENTORY_ROW).to_owned()]);
     let rows = fetch_binary_rows(sql, database, table, &versions_row, false)?;
     let Some(versions) = rows.iter().find(|row| row.part_no == 0) else {
         return Ok(overlay);

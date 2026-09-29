@@ -629,14 +629,14 @@ mod tests {
     }
 
     fn published_by(dir: &std::path::Path, main_configuration: bool) -> BTreeSet<String> {
-        // Each run resolves the overlay of the rows it was given.
-        crate::mssql_dump::dynamic_generation::clear_storage_generation_overlays();
         let _active = super::activate(dir).unwrap();
         let sql = crate::sql::SqlExec::detached("the rows come from a folder");
         let headers =
             crate::mssql_dump::fetch::fetch_row_headers(&sql, "db", "Config", &BTreeSet::new())
                 .unwrap();
-        crate::mssql_dump::install_storage_overlay(
+        // Resolved, not installed: the installed overlays are shared by the
+        // tests of the process.
+        crate::mssql_dump::resolve_storage_overlay(
             &sql,
             "db",
             "Config",
@@ -645,6 +645,7 @@ mod tests {
             main_configuration,
         )
         .unwrap()
+        .1
         .into_iter()
         .map(|header| header.file_name)
         .collect()

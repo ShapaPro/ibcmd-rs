@@ -43,11 +43,24 @@ pub(super) fn build_metadata_command_reference_index_from_texts(
     index
 }
 
+/// The `<UseStandardCommands>` of a kind whose row the metadata model decodes,
+/// read at the slot the model writes the object's own XML from. The platform
+/// keeps the raw `<code>:<uuid>` sentinel for such an object when it is
+/// `false`: measured on a database whose staged constant has
+/// `<UseStandardCommands>false</UseStandardCommands>`, where the subsystem that
+/// hides the constant's `Open` command prints the sentinel and this export
+/// printed the name.
+fn model_use_standard_commands(kind: &str, text: &str) -> Option<bool> {
+    let row = crate::metadata_model::brace::parse_row(text.as_bytes()).ok()?;
+    crate::metadata_model::simple::export::use_standard_commands(kind, &row)
+}
+
 /// The target's own `<UseStandardCommands>`, read through the same decoder and
 /// at the same slot the kind's own properties parser uses -- offset 31 of the
 /// normalized owner fields for `Catalog`, offset 23 for `Document`, logical
 /// field 7 for `InformationRegister`, and slot 7 of the object fields for
-/// `Report` and `Constant`. `None` for every other kind, or when the decode
+/// `Report`, and the flag the metadata model itself reads for the kinds it
+/// decodes (`Constant`). `None` for every other kind, or when the decode
 /// fails: the caller
 /// then keeps the pre-existing `true` assumption rather than a guessed offset,
 /// per the project's fail-closed rule on unevidenced field positions.
@@ -90,27 +103,13 @@ fn metadata_use_standard_commands(kind: &str, text: &str, header: &MetadataHeade
         }
         return parse_1c_bool_field(fields.get(7).copied());
     }
-    if kind == "Constant" {
-        // Slot 7 of the record `{16,<body>,<4 ids>,<DataLockControlMode>,
-        // <UseStandardCommands>,...}`, the slot the model export writes the
-        // constant's own `Constants/<name>.xml` from. The platform keeps the
-        // raw `100:<uuid>` sentinel for such a constant: measured on a
-        // database whose staged constant `ИспользоватьКонтрольТарификации` has
-        // `<UseStandardCommands>false`, where the subsystem that hides its
-        // `Open` command prints the sentinel and this export printed the name.
-        let fields = metadata_object_fields(text)?;
-        if fields.first().map(|value| value.trim()) != Some("16") {
-            return None;
-        }
-        return parse_1c_bool_field(fields.get(7).copied());
-    }
     let family = match kind {
         "Catalog" => owner_graph::OwnerGraphFamily::Catalog,
         // Same slot `parse_document_properties_from_text` reads for the
         // document's own `Documents/<name>.xml`, through the same owner-graph
         // decoder.
         "Document" => owner_graph::OwnerGraphFamily::Document,
-        _ => return None,
+        _ => return model_use_standard_commands(kind, text),
     };
     let slot = match kind {
         "Catalog" => 31,
