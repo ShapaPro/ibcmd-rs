@@ -44,6 +44,9 @@ mod sql;
 mod tree_diff;
 mod trees;
 
+#[cfg(test)]
+mod corpus_tests;
+
 pub use check::{Inputs, RowProvider, check};
 pub use dbtree::check_tree_against_db;
 pub use model::{Note, ObjectChange, ObjectOp, Reason, ReasonClass, Stats, Verdict};
