@@ -223,10 +223,12 @@ impl OfflineRows {
     /// [`dynamic_generation`]), with each staged row in place of the stored
     /// row of its name. The apply drops the aliases of what it replaces, so a
     /// staged row is never shadowed by one; the generation history itself is
-    /// left out, since nothing is aliased any more.
+    /// left out, since nothing is aliased any more. `removed` are the names the
+    /// stage's `deleted` row lists: the apply removes those rows.
     pub(super) fn with_staged(
         self,
         staged: impl IntoIterator<Item = (String, Arc<Vec<u8>>)>,
+        removed: &[String],
     ) -> Result<Self> {
         let mut rows = self.rows;
         if let Some(marker) = rows.remove(super::DYNAMIC_UPDATE_MARKER_ROW) {
@@ -246,6 +248,9 @@ impl OfflineRows {
                 }
             }
             rows = published;
+        }
+        for file_name in removed {
+            rows.remove(file_name);
         }
         for (file_name, bytes) in staged {
             rows.insert(file_name, vec![StoredPart::memory(bytes)]);
@@ -537,11 +542,14 @@ mod tests {
     #[test]
     fn a_staged_row_takes_the_place_of_the_row_and_of_its_alias() {
         let state = generation_rows()
-            .with_staged([
-                ("a.0".to_string(), row(b"a.0 staged")),
-                ("versions".to_string(), row(b"versions staged")),
-                ("new.0".to_string(), row(b"a row the storage lacked")),
-            ])
+            .with_staged(
+                [
+                    ("a.0".to_string(), row(b"a.0 staged")),
+                    ("versions".to_string(), row(b"versions staged")),
+                    ("new.0".to_string(), row(b"a row the storage lacked")),
+                ],
+                &[],
+            )
             .unwrap();
         let got = contents(&state);
         assert_eq!(got["a.0"], b"a.0 staged");
@@ -565,11 +573,38 @@ mod tests {
             ("a".to_string(), row(b"old")),
             ("b".to_string(), row(b"kept")),
         ]);
-        let state = rows.with_staged([("a".to_string(), row(b"new"))]).unwrap();
+        let state = rows
+            .with_staged([("a".to_string(), row(b"new"))], &[])
+            .unwrap();
         let got = contents(&state);
         assert_eq!(got["a"], b"new");
         assert_eq!(got["b"], b"kept");
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn the_rows_a_stage_deletes_are_not_in_the_state() {
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"old")),
+            ("gone".to_string(), row(b"removed by the tree")),
+            ("gone.0".to_string(), row(b"removed with it")),
+            ("z".to_string(), row(b"kept")),
+        ]);
+        let state = rows
+            .with_staged(
+                [("a".to_string(), row(b"new"))],
+                &[
+                    "gone".to_string(),
+                    "gone.0".to_string(),
+                    "never there".to_string(),
+                ],
+            )
+            .unwrap();
+        let got = contents(&state);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
     }
 
     #[test]
@@ -579,7 +614,7 @@ mod tests {
             row(b"{1,2,not-a-uuid}"),
         )]);
         let error = rows
-            .with_staged(Vec::<(String, Arc<Vec<u8>>)>::new())
+            .with_staged(Vec::<(String, Arc<Vec<u8>>)>::new(), &[])
             .unwrap_err();
         assert!(
             error.to_string().contains("generation history"),

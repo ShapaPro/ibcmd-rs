@@ -2299,6 +2299,15 @@ pub(crate) enum StateBase<'a> {
         sql: &'a crate::sql::SqlExec,
         database: &'a str,
     },
+    /// The Config table of a database as a stage has already read it: part 0
+    /// of every row. Only the rows stored in more than one part are read
+    /// again, for their other parts -- the read of the whole table took
+    /// 195 s on ERP УХ.
+    Prefetched {
+        part0: &'a std::collections::HashMap<String, Vec<u8>>,
+        sql: &'a crate::sql::SqlExec,
+        database: &'a str,
+    },
 }
 
 /// A row a stage writes into ConfigSave: its file name and stored bytes.
@@ -2329,6 +2338,7 @@ pub(crate) struct StateExportReport {
 pub(crate) fn export_staged_state(
     base: StateBase<'_>,
     staged: &[StagedRow<'_>],
+    removed: &[String],
     source_version: InfobaseConfigSourceVersion,
     output_root: &Path,
     sink: Arc<dyn FileSink>,
@@ -2344,11 +2354,26 @@ pub(crate) fn export_staged_state(
                 .into_iter()
                 .map(|row| (row.file_name, Arc::new(row.binary))),
         ),
+        StateBase::Prefetched {
+            part0,
+            sql,
+            database,
+        } => {
+            let mut rows = part0
+                .iter()
+                .map(|(file_name, bytes)| (file_name.clone(), Arc::new(bytes.clone())))
+                .collect::<BTreeMap<_, _>>();
+            for row in fetch_multi_part_config_rows(sql, database)? {
+                rows.insert(row.file_name, Arc::new(row.binary));
+            }
+            offline_rows::OfflineRows::from_memory(rows)
+        }
     };
     let state = stored.with_staged(
         staged
             .iter()
             .map(|row| (row.file_name.to_owned(), Arc::new(row.bytes.to_vec()))),
+        removed,
     )?;
     let state_rows = state.len();
     let read_ms = elapsed_ms(started);
@@ -2411,6 +2436,25 @@ fn fetch_all_config_rows(
         rows.extend(fetch_binary_rows(sql, database, table, &selected, true)?);
     }
     Ok(rows)
+}
+
+/// The rows of the Config table that are stored in more than one part, each
+/// assembled from all its parts.
+fn fetch_multi_part_config_rows(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let headers = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
+    let multi = headers
+        .iter()
+        .filter(|header| header.part_no > 0)
+        .map(|header| header.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    if multi.is_empty() {
+        return Ok(Vec::new());
+    }
+    fetch_binary_rows(sql, database, table, &multi, true)
 }
 
 fn ensure_collect_all_strict_gates(

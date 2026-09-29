@@ -66,6 +66,12 @@ pub enum ScriptVariables {
 pub trait SqlClient: Send + Sync {
     fn dbms(&self) -> Dbms;
 
+    /// Why every request fails, for a handle that reaches no database
+    /// (`SqlExec::detached`); `None` for a real client.
+    fn detached_reason(&self) -> Option<&'static str> {
+        None
+    }
+
     /// How many requests may run at once (parallel reads should not split
     /// into more parts than this).
     fn max_connections(&self) -> usize;
@@ -360,6 +366,11 @@ impl SqlExec {
         }
     }
 
+    /// Why every request of this handle fails, when it is a detached one.
+    pub fn detached_reason(&self) -> Option<&'static str> {
+        self.client().and_then(SqlClient::detached_reason)
+    }
+
     /// The external tools (`--sqlcmd`), if the command runs them.
     pub fn tools(&self) -> Option<&SqlTools> {
         match &self.inner.backend {
@@ -418,6 +429,10 @@ struct Detached {
 impl SqlClient for Detached {
     fn dbms(&self) -> Dbms {
         Dbms::SqlServer
+    }
+
+    fn detached_reason(&self) -> Option<&'static str> {
+        Some(self.reason)
     }
 
     fn max_connections(&self) -> usize {
