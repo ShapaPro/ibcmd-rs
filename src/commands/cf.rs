@@ -2359,6 +2359,7 @@ mod tests {
             storage_version: 5,
             page_size: None,
             reserved: 0,
+            base_free: false,
         };
         let report = bootstrap_report(
             run(CfArgs {
