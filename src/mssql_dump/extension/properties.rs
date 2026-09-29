@@ -34,6 +34,7 @@ pub(crate) enum Meaning {
 }
 
 const TYPE_PROPERTY: &str = "b1053250-abe6-11d4-9434-004095e12fc7";
+const SYNONYM_PROPERTY: &str = "cf4abea3-37b2-11d4-940f-008048da11f9";
 
 /// The meaning of property `guid` on an element called `element`
 /// (`Catalog`, `Attribute`, `CommonModule`, ...), if it is known.
@@ -43,25 +44,50 @@ pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
         "9595ddd6-e72c-47ad-a156-672db811628c" => return Some(ExtendedObject),
         // `Type` of an attribute, resource, dimension, defined type, ...
         TYPE_PROPERTY => return Some(Multi("Type")),
+        // One id names the synonym whatever the class (upstream PR 387,
+        // `external/adopted/props_all`: a document lists it too).
+        SYNONYM_PROPERTY => return Some(Property("Synonym")),
         _ => {}
     }
     Some(match (element, guid) {
         ("AccumulationRegister", "bd533460-4001-11d6-a3c7-0050bae0a776") => {
             Property("RegisterType")
         }
-        // Catalog: the two id pairs always appear whole; the assignment inside
-        // a pair is the one of the stored `{9d, 9e, 9f}` run.
-        ("Catalog", "37f2fa9d-b276-11d4-9435-004095e12fc7") => Property("CodeType"),
-        ("Catalog", "37f2fa9e-b276-11d4-9435-004095e12fc7") => Property("CodeLength"),
+        // Catalog. The ids of the code type and length were read off the
+        // stored `{9d, 9e, 9f}` run in the first pass and came out swapped; the
+        // platform probes that set one property apart (upstream PR 387, fixtures
+        // `external/adopted/props_b0..b2`) show `9d` beside `CodeLength` only
+        // and `9e` beside `CodeType` only.
+        ("Catalog", "37f2fa9d-b276-11d4-9435-004095e12fc7") => Property("CodeLength"),
+        ("Catalog", "37f2fa9e-b276-11d4-9435-004095e12fc7") => Property("CodeType"),
         ("Catalog", "37f2fa9f-b276-11d4-9435-004095e12fc7") => Property("DescriptionLength"),
         ("Catalog", "bf9cc511-eb2a-48b6-a666-7afb78b83f36") => Property("CodeAllowedLength"),
+        // Set apart by the same probes (fixtures `external/adopted/props_*`).
+        ("Catalog", "b69601f0-4cf6-11d4-9415-008048da11f9") => Property("Owners"),
+        ("Catalog", "b0ec341d-eede-4bb4-b303-ed50020b4c7f") => Property("Hierarchical"),
+        ("Catalog", "a865d4e5-8584-4894-8e49-4b4206f98f5a") => Property("HierarchyType"),
+        // The modules and predefined items an adopted object extends
+        // (`external/adopted/{catalog_modules,catalog_object_module,
+        // document_children,predefined,exchange_plan}`).
+        ("Catalog", "a637f77f-3840-441d-a1c3-699c8c5cb7e0") => Block("ObjectModule"),
+        ("Catalog", "d1b64a2c-8078-4982-8190-8f81aefda192") => Block("ManagerModule"),
+        ("Document", "60643a07-120a-4a63-9dba-67369c0f0145") => Property("NumberType"),
+        ("Document", "490eb6bd-24c4-4943-82aa-d0c4b666861b") => Property("NumberLength"),
+        ("Document", "c6c9689d-2978-42e8-863f-0280c6a85b56") => Property("NumberAllowedLength"),
+        ("Document", "a637f77f-3840-441d-a1c3-699c8c5cb7e0") => Block("ObjectModule"),
+        ("Form", "32e087ab-1491-49b6-aba7-43571b41ac2b") => Block("Form"),
+        ("Form", "e3331ed0-3854-478d-b6b5-4f14acdd6edb") => Property("FormType"),
+        ("EventSubscription", "41721fe8-6dcb-4585-9ec2-5577d430cf6b") => Property("Source"),
+        ("FilterCriterion", "e1e8ea40-0906-11d6-a3c7-0050bae0a776") => Property("Content"),
+        ("StyleItem", "36e0f718-e0ba-4369-af8b-aff9a4ad7a35") => Property("Value"),
+        ("CommonModule", "07ddee68-6fc0-4b88-9616-7792446d12b8") => Property("ReturnValuesReuse"),
+        ("CommonCommand", "482411f7-457f-4889-a7c9-9adbfb1c7bd4") => Property("Group"),
         ("Command", "482411f7-457f-4889-a7c9-9adbfb1c7bd4") => Property("Group"),
         // 8.5: an adopted command of a register lists it (state 2, printed empty).
         ("Command", "7d14f63a-87e8-4188-a28b-02da93f6bcbd") => Multi("CommandParameterType"),
         ("CommonCommand", "7d14f63a-87e8-4188-a28b-02da93f6bcbd") => Multi("CommandParameterType"),
         ("CommonForm", "32e087ab-1491-49b6-aba7-43571b41ac2b") => Block("Form"),
         ("CommonForm", "e3331ed0-3854-478d-b6b5-4f14acdd6edb") => Property("FormType"),
-        ("CommonForm", "cf4abea3-37b2-11d4-940f-008048da11f9") => Property("Synonym"),
         ("CommonForm", "c9ba86bf-a1e7-440f-9450-adb61f886f88") => Property("ExtendedPresentation"),
         ("CommonForm", "719346a1-02d5-4311-a141-4d22470a7ac3") => Property("Explanation"),
         ("CommonModule", "d5963243-262e-4398-b4d7-fb16d06484f6") => Block("Module"),
@@ -77,10 +103,12 @@ pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
         ("CommonModule", "c474bab9-d13a-4fbd-bfb0-9214d6dc2fde") => Property("ServerCall"),
         ("InformationRegister", "9f36fd70-4bf4-47f6-b235-935f73aab43f") => Block("RecordSetModule"),
         ("InformationRegister", "d1b64a2c-8078-4982-8190-8f81aefda192") => Block("ManagerModule"),
-        ("InformationRegister", "09c412e0-0f30-11d6-a3c7-0050bae0a776") => {
+        // The same probes: `09c412e0` alone is `WriteMode`, `13134205` is the
+        // periodicity (the first pass had them the other way round).
+        ("InformationRegister", "09c412e0-0f30-11d6-a3c7-0050bae0a776") => Property("WriteMode"),
+        ("InformationRegister", "13134205-f60b-11d5-a3c7-0050bae0a776") => {
             Property("InformationRegisterPeriodicity")
         }
-        ("InformationRegister", "13134205-f60b-11d5-a3c7-0050bae0a776") => Property("WriteMode"),
         ("Language", "4b2a2bcf-a845-41ba-a03d-05b09a2c6c11") => Property("LanguageCode"),
         ("Role", "3245b9fe-57f9-43dc-9c11-030f0617ce16") => Block("Rights"),
         ("StyleItem", "1ab4ba03-e4e6-4bf0-93e9-fcc28cc67567") => Property("Type"),
@@ -92,22 +120,40 @@ pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
             Block("MainSectionCommandInterface")
         }
         ("Configuration", "15e3462b-bc9b-40cd-9d9f-dc0922f84560") => Property("DefaultLanguage"),
-        ("Configuration", "6a447e3f-d9d7-4c97-a239-87e3fe6d8055") => {
+        // The root's controllable properties and modules, each set apart by a
+        // platform probe that changed one value (upstream PR 387, fixtures
+        // `external/extension_roots/{values,spellings,modules,roles}`). The
+        // first pass took `6a447e3f` for the managed application module and
+        // `d22e852a` for a hidden block; they list together in the two
+        // extensions on record, so the corpus did not tell them apart: the
+        // platform lists `6a447e3f` when the extension sets the default roles
+        // and `d22e852a` when it extends the managed application module.
+        ("Configuration", "6a447e3f-d9d7-4c97-a239-87e3fe6d8055") => Property("DefaultRoles"),
+        ("Configuration", "d22e852a-cf8a-4f77-8ccb-3548e7792bea") => {
             Block("ManagedApplicationModule")
         }
-        ("Configuration", "d22e852a-cf8a-4f77-8ccb-3548e7792bea") => Hidden("unknown block"),
+        ("Configuration", "9b7bbbae-9771-46f2-9e4d-2489e0ffc702") => Block("SessionModule"),
+        ("Configuration", "a4a9c1e2-1e54-4c7f-af06-4ca341198fac") => {
+            Block("ExternalConnectionModule")
+        }
+        ("Configuration", "a78d9ce3-4e0c-48d5-9863-ae7342eedf94") => {
+            Block("OrdinaryApplicationModule")
+        }
+        ("Configuration", "3a5cca5c-0675-43df-80ca-2cf5163335f2") => Property("ModalityUseMode"),
+        ("Configuration", "161bc4c0-4cc0-4382-a045-f58f25e24783") => Property("CompatibilityMode"),
         // HomePageWorkArea, Logo and Splash: an 8.5 extension that changes them
         // lists the three ids, each in state 3 (ServiceDesk, the only one on
         // record). Which id is which is not on record, so they are a group.
         ("Configuration", "d98a8e01-7219-41ce-9f23-dada0860b9bf")
         | ("Configuration", "740eb5f6-e214-4e30-aefa-f15bab91c688")
         | ("Configuration", "3035a9db-d6b2-450e-8b22-4430577f8dab") => Group("RootExtAssets"),
-        // DefaultRunMode, UsePurposes and InterfaceCompatibilityMode: the three
-        // ids always appear together (ServiceDesk, the only extension that
-        // adopts them).
-        ("Configuration", "c6c6cdec-9de1-431f-b17a-e442eebf86c1")
-        | ("Configuration", "cbd1f1ed-72d3-4da3-bd02-c643d9595b7d")
-        | ("Configuration", "da648ef9-2f12-418f-8e2f-8956bc10a66f") => Group("RootRunMode"),
+        // DefaultRunMode, UsePurposes and InterfaceCompatibilityMode list
+        // together in ServiceDesk; each is set apart by the same probes.
+        ("Configuration", "c6c6cdec-9de1-431f-b17a-e442eebf86c1") => Property("DefaultRunMode"),
+        ("Configuration", "da648ef9-2f12-418f-8e2f-8956bc10a66f") => Property("UsePurposes"),
+        ("Configuration", "cbd1f1ed-72d3-4da3-bd02-c643d9595b7d") => {
+            Property("InterfaceCompatibilityMode")
+        }
         _ => return None,
     })
 }
@@ -138,6 +184,83 @@ mod tests {
 
     /// HomePageWorkArea, Logo and Splash: the three ids of an 8.5 extension that
     /// changes them appear together, and which is which is not on record.
+    /// Each assignment below is a platform probe's, not a corpus reading: the
+    /// property printed beside the listed id changes with the one value the
+    /// probe changes (`external/adopted/props_*`, `external/extension_roots/*`
+    /// of upstream PR 387).
+    #[test]
+    fn ids_that_the_corpus_could_not_tell_apart_follow_the_probes() {
+        for (element, guid, expected) in [
+            (
+                "Catalog",
+                "37f2fa9d-b276-11d4-9435-004095e12fc7",
+                "CodeLength",
+            ),
+            (
+                "Catalog",
+                "37f2fa9e-b276-11d4-9435-004095e12fc7",
+                "CodeType",
+            ),
+            (
+                "InformationRegister",
+                "09c412e0-0f30-11d6-a3c7-0050bae0a776",
+                "WriteMode",
+            ),
+            (
+                "InformationRegister",
+                "13134205-f60b-11d5-a3c7-0050bae0a776",
+                "InformationRegisterPeriodicity",
+            ),
+            (
+                "Configuration",
+                "6a447e3f-d9d7-4c97-a239-87e3fe6d8055",
+                "DefaultRoles",
+            ),
+            (
+                "Configuration",
+                "c6c6cdec-9de1-431f-b17a-e442eebf86c1",
+                "DefaultRunMode",
+            ),
+            (
+                "Configuration",
+                "da648ef9-2f12-418f-8e2f-8956bc10a66f",
+                "UsePurposes",
+            ),
+            (
+                "Configuration",
+                "cbd1f1ed-72d3-4da3-bd02-c643d9595b7d",
+                "InterfaceCompatibilityMode",
+            ),
+        ] {
+            assert_eq!(
+                meaning(element, guid),
+                Some(Meaning::Property(expected)),
+                "{element} {guid}"
+            );
+        }
+        for (guid, expected) in [
+            (
+                "d22e852a-cf8a-4f77-8ccb-3548e7792bea",
+                "ManagedApplicationModule",
+            ),
+            ("9b7bbbae-9771-46f2-9e4d-2489e0ffc702", "SessionModule"),
+            (
+                "a4a9c1e2-1e54-4c7f-af06-4ca341198fac",
+                "ExternalConnectionModule",
+            ),
+            (
+                "a78d9ce3-4e0c-48d5-9863-ae7342eedf94",
+                "OrdinaryApplicationModule",
+            ),
+        ] {
+            assert_eq!(
+                meaning("Configuration", guid),
+                Some(Meaning::Block(expected)),
+                "{guid}"
+            );
+        }
+    }
+
     #[test]
     fn the_8_5_root_asset_ids_form_one_group() {
         for guid in [

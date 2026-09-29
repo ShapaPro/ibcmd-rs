@@ -22,9 +22,12 @@ use uuid::Uuid;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec};
 
 const EVIDENCED_CONFIGINFO_STORAGE_FORMATS_8327: [u32; 4] = [80_310, 80_314, 80_321, 80_324];
-/// Storage formats of the 8.5.1 extensions the export reads (the БСП 8.5 clone,
-/// three extensions). Read only: nothing is generated or staged in them.
-const READABLE_CONFIGINFO_STORAGE_FORMATS_85: [u32; 1] = [80_501];
+/// Storage formats the export reads besides the evidenced ones: 80501, the
+/// 8.5.1 extensions of the БСП 8.5 clone (three extensions), and 80327, the
+/// extensions the 8.3.27.2214 platform creates itself (the platform-made
+/// fixtures of upstream PR 387). Read only: nothing is generated or staged in
+/// them.
+const READABLE_CONFIGINFO_STORAGE_FORMATS_85: [u32; 2] = [80_327, 80_501];
 const MAX_CONFIGINFO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONFIGINFO_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_EXTENSION_ZIPPED_INFO_BYTES: usize = 4_000;
