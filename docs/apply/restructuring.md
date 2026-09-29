@@ -1,13 +1,14 @@
 # Restructuring on `config apply`: what native does, and what it takes to do it ourselves
 
 Issue [#341](https://github.com/Untru/ibcmd-rs/issues/341), track "ddl", 0.4 "Своё применение конфигурации".
-Research draft of 2026-09-29 (checkpoint 1: traces, formats, mapping). The prototype (section 9) is not
-written yet.
+2026-09-29. Checkpoint 1 (sections 1-8, 10-11): traces, formats, mapping. Checkpoint 2 (section 9): the
+prototype for the simplest case -- a new attribute in a catalog -- in `src/restructure/`, run on a twin of
+the native apply and compared with it.
 
 Scope of the measurements: platform 8.3.27.2214, Microsoft SQL Server 2025, exclusive apply
 (`ibcmd infobase config apply --force --dynamic=disable --user=Администратор`), the БСП demo configuration
-(1761 main tables, 4 extensions) restored from the lab corpus. The 8.5 БСП was restored read-only and its
-formats compared; nothing was traced on 8.5. Everything below is **measured** unless it says
+(1761 main tables, 4 extensions) restored from the lab corpus. Case a was traced once on the 8.5.1.1150
+БСП as well (section 9.7); the other cases only on 8.3.27. Everything below is **measured** unless it says
 **hypothesis**. Evidence files are listed in section 11; the scripts that produced them are in
 `scripts/restructure-lab/`.
 
@@ -41,9 +42,28 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
    an object family from the *old* metadata before it may change it) turns coverage into an automatic
    safety check.
 6. **Findings other tracks need** (section 10): our import in patch mode silently ignores added
-   attributes; native `config import` is unreliable under load (a partial or a failed stage); a native
-   apply interrupted at "Принятие изменений" left a database that refuses every `ibcmd config` command
-   including `config repair`.
+   attributes; native `config import` failed twice under load with an unknown-predefined-element error;
+   a native apply interrupted at "Принятие изменений" left a database that refuses every `ibcmd config`
+   command including `config repair`.
+7. **The prototype works, in one transaction** (section 9). `ibcmd-rs mssql-restructure` plans and runs
+   "new attributes in one catalog" on a lab database: the platform's new-generation protocol
+   (`NG` tables, copy, indexes, drop, rename) plus the publication of `DBSchema`, `SchemaStorage`,
+   `DBNames` and the promotion of the staged `Config` rows are **one SQL Server transaction**, read back
+   (row counts, columns, indexes) before `COMMIT`; `--trial` runs everything and rolls it back, and the
+   database is exactly as it was. On the twin of case a2 the result equals the native apply where it matters:
+   the rebuilt tables and their data, `Config` (9841 rows, metadata included), `DBSchema` and `DBNames` (but
+   the two system tables the platform upgraded on its own), the native export (12 198 files identical to
+   the native twin's), a session reads and writes the new attribute, native `config apply` says "не требуется",
+   and when the same catalog is staged again native computes the same structure and runs no DDL at all.
+8. **What a restructure must also write into `Params`** (section 9.6): `DBNames` and `DBNamesVersion-DBNames`
+   (numbers); the XDTO model cache (one `*.si` row) -- left stale, XDTO serialization of the changed object
+   fails ("Свойство ... не обнаружено") while queries and writes work; the prototype inserts the one
+   `<property>` line native inserts (text equal to native's). The other two changed `*.si` rows and `siVersions`
+   are left as they are (no effect seen). The `*.ui` rows are the platform's licensing records: not touched.
+9. **`ALTER TABLE ... ADD` is acceptable to the platform** for everyday work (section 9.5): the column lands
+   after the separator column instead of in the schema's place and sessions, queries and writes do not care.
+   **The estimate changes** (section 8): the prototype was quick, the classification of a staged image and
+   the derived caches are the long poles.
 
 ## 2. Method
 
@@ -59,6 +79,19 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
 - **Snapshots.** Before/after: every table's columns and indexes, row count and `CHECKSUM_AGG(BINARY_CHECKSUM(*))`,
   and the service tables (`DBSchema`, `SchemaStorage`, `Params`, `Config`, `ConfigSave`, `Files`, `ConfigCAS`)
   row by row with content hashes (`snapshot.py`, `snapdiff.py`).
+- **Twins (checkpoint 2).** Two databases restored from the same backup of the staged case a2
+  (`ibcmd_rs_04_ddl_bsp8327_a_a2_staged.bak`): the native apply runs on one (`a2_nat`), the prototype on the other
+  (`a2_own`); everything is compared with the native twin. A second native apply of case a2 on a fresh twin gave
+  a byte-identical `DBSchema` and `Config` -- the native result is deterministic but for random guids
+  (`DBNamesVersion-DBNames`, `siVersions`, `*.ui`, the PK names of `_ConfigChngR`, `MobileVersions.dat`).
+- **Staging of checkpoint 2.** Case a was staged before by a full native import; the follow-up experiments
+  use the native **`import files --partial`**, which stages a delta of four rows: the changed descriptor and
+  `root`, `version`, `versions` (section 3.4).
+- **Sessions.** The 1C server cluster runs as LocalSystem, which has no SQL login (the apply track hit
+  error 18456), so a session on a lab database is opened with a stand-alone server (`ibsrv`) started as the
+  caller's Windows account (integrated SQL login) and the 8.3.27 thin client over HTTP (`1cv8c /WS`) running
+  one generic processing (`probe/ddl_probe.epf`, built with the Designer from XML) that executes a BSL job
+  file on the server and writes its result (`scripts/restructure-lab/srv.ps1`, `session_job.ps1`).
 - **Cases** (the changed tables hold data: 8-716 rows, the totals table 3424; case c creates an empty table):
 
 | label | change (all in the БСП demo objects) | table(s) that changed | rows |
@@ -74,8 +107,10 @@ formats compared; nothing was traced on 8.5. Everything below is **measured** un
 | k | string String(0) -> String(5), Number(10,0) -> Number(5,0), Boolean -> String(10) on rows that hold longer/larger values | `_Reference2598` | 716 (5 seeded) |
 
 Case e was merged into g (two failed native imports; section 10); the string widening and the index
-creation are still separable in the trace. No trace exists for: deleting a whole object, type changes of
-references, `--dynamic=force`, 8.5, ERP УХ.
+creation are still separable in the trace. Checkpoint 2 added: a85 (case a on the 8.5 БСП, section 9.7), the
+identical re-stage of case a on the twin, and a second and a third attribute for the `ALTER TABLE`
+experiment (section 9.5). No trace exists for: case e alone, deleting a whole object, type changes of
+references, `--dynamic=force`, ERP УХ.
 
 ## 3. What native apply does
 
@@ -131,7 +166,12 @@ continued by the next apply.
 
 - A table is rebuilt when its **entry in the new DBSchema differs from the old one**. The whole object goes
   with it: main table and all sub-tables (case a2: `_Reference20`, `_Reference20_VT155`, `_Reference20_VT159`
-  for one new column in the main table); companion tables follow (`_RefSInf3901` with `_Reference27`).
+  for one new column in the main table). Companion tables: the change-registration table of an exchange
+  plan (`_ReferenceChngR1033`, 10 rows) was **not** rebuilt in case a2; the predefined-data table
+  (`_RefSInf<n>`: `PDInitialized` and the separator) was not rebuilt in a2 either (`_RefSInf4877`, no rows)
+  but was rebuilt with its catalog in case h (`_RefSInf3901` with `_Reference27`, one row copied). The
+  difference is predefined data: 14 of the 75 `RefSInf` tables hold rows, exactly the 14 catalogs that have
+  a `Predefined.xml`. (Checkpoint 1 said "companion tables follow"; that was too general.)
   Index-only changes rebuild the table too (case g). New tables use the same NG path without data.
 - `_ConfigChngR` and `_ConfigChngR_ExtProps` are rebuilt **on every apply**, even with no change (the
   primary key gets a new auto-generated name each time; the row count stayed 20685 in a2, b, g, f, h and
@@ -163,6 +203,18 @@ continued by the next apply.
 - `root`, `version` and `versions` are taken **as staged**: the generation printed by native
   ("Создано поколение конфигурации: 56569e24...") is the header uuid of the staged `versions` row
   (`{1,9834,"",<uuid>,...}`); the row is identical before and after the apply.
+- The staged `deleted` row (raw deflate of `0`: the list of deleted objects, empty here) is consumed by the
+  apply and not copied: `Config` after the apply equals the staged `ConfigSave` minus `deleted` **row for
+  row, `Creation`/`Modified`/`Attributes`/`DataSize` included** (9841 of 9842 rows, case a2).
+- A native `config import files --partial` stages a **delta**: the changed descriptor plus `root`, `version`
+  and `versions` (4 rows for case a, 8.3.27 and 8.5), no `deleted` row; the apply promotes those and leaves
+  every other `Config` row alone.
+- **The rows of a full stage are not comparable as text.** A native import writes every descriptor in the
+  record versions of the configuration's compatibility mode: in the staged image of case a2, 9166 of the 9838
+  `Config` rows differ from the stored ones as bytes, 3639 of them still after inflate (catalog tag 56 -> 57,
+  attribute wrapper `{5,...}` -> `{6,...,0,{1,<nil>}}`, standard-attribute records 13 -> 14 elements ...)
+  without any structural change; the other 5527 differ in the deflate stream alone. A classifier has to read
+  *facts* (section 9.2), not diff rows.
 - Other writes of an apply, none derived from the structure change alone: `Params` `DBNames` and
   `DBNamesVersion-DBNames` (only when names were allocated), the `*.si` cache rows and `siVersions`
   (rewritten with new version guids on **every** apply), two `*.ui` rows, `_ExtensionsRestruct(NGS)` rows
@@ -248,7 +300,11 @@ although its table number 7272 is larger than 505), inside a kind in the traced 
 table number order agree (case h: `Reference15`, `20`, `27`, `2598`); within an object a new tabular section
 (`VT`, `LineNo`, its attributes) and attributes in metadata order. The header takes the last number and
 the count grows. Built-in tables that the platform adds take numbers from the same counter with the nil
-uuid.
+uuid. **The header may run ahead of the largest entry by one** (case c: entries up to 11039, header 11040;
+the trace track saw 11039 over 11038 after a new catalog): a number was reserved and no entry written (a
+companion name of the new catalog, **hypothesis**). The counter is the *header*, not the largest number, and
+the rule "max over the headers + 1" is the one the prototype uses (case a on 8.3.27: extension header
+11033 -> 11034; on 8.5: extension header 11261 -> 11262).
 
 Which kinds a metadata class allocates (`docs/apply/evidence/restructuring/dbnames-kinds.txt`, all of
 БСП): catalog `Reference` + `ReferenceChngR` (+ `RefSInf` for 74 of 114); attribute `Fld`; tabular
@@ -322,34 +378,39 @@ companions.
 
 ## 6. The algorithm for the simplest case (a new attribute)
 
-Given `ConfigSave` staged by native import and the old `Config`:
+Implemented in `src/restructure/` (section 9). Given the staged `ConfigSave` (a whole image or a delta) and
+the stored `Config`:
 
-1. **Classify**: compare the object rows (`<uuid>`, not `.0`) of `ConfigSave` and `Config`; decode the
-   changed catalog/document row (the repo has the decoders `metadata_model::objects_export::decode` and
-   `attribute_export`); accept only "attributes appended, simple type", refuse everything else.
-2. **Number**: `n = max(header of main DBNames, headers of every DBNames-Ext-*) + 1`; append
-   `{<attr uuid>,"Fld",<n>}`; `DBNames` header `{<n>,{<count+1>,...}}`; new guid in
-   `DBNamesVersion-DBNames`; deflate.
-3. **Schema**: parse `DBSchema`, insert the field entry `{"Fld<n>",<nullable>,{1,<type>},"",0}` before the
-   first common-attribute field of the table; if the attribute has an index flag add the index entries;
-   move the table to the end (before `ConfigChngR`); write with the exact layout; the header count is
-   unchanged.
-4. **Rebuild**: the NG protocol of 3.2 for the table and its sub-tables (or, **hypothesis**, a single
-   transaction: `BEGIN TRAN` ... the same statements ... `COMMIT`; SQL Server DDL is transactional, so a
-   crash rolls everything back and no native state machine is needed in exclusive mode). Copy with the
-   default of the type.
-5. **Publish**: `UPDATE SchemaStorage ... CurrentSchema`, `UPDATE DBSchema`, the `Params` rows, the promotion
-   of the staged `Config` rows (the exclusive activation in `src/mssql_main_activation.rs` already replaces
-   `Config` rows from `ConfigSave` by exact name and clears `ConfigSave`), `_ConfigChngR` (hypothesis: not
-   required for the structure), derived caches `*.si`/`siVersions`/`*.ui` (hypothesis: the platform
-   rebuilds them lazily).
-
-Open on the twin (section 9): whether `ALTER TABLE ADD` (column after `_Fld2683`, i.e. a different physical
-order) is accepted by the platform; which derived `Params` rows are required.
+1. **Classify** (fail closed, `plan.rs`): no new file (a new object) and an empty `deleted` marker; across the
+   attribute bodies of every descriptor that differs, no attribute is removed and none changes its type or
+   its indexing (or `Use`); the new attributes -- uuids with no field yet -- all sit in the own attributes of
+   **one catalog**; that catalog is otherwise the same as far as its table goes (hierarchy, code and
+   description lengths, owners, data history, tabular sections); the catalog has no predefined data; every
+   stored attribute maps to the field the stored `DBSchema` entry has.
+2. **Number**: `n = max(header of the main DBNames, headers of every DBNames-Ext-*) + 1` per new attribute in
+   metadata order; append `{<attr uuid>,"Fld",<n>}`; new guid in `DBNamesVersion-DBNames`; deflate.
+3. **Schema**: insert the field entry `{"Fld<n>",<nullable>,{1,<type>},"",0}` right after the field of the
+   attribute before it (the first attribute: after the standard fields); nullable when the catalog has the
+   `Folder` field and the attribute is `ForItem`; the entry moves to the end of the table list, before
+   `ConfigChngR`; the header count is unchanged.
+4. **Rebuild** in one transaction: create the `NG` tables of the main table and its sub-tables, copy with the
+   default of the type (`0x00`, `N''` / `CAST(CASE WHEN T1._Folder = 0x01 THEN N'' END AS NVARCHAR(n))`,
+   `CAST(0 AS NUMERIC(p, s))`, the empty date, ...), create the indexes, drop the old tables, `sp_rename`
+   the tables and the indexes; read the result back and compare it with the model.
+5. **Publish** in the same transaction: `SchemaStorage` (`Status 100`, the new `CurrentSchema`, empty
+   generations), `DBSchema`, `Params` `DBNames` and `DBNamesVersion-DBNames`, the XDTO model row (one
+   `<property>` line), the staged `Config` rows (the parts that differ replace the stored ones), `ConfigSave`
+   emptied. Not written: `_ConfigChngR` (rebuilt by native on every apply), the two other changed `*.si` rows,
+   `siVersions`, `*.ui`, the help index in `Files`, `_ExtensionsRestruct*` (section 9.6).
 
 ## 7. Risks and unknowns
 
-- **Race/flakiness of native staging** (section 10) makes traces expensive; own staging (base-free) worked.
+- **Flakiness of native staging** (section 10) makes traces expensive; own staging (base-free) worked, and the
+  native `import files --partial` (a delta of four rows, a minute) is the cheap way to stage one changed file.
+- **The classification of a staged image** is not solved by comparing rows (section 3.4); the prototype reads
+  facts for attributes and catalogs, the other kinds need their own readers or the restructuring check (#338).
+- **Derived state of an apply** (`*.si` caches, `siVersions`, exchange-plan registration, help index): the
+  platform does not repair a stale cache on its own when nothing new is staged (section 9.6).
 - **Extensions** (4 in the corpus): `SchemaStorage(1)` and `_ExtensionsRestruct*` are updated by the main
   apply (`_ExtensionsRestructNGS` 0 -> 3 rows in the baseline); an extension that adopts a changed object
   may need its own tables rebuilt. Not traced.
@@ -365,54 +426,215 @@ order) is accepted by the platform; which derived `Params` rows are required.
 - **Platform-build drift**: a database from an older build needs the built-in tables of the current build
   (about 40 system tables, 4 upgraded or created in our traces); a reference list per build is required.
 - **Recovery**: a native apply that stopped after the switch left the database unusable for `ibcmd`;
-  an own implementation must be atomic or resumable. **Size**: the NG copy is O(rows) with a log
-  proportional to the table; a single transaction on a 100 GB table is impractical (the native path
-  commits in steps).
-- **8.5**: formats are identical (section 4.2); 2.21 metadata rows and new-in-8.5 objects may add
-  families; nothing traced.
+  an own implementation must be atomic or resumable -- one transaction is atomic (section 9.3). **Size**: the
+  NG copy is O(rows) with a log proportional to the table; a single transaction on a 100 GB table is
+  impractical (the native path commits in steps).
+- **8.5**: formats are identical (section 4.2) and the protocol of case a is the same (section 9.7); 2.21 metadata
+  rows and new-in-8.5 objects may add families; the prototype was not run there.
 
 ## 8. Estimate
 
 Assumptions: one engineer who knows the repo, Rust, MSSQL, native as an oracle on lab clones, the research
-tools of this track available. Numbers are ranges of working weeks; confidence is stated.
+tools of this track available. Numbers are ranges of working weeks; confidence is stated. **Status** is what the
+prototype of section 9 has done.
 
-| work package | weeks | confidence | note |
+| work package | weeks | confidence | status / note |
 |---|---|---|---|
-| W1 formats in Rust: brace parser/writer (byte-exact), `DBSchema`, `NewGenCreated`, `DBNames`, `SchemaStorage` | 1.5-2 | high | model validated 100% in Python |
-| W2 `DBSchema` -> DDL/DML generator, NG driver, publish, conformance tests on the corpora | 2-3 | high | all statement templates are known |
-| W3 metadata -> schema for catalogs, documents and their tabular sections (all attribute kinds, indexes, common attributes) | 3-4 | medium | rules verified for main fields; sub-tables, owners, type sets are the unknown part |
+| W1 formats in Rust: brace parser/writer (byte-exact), `DBSchema`, `NewGenCreated`, `DBNames`, `SchemaStorage` | 1.5-2 | high | **done** (`src/restructure/{names,schema,storage}.rs` on `metadata_model::brace`; byte-exact on both corpora) |
+| W2 `DBSchema` -> DDL/DML generator, NG driver, publish, conformance tests on the corpora | 2-3 | high | **done for one object family** (tables, indexes, copy with defaults, one-transaction driver with read-back); registers add index derivation, identity columns, in-place copy variants |
+| W3 metadata -> schema for catalogs, documents and their tabular sections (all attribute kinds, indexes, common attributes) | 3-4 | medium | started: a new String/Boolean/Number/Date attribute of a catalog; types by reference and composite types need the type-id -> table map; indexes, sub-tables, owners, type sets open |
 | W4 registers (information, accumulation: dims, resources, indexes, totals, aggregates) | 4-6 | low-medium | index derivation is not decoded |
 | W5 other families (constants, enums, charts, BP, tasks, exchange plans, journals, accounting/calculation registers) | 5-8 | low | 106 table families in the corpus |
 | W6 data conversion for type changes, deletions of objects and their references | 3-5 | low | done by the 1C engine row by row (case k); rules per type pair unknown |
-| W7 extensions and platform-build drift | 3-4 | low | `_ExtensionsRestruct*`, `X1` tables |
-| W8 verification harness (native twin per case, session read, parity export) | 2 | medium | the lab kit exists |
-| W9 8.5 differences | 2-3 | low | formats equal, rows differ |
+| W7 extensions and platform-build drift | 3-4 | low | `_ExtensionsRestruct*`, `X1` tables; the 8.5 drift is 240 `ALTER INDEX` statements on primary keys |
+| W8 verification harness (native twin per case, session read, parity export) | 2 | medium | **done as a kit**: twin restore, snapshot/diff, XE trace, native export + `source-diff`, a session on a lab database without the cluster |
+| W9 8.5 differences | 2-3 | low | one trace: same protocol for the object (section 9.7) |
+| **W10 derived state of an apply** (new): the XDTO model and the other `*.si` caches, `siVersions`, `_ConfigChngR` registration, `_ExtensionsRestruct*`, help index, `MobileVersions.dat` | 2-3 | low-medium | the XDTO row for a simple attribute is done (text equal to native's); `1a621f0f.si` (object registry: counter + one entry) and `c77bc206.si` (permutation) are not decoded |
+| **W11 classification of a staged image** (new, shared with the restructuring check #338) | 2-4 | medium | rows of a native full stage differ from the stored ones in the record versions (section 3.4): facts per kind have to be read from both; the prototype does it for attributes of all kinds and for catalogs |
 
 - **Minimal useful subset for 0.4** ("S1"): W1 + W2 + the catalog/document part of W3 restricted to
   **append/delete an attribute of a simple type, add/delete a tabular section, index flag, add a plain
-  catalog or document, widen a string** + W8: about **6-9 weeks** with the fail-closed classifier and the
-  round-trip gate (refuse anything else, use native apply for it). Each step is independently
-  verifiable on a twin.
-- **Full own restructuring** (W1-W9): the packages add up to 25-37 weeks; with a contingency for the
-  untraced areas (a third) **7-11 months** of one engineer, with a long tail; do not promise it for 0.4 or
+  catalog or document, widen a string** + W8 + W10/W11 for these: about **6-9 weeks** with the fail-closed
+  classifier and the round-trip gate (refuse anything else, use native apply for it). Each step is
+  independently verifiable on a twin. The prototype covers the first item of that list ("append an attribute
+  of a simple type to a catalog") in a few hours on top of checkpoint 1 -- the formats were the
+  work of checkpoint 1; what took the time were the twins, the classification and the caches.
+- **Full own restructuring** (W1-W11): the packages add up to 29-44 weeks; with a contingency for the
+  untraced areas (a third) **8-13 months** of one engineer, with a long tail; do not promise it for 0.4 or
   0.5.
 - **Round-trip gate (recommended)**: before an object family is allowed to change, the generator must
   rebuild the *old* `DBSchema` entries of that family from the *old* `Config` rows and match the stored
   text exactly (the checks of `gen_check.py`/`dbschema_check.py` run at apply time on the affected
   objects). A family the generator cannot reproduce is refused; coverage then grows without risking
-  silent damage.
+  silent damage. The prototype applies it to the fields of the changed catalog (`check_stored_fields`).
 - **Not worth building first**: the online/high-load path (0.5) shares the NG protocol but adds
   `NewGenDropped`, sessions and switching under load; it needs its own traces.
 
-## 9. Prototype for case (a) — not started
+## 9. The prototype for case (a): a new attribute in a catalog
 
-By instruction the prototype waits for the checkpoint. Plan: `src/restructure/` (own module; the
-`mssql_main_activation` file is owned by the apply track), formats + generator + executor against the
-lab twin built from `lab/04/restructure/bak/ibcmd_rs_04_ddl_bsp8327_a_a2_staged.bak` (native staging of
-case a; native applies one twin, ours the other). Success criteria are those of the issue: native
-`config apply` on our twin finds nothing to do, native export equals the edited tree (`source-diff`),
-`DBSchema`/`DBNames`/table structure equal the native twin's (byte for byte where possible), a session
-reads the catalog with the new attribute at its default.
+Code: `src/restructure/` (about 4 200 lines and 830 lines of tests), command `ibcmd-rs mssql-restructure`;
+lab kit: `scripts/restructure-lab/`; fixtures: `tests/fixtures/native-evidence/restructure/`.
+
+### 9.1 What was built
+
+| file | what |
+|---|---|
+| `names.rs` | `DBNames` (raw deflate of brace text): parse, byte-exact write, the shared counter, `DBNamesVersion` |
+| `schema.rs` | `DBSchema` / `NewGenCreated` on `metadata_model::brace` (not a second brace implementation): views over the tree, field insertion, the table -> SQL model (columns, types, indexes, implicit keys, `create table`, `CREATE INDEX` in the platform's text and order) |
+| `storage.rs` | `SchemaStorage` states 100/200/400/500 and the empty-generation marker `{0,{0}}` |
+| `catalog.rs` | a catalog row read as *facts* through the layout of `metadata_model::objects` (no XML context needed); an attribute's type pattern -> field type entries |
+| `xdto.rs` | the XDTO model cache row: insert one `<property>` line |
+| `plan.rs` | the checks (9.2), the plan (new schema, names, model row) and its statements |
+| `reader.rs`, `exec.rs` | the database side; the plan run in one transaction with read-back checks |
+| `command.rs` | `mssql-restructure --database <db> [--dry-run] [--trial] [--alter-add] [--skip-xdto] [--dump-plan <dir>] [--report <file>]` |
+
+`--dry-run` plans and prints (6 s on the БСП twin); `--trial` runs everything and rolls it back; writing to a database
+whose name is not `ibcmd_rs_04_*` / `ibcmd_rs_05_*` needs `--allow-non-lab`; other sessions in the database stop it.
+Tests: 30 in the crate's lib (formats, DBSchema against the statements of the native trace, plan against the
+native result, refusals, XDTO); three of them read the lab corpora and skip themselves without the lab:
+byte-exact round trip of `DBSchema` and `DBNames` of the 8.3.27 and the 8.5 БСП, the model against the
+columns and indexes of **every** table of both databases (1937 and 1922, `schema.txt` of a snapshot), and the plan of
+case a2 made from the staged snapshot against the native result (9.4).
+
+### 9.2 What it checks, fail closed
+
+Everything else is refused with the reason (`plan.rs`, tested in `tests_plan.rs`):
+
+1. the staged image adds no file (no new object) and its `deleted` marker is empty; the image may be a whole
+   configuration or a delta (`import files --partial`);
+2. over the attribute bodies (`{27,{2,...}}`) of every descriptor that differs -- **all kinds**, not only
+   catalogs -- no attribute is removed, none changes its type, indexing or `Use`, and the new ones (uuids
+   without a field) all sit in the own attributes of **one catalog**;
+3. that catalog keeps its hierarchy, code and description lengths, owners, data history and tabular sections; has
+   no subordination, no predefined data (a non-empty `RefSInf`, section 3.3), no other companion than the change
+   registration table;
+4. every stored attribute of it maps to the field the stored `DBSchema` entry has (type entries and
+   nullability) -- the round-trip gate on the one object that is going to change;
+5. a new attribute has a boolean, string, number or date type, is not indexed, is a nullable field only if it is a
+   string (`ForItem` in a hierarchical catalog: NULL for folders, the default for items).
+
+Not checked -- the restructuring check's job (#338), run it first: a changed property of a non-catalog object that
+changes its table (a document's number length, a register's dimension order), and attributes of other kinds that
+change in a way that does not touch their type and indexing. Types by reference, composite types and defined
+types are refused until the type-id -> table map exists.
+
+### 9.3 One transaction: yes
+
+`SET XACT_ABORT ON; SET LOCK_TIMEOUT 60000; BEGIN TRANSACTION`, then the platform's statements, then the
+read-back, then `COMMIT`. Inside the transaction SQL Server 2025 accepted `CREATE TABLE`, `ALTER TABLE ... SET
+(LOCK_ESCALATION)`, `CREATE [UNIQUE] [CLUSTERED] INDEX ... WITH (SORT_IN_TEMPDB, MAXDOP, ALLOW_PAGE_LOCKS)`,
+`INSERT ... WITH(TABLOCK) ... SELECT`, `DROP TABLE`, `sp_rename` (objects and indexes), and the updates of
+`SchemaStorage`, `DBSchema`, `Params`, `Config`. Measured on the БСП twin (case a2):
+
+| run | result |
+|---|---|
+| `--trial` | 40.8 s; 3 `NG` tables created, 14 + 29 + 18 rows copied, 10 indexes, the old tables dropped, 13 renames, then the publication; every check passed; `ROLLBACK`. Afterwards the database is what it was: `ConfigSave` 9842 rows, `Config` 9838, `Status 100`, the same `CurrentSchema` hash, no `NG` table, `_Reference20` with 15 columns |
+| apply | 65 s, `COMMIT` |
+| by phase (trial) | create 0.3 s, copy 0.2 s, indexes 0.4 s, drop 0.7 s, rename 1.7 s, publication 30 s of which the promotion of a **whole** stage 29.5 s; a **delta** stage promotes in 0.07 s. (The real apply once spent 46 s in the index phase: the machine was loaded.) |
+
+What atomicity gives: no `Status` 200/400/500 is ever visible and `NewGenCreated` is never written, so there
+is nothing to resume and no "незавершенная операция" state (section 10, finding 3); a failed check rolls
+back. What it costs: the log of the whole copy in one transaction (kilobytes for a catalog; for a table of 100 GB it is
+not acceptable, the native path commits in steps: cap the size of what is rebuilt this way or chunk the copy);
+`Sch-M` locks on the object's tables for the duration (exclusive apply anyway). Differences from the native
+sequence, all harmless in the result: the indexes are created once, after the load (native creates them, drops
+them, loads a heap and creates them again); `_ConfigChngR` is not rebuilt.
+
+### 9.4 Verification on the twin of case a2
+
+Both twins come from the same backup of the staged state; native applied one, the prototype the other.
+
+| check | result |
+|---|---|
+| plan made offline from the staged snapshot vs the native result (`tests_corpus.rs`) | `DBNames` text **equal**; every `DBSchema` entry **equal** but `DbCopies` and `DbCopiesUpdates` (the platform upgraded those two system tables on its own, a build drift; the native table order differs only by where they sit); the new `Reference20` entry equal byte for byte; the XDTO model row text equal to native's (25 173 491 characters) |
+| snapshot of both twins (`out/diff_own_vs_native.txt`) | 2234 tables in both; structure identical but the auto-named primary key of `_ConfigChngR` (random) and the two upgraded system tables |
+| data of the rebuilt tables | `_Reference20` (all columns but the row version), `_VT155`, `_VT159`: `EXCEPT` both ways **0 rows**; the new column: 1 folder NULL, 13 items `''`, as native |
+| `Config` after | 9841 rows, **0 differ from native's, `Creation`/`Modified`/`Attributes`/`DataSize` included**; `ConfigSave` 0, `ConfigCAS` identical, `SchemaStorage` both rows `Status 100` and empty generations |
+| native `config apply` on our twin | "Обновление конфигурации базы данных не требуется", exit 0 |
+| the **same catalog staged again** on our twin (native `import files --partial`, 4 rows) and a native apply, traced | 1611 events, **no `create table`, no `drop`, no `sp_rename`**: the platform's own recomputation of the structure from the staged metadata equals the `DBSchema` we wrote. (No DDL at all; it registered the change for exchange plans and rewrote the `*.ui` rows) |
+| native export | 12 198 files, **identical** between the native twin and ours, `ConfigDumpInfo.xml` included. Against the reference tree: `Catalogs/_ДемоПартнеры.xml` (byte-identical to the case-a edit) and `ConfigDumpInfo.xml` differ; with `configVersion` blanked the latter has the new attribute and lacks two empty module entries of `Catalog.НастройкиАвторизацииИнтернетСервисов` that the native import dropped (the same in the native twin) |
+| session on our twin: a stand-alone server + thin client, and a **real session in the 1C server cluster** (the twin registered with `register-ib.ps1`, `Srvr="localhost:2541"`) | the catalog reads with the new attribute `''` for all 14 rows -- as on the native twin; an item written with a value is stored and read back with SQL; an object is serialized through XDTO only when the model cache is right (9.6) |
+
+Where the twins still differ, all of it derived state (9.6): `_ConfigChngR` (native rebuilds it on every apply
+with new keys and registers 782 more objects as changed for the nodes: `_MessageNo` NULL 17 327 vs 16 545 rows;
+only matters with exchange plans), `Params` (`*.ui`, `siVersions`, two `*.si`, random guids), `Files`
+(`MobileVersions.dat`, `gc.mrk`, the help index: native leaves 2 bytes in `userDocs_ru` and friends, ours keeps
+what was there), `_DbCopies*`.
+
+### 9.5 `ALTER TABLE ... ADD`: accepted by the platform
+
+Question: may an own apply add the column in place instead of rebuilding the object (much cheaper for a big table)?
+The column lands at the end of the physical table, after the separator column `_Fld2683` instead of before it.
+Experiment (`--alter-add` on the copy of our twin, a second attribute `ДемоВторойРеквизит` String(20) staged by the
+native partial import): the plan is `ALTER TABLE dbo._Reference20 ADD _Fld11035 nvarchar(20) NULL` plus `UPDATE ... SET
+_Fld11035 = N'' WHERE _Folder = 0x01`, the publication as before; 0.3 s in all. The physical order is now
+`..., _Fld11034, _Fld2683, _Fld11035`.
+
+| probe | result |
+|---|---|
+| session (stand-alone server + thin client) | the metadata knows the attribute; a new item with both attributes is written, read back, found by `WHERE ДемоВторойРеквизит = &Значение`; an existing item is changed and written; XDTO serialization contains the attribute (after the model cache was dropped, 9.6) |
+| native `config apply` afterwards | @@NATIVE-NOOP@@ |
+| a third attribute staged and a native apply with a trace (the platform rebuilds the object) | @@NATIVE-REBUILD@@ |
+
+Verdict: the platform reads and writes by column *name*; column order is not part of the contract as far as sessions
+and its own restructure are concerned. **Hypotheses not tested**: a table of `_InfoRg`/`_AccumRg` family (the aggregates and
+totals read positionally?), extensions, the online path. Two costs remain: the physical order then differs from what
+the platform would produce, so a byte-for-byte comparison of the table structures with a native twin stops working (which
+is how the prototype proves itself), and the size of the row grows in place (page splits) where a rebuild packs it. The prototype
+keeps the rebuild as the default and `--alter-add` as the research switch.
+
+### 9.6 Which `Params` rows a restructure needs
+
+Native writes these on the apply of case a2 (twin comparison; each `*.si` is a derived cache):
+
+| row | native | prototype | needed |
+|---|---|---|---|
+| `DBNames` | +1 entry, header 11034 | same text (deflate differs) | yes, by construction: the numbering of the new field |
+| `DBNamesVersion-DBNames` | new random guid | new random guid | yes, by construction (version of the numbering) |
+| `ea13a2c9-...si` (XDTO model of the configuration: `{2,1,{{#base64:<model xml>}}}`, 64-character lines, CR CR LF) | one line inserted: `<property name="ДемоНовыйРеквизит" type="xs:string" lowerBound="0"/>` in `CatalogObject._ДемоПартнеры`, after the property of the attribute before | the same line, same text | **for XDTO**: with the row stale, `СериализаторXDTO.ЗаписатьXML(object)` fails "Свойство 'ДемоНовыйРеквизит' не обнаружено"; queries and writes work. The row **deleted** -> the platform rebuilds the model in memory, serialization works and the row is not written back. **All** `*.si` rows deleted -> the stand-alone server exits at start. A native apply with nothing new to promote does not refresh the rows |
+| `1a621f0f-...si` (object registry, 32 422 lines) | counter `{10807,` -> `{10808,` and one entry `0,0,<attr uuid>,<owner uuid>,36,"<name>",{1,1,{"ru","<synonym>"}}` | left stale | no effect seen; the entry's place in the list is not decoded |
+| `c77bc206-...si` (a list of uuids with zeros, 3 lines) | the same list in another order | left | no effect seen; a hash-ordered set, the order rule is not decoded |
+| the other 13 `*.si`, `siVersions` | same content / new random guids | left | no effect seen |
+| `*.ui` x2 | rewritten (encrypted) | left | not needed: these are the platform's configuration-licensing records (track ui, coordinator's note); an own apply does not create or change them |
+
+So a restructure needs the numbering rows and, to be complete, the model cache row(s); the prototype writes the XDTO row
+(`--skip-xdto` leaves it stale). The alternative that costs no code: **delete** the stale XDTO row and let the platform
+recompute it (first session pays for the 25 MB model). A stale set of the other two `*.si` rows is the open item.
+
+### 9.7 The 8.5 trace
+
+Case a on the 8.5.1.1150 БСП (`ibcmd_rs_04_ddl_bsp85_a`, native 8.5 import of the same catalog edited in the 2.21
+dialect with `import files --partial`, 4 rows staged in 61 s, then a traced native apply; the user is
+`Администратор (обычное приложение)`, plain `Администратор` asks for a password there).
+
+- **The protocol is the same.** The 39 statements of `Reference20` -- three `NG` tables, ten indexes, the copy, the
+  renames -- are those of 8.3.27 with the new field number (`Fld11262`: extension header 11261 + 1), the same
+  index order, the same `Status` 200/400/500 updates around `NewGenCreated`, `_ConfigChngR` rebuilt through
+  `insert bulk`, four `INSERT` into `_ExtensionsRestructNGS`. `IBVersion 7`, `PlatformVersionReq 80313` both.
+- **Differences, all outside the object:** 8.5 does not upgrade `_DbCopies*` (the 8.5 clone is on the current build) but
+  runs **240 `ALTER INDEX ... SET(ALLOW_PAGE_LOCKS = OFF, ALLOW_ROW_LOCKS = ON)`** on the primary keys of older tables; it
+  rewrites all 16 `*.si` rows (three in 8.3.27), `siVersions` and both `*.ui`; the first apply of the lineage collects
+  garbage (`ConfigCAS` 19 359 -> 730 rows, `Files` 369 -> 42); `_ExtensionsRestruct` 80 -> 82 and
+  `_ExtensionsRestructNGS` 0 -> 3 rows (three extensions); the descriptor row is 4745 -> 4802 bytes, as in 8.3.27.
+- The prototype was not run on 8.5 (the statements of the object are the same, the record layouts of 2.21 differ
+  in `Since8_5_1` slots that the catalog layout does not have); `catalog.rs` reads the 8.5 catalog row through the
+  same layout code and the model reproduces all 1922 tables of the 8.5 БСП.
+
+### 9.8 Not done, open
+
+- **Case e alone** (widening a string), **deleting an object**, **changing the type of a reference**: not traced;
+  the prototype refuses type changes and deletions (the data conversion of case k is done by the 1C engine).
+- **Indexes** (the `Indexing` flag creates `ByField...` entries), **tabular sections**, new objects, registers,
+  documents (their attribute wrapper differs and their `Use` does not exist): the model already reads them, the plan does not
+  change them.
+- **Types by reference and composite types**: need the map of type ids to table names (`Reference569`, `Enum2894`) built from
+  the generated types of the rows; then `R`/`E` fields.
+- **Predefined data**: the platform rebuilds `RefSInf` with the catalog (case h); the prototype refuses such a catalog.
+- **Extensions**: `SchemaStorage(1)`, the `X1` tables and `_ExtensionsRestruct*` (native inserts four rows into
+  `_ExtensionsRestructNGS` on every apply and removes them again); an extension that adopts the changed catalog is
+  not looked at.
+- **`--dynamic=force`**, ERP УХ, online (0.5): not traced by this track.
+- **Derived state**: the two other `*.si`, `_ConfigChngR` registration, help index; big tables (chunked copy).
 
 ## 10. Findings other tracks need
 
@@ -422,15 +644,18 @@ reads the catalog with the new attribute at its default.
    the whole edited tree (9838 rows; 3 multi-part rows `5189beb9..0[1..2]`, `7e3283df..0[1]` are missing
    compared with native) and **native apply accepted it on an existing database** for 12 attributes of
    every type, a new tabular section, and a new catalog (cases h, c).
-2. **Native `config import` is unreliable under load.** The first import after an apply staged only a
-   subset (9597 / 9615 / 9635 of ~9842 rows) or failed with "Ссылка на неизвестный предопределенный
-   элемент - ChartOfCharacteristicTypes.ОбъектыАдресацииЗадач.ВсеОбъектыАдресации" (the reference changed
-   between attempts and disappeared on retry; the import uses several writer connections; **hypothesis**:
-   a race between the load of predefined items and the objects that refer to them at 90-99% CPU).
-   A partial stage makes the following apply fail at once with "Нарушена целостность структуры
-   конфигурации" (cases c, e). A second import stages everything. Count the rows of `ConfigSave` (a full
-   stage of this configuration is 9842) before applying. `--threads` is not accepted by import.
-3. **A native apply can die at "Принятие изменений"** (exit -1, no message; case d on clone `a`, while a
+2. **Native `config import` failed twice under load; the row count is not the completeness test.** The first
+   import after an apply failed with "Ссылка на неизвестный предопределенный элемент -
+   ChartOfCharacteristicTypes.ОбъектыАдресацииЗадач.ВсеОбъектыАдресации" (the reference changed between
+   attempts and disappeared on retry; the import uses several writer connections; **hypothesis**: a race
+   between the load of predefined items and the objects that refer to them at 90-99% CPU), and two
+   applies of a stage failed at once with "Нарушена целостность структуры конфигурации" (cases c, e). Checkpoint 1
+   called the stages of 9597 / 9615 / 9635 rows *partial* because a stage of this configuration was 9842 rows
+   in the runs before; the trace track measured that a **complete** native stage of the БСП holds about 9 618
+   rows. Those counts were probably complete stages, so the diagnosis "partial" is withdrawn. The test is:
+   `ConfigSave` has a `versions` row, no `commit` and no `*.new` rows, and every staged `versions` entry that
+   differs from `Config`'s has its row. The two errors above remain real; their cause is not established (a
+   second import worked each time). `--threads` is not accepted by import.3. **A native apply can die at "Принятие изменений"** (exit -1, no message; case d on clone `a`, while a
    second ibcmd of this track - an import and an apply on another clone - ran at the same time; the clean
    re-run on a fresh clone passed while four ibcmd processes of other tracks were running, so concurrency
    alone is not proven to be the cause). The database was left with
@@ -457,15 +682,37 @@ reads the catalog with the new attribute at its default.
    events per apply and no information beyond `rpc_completed`; `object_*` events list every DDL with its
    text, including the temp tables of the platform.
 
+9. **The staged image is not comparable to the stored one as text** (section 3.4): 9166 of 9838 `Config` rows
+   differ as bytes after a native import of the tree exported from the same database, 3639 after inflate, in
+   record versions only. An apply or a check that diffs rows will call everything changed; read facts.
+10. **`import files --partial` stages a delta** (`<descriptor>`, `root`, `version`, `versions`; 4 rows, about a
+    minute, 8.3.27 and 8.5) and the native apply of it restructures as usual. The `Администратор` of the 8.5
+    БСП corpus has a password: use `Администратор (обычное приложение)`.
+11. **A native apply that has nothing new to promote does not rewrite the `*.si` caches** (it rewrote the `*.ui`
+    licensing rows and registered the change for exchange plans): a cache that a direct write left stale is not
+    repaired by the next no-change apply. The XDTO model cache decides whether a changed object can be serialized
+    (section 9.6); a session can run without any stale-cache error otherwise.
+12. **The stage of a `Config` promotion can be set-based:** `DELETE`/`INSERT ... SELECT` of the parts that differ
+    (18-30 s for a whole 80 MB image in a loaded lab, 0.07 s for a delta) instead of the native 9 839
+    row-by-row `.new` renames; the `deleted` marker row is not copied.
+13. **A native `ibcmd` that asks for a password holds the lock and waits for ever** (a plain `Администратор` on the
+    8.5 corpus held the native lock for 23 minutes until it was killed). The kit's `Invoke-NativeCommand`
+    closes stdin, sets a timeout and caps the output.
+
 ## 11. Evidence
 
 Repo (`docs/apply/evidence/restructuring/`): `a2-structure-statements.sql` (the NG protocol verbatim),
 `newgen-created-a2-first.brace.txt`, `newgen-created-a2-last.brace.txt`, `timeline-dm.txt`,
 `types-h-statements.sql`, `dbschema-conformance-8327.txt`, `dbschema-conformance-85.txt`,
 `gen-check-catalogs-documents.txt`, `md-types-vs-dbschema.txt`, `dbnames-kinds.txt`, `roundtrip.txt`,
-`conversion-k.md`, `cases.md`.
+`conversion-k.md`, `cases.md`. Checkpoint 2: `prototype-statements-a2.sql` (the statements of the plan of case a2
+without the binary parameters), `prototype-apply-report-a2.json` (the report of the real run: steps, times,
+read-back checks), `twin-compare-a2.txt` (native twin against ours: snapshot diff, `EXCEPT` of the data, exports),
+`xdto-model-a2.txt` (the change of the XDTO model row and the other `*.si` rows), `sessions-a2.md` (the jobs and
+their output), `a85-structure-statements.sql` (the 8.5 trace, the `ALTER INDEX` list cut), `alter-experiment.md`.
+Tests: `src/restructure/tests_*.rs`, fixtures `tests/fixtures/native-evidence/restructure/`.
 
-Lab (`F:\ibcmd\lab\04\restructure`): `xe/<case>/events.jsonl` (+ `.xel`), `out/diff_<case>.txt`,
-`snap/<db>/<label>/{schema.txt,tables.tsv,svc.json}` with blobs in `blobs/`, `bak/*.bak` (twin sources),
-`logs/`, `tree/patches/<case>/{before,after}` (the exact XML edits), `STATUS.md`.
-Scripts: `scripts/restructure-lab/README.md`.
+Lab (`F:\ibcmd\lab\04\restructure`): `xe/<case>/events.jsonl` (the raw `.xel` files are deleted), `out/diff_<case>.txt`,
+`snap/<db>/<label>/{schema.txt,tables.tsv,svc.json}` with blobs in `blobs/` (kept: a2_staged, a2_after, the two
+twins, the 8.5 БСП), `bak/*_a2_staged.bak` (twin source), `logs/`, `tree/patches/<case>/{before,after}` (the exact
+XML edits), `probe/` (the session processing and jobs), `STATUS.md`. Scripts: `scripts/restructure-lab/README.md`.
