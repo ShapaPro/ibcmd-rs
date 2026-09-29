@@ -341,6 +341,11 @@ pub fn plan_with_gate(
     structural_gate: &dyn StructuralGate,
 ) -> Result<ConfigApplyPlan> {
     let total = Instant::now();
+    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
+        bail!(
+            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`"
+        );
+    }
     let client = require_client(sql)?;
     let database = options.database.as_str();
     let db = quote_ident(database)?;
@@ -353,11 +358,6 @@ pub fn plan_with_gate(
         database,
     )?;
     timings.storage_check_ms = ms(started);
-    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
-        bail!(
-            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`"
-        );
-    }
 
     let started = Instant::now();
     let staged = read_row_metas(
@@ -488,8 +488,7 @@ pub fn plan_with_gate(
         .ok_or_else(|| anyhow!("ConfigSave holds no versions row: not a complete stage"))?;
     let staged_versions = versions::parse_versions(&staged_versions)?;
     // A delta stage (the rows of a few objects and `versions`) is a stage too:
-    // the native apply takes it, keeps the active `root` and `version`, and
-    // leaves the schema storage and the change-registration ids alone.
+    // the native apply takes it and keeps the active `root` and `version`.
     for service in ["root", "version"] {
         if !staged.iter().any(|row| row.name == service) {
             report.warnings.push(format!(
@@ -990,5 +989,35 @@ fn write_artifact(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::write(path, bytes)
             .with_context(|| format!("failed to write {}", path.display())),
         Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_8_5_profile_is_refused_before_anything_is_read() {
+        let sql = SqlExec::detached("no server in a unit test");
+        let options = ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_5_1_1150);
+        let error = plan(&sql, &options).err().expect("8.5 is refused");
+        assert!(
+            error.to_string().contains("measured on 8.3.27 only"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_platform_that_is_measured_still_needs_a_server() {
+        let sql = SqlExec::detached("no server in a unit test");
+        let options =
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214);
+        let error = plan(&sql, &options).err().expect("a detached handle fails");
+        assert!(!error.to_string().contains("8.5"), "{error}");
+    }
+
+    #[test]
+    fn safe_stems_keep_only_file_name_characters() {
+        assert_eq!(safe_stem("a b/c:d-e_f"), "a_b_c_d-e_f");
     }
 }

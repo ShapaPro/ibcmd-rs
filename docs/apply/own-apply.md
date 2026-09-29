@@ -53,10 +53,8 @@ Order of the native apply (S2/S3, session numbers omitted):
    data never leaves the server. ~20 000 statements for 9 517 rows.
 4. `MobileVersions.datNEW` in `Files`; `DBNames.New` / `DBNames-Ext-*.New` in
    `Params` (rewritten with unchanged content).
-5. The restructuring framework -- when the stage carries `root` and `version`
-   rows (S1, S2, S3), even if nothing is structural; **not** for a delta stage
-   without them (S4: no `_IDRRef` renumbering, `SchemaStorage` and `DBSchema`
-   untouched): it
+5. The restructuring framework, on the **long path** (S1, S2, S3; the trace track's cases 1x, 2a, 2c): even
+   when nothing is structural it
    rebuilds `_ConfigChngR` and `_ConfigChngR_ExtProps` as `..NG` tables (new
    `_IDRRef` for every row, the staged objects' `_MessageNo` set to NULL), fills
    `_ExtensionsRestructNGS` when extensions exist, and only in S1 restructured
@@ -97,6 +95,22 @@ Consequences measured on the end state:
   конфигурации базы данных не требуется" and change nothing (5.6 s);
 - the new generation the native apply prints is the header GUID of the staged
   `versions` row (byte-swapped) followed by `00000000`.
+
+### The short path (S4; the trace track's case 2n)
+
+Not every stage takes the long path above. The S4 stage (traced with the kit of track trace, 195 write
+statements, 24 user transactions, 75 s, `docs/apply/evidence/own-apply/s4-write-families.md`) ran no
+structure phase, no `..NG` tables (no DDL at all), no `DBNames` passes, no ConfigCAS garbage collection:
+`.ui` (3 rows), the `.new` copy of the staged rows, `MobileVersions.datNEW`, the 16 `.sinew` rows, the `commit`
+marker, the promotion of `.si`, `dbStruFinal`, `UPDATE _ConfigChngR SET _MessageNo = NULL` (40 rows) with six
+`INSERT`s into `_ConfigChngR` and six into `_ConfigChngR_ExtProps` (the two new objects, three nodes each),
+the promotion of the staged rows, the clean-up and the help index. `_IDRRef`, `DBSchema` and `SchemaStorage`
+kept their bytes. What decides the path is open (trace track, question 1; its case 2n took the short path
+too, with `root`, `version` and `versions` staged). S4 adds two data points: it staged the descriptor of
+one data processor (a table-less kind) and ten body rows of objects of mixed kinds -- a constant and a report
+among them -- **without** their descriptors, and stayed on the short path; S3 staged the descriptors of a
+catalog and a document and took the long one. This apply does not care: it never renumbers ids and writes
+the same end state for both paths (S3 on the long path, S4 on the short one, both equal).
 
 ### What a new form or template adds (measured: S1, S4)
 
@@ -217,7 +231,7 @@ listed in the report as `not_written`):
 | `Params.*.si`, `siVersions` (except for new objects) | Service-information caches. Their content is a function of the object set and names (same text before and after S2/S3; only a new object, a rename or a synonym change alters it). The native apply rewrites all 16 rows with unchanged content and new version guids; this one rewrites the main row (and its `siVersions` entry) only when a new form or template adds records. |
 | Help index (`Files.userDocs_ru*` ...) | Rebuilt by the native apply from help pages; a body-only change leaves the pages, so the old index stays valid. |
 | ConfigCAS garbage collection and its bookkeeping | Housekeeping of extension content, independent of the main configuration. |
-| `_ExtensionsRestructNGS`, `_IDRRef` renewal in `_ConfigChngR` | Scratch of the restructuring framework (three constant rows in every native apply that runs it, none in a delta stage without `root`/`version`); the registrations keep their ids, so `_ConfigChngR_ExtProps` stays consistent. |
+| `_ExtensionsRestructNGS`, `_IDRRef` renewal in `_ConfigChngR` | Scratch of the restructuring framework (three constant rows in every native apply that takes the long path, none on the short one); the registrations keep their ids, so `_ConfigChngR_ExtProps` stays consistent. |
 
 ### Known differences from the native apply
 
@@ -236,9 +250,9 @@ the platform does not mind (S2, S3, S4, and the probe below):
   the same for 8.5 and licensing; its result replaces this paragraph when it lands.
 - **All `.si` rows and their versions** are rewritten by the native apply even when their
   content is unchanged; we write only what changes (S4: the rows are identical in text).
-- **`_IDRRef`** of `_ConfigChngR` is renumbered by the native apply when the stage carries
-  `root` and `version` (S1-S3); we keep the ids (S4, a delta stage, shows the platform does
-  not renumber either without them). Ids of new registrations differ by construction.
+- **`_IDRRef`** of `_ConfigChngR` is renumbered by the native apply on the long path (S1-S3);
+  we keep the ids (the short path, S4, does not renumber either). Ids of new registrations
+  differ by construction.
 - **Help index, ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and
   scratch of the native apply, see the table above.
 - **`Creation`/`Modified` of `Files.MobileVersions.dat`** and the random head guid differ.
@@ -343,7 +357,8 @@ The platform on the own result (`ibcmd_rs_04_apply_bsp8327_ours2_20260929`):
 
 S4, a delta stage with a **new form and a new template** (16 rows: the two new objects with their
 `.0` bodies, their owner, ten module edits, `versions`; no `root`/`version`), native 39.6 s against
-own 9.7 s in all (transaction 1.8 s). Own vs native end state (`tools\verify_new.py`):
+own 9.7 s in all (transaction 1.8 s); traced with the kit of track trace: native 195 write statements
+in 24 transactions, own 17 in one (`docs/apply/evidence/own-apply/s4-write-families.md`). Own vs native end state (`tools\verify_new.py`):
 `Config` **9 845 of 9 845 rows identical** (the four new rows and the owner's descriptor included);
 `_ConfigChngR` 20 691 rows, the same (node, object) pairs and message numbers, ids unique;
 `_ConfigChngR_ExtProps` identical for 16 349 objects; **all 16 `.si` rows have identical text**
