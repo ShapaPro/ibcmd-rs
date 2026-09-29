@@ -495,7 +495,7 @@ lab kit: `scripts/restructure-lab/`; fixtures: `tests/fixtures/native-evidence/r
 | `reader.rs`, `exec.rs` | the database side; the plan run in one transaction with read-back checks |
 | `command.rs` | `mssql-restructure --database <db> [--dry-run] [--trial] [--alter-add] [--skip-xdto] [--dump-plan <dir>] [--report <file>]` |
 
-`--dry-run` plans and prints (6 s on the БСП twin); `--trial` runs everything and rolls it back; writing to a database
+`--dry-run` plans and prints (6-24 s on the БСП twin, depending on the load of the machine); `--trial` runs everything and rolls it back; writing to a database
 whose name is not `ibcmd_rs_04_*` / `ibcmd_rs_05_*` needs `--allow-non-lab`; other sessions in the database stop it.
 Tests: 30 in the crate's lib (formats, DBSchema against the statements of the native trace, plan against the
 native result, refusals, XDTO); three of them read the lab corpora and skip themselves without the lab:
