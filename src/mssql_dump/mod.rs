@@ -20090,10 +20090,17 @@ fn parse_accumulation_register_attribute_payload(
                         (indexing, full_text_search, fields.get(1)?)
                     } else if fields.len() == 4
                         && fields.first().map(|field| field.trim()) == Some("3")
-                        && fields.get(2).map(|field| field.trim()) == Some("0")
-                        && fields.get(3).map(|field| field.trim()) == Some("1")
                     {
-                        ("DontIndex", "Use", fields.get(1)?)
+                        // The short form stores the two codes as well: a
+                        // 1C:Документооборот register keeps `{3, <body>, 1,
+                        // 1}` for an attribute the platform dumps
+                        // `Index`/`Use` (`AccumulationRegisters/
+                        // КоличествоДействийЗадач`).
+                        (
+                            metadata_attribute_indexing_xml(fields.get(2)?.trim())?,
+                            register_child_full_text_search_xml(fields.get(3)?.trim())?,
+                            fields.get(1)?,
+                        )
                     } else {
                         return None;
                     };
