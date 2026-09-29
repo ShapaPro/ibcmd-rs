@@ -374,8 +374,14 @@ native `config export` and `infobase config check`.
 
 1. **Why did 2n take the short path?** Hypotheses: (a) no staged row differs semantically from `Config` ("nothing to
    restructure"), (b) no module text changed. 1x' differs from 2n by five module edits (long path), 2a by an
-   attribute (long). Proposed test: on a fresh clone stage (i) one module edit only, (ii) a descriptor edit with
-   no structure effect, (iii) nothing; apply each natively and read the log lines.
+   attribute (long). **Measured since:** 2n repeated on a fresh clone (X0: 9 rows staged, 20 s, no structure phase,
+   register ids unchanged) - the short path is reproducible and not a property of the first clone. The test that
+   separates the hypotheses is prepared and not run, because the `native` lock could not be obtained in 70 minutes:
+   three clones hold the stages - `c4_paths` (a catalog object module edited), `c4_x2` (a common module edited),
+   `c4_x4` (a catalog synonym changed, no module) - and `F:\ibcmd\lab\04\trace\scripts\run_paths2.ps1 -ApplyOnly`
+   applies the three under one hold of the lock (about six minutes) and writes `paths\summary.tsv`
+   (`structure_phase`, `exchange_registration`, `register_ids_changed` per case). Long for X1 and X2 and short for X4
+   would make module text the trigger; long for all three, any semantic change.
 2. **`_ConfigChngR`**: the `_MessageNo` rule of section 4.4 is exact on six applies (1x, 1d, 1x', 1d', 2a, 2c); open: which objects and nodes a
    register holds at all (20 685 rows, five nodes; a new object went to three nodes), and the generator of the
    row ids.
