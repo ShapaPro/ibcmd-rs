@@ -140,7 +140,10 @@ fn marker_fields(blob: &[u8]) -> Result<Vec<String>> {
 }
 
 /// Reads the two markers (each `None` when the row is absent). Both present
-/// and consistent, or both absent; anything else fails closed.
+/// and consistent, or both absent, or -- after a native apply of body rows
+/// alone, which clears the `Config` marker and leaves the `Params` one -- only
+/// the `Params` marker, which then names no overlay; anything else fails
+/// closed.
 pub fn parse_dynamic_history(
     config_marker: Option<&[u8]>,
     params_marker: Option<&[u8]>,
@@ -195,7 +198,29 @@ pub fn parse_dynamic_history(
                 generations,
             })
         }
-        _ => bail!("Config and Params dynamic markers must both be present or both absent"),
+        (None, Some(params)) => {
+            let params = marker_fields(params)?;
+            let count = params
+                .get(1)
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| anyhow!("Params.DynamicallyUpdated has no count"))?;
+            if params.first().map(String::as_str) != Some("0")
+                || count == 0
+                || params.len() != count + 2
+            {
+                bail!("unsupported Params.DynamicallyUpdated marker");
+            }
+            let ordinary = Uuid::parse_str(&params[2]).map_err(|_| {
+                anyhow!("Params.DynamicallyUpdated has an invalid ordinary generation")
+            })?;
+            Ok(DynamicHistory {
+                ordinary: Some(ordinary),
+                generations: Vec::new(),
+            })
+        }
+        (Some(_), None) => {
+            bail!("Config.DynamicallyUpdated is present but Params.DynamicallyUpdated is not")
+        }
     }
 }
 
@@ -275,6 +300,12 @@ mod tests {
             DynamicHistory::default()
         );
         assert!(parse_dynamic_history(Some(config.as_bytes()), None).is_err());
+        // a native apply of body rows alone clears the Config marker and leaves the
+        // Params one: no overlay any more
+        let left_over = parse_dynamic_history(None, Some(params.as_bytes())).unwrap();
+        assert_eq!(left_over.ordinary, Some(Uuid::parse_str(V).unwrap()));
+        assert!(left_over.generations.is_empty());
+        assert!(parse_dynamic_history(None, Some(b"{1,3,x}")).is_err());
         let mismatched = format!("{{0,3,{V},{G1},{G0}}}");
         assert!(
             parse_dynamic_history(Some(config.as_bytes()), Some(mismatched.as_bytes())).is_err()

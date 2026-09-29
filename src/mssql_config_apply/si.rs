@@ -672,9 +672,8 @@ mod tests {
         // DP3 has nothing: right behind the owner
         assert_eq!(main.place(DP3, 3, None, None).unwrap(), 9);
         // the first form of DP2's kind... it has one; a first attribute goes in front of the forms
-        assert_eq!(
+        assert!(
             main.place(DP2, 5, None, None).is_err(),
-            true,
             "attribute order is not observed"
         );
         // a sibling that is not a child of the owner is refused

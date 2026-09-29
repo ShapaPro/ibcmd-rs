@@ -326,6 +326,12 @@ alone from a full native set, because nothing in the results asks for it:
 - a body row whose owner kind and suffix the source-asset registry names as a module,
   form, template, picture or help page; other body roles pass only when the inflated
   text is unchanged;
+- a **body row of several parts** (the platform cuts a value at 10 MB into `PartNo` 0, 1, ...): one
+  change, whichever part differs. Its first part stands for it in the role check and the parts
+  beyond the first are counted (`extra_parts`). Refused: a part whose first part is not staged; a
+  descriptor with a part other than 0; a row of several parts (staged or active) whose role would
+  need a text comparison -- predefined data, an exchange plan's content -- because that
+  comparison reads one part only;
 - **new rows**, judged by `mssql_config_apply::objects` and passed to the gate as accepted:
   - a *new form or template of an existing object*: the owner's staged descriptor must be
     the active one plus the references (equal as brace trees once the new uuids are taken
@@ -426,6 +432,15 @@ not the apply):
   existing `.1`): `Config`, `_ConfigChngR` and `_ConfigChngR_ExtProps` identical (the new file appended
   behind the existing one, as predicted), `.si` untouched by both; the native apply took the third path
   above and left `Params.DynamicallyUpdated`, which this apply now leaves too for such a stage.
+- **S6** (3 rows, made by hand on the S5C twin, `s5our`): `versions` with a new generation and a template
+  body of two parts -- both parts of an existing `.0` row, 10 000 000 and 974 171 bytes, one byte of the
+  second flipped. The gate passes it as one changed `Template` body (`extra_parts: 1`); the apply moves both
+  parts and its postconditions hold (every staged part in `Config` byte for byte, `ConfigSave` empty,
+  `DataSize` 10 974 171 on both). The start state -- the `Params` marker left by S5C, no `Config` marker --
+  is a legal input now (`parse_dynamic_history` reads a lone `Params` marker as "no overlays"). Not compared
+  with a native apply: the import of this repository staged such a row as one `PartNo = 0` row (in S2 it
+  became one part in the native twin too, see "What the native apply does"), so a stage with parts needs
+  the platform's own import.
 
 Exclusivity with a real 1C process: an `ibsrv` (standalone server) started on a staged twin holds 23
 connections; the apply refuses with the sessions listed, and a second apply started meanwhile is
@@ -466,6 +481,12 @@ the snapshot row, every saved file hashes to its manifest entry).
   apply therefore demands exclusive access and refuses while the working process holds its connections.
 - **Dynamic-update overlays in `Params`** (a `.si` row under a `_dynupdate_` name, left by a native
   dynamic apply) are refused: this apply folds only `Config` overlays.
+- **Big stages**: a row above 10 MB (several parts) is moved as the stage has it (S6, a hand-made stage); one of the roles that
+  need a text comparison is refused when it has parts. The whole apply is one transaction: the log space a stage of
+  hundreds of MB needs is not measured (the S2 stage, 9 517 rows and 81 MB, took 5.6 s of SQL on an idle machine and 120 s under load from other tracks). The importer stages every row of the tree
+  although only the edited ones differ from `Config` (9 517 staged, 9 515 identical in the cluster proof); the native apply
+  moves them all too. A mode that would leave the byte-identical rows out is possible, and would differ from the native
+  apply only in `Creation`/`Modified` of those rows -- a proposal, not done.
 - **8.5** is refused: the apply is measured on 8.3.27 only.
 - The help index and the extension CAS garbage are left as they are; they are caches.
 - A working process that keeps a pooled connection makes the SQL exclusivity check refuse; the

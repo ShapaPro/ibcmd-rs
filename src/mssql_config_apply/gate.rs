@@ -46,6 +46,8 @@ pub struct GateStats {
     pub rows_identical: usize,
     pub descriptors_layout_only: usize,
     pub service_rows: usize,
+    /// Parts beyond the first of a multi-part body row.
+    pub extra_parts: usize,
     /// New forms and templates the caller analysed and accepted.
     pub new_objects: usize,
     /// Changed body rows by the role the registry gives them.
@@ -130,9 +132,36 @@ impl StructuralGate for ConservativeGate {
         };
         let mut changed_bodies: Vec<(&RowMeta, String, String)> = Vec::new();
         let mut descriptors_to_compare = 0usize;
+        // A row of several parts (the platform cuts a value at 10 MB) is one change:
+        // any part that is new or differs makes its name changed, and its first
+        // part stands for it in the role check.
+        let mut changed_names: HashSet<String> = HashSet::new();
+        let mut first_parts: HashSet<String> = HashSet::new();
+        let mut multi_part: HashSet<String> = HashSet::new();
+        for row in input.staged {
+            let name = row.name.to_ascii_lowercase();
+            if row.part == 0 {
+                first_parts.insert(name.clone());
+            } else {
+                multi_part.insert(name.clone());
+            }
+            if input
+                .active
+                .get(&row.key())
+                .is_none_or(|active| active.sha256 != row.sha256)
+            {
+                changed_names.insert(name);
+            }
+        }
+        for (name, part) in input.active.keys() {
+            if *part != 0 {
+                multi_part.insert(name.clone());
+            }
+        }
         for row in input.staged {
             let active = input.active.get(&row.key());
             let identical = active.is_some_and(|active| active.sha256 == row.sha256);
+            let name_key = row.name.to_ascii_lowercase();
             match classify_name(&row.name) {
                 RowName::Service(name) => {
                     verdict.stats.service_rows += 1;
@@ -140,10 +169,20 @@ impl StructuralGate for ConservativeGate {
                         verdict.block(&row.name, format!("the service row {name} changes"));
                     }
                 }
+                // an unchanged first part of a body row another part of which changes
+                RowName::Body { owner, suffix }
+                    if identical && row.part == 0 && changed_names.contains(&name_key) =>
+                {
+                    changed_bodies.push((row, owner.to_owned(), suffix.to_owned()));
+                }
                 _ if identical => verdict.stats.rows_identical += 1,
+                RowName::Descriptor(_) if row.part != 0 => verdict.block(
+                    &row.name,
+                    "a descriptor with a part number other than 0",
+                ),
                 RowName::Descriptor(_) => match active {
                     Some(_) => descriptors_to_compare += 1,
-                    None if input.accepted_new_rows.contains(&row.name.to_ascii_lowercase()) => {
+                    None if input.accepted_new_rows.contains(&name_key) => {
                         verdict.stats.new_objects += 1;
                     }
                     None => verdict.block(
@@ -153,7 +192,14 @@ impl StructuralGate for ConservativeGate {
                 },
                 RowName::Body { owner, suffix } => {
                     if row.part != 0 {
-                        verdict.block(&row.name, "a body row with a part number other than 0");
+                        if first_parts.contains(&name_key) {
+                            verdict.stats.extra_parts += 1;
+                        } else {
+                            verdict.block(
+                                &row.name,
+                                "a body part whose first part is not staged",
+                            );
+                        }
                     } else {
                         changed_bodies.push((row, owner.to_owned(), suffix.to_owned()));
                     }
@@ -171,6 +217,7 @@ impl StructuralGate for ConservativeGate {
             classify_bodies(
                 input,
                 &changed_bodies,
+                &multi_part,
                 self.admit_unverified_roles,
                 &mut verdict,
             )?;
@@ -381,6 +428,7 @@ fn role_is_unverified_ok(role: SourceAssetRole) -> bool {
 fn classify_bodies(
     input: &GateInput<'_>,
     changed: &[(&RowMeta, String, String)],
+    multi_part: &HashSet<String>,
     admit_unverified: bool,
     verdict: &mut GateVerdict,
 ) -> Result<()> {
@@ -456,7 +504,18 @@ fn classify_bodies(
             )),
         }
     }
-    compare_bodies(input, &to_compare, verdict)
+    // A text comparison reads the first part only: a row of several parts whose
+    // role would need one cannot be proved unchanged.
+    let (multi, single): (Vec<_>, Vec<_>) = to_compare
+        .into_iter()
+        .partition(|(row, _, _)| multi_part.contains(&row.name.to_ascii_lowercase()));
+    for (row, reason, _) in &multi {
+        verdict.block(
+            &row.name,
+            format!("{reason}; it has several parts, and only a single-part text can be compared"),
+        );
+    }
+    compare_bodies(input, &single, verdict)
 }
 
 /// How a body row that no role admits is compared with the active row.
@@ -669,3 +728,7 @@ mod tests {
         assert_eq!(verdict.blockers_omitted, 5);
     }
 }
+
+#[cfg(test)]
+#[path = "gate_parts_tests.rs"]
+mod parts_tests;
