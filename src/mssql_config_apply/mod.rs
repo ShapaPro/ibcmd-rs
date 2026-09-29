@@ -410,6 +410,18 @@ pub fn plan_with_gate(
             "{left_over} row(s) of an unfinished operation (commit / dynamicCommit / dbStruFinal / convertPhase / erase_save / deleted / *.new) are recorded in Config or ConfigSave; run the native `ibcmd infobase config repair` first"
         );
     }
+    // The schema storage of a settled infobase is at Status 100; the native apply
+    // walks it through 200, 400 and 500 and back, so any other value is an
+    // interrupted operation.
+    let unsettled = scalar_i64(
+        client,
+        &format!("SELECT COUNT_BIG(*) FROM {db}.dbo.SchemaStorage WHERE Status <> 100"),
+    )?;
+    if unsettled != 0 {
+        bail!(
+            "SchemaStorage is not settled ({unsettled} row(s) with Status other than 100): an interrupted restructuring or apply; run the native `ibcmd infobase config repair` first"
+        );
+    }
     timings.inventory_ms = ms(started);
 
     let active: HashMap<(String, i32), RowMeta> = replaced

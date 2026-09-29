@@ -46,12 +46,18 @@ Order of the native apply (S2/S3, session numbers omitted):
    data never leaves the server. ~20 000 statements for 9 517 rows.
 4. `MobileVersions.datNEW` in `Files`; `DBNames.New` / `DBNames-Ext-*.New` in
    `Params` (rewritten with unchanged content).
-5. The restructuring framework, always: it rebuilds `_ConfigChngR` and
-   `_ConfigChngR_ExtProps` as `..NG` tables (new `_IDRRef` for every row, the
-   staged objects' `_MessageNo` set to NULL), fills `_ExtensionsRestructNGS`
-   when extensions exist, and only in S1 restructured the route-point table
-   of a business process. `DBSchema` and `SchemaStorage` are rewritten (same
-   bytes unless a table changed).
+5. The restructuring framework, always, even when nothing is structural: it
+   rebuilds `_ConfigChngR` and `_ConfigChngR_ExtProps` as `..NG` tables (new
+   `_IDRRef` for every row, the staged objects' `_MessageNo` set to NULL), fills
+   `_ExtensionsRestructNGS` when extensions exist, and only in S1 restructured
+   the route-point table of a business process. Around it `SchemaStorage`
+   (SchemaID 0) walks `Status` 100 -> 200 (`UPDATE ... SET NewGenCreated = <1 KB
+   of table text>, Status = 200`) -> 400 -> 500 -> 100 (`UPDATE ... SET Status = 100,
+   CurrentSchema = @P1, NewGenCreated = @P2, NewGenDropped = @P3`, 977 KB) and
+   `UPDATE DBSchema SET SerializedData = @P1` writes the schema blob again: **both
+   are written in every apply, but with the bytes they already had** (S2, S3:
+   `DBSchema` and `SchemaStorage` hashes equal before and after; they change only when
+   a table does, as in S1).
 6. The extension CAS garbage collection (`ConfigCAS` 12 797 -> 636 rows,
    `Files.CAS_GC_Info`, `extd_props_cached/gc.mrk`) and the help index
    (`Files.userDocs_ru*`, `userPostings_ru*`, `userVocabulary_ru*`).
@@ -81,6 +87,33 @@ Consequences measured on the end state:
   конфигурации базы данных не требуется" and change nothing (5.6 s);
 - the new generation the native apply prints is the header GUID of the staged
   `versions` row (byte-swapped) followed by `00000000`.
+
+### The state an interrupted native apply leaves
+
+The native apply is ~30 000 autocommit statements around the `commit` marker. When it dies
+part-way (ddl track, 2026-09-29: killed at «Принятие изменений» while several native runs
+competed for the CPU) the database answers every `ibcmd config` command with «Обнаружена
+незавершенная операция сохранения конфигурации». By the trace that state is: `SchemaStorage`
+(SchemaID 0) at `Status` 200, 400 or 500 (never 100), a non-empty `NewGenCreated`, possibly
+`DBSchema` already rewritten, `*.new` rows in `Config` (and a `commit` row once the renames
+began), `ConfigSave` still full. The own apply **refuses** that state before it writes anything
+(the `*.new` and marker names, and `SchemaStorage.Status <> 100`, are checked in the plan and
+again under the locks) and points at the native `config repair`. It never produces the state
+itself: the whole move is one transaction.
+
+### What the importer stages (findings for the import track)
+
+- Our import stages the **whole** configuration (patch mode 9 517 rows, base-free 9 842), not a
+  delta, so a native apply of it moves every row through `.new`, unchanged ones too.
+- ddl track: patch mode silently drops descriptor changes (a new catalog attribute never reached
+  `ConfigSave`; every staged row equalled `Config` but `versions`). The apply can only judge what
+  is staged: **a change that is missing from `ConfigSave` is invisible to every gate here**.
+- Patch mode cannot stage a new form or template (`Config row not found`); base-free can, but it
+  recompiles a business process's route-point flowchart differently, which makes the native apply
+  restructure that table (S1).
+- The help index (`Files.userDocs_ru*`) built by the native apply from our staged help rows is
+  nearly empty (2 KB and 2 bytes against 47 KB in the base), so our packed help pages are not
+  what the platform's indexer reads.
 
 ## What this apply does
 

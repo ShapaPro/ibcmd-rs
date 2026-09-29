@@ -30,6 +30,7 @@ pub mod code {
     pub const CHANGE_REGISTRATION: u32 = 57313;
     pub const FILES_WRITE: u32 = 57314;
     pub const PARAMS_WRITE: u32 = 57315;
+    pub const UNFINISHED_SCHEMA: u32 = 57316;
 }
 
 /// Names whose presence means an earlier operation did not finish
@@ -274,6 +275,13 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         ),
         code::UNFINISHED_OPERATION,
         "an unfinished operation is recorded in Config or ConfigSave; run the native config repair first",
+    );
+    // A restructuring in flight leaves the schema storage in another state than 100.
+    throw(
+        &mut sql,
+        "EXISTS (SELECT 1 FROM dbo.SchemaStorage WHERE Status <> 100)",
+        code::UNFINISHED_SCHEMA,
+        "SchemaStorage is not in the settled state (Status 100): an interrupted restructuring; run the native config repair first",
     );
 
     // What the plan saw must still be there.
