@@ -31,6 +31,21 @@ pub fn kind_names(kind: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// A new object's table entry.
+#[derive(Clone, Copy, Debug)]
+pub struct NewTable<'a> {
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub object: &'a str,
+    /// The number `DBNames` gave the table (`Reference11036` -> 11036).
+    pub table_number: u64,
+    /// The `Ref` generated type of the object.
+    pub ref_type_id: &'a str,
+    /// The objects the root lists before and after the new one (of the same kind).
+    pub predecessor: Option<&'a str>,
+    pub successor: Option<&'a str>,
+}
+
 /// The table part of an entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRef {
@@ -160,18 +175,18 @@ impl NamesTables {
             .collect()
     }
 
-    /// Adds the table entry of a new object of `kind`: right after the entry of the object the root
-    /// lists before it (`predecessor`), or right before the one it lists after (`successor`).
-    pub fn add_object(
-        &mut self,
-        kind: &str,
-        name: &str,
-        object: &str,
-        table_number: u64,
-        ref_type_id: &str,
-        predecessor: Option<&str>,
-        successor: Option<&str>,
-    ) -> Result<()> {
+    /// Adds the table entry of a new object: right after the entry of the object the root lists
+    /// before it (`predecessor`), or right before the one it lists after (`successor`).
+    pub fn add_object(&mut self, new: &NewTable<'_>) -> Result<()> {
+        let NewTable {
+            kind,
+            name,
+            object,
+            table_number,
+            ref_type_id,
+            predecessor,
+            successor,
+        } = *new;
         let (russian_kind, prefix) =
             kind_names(kind).with_context(|| format!("no table names are known for {kind}"))?;
         if !self.entries.iter().all(|entry| entry.object != object) {

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::metadata_model::brace::{Brace, parse_row, serialize_row};
 use crate::restructure::caches::facts::{ObjectFacts, TABULAR_SECTIONS};
 use crate::restructure::caches::help_props::HelpProps;
-use crate::restructure::caches::names_tables::NamesTables;
+use crate::restructure::caches::names_tables::{NamesTables, NewTable};
 use crate::restructure::caches::order::iteration_order;
 use crate::restructure::caches::owner_map::OwnerMap;
 use crate::restructure::caches::plan::{
@@ -193,15 +193,15 @@ fn a_catalog_removed_from_every_row_comes_back_where_the_platform_had_it() {
             .map(|i| catalogs.objects[i].as_str());
         let successor = catalogs.objects.get(position + 1).map(String::as_str);
         again
-            .add_object(
-                "Catalog",
-                &facts.name,
+            .add_object(&NewTable {
+                kind: "Catalog",
+                name: &facts.name,
                 object,
-                table.number,
-                &table.type_id,
+                table_number: table.number,
+                ref_type_id: &table.type_id,
                 predecessor,
                 successor,
-            )
+            })
             .unwrap();
         assert_eq!(again, names, "a07b62f0, {}", facts.name);
 

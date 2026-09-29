@@ -79,7 +79,8 @@ the property `T` in `CatalogObject.X`, `lowerBound="0" upperBound="99999"`). Bot
 - **`c4629235`: the position of five other entries.** The map is filled in an order that is neither the root's
   nor the registry's (`1a621f0f`) nor a finer hash order (tested); its tail interleaves the nested elements
   of documents, data processors and registers. A new catalog at the root position 39 moves five other entries of the 2377
-  (four places: the growth points shift by one). The entry is exact; `HelpProps::add_entry_approximately` puts it
+  (four places: the growth points shift by one); with the approximate placement 10 of the 2375 neighbour
+  links of native's row are broken (the test prints it). The entry is exact; `HelpProps::add_entry_approximately` puts it
   where a last-inserted key would go and `CacheRow::exact` is `false`. The platform tolerates a stale
   `c4629235` (12.5) and rewrites it at the next native apply.
 - **`facbfffe` section 7** (`Explanation`) and the sections 0, 5, 6 (constants, registers) are refused.

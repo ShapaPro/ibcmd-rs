@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::metadata_model::brace::Brace;
 use crate::restructure::caches::facts::{ObjectFacts, TABULAR_SECTIONS};
 use crate::restructure::caches::help_props::HelpProps;
-use crate::restructure::caches::names_tables::NamesTables;
+use crate::restructure::caches::names_tables::{NamesTables, NewTable};
 use crate::restructure::caches::owner_map::OwnerMap;
 use crate::restructure::caches::root::{
     CATALOG_CLASS, Collection, collection_of, collections, kind_of_class,
@@ -126,15 +126,15 @@ pub fn new_catalog(input: &NewCatalog<'_>) -> Result<Vec<CacheRow>> {
 
     // a07b62f0: names -> tables
     let mut names = NamesTables::parse(&cached(input.cache, rows::NAMES_TABLES)?)?;
-    names.add_object(
-        "Catalog",
-        &facts.name,
-        &facts.uuid,
-        input.table_number,
-        &facts.generated_type("Ref")?.type_id,
+    names.add_object(&NewTable {
+        kind: "Catalog",
+        name: &facts.name,
+        object: &facts.uuid,
+        table_number: input.table_number,
+        ref_type_id: &facts.generated_type("Ref")?.type_id,
         predecessor,
         successor,
-    )?;
+    })?;
     out.push(CacheRow {
         name: rows::NAMES_TABLES,
         text: names.render(),
