@@ -794,10 +794,10 @@ fn bootstrap_base_free(
     let storage_entries = patch.len();
     let limits = limits_for_len(retained)
         .map_err(|message| bootstrap_failure(&args, "source_tree_invalid", message))?;
-    let revision = match args.revision {
-        CfRevision::Format15 => Revision::Format15,
-        CfRevision::Format16 => Revision::Format16,
-    };
+    // Always the unpaged format15: 8.3.27.2214 refuses the bootstrap
+    // writer's paged format16 (`/LoadCfg`: stream format error) and loads the
+    // format15 one, dumping back the tree it was built from.
+    let revision = Revision::Format15;
     let mut cf_profile = BootstrapCfProfile::new(revision, args.storage_version, storage_profile)
         .with_reserved(args.reserved);
     if let Some(page_size) = args.page_size {

@@ -64,7 +64,31 @@ pub fn base_free_patch(
     root: &Path,
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<(StoragePatch, usize)> {
-    let entries = base_free_entries(root, source_version)?;
+    let mut entries = base_free_entries(root, source_version)?;
+    // Diagnostics: IBCMD_RS_BASE_FREE_ENTRIES_FROM=<file.cf> takes every
+    // entry from that file instead, except those whose name contains one of
+    // the comma-separated IBCMD_RS_BASE_FREE_KEEP_OURS substrings; bisects
+    // what a platform refuses.
+    if let Some(from) = std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_FROM") {
+        let keep = std::env::var("IBCMD_RS_BASE_FREE_KEEP_OURS").unwrap_or_default();
+        let keep = keep.split(',').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+        let source = std::fs::File::open(&from)?;
+        let limits = ibcmd_core::limits::ResourceLimits::for_input_bytes(source.metadata()?.len());
+        let profile = ibcmd_core::artifact::StorageProfileId::parse("storage:cf-cli")?;
+        let archive = ibcmd_cf::archive::decode_packed_archive(source, limits, profile)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut theirs = BTreeMap::new();
+        for (name, payload) in crate::external::export::entries_of(&archive) {
+            if keep.iter().any(|part| name.contains(part)) {
+                if let Some(ours) = entries.get(&name) {
+                    theirs.insert(name, ours.clone());
+                }
+            } else {
+                theirs.insert(name, payload);
+            }
+        }
+        entries = theirs;
+    }
     let total = entries.values().map(Vec::len).sum();
     let mut patch = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
