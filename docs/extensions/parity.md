@@ -27,6 +27,20 @@ side" below; the offline empty-database cycles show the same differences before
 and after); the extension export shares the *legacy converters* with
 `--legacy-export`, so that path was measured too: the БСП 8.3.27 corpus is identical in all 12198 files and the ERP УХ 8.3.27 corpus in all 140709 files (the only extra entry is the dump's own manifest.json).
 
+Measured 2026-09-29 on a clone of the БСП 8.5 database (three extensions,
+platform 8.5.1.1150, XML 2.21, `--platform 8.5.1`), same method:
+
+| extension | files | differences now |
+|---|---|---|
+| `_ДемоПустоеРасширение` | 3 | 0 |
+| `_ДемоРасширение` | 187 | 0 |
+| `ServiceDesk` | 633 | 0 |
+
+The offline export of the main configuration is unchanged by the 8.5 work on
+both paths: the БСП 8.3.27 corpus is identical in all 12198 files and the БСП 8.5
+corpus in all 12337 files, through the default (model) export and through
+`--legacy-export`.
+
 The export reports `native_xml_parity: true` when no storage row is opaque or
 failed. That is a claim about the readers and not a proof: they read fail-closed
 (a row whose shape they cannot state exactly is reported, never written
@@ -47,6 +61,17 @@ ordinary converter blind to extensions (`src/mssql_dump/extension/`):
    writes for an adopted object: the properties the header lists (plus name,
    comment and `ExtendedConfigurationObject`), `xr:PropertyState` blocks,
    `MultiState` type lists.
+
+**Which image.** The native export writes the *staged* state of an extension
+when it has one: the БСП 8.5 clone keeps two changed modules of ServiceDesk in
+`ConfigCASSave`, and the native tree holds them. A staged namespace
+(`<extension _IDRRef>__<logical name>`) is the changed rows plus a new
+`configinfo` (the manifest); the rows it leaves out are the ones `ConfigCAS`
+already holds under the same digest. `mssql-dump-extension --image auto` (the
+default) roots the graph at the staged `configinfo` when the namespace exists,
+supplies the staged rows and fetches the rest from `ConfigCAS`; `--image active`
+reads the generation the registry names, `--image staged` fails when nothing is
+staged. The report says which image was exported (`image`, `image_cas_root`).
 
 The root object is rendered by `extension/root.rs`, `ConfigDumpInfo.xml` from the
 digests of the CAS manifest, and forms get a post-pass over their XML
@@ -223,6 +248,49 @@ test per family (`business_object.rs`). The tests fail on the previous layouts.
   the register's own standard-attribute markers (`-3` `LineNumber`, `-4`
   `CalculationType`, `-11` `ReversingEntry`, ...).
 
+### Platform 8.5.1
+
+The 8.5 rows and XML differ from 8.3.27 in these places (all measured on the
+three БСП 8.5 extensions, `src/mssql_dump/extension/`):
+
+* **Root.** An extension the 8.5 platform converted stores the `{76,` tuple: 77
+  members, 0-60 as in `{68,`, 61-68 the enumerations added by 8.5 (with the
+  `Caption` and `ShortCaption` in 64 and 65), 69-76 the auxiliary forms. The
+  packed platform version `80501` prints as `Version8_5_1`, and the interface
+  compatibility mode `3` with `6` in member 62 as `Version8_5EnableTaxi`. XML 2.21
+  writes `Caption`/`ShortCaption` after `Version` for every extension (an
+  extension that was not converted has none: both empty).
+* **Adopted root blocks.** An extension that changes the home page work area, the
+  logo or the splash screen lists three ids (`d98a8e01`, `740eb5f6`, `3035a9db`)
+  in state 3 and the platform prints `HomePageWorkArea`, `Logo` and `Splash` as
+  `Extended` after the module states. Which id is which is not on record (one
+  extension); they are a group and appear whole or not at all. The logo is an
+  extension picture and goes out as such.
+* **Home page work area.** Template `0` is `OneColumn` and prints one `<Column>`;
+  the stored row still closes with an empty right column.
+* **Styles.** The body is revision `2`, colours `{4,...}`, fonts `{8,...}`, and it
+  ends with one record `{1,{0,<colour>}}` that the platform prints as the last
+  item `FirstBrand`.
+* **Types.** `{"R"}` (and `{"R",<length>,<flag>}`) is the binary data type,
+  `xs:base64Binary` with `BinaryDataQualifiers`. HTTP method code `10` is `PATCH`.
+* **Commands.** An adopted command of a register lists its parameter types
+  (`7d14f63a`) in state 2, printed empty.
+* **Characteristics.** An item may name no source: both sources are the nil uuid
+  and the fields sentinels; the platform prints `from=""`.
+* **Forms.** The base form of an adopted form is a record of its own in the 8.5
+  layout: its items number the same ids as the form's, so it is converted and
+  completed with its own facts and written after the form's tree. A planner field
+  keeps its 8.3.27 property bag. The appended importance member of a button is
+  `0` (`Main`) exactly for the default button (88 of 88 on ServiceDesk), so the
+  writer adds `DefaultButton` there; the 8.3.27 slot that also says so is set on
+  six of the eight default buttons only.
+
+`tests/fixtures/native-evidence/extension-empty/` holds the two stored rows of
+`_ДемоПустоеРасширение` (identical on 8.3.27 and 8.5) and the tree each platform
+wrote for them; `the_empty_extension_exports_to_the_native_tree_of_both_platforms`
+exports both dialects from those rows and compares the three files byte for
+byte.
+
 ### References to the extended configuration
 
 The extension's own type lists know nothing of the objects it does not adopt, so
@@ -246,14 +314,18 @@ These are read off a single native sample; the evidence is in the lab folder
 * the completion of old items is proved on 8 forms of one extension (ids, order,
   the dynamic list defaults); other kinds of items (pages, groups) that an older
   platform completed may exist;
+* 8.5: the asset ids (one extension), `Version8_5EnableTaxi` (the one
+  combination `3` + `6` on record), the `OneColumn` work area (one row) and the
+  brand colour of a style (one style body) are read off single samples;
 * `OnBasePeriod` for `DependenceOnCalculationTypes` `2` and the values other than
   `0`/`1` of the accounting register's lock mode and full-text search are the
   enumeration order, not observed.
 
 ## Not covered yet
 
-* the БСП 8.5 extensions (`--source-version 2.21`) and the 8.5 regression of the
-  shared readers;
+* the ERP УХ 8.5 corpus for the 8.5 readers (no such clone was made);
+* the load of an 8.5 extension (the 8.5 form loader has the planner bag entry
+  and the empty-source characteristic compiles, but no 8.5 extension was loaded);
 * the load and activation round trip of an exported extension;
 * the drop-in `ibcmd infobase config export --extension=<name>` route.
 
@@ -264,6 +336,8 @@ These are read off a single native sample; the evidence is in the lab folder
 pwsh -NoProfile -File F:/ibcmd/lab/05/ext/tools/native_export.ps1
 # ours + comparison, listing of what is left
 bash F:/ibcmd/lab/05/ext/tools/run_ours.sh <run>
+# the БСП 8.5 clone: reference tree, database, platform
+bash F:/ibcmd/lab/05/ext/tools/run_ours.sh <run> native/85 <database> 8.5.1
 python -X utf8 F:/ibcmd/lab/05/ext/tools/left.py <run>
 # the ordinary export must not move
 bash F:/ibcmd/lab/05/ext/tools/main_regress.sh bsp8327 <run>
