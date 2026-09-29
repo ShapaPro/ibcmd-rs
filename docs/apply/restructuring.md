@@ -53,13 +53,16 @@ Scope of the measurements: platform 8.3.27.2214, Microsoft SQL Server 2025, excl
    database is exactly as it was. On the twin of case a2 the result equals the native apply where it matters:
    the rebuilt tables and their data, `Config` (9841 rows, metadata included), `DBSchema` and `DBNames` (but
    the two system tables the platform upgraded on its own), the native export (12 198 files identical to
-   the native twin's), a session reads and writes the new attribute, native `config apply` says "не требуется",
-   and when the same catalog is staged again native computes the same structure and runs no DDL at all.
+   the native twin's), a session (also in a real 1C server cluster) reads and writes the new attribute,
+   native `config apply` says "не требуется", and when the same catalog is staged again native computes the
+   same structure and runs no DDL at all.
 8. **What a restructure must also write into `Params`** (section 9.6): `DBNames` and `DBNamesVersion-DBNames`
    (numbers); the XDTO model cache (one `*.si` row) -- left stale, XDTO serialization of the changed object
    fails ("Свойство ... не обнаружено") while queries and writes work; the prototype inserts the one
-   `<property>` line native inserts (text equal to native's). The other two changed `*.si` rows and `siVersions`
-   are left as they are (no effect seen). The `*.ui` rows are the platform's licensing records: not touched.
+   `<property>` line native inserts (text equal to native's). The other two changed `*.si` rows (an object
+   registry, a permutation) and `siVersions` are left as they are: no effect in any check, and the next native
+   apply that touches the object recomputes them all from the metadata. The `*.ui` rows are the platform's
+   licensing records: not touched.
 9. **`ALTER TABLE ... ADD` is acceptable to the platform** for everyday work (section 9.5): the column lands
    after the separator column instead of in the schema's place and sessions, queries and writes do not care.
    **The estimate changes** (section 8): the prototype was quick, the classification of a staged image and
@@ -81,7 +84,8 @@ Scope of the measurements: platform 8.3.27.2214, Microsoft SQL Server 2025, excl
   row by row with content hashes (`snapshot.py`, `snapdiff.py`).
 - **Twins (checkpoint 2).** Two databases restored from the same backup of the staged case a2
   (`ibcmd_rs_04_ddl_bsp8327_a_a2_staged.bak`): the native apply runs on one (`a2_nat`), the prototype on the other
-  (`a2_own`); everything is compared with the native twin. A second native apply of case a2 on a fresh twin gave
+  (`a2_own` for its first run, `a2_fin` for the final run of the finished prototype, the one the tables of section 9
+  report); everything is compared with the native twin. A second native apply of case a2 on a fresh twin gave
   a byte-identical `DBSchema` and `Config` -- the native result is deterministic but for random guids
   (`DBNamesVersion-DBNames`, `siVersions`, `*.ui`, the PK names of `_ConfigChngR`, `MobileVersions.dat`).
 - **Staging of checkpoint 2.** Case a was staged before by a full native import; the follow-up experiments
@@ -91,7 +95,9 @@ Scope of the measurements: platform 8.3.27.2214, Microsoft SQL Server 2025, excl
   error 18456), so a session on a lab database is opened with a stand-alone server (`ibsrv`) started as the
   caller's Windows account (integrated SQL login) and the 8.3.27 thin client over HTTP (`1cv8c /WS`) running
   one generic processing (`probe/ddl_probe.epf`, built with the Designer from XML) that executes a BSL job
-  file on the server and writes its result (`scripts/restructure-lab/srv.ps1`, `session_job.ps1`).
+  file on the server and writes its result (`scripts/restructure-lab/srv.ps1`, `session_job.ps1`). From 15:33
+  the coordinator's `register-ib.ps1` registers a lab database in the local cluster (the cluster connects with the
+  SQL login), and the same job runs in a **real cluster session** (`session_job.ps1 -Database <db>`).
 - **Cases** (the changed tables hold data: 8-716 rows, the totals table 3424; case c creates an empty table):
 
 | label | change (all in the БСП demo objects) | table(s) that changed | rows |
@@ -524,13 +530,14 @@ types are refused until the type-id -> table map exists.
 read-back, then `COMMIT`. Inside the transaction SQL Server 2025 accepted `CREATE TABLE`, `ALTER TABLE ... SET
 (LOCK_ESCALATION)`, `CREATE [UNIQUE] [CLUSTERED] INDEX ... WITH (SORT_IN_TEMPDB, MAXDOP, ALLOW_PAGE_LOCKS)`,
 `INSERT ... WITH(TABLOCK) ... SELECT`, `DROP TABLE`, `sp_rename` (objects and indexes), and the updates of
-`SchemaStorage`, `DBSchema`, `Params`, `Config`. Measured on the БСП twin (case a2):
+`SchemaStorage`, `DBSchema`, `Params`, `Config`. Measured on the БСП twin of the final run (case a2, `a2_fin`;
+`prototype-apply-report-a2.json`, `prototype-trial-report-a2.json`):
 
 | run | result |
 |---|---|
-| `--trial` | 40.8 s; 3 `NG` tables created, 14 + 29 + 18 rows copied, 10 indexes, the old tables dropped, 13 renames, then the publication; every check passed; `ROLLBACK`. Afterwards the database is what it was: `ConfigSave` 9842 rows, `Config` 9838, `Status 100`, the same `CurrentSchema` hash, no `NG` table, `_Reference20` with 15 columns |
-| apply | 65 s, `COMMIT` |
-| by phase (trial) | create 0.3 s, copy 0.2 s, indexes 0.4 s, drop 0.7 s, rename 1.7 s, publication 30 s of which the promotion of a **whole** stage 29.5 s; a **delta** stage promotes in 0.07 s. (The real apply once spent 46 s in the index phase: the machine was loaded.) |
+| `--trial` | 33.5 s in all; 3 `NG` tables created, 14 + 29 + 18 rows copied, 10 indexes, the old tables dropped, 13 renames, then the publication (the XDTO row included); every check passed; `ROLLBACK`. Afterwards the database is what it was: `ConfigSave` 9842 rows, `Config` 9838, `Status 100`, the same `CurrentSchema` hash, no `NG` table, `_Reference20` with 15 columns |
+| apply | 9.0 s in all, 7.3 s inside the transaction, `COMMIT` |
+| by phase (apply) | create 17 ms, copy 8 ms, indexes 95 ms, drop 5 ms, renames 22 ms, publication 7.0 s of which the promotion of a **whole** stage (9 842 rows) 5.9 s and emptying `ConfigSave` 0.9 s; a **delta** stage promotes in 0.07 s. The first run on a loaded machine (`a2_own`, before the XDTO row): apply 65 s, of which the index phase 46 s and the promotion 17 s; trial 40.8 s. The structure work itself is a fraction of a second for a catalog of 14 rows |
 
 What atomicity gives: no `Status` 200/400/500 is ever visible and `NewGenCreated` is never written, so there
 is nothing to resume and no "незавершенная операция" state (section 10, finding 3); a failed check rolls
@@ -542,22 +549,26 @@ them, loads a heap and creates them again); `_ConfigChngR` is not rebuilt.
 
 ### 9.4 Verification on the twin of case a2
 
-Both twins come from the same backup of the staged state; native applied one, the prototype the other.
+Both twins come from the same backup of the staged state; native applied one (`a2_nat`), the prototype the other
+(`a2_fin`, the final run; the first run on `a2_own` gave the same tables, `DBSchema`, `DBNames` and `Config`, without the XDTO row).
+Full output: `twin-compare-a2.txt`, `sessions-a2.md`.
 
 | check | result |
 |---|---|
 | plan made offline from the staged snapshot vs the native result (`tests_corpus.rs`) | `DBNames` text **equal**; every `DBSchema` entry **equal** but `DbCopies` and `DbCopiesUpdates` (the platform upgraded those two system tables on its own, a build drift; the native table order differs only by where they sit); the new `Reference20` entry equal byte for byte; the XDTO model row text equal to native's (25 173 491 characters) |
-| snapshot of both twins (`out/diff_own_vs_native.txt`) | 2234 tables in both; structure identical but the auto-named primary key of `_ConfigChngR` (random) and the two upgraded system tables |
+| snapshot of both twins (`twin-compare-a2.txt`, section 1) | 2234 tables in both; structure identical but the auto-named primary key of `_ConfigChngR` (random) and the two upgraded system tables |
 | data of the rebuilt tables | `_Reference20` (all columns but the row version), `_VT155`, `_VT159`: `EXCEPT` both ways **0 rows**; the new column: 1 folder NULL, 13 items `''`, as native |
-| `Config` after | 9841 rows, **0 differ from native's, `Creation`/`Modified`/`Attributes`/`DataSize` included**; `ConfigSave` 0, `ConfigCAS` identical, `SchemaStorage` both rows `Status 100` and empty generations |
+| `Config` after | 9841 rows, **`EXCEPT` both ways 0 rows -- `Creation`/`Modified`/`Attributes`/`DataSize`/`BinaryData` included**; `ConfigSave` 0, `ConfigCAS` identical (`EXCEPT` 0), `SchemaStorage` both rows `Status 100` and empty generations |
+| the XDTO model row `Params ea13a2c9-....si`, inflated | **equal to native's** (25 173 494 bytes, the same sha256); the deflated rows differ in size (2 998 675 native, 2 977 849 ours: another deflate implementation) |
 | native `config apply` on our twin | "Обновление конфигурации базы данных не требуется", exit 0 |
 | the **same catalog staged again** on our twin (native `import files --partial`, 4 rows) and a native apply, traced | 1611 events, **no `create table`, no `drop`, no `sp_rename`**: the platform's own recomputation of the structure from the staged metadata equals the `DBSchema` we wrote. (No DDL at all; it registered the change for exchange plans and rewrote the `*.ui` rows) |
-| native export | 12 198 files, **identical** between the native twin and ours, `ConfigDumpInfo.xml` included. Against the reference tree: `Catalogs/_ДемоПартнеры.xml` (byte-identical to the case-a edit) and `ConfigDumpInfo.xml` differ; with `configVersion` blanked the latter has the new attribute and lacks two empty module entries of `Catalog.НастройкиАвторизацииИнтернетСервисов` that the native import dropped (the same in the native twin) |
-| session on our twin: a stand-alone server + thin client, and a **real session in the 1C server cluster** (the twin registered with `register-ib.ps1`, `Srvr="localhost:2541"`) | the catalog reads with the new attribute `''` for all 14 rows -- as on the native twin; an item written with a value is stored and read back with SQL; an object is serialized through XDTO only when the model cache is right (9.6) |
+| native export (of both twins, `source-diff`) | 12 198 files, **identical** between the native twin and ours, `ConfigDumpInfo.xml` included. Against the reference tree (the БСП exported before the edit): exactly `Catalogs/_ДемоПартнеры.xml` (**byte-identical to the case-a edit**) and `ConfigDumpInfo.xml` differ; with `configVersion` blanked the latter has the new attribute and lacks two empty module entries of `Catalog.НастройкиАвторизацииИнтернетСервисов` that the native import dropped (the same in the native twin) |
+| session on our twin: a stand-alone server + thin client, and a **real session in the 1C server cluster** (the twin registered with `register-ib.ps1`, `Srvr="localhost:2541"`) | the catalog reads with the new attribute empty in all 14 rows (13 items `''`, the folder NULL) -- as on the native twin; an item written with a value is stored, found by a query on the attribute and changed; the object is serialized through XDTO **with** the attribute (only when the model cache is right, 9.6: a stale row makes the same job fail) |
 
 Where the twins still differ, all of it derived state (9.6): `_ConfigChngR` (native rebuilds it on every apply
 with new keys and registers 782 more objects as changed for the nodes: `_MessageNo` NULL 17 327 vs 16 545 rows;
-only matters with exchange plans), `Params` (`*.ui`, `siVersions`, two `*.si`, random guids), `Files`
+only matters with exchange plans), `Params` (`*.ui`, `siVersions`, two `*.si`, random guids; and the session-state row `ecsreg_*` that the first server start
+removes from ours as it did from native's), `Files`
 (`MobileVersions.dat`, `gc.mrk`, the help index: native leaves 2 bytes in `userDocs_ru` and friends, ours keeps
 what was there), `_DbCopies*`.
 
@@ -573,8 +584,11 @@ _Fld11035 = N'' WHERE _Folder = 0x01`, the publication as before; 0.3 s in all. 
 | probe | result |
 |---|---|
 | session (stand-alone server + thin client) | the metadata knows the attribute; a new item with both attributes is written, read back, found by `WHERE ДемоВторойРеквизит = &Значение`; an existing item is changed and written; XDTO serialization contains the attribute (after the model cache was dropped, 9.6) |
-| native `config apply` afterwards | @@NATIVE-NOOP@@ |
-| a third attribute staged and a native apply with a trace (the platform rebuilds the object) | @@NATIVE-REBUILD@@ |
+| a third attribute staged (native partial import) and a **native apply with a trace** on the ALTER state | native rebuilt the catalog's three tables ("Изменена структура таблиц базы данных", `alter-native-structure-statements.sql`): `_Reference20NG` is created with `..., _Fld11034, _Fld11035, _Fld11036, _Fld2683`, the copy reads the ALTER-added `T1._Fld11035` **by name**, and afterwards `sys.columns` has the platform's order -- **the next native rebuild normalizes the column order**. The data survived (both earlier attributes, the item changed in the session) |
+
+A native `config apply` with nothing staged directly after the ALTER was not run: the stored `DBSchema` is the same text a rebuild
+would have written and the platform decides from `DBSchema` (the re-stage on a rebuilt twin ran no DDL, section 9.4), so "не требуется" is
+expected -- an inference, not a measurement.
 
 Verdict: the platform reads and writes by column *name*; column order is not part of the contract as far as sessions
 and its own restructure are concerned. **Hypotheses not tested**: a table of `_InfoRg`/`_AccumRg` family (the aggregates and
@@ -592,14 +606,20 @@ Native writes these on the apply of case a2 (twin comparison; each `*.si` is a d
 | `DBNames` | +1 entry, header 11034 | same text (deflate differs) | yes, by construction: the numbering of the new field |
 | `DBNamesVersion-DBNames` | new random guid | new random guid | yes, by construction (version of the numbering) |
 | `ea13a2c9-...si` (XDTO model of the configuration: `{2,1,{{#base64:<model xml>}}}`, 64-character lines, CR CR LF) | one line inserted: `<property name="ДемоНовыйРеквизит" type="xs:string" lowerBound="0"/>` in `CatalogObject._ДемоПартнеры`, after the property of the attribute before | the same line, same text | **for XDTO**: with the row stale, `СериализаторXDTO.ЗаписатьXML(object)` fails "Свойство 'ДемоНовыйРеквизит' не обнаружено"; queries and writes work. The row **deleted** -> the platform rebuilds the model in memory, serialization works and the row is not written back. **All** `*.si` rows deleted -> the stand-alone server exits at start. A native apply with nothing new to promote does not refresh the rows |
-| `1a621f0f-...si` (object registry, 32 422 lines) | counter `{10807,` -> `{10808,` and one entry `0,0,<attr uuid>,<owner uuid>,36,"<name>",{1,1,{"ru","<synonym>"}}` | left stale | no effect seen; the entry's place in the list is not decoded |
-| `c77bc206-...si` (a list of uuids with zeros, 3 lines) | the same list in another order | left | no effect seen; a hash-ordered set, the order rule is not decoded |
-| the other 13 `*.si`, `siVersions` | same content / new random guids | left | no effect seen |
+| `1a621f0f-...si` (object registry, 32 422 lines: a pre-order list of the metadata objects, `}<flag>,<flag>,<uuid>,<owner uuid>,<kind>,"<name>",{1,1,{"ru","<synonym>"}}`, kind 36 = attribute, 39 = tabular section; the counter is the number of entries) | counter `{10807,` -> `{10808,` and one entry, placed after the last attribute of the owner catalog and before its first tabular section (`xdto-model-a2.txt`) | left stale | no effect seen in any check; the rule for a new attribute of a catalog is known, several attributes are inserted in metadata order (native, third attribute), not implemented |
+| `c77bc206-...si` (a list of uuids with zeros, 3 lines) | the same list in another order -- the **same text** after the apply of one attribute and after the apply of three | left | no effect seen; the order rule is not decoded (it does not depend on the number of attributes) |
+| the other 13 `*.si`; `siVersions` (plain text `{0,16,"<row>.si",<guid>,...}`) | the 13 rows keep their content; `siVersions` gets a new random guid for **every** row on every apply and the pairs are reordered | left | no effect seen in fresh sessions. A server that is **already running** and keys its cache by these guids would need a new guid for a row that changed -- not tested (needs a server across the restructure; 0.5) |
 | `*.ui` x2 | rewritten (encrypted) | left | not needed: these are the platform's configuration-licensing records (track ui, coordinator's note); an own apply does not create or change them |
 
 So a restructure needs the numbering rows and, to be complete, the model cache row(s); the prototype writes the XDTO row
 (`--skip-xdto` leaves it stale). The alternative that costs no code: **delete** the stale XDTO row and let the platform
 recompute it (first session pays for the 25 MB model). A stale set of the other two `*.si` rows is the open item.
+
+Native computes all these caches **from the metadata**, it does not patch the stored rows: the apply of a third attribute on a twin whose caches our
+runs had left stale wrote all three properties into the XDTO model and all three entries into the registry (`alter-experiment.md`). A stale cache
+therefore heals at the next native apply that touches the object; until then only XDTO serialization of the changed object suffers. Two real cluster
+sessions on the final twin rewrote none of the `*.si` rows and none of `DBNames` (`sessions-a2.md`): the platform accepts the rows the prototype
+leaves.
 
 ### 9.7 The 8.5 trace
 
@@ -634,7 +654,11 @@ dialect with `import files --partial`, 4 rows staged in 61 s, then a traced nati
   `_ExtensionsRestructNGS` on every apply and removes them again); an extension that adopts the changed catalog is
   not looked at.
 - **`--dynamic=force`**, ERP УХ, online (0.5): not traced by this track.
-- **Derived state**: the two other `*.si`, `_ConfigChngR` registration, help index; big tables (chunked copy).
+- **Derived state**: the object registry and the permutation `*.si` (the entry rule for one attribute is known,
+  the permutation's is not), the version guids of `siVersions` (needed by a server that runs across the restructure), the `_ConfigChngR`
+  registration for exchange plans, the help index in `Files`; big tables (chunked copy, section 9.3).
+- **Not run**: a native `config apply` with nothing staged right after an `ALTER TABLE ... ADD` (expected "не требуется", section 9.5);
+  the prototype itself on 8.5 (the object's statements are the same, 9.7).
 
 ## 10. Findings other tracks need
 
@@ -655,7 +679,8 @@ dialect with `import files --partial`, 4 rows staged in 61 s, then a traced nati
    rows. Those counts were probably complete stages, so the diagnosis "partial" is withdrawn. The test is:
    `ConfigSave` has a `versions` row, no `commit` and no `*.new` rows, and every staged `versions` entry that
    differs from `Config`'s has its row. The two errors above remain real; their cause is not established (a
-   second import worked each time). `--threads` is not accepted by import.3. **A native apply can die at "Принятие изменений"** (exit -1, no message; case d on clone `a`, while a
+   second import worked each time). `--threads` is not accepted by import.
+3. **A native apply can die at "Принятие изменений"** (exit -1, no message; case d on clone `a`, while a
    second ibcmd of this track - an import and an apply on another clone - ran at the same time; the clean
    re-run on a fresh clone passed while four ibcmd processes of other tracks were running, so concurrency
    alone is not proven to be the cause). The database was left with
@@ -690,14 +715,21 @@ dialect with `import files --partial`, 4 rows staged in 61 s, then a traced nati
     БСП corpus has a password: use `Администратор (обычное приложение)`.
 11. **A native apply that has nothing new to promote does not rewrite the `*.si` caches** (it rewrote the `*.ui`
     licensing rows and registered the change for exchange plans): a cache that a direct write left stale is not
-    repaired by the next no-change apply. The XDTO model cache decides whether a changed object can be serialized
-    (section 9.6); a session can run without any stale-cache error otherwise.
+    repaired by the next no-change apply. An apply that changes the object **recomputes** the caches from the metadata
+    (the third attribute on a twin with stale caches wrote all three properties / registry entries). The XDTO model
+    cache decides whether a changed object can be serialized (section 9.6); a session can run without any stale-cache
+    error otherwise.
 12. **The stage of a `Config` promotion can be set-based:** `DELETE`/`INSERT ... SELECT` of the parts that differ
     (18-30 s for a whole 80 MB image in a loaded lab, 0.07 s for a delta) instead of the native 9 839
     row-by-row `.new` renames; the `deleted` marker row is not copied.
 13. **A native `ibcmd` that asks for a password holds the lock and waits for ever** (a plain `Администратор` on the
     8.5 corpus held the native lock for 23 minutes until it was killed). The kit's `Invoke-NativeCommand`
     closes stdin, sets a timeout and caps the output.
+14. **`Params` holds a session-state row, `ecsreg_<id>`** (306 bytes in the БСП corpus): the first server start or native command removes it. A
+    comparison of `Params` between two databases must ignore it (it is why two snapshots taken before and after a session differ by one row).
+15. **The platform builds derived state from the metadata on every apply that changes something**: `*.si` caches, the change registration
+    `_ConfigChngR` (rebuilt with new keys, 782 more objects registered than in an own restructure) and `_ExtensionsRestruct*`. An own apply
+    that skips them is right for the database (sessions accept it) and stale for XDTO, until the next native apply.
 
 ## 11. Evidence
 
@@ -706,10 +738,11 @@ Repo (`docs/apply/evidence/restructuring/`): `a2-structure-statements.sql` (the 
 `types-h-statements.sql`, `dbschema-conformance-8327.txt`, `dbschema-conformance-85.txt`,
 `gen-check-catalogs-documents.txt`, `md-types-vs-dbschema.txt`, `dbnames-kinds.txt`, `roundtrip.txt`,
 `conversion-k.md`, `cases.md`. Checkpoint 2: `prototype-statements-a2.sql` (the statements of the plan of case a2
-without the binary parameters), `prototype-apply-report-a2.json` (the report of the real run: steps, times,
-read-back checks), `twin-compare-a2.txt` (native twin against ours: snapshot diff, `EXCEPT` of the data, exports),
-`xdto-model-a2.txt` (the change of the XDTO model row and the other `*.si` rows), `sessions-a2.md` (the jobs and
-their output), `a85-structure-statements.sql` (the 8.5 trace, the `ALTER INDEX` list cut), `alter-experiment.md`.
+without the binary parameters), `prototype-apply-report-a2.json` and `prototype-trial-report-a2.json` (the reports of the real
+run and of the trial: steps, times, read-back checks), `twin-compare-a2.txt` (native twin against ours: snapshot diff,
+`EXCEPT` of the data, exports), `xdto-model-a2.txt` (the change of the XDTO model row and the other `*.si` rows, `siVersions`),
+`sessions-a2.md` (the jobs and their output), `a85-structure-statements.sql` (the 8.5 trace, the `ALTER INDEX` list cut),
+`alter-experiment.md` and `alter-native-structure-statements.sql` (the ALTER experiment and the native rebuild that followed).
 Tests: `src/restructure/tests_*.rs`, fixtures `tests/fixtures/native-evidence/restructure/`.
 
 Lab (`F:\ibcmd\lab\04\restructure`): `xe/<case>/events.jsonl` (the raw `.xel` files are deleted), `out/diff_<case>.txt`,

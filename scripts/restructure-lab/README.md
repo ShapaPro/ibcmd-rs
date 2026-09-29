@@ -18,11 +18,15 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | `xe.ps1` | Extended Events helpers: `Start-DdlXe` / `Stop-DdlXe` (session `ibcmd_rs_04_ddl_<n>`, filtered to one database, files in `C:\temp\ibcmd_rs_04\ddl`), `Invoke-NativeApply` (native apply, notes other ibcmd processes seen while it ran) |
 | `native_lock.ps1` | `Invoke-NativeLocked { ... }`: runs a native `config import` / `config apply` / `infobase create` under the lab `native` lock (`heavy-lock.ps1 acquire ddl -Name native` ... `release`), held for that command only; every script here that starts a native write uses it |
 | `run_case.ps1` | one traced apply: light snapshot of the staged state, COPY_ONLY backup (twin source), XE session, native `config apply --force --dynamic=disable`, XE read, full snapshot, diff |
-| `run_series.ps1` | cumulative cases: edit the tree, native import until the stage is complete (row count check), `run_case` |
+| `run_series.ps1` | cumulative cases: edit the tree, native import until the stage is complete (see below), `run_case` |
 | `try_native.ps1` | fast loop: native import (+ apply) of a tree on a debug clone |
+| `import_files.ps1` | native `config import files --partial` of some files of a tree: stages a delta of four rows (about a minute) |
+| `apply_only.ps1` | native `config apply` of what is staged, under the lock; `-Trace <label>` adds an Extended Events trace (`xe/<label>/events.jsonl`) |
+| `export_tree.ps1` | native `config export` of a database into a folder (read-only, no lock); compare trees with `ibcmd-rs source-diff` |
 | `snapshot.py` | columns, indexes, row counts and checksums of all tables + service tables with content hashes into a snapshot folder; blobs go to a content-addressed store |
 | `snapdiff.py`, `schemadiff.py`, `dbnames_diff.py` | diffs of two snapshots: tables/columns/indexes, service rows, `DBSchema` entries, `DBNames` |
 | `xe_read.py`, `xe_shapes.py`, `timeline.py`, `extract_ddl.py` | XE file -> JSONL, normalised statement story per session, phase timeline, the structure statements as a readable SQL log |
+| `si_diff.py` | the `Params` `*.si` cache rows between two snapshots, after inflate (the XDTO model row is shown decoded from its base64 block) |
 
 ## Decode and check
 
@@ -34,11 +38,20 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | `md_types_check.py`, `gen_check.py` | XML type descriptors -> type entries; the field list of catalogs and documents generated from the XML tree and `DBNames`, compared with the real entries (94/94) |
 | `names.py`, `lab.py`, `db.py`, `dbnames_kinds.py`, `make_cases_md.py` | `DBNames` parsing, snapshot store access, pyodbc helpers, the metadata class -> `DBNames` kinds table, the per-case evidence file |
 
+## Sessions on a lab database
+
+| script | what |
+|---|---|
+| `srv.ps1` | `start` / `stop` a stand-alone server (`ibsrv`) on one lab database under the caller's Windows account (the cluster service has no SQL login) |
+| `session_job.ps1` | runs a piece of BSL (`-Job file.bsl`, the variable `Результат` is printed) in a thin-client session over HTTP (`-Port`) or, with `-Database`, in the local 1C cluster where the database was registered with the lab's `register-ib.ps1`; the client is a generic processing built from `probe/src` with the Designer |
+
 ## Edit the tree
 
 `edit_tree.py`, `edit_cases_more.py`, `edit_cases_h.py`: the exact XML edits of the cases (a: attribute,
 b: document attribute, c: new catalog, d: dimension + resource, e/g/f: widen / index / delete, h: attribute
 types and tabular sections). Each edit keeps the original and the edited file under `tree/patches/<case>/`.
+`edit85.py` makes case a on the 8.5 (2.21) dialect, `edit_second.py <tree> <catalog> <name> ...` adds a second / third attribute
+(the `ALTER TABLE` experiment).
 
 ## Typical run
 
@@ -49,6 +62,27 @@ pwsh -NoProfile -File scripts\restructure-lab\run_series.ps1 -Cases a -Prev <sna
 python scripts\restructure-lab\snapdiff.py <db> <before-label> <db> <after-label>
 ```
 
-Every native write goes through the lab `native` lock (`native_lock.ps1`); verify the `ConfigSave` row count after a
-native import (a full stage of this configuration is 9842 rows; a partial stage makes the apply fail, see the
-findings in the doc).
+Every native write goes through the lab `native` lock (`native_lock.ps1`), one command per hold. A native `config import` is complete when
+`ConfigSave` has a `versions` row, no `commit` and no `*.new` rows, and every staged `versions` entry that differs from `Config`'s has its
+row (a complete stage of the БСП is about 9 618 rows in a full import, 4 rows with `--partial`; the row count alone is not the test).
+
+## The prototype's twin run (checkpoint 2)
+
+```powershell
+# 1. the staged image once (native import), a COPY_ONLY backup of it, two twins from the backup
+sqlcmd -S localhost -E -C -b -Q "BACKUP DATABASE [X] TO DISK = N'<lab>\bak\X_a2_staged.bak' WITH COPY_ONLY, COMPRESSION, INIT"
+pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus bak -Bak <lab>\bak\X_a2_staged.bak -Name ibcmd_rs_04_ddl_a2_nat -Track ddl -Purpose "..."
+pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus bak -Bak <lab>\bak\X_a2_staged.bak -Name ibcmd_rs_04_ddl_a2_fin -Track ddl -Purpose "..."
+# 2. native on one twin (apply_only.ps1), the prototype on the other
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_a2_fin --dry-run --dump-plan <dir>
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_a2_fin --trial      # runs and rolls back
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_a2_fin --report <file.json>
+# 3. compare: snapshots, data with EXCEPT, the *.si rows, exports, a native no-op apply, sessions
+python snapshot.py <db> <label>; python snapdiff.py <native db> <label> <our db> <label>
+python si_diff.py <native db> <label> <our db> <label>
+pwsh export_tree.ps1 -Database <db> -Out <dir>;  ibcmd-rs source-diff <native tree> <our tree>
+pwsh apply_only.ps1 -Database <our db>            # "Обновление конфигурации базы данных не требуется"
+pwsh F:\ibcmd\lab\04\tools\register-ib.ps1 register -Database <our db> -Platform 8.3.27 -Track ddl
+pwsh session_job.ps1 -Job <file.bsl> -Database <our db>
+pwsh F:\ibcmd\lab\04\tools\register-ib.ps1 unregister -Database <our db> -Platform 8.3.27 -Track ddl
+```
