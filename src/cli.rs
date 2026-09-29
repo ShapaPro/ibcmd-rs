@@ -1884,7 +1884,7 @@ pub struct TraceAnalyzeArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlCompareArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
@@ -1904,7 +1904,7 @@ pub struct MssqlCompareArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlActivationSnapshotArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Database to inspect. This command is read-only.
@@ -2084,7 +2084,7 @@ pub struct MssqlApplySourceChangeArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlAuditSourceParityArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Baseline database name whose Config blobs are used for dry-run packing.
@@ -2122,7 +2122,7 @@ pub struct MssqlAuditSourceParityArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlCloneArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
@@ -2306,13 +2306,13 @@ pub struct VersionsBlobPatchArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonModuleArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2344,13 +2344,13 @@ pub struct MssqlStageCommonModuleArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonModulesArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2379,13 +2379,13 @@ pub struct MssqlStageCommonModulesArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonModuleMetadataArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2417,13 +2417,13 @@ pub struct MssqlStageCommonModuleMetadataArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonModuleObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2458,13 +2458,13 @@ pub struct MssqlStageCommonModuleObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonModuleObjectsArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2493,13 +2493,13 @@ pub struct MssqlStageCommonModuleObjectsArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageMetadataObjectsArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2531,13 +2531,13 @@ pub struct MssqlStageMetadataObjectsArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSourceMetadataObjectsArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2566,13 +2566,13 @@ pub struct MssqlStageSourceMetadataObjectsArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSourceCommonModuleObjectsArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2601,13 +2601,13 @@ pub struct MssqlStageSourceCommonModuleObjectsArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSourceObjectsArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
-    /// SQL login passed to sqlcmd -U. Uses integrated auth when omitted.
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
     #[arg(long)]
     pub sql_user: Option<String>,
-    /// SQL password passed to sqlcmd -P. Prefer --sql-pwd-env for shell history.
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
     #[arg(long)]
     pub sql_pwd: Option<String>,
     /// Environment variable containing the SQL password.
@@ -2654,9 +2654,10 @@ pub struct MssqlStageSourceObjectsArgs {
     /// read. The usual confirmations are still required.
     #[arg(long)]
     pub script_only: bool,
-    /// Load the staged rows with one bulk copy (bcp) into a tempdb table and
-    /// one set-based transaction, reading the base rows with one bcp query:
-    /// the default. Writes the same ConfigSave rows as --per-row.
+    /// Load the staged rows in bulk into a tempdb table and apply them in one
+    /// set-based transaction, reading the base rows in one pass: the
+    /// default (with --sqlcmd, through bcp.exe). Writes the same ConfigSave
+    /// rows as --per-row.
     #[arg(long)]
     pub bulk: bool,
     /// Stage with per-row SQL batches and per-object base-row queries instead
@@ -2676,7 +2677,7 @@ pub struct MssqlStageSourceObjectsArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageExchangePlanObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2705,7 +2706,7 @@ pub struct MssqlStageExchangePlanObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageBusinessProcessObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2734,7 +2735,7 @@ pub struct MssqlStageBusinessProcessObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageDocumentJournalObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2763,7 +2764,7 @@ pub struct MssqlStageDocumentJournalObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageReportObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2792,7 +2793,7 @@ pub struct MssqlStageReportObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageDataProcessorObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2821,7 +2822,7 @@ pub struct MssqlStageDataProcessorObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCatalogObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2850,7 +2851,7 @@ pub struct MssqlStageCatalogObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageInformationRegisterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2879,7 +2880,7 @@ pub struct MssqlStageInformationRegisterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageScheduledJobObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2908,7 +2909,7 @@ pub struct MssqlStageScheduledJobObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageXdtopackageObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2937,7 +2938,7 @@ pub struct MssqlStageXdtopackageObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageRoleObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2966,7 +2967,7 @@ pub struct MssqlStageRoleObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageConstantObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -2995,7 +2996,7 @@ pub struct MssqlStageConstantObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageDefinedTypeObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3024,7 +3025,7 @@ pub struct MssqlStageDefinedTypeObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSessionParameterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3053,7 +3054,7 @@ pub struct MssqlStageSessionParameterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSettingsStorageObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3082,7 +3083,7 @@ pub struct MssqlStageSettingsStorageObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageFunctionalOptionObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3111,7 +3112,7 @@ pub struct MssqlStageFunctionalOptionObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageFunctionalOptionsParameterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3140,7 +3141,7 @@ pub struct MssqlStageFunctionalOptionsParameterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageEventSubscriptionObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3169,7 +3170,7 @@ pub struct MssqlStageEventSubscriptionObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageHTTPServiceObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3198,7 +3199,7 @@ pub struct MssqlStageHTTPServiceObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageWebServiceObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3227,7 +3228,7 @@ pub struct MssqlStageWebServiceObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonAttributeObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3256,7 +3257,7 @@ pub struct MssqlStageCommonAttributeObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageLanguageObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3285,7 +3286,7 @@ pub struct MssqlStageLanguageObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageStyleItemObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3314,7 +3315,7 @@ pub struct MssqlStageStyleItemObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageStyleObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3343,7 +3344,7 @@ pub struct MssqlStageStyleObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageBotObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3372,7 +3373,7 @@ pub struct MssqlStageBotObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageDocumentNumeratorObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3401,7 +3402,7 @@ pub struct MssqlStageDocumentNumeratorObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageIntegrationServiceObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3430,7 +3431,7 @@ pub struct MssqlStageIntegrationServiceObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSequenceObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3459,7 +3460,7 @@ pub struct MssqlStageSequenceObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageWSReferenceObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3488,7 +3489,7 @@ pub struct MssqlStageWSReferenceObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageTaskObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3517,7 +3518,7 @@ pub struct MssqlStageTaskObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageSubsystemObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3546,7 +3547,7 @@ pub struct MssqlStageSubsystemObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommandGroupObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3575,7 +3576,7 @@ pub struct MssqlStageCommandGroupObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageEnumObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3604,7 +3605,7 @@ pub struct MssqlStageEnumObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageDocumentObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3633,7 +3634,7 @@ pub struct MssqlStageDocumentObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageFilterCriteriaObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3662,7 +3663,7 @@ pub struct MssqlStageFilterCriteriaObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageAccountingRegisterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3691,7 +3692,7 @@ pub struct MssqlStageAccountingRegisterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageAccumulationRegisterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3720,7 +3721,7 @@ pub struct MssqlStageAccumulationRegisterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCalculationRegisterObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3749,7 +3750,7 @@ pub struct MssqlStageCalculationRegisterObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageChartOfCharacteristicTypesObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3778,7 +3779,7 @@ pub struct MssqlStageChartOfCharacteristicTypesObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageChartOfAccountsObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3807,7 +3808,7 @@ pub struct MssqlStageChartOfAccountsObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageChartOfCalculationTypesObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3836,7 +3837,7 @@ pub struct MssqlStageChartOfCalculationTypesObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageChartOfCalculationRegistersObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3865,7 +3866,7 @@ pub struct MssqlStageChartOfCalculationRegistersObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonCommandObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3894,7 +3895,7 @@ pub struct MssqlStageCommonCommandObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonFormObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3923,7 +3924,7 @@ pub struct MssqlStageCommonFormObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonPictureObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.
@@ -3952,7 +3953,7 @@ pub struct MssqlStageCommonPictureObjectArgs {
 
 #[derive(Debug, Args)]
 pub struct MssqlStageCommonTemplateObjectArgs {
-    /// SQL Server name passed to sqlcmd -S.
+    /// SQL Server name.
     #[arg(long, default_value = "localhost")]
     pub server: String,
     /// Target database name.

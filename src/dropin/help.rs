@@ -47,25 +47,28 @@ pub fn infobase_help(program: &str) -> String {
 Параметры:
 
     --config=<path> | -c <path>
-        Путь к конфигурационному файлу ibcmd
+        Путь к конфигурационному файлу ibcmd. Из его раздела database:
+        берутся СУБД, сервер, база, пользователь и пароль, не заданные
+        параметрами
 
     --dbms=<kind>
         Тип СУБД, в которой размещается информационная база.
         Поддерживается только MSSQLServer
 
     --database-server=<server> | --db-server=<server>
-        Имя сервера СУБД (по умолчанию localhost)
+        Имя сервера СУБД: server, server\\instance, server/instance или
+        server,port (по умолчанию из настроек, иначе localhost)
 
     --database-name=<name> | --db-name=<name>
         Имя базы данных
 
     --database-user=<name> | --db-user=<name>
-        Имя пользователя сервера СУБД. Без него используется проверка
-        подлинности Windows
+        Имя пользователя сервера СУБД. Без него (и без настроек) используется
+        проверка подлинности Windows
 
     --database-password=<password> | --db-pwd=<password>
         Пароль пользователя сервера СУБД. Без него берется из переменной
-        окружения IBCMD_DB_PSW
+        окружения IBCMD_DB_PSW или из раздела database: файла --config
 
     --request-database-password | --request-db-pwd | -W
         Запрос пароля пользователя сервера СУБД через стандартный поток ввода (STDIN)
@@ -129,12 +132,16 @@ pub fn infobase_help(program: &str) -> String {
     --report=<file>
         Записать отчет о выполнении команды в файл JSON
 
-    --source-version=<2.20|2.21>
-        Версия формата XML выгрузки: 2.20 - платформа 8.3.27 (по умолчанию),
-        2.21 - платформа 8.5.1. Импорт по умолчанию берет версию из дерева
+    --platform=<version>
+        Версия платформы базы: 8.3.27 или 8.5.1 (или сборка 8.3.27.2214,
+        8.5.1.1150). Задает формат XML: 2.20 для 8.3, 2.21 для 8.5. Без него
+        берется из настроек (запись базы в ibcmd-rs.toml, IBCMD_RS_PLATFORM),
+        при импорте - из дерева. Прежний --source-version=<2.20|2.21> тоже
+        принимается
 
     --sqlcmd=<path>
-        Путь к sqlcmd (по умолчанию найденный в PATH)
+        Работать через sqlcmd и bcp, как версия 0.2. По умолчанию ibcmd-rs
+        подключается к SQL Server сам
 
     --settings=<file>
         Файл настроек JSON (ключи vrunner и ibcmd-rs)
@@ -153,7 +160,12 @@ pub fn infobase_help(program: &str) -> String {
         общие параметры --pid, --remote
         режимы {modes}
 
-Коды возврата: 0 - успех, 1 - ошибка.
+Коды возврата: 0 - успех, 2 - ошибка в командной строке, -1 - ошибка
+выполнения (как у ibcmd), 1 - команда или параметр не поддерживаются в этой
+версии ibcmd-rs.
+
+Справочник по всем командам, настройкам и версиям платформы:
+https://github.com/Untru/ibcmd-rs/blob/master/docs/COMMANDS.md
 ",
         summary = INFOBASE.summary,
     )
