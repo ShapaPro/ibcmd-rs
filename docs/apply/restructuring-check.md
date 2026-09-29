@@ -61,6 +61,7 @@ The text report is Russian, `--json` prints the `Verdict`:
 | `objects[]` | **every** object whose descriptor differs, harmless or not, no cap: `object`, `id` (uuid), `file_name`, `kind`, `op` (`added`, `removed`, `changed`), `class` (the most serious among its changes, `null` when all are harmless), `changes` |
 | `stats` | files, rows, descriptors compared, body rows by role, unreadable rows, files not compared |
 | `source` | `rows`, `tree-db` or `trees` |
+| `incomplete` | files that carry data were left out of the comparison (`stats.body_files_not_compared`, a tree against a database): `needs_restructuring: false` says nothing about them; `Verdict::is_conclusive()` |
 
 Rust: `apply_check::check_staged(sql, database, xml_version)`, `check_tree_against_db(sql, database, tree,
 xml_version, partial)`, `check_trees(old, new)`, all returning `Verdict`; `Verdict::refusal()` is the message an
@@ -295,10 +296,12 @@ modes, runs the native `infobase config apply --force --dynamic=<mode> --user=А
 3. which of `Config`, `Params`, `DBSchema`, `SchemaStorage` changed.
 
 A modification counts as **restructuring** when the log names the object as changed, new or deleted, or the
-columns, indexes, tables, `DBSchema` or `SchemaStorage` differ, or row counts changed. Noise that every apply
-makes is ignored: the tables `_ConfigChngR` and `_ConfigChngR_ExtProps` are rebuilt on every apply (the primary key
-gets a new name; the log line `Реструктуризация Таблица регистрации изменений конфигурации` is theirs), and
-`Params` rows (`*.si`, `siVersions`) are rewritten.
+columns, indexes, tables, `DBSchema` or `SchemaStorage` differ, or the row count of a table of the configuration's
+data changed (a predefined item, an enumeration value). Noise that every apply makes is ignored: the tables
+`_ConfigChngR` and `_ConfigChngR_ExtProps` are rebuilt on every apply (the primary key gets a new name; the log line
+`Реструктуризация Таблица регистрации изменений конфигурации` is theirs), `Params` rows (`*.si`, `siVersions`) are
+rewritten, and the first apply of a clone also collects garbage in `ConfigCAS` and `Files` and fills
+`_ExtensionsRestructNGS` (row counts of service tables do not count).
 
 ### 5.3 Two ways to apply, one way to read
 
