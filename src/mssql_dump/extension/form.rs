@@ -141,7 +141,6 @@ fn start_tag(line: &str) -> Option<StartTag<'_>> {
 /// The last line of the element that starts at `start` (the line itself for an
 /// element written on one line).
 fn element_end(lines: &[&str], start: usize) -> usize {
-    let text = lines[start].trim_start_matches('\t');
     match start_tag(lines[start]) {
         Some(tag) if !tag.self_closed => {
             let depth = depth_of(lines[start]);
@@ -152,11 +151,8 @@ fn element_end(lines: &[&str], start: usize) -> usize {
                 })
                 .unwrap_or(lines.len() - 1)
         }
-        _ => {
-            // A self-closed tag or an element with its content on the line.
-            let _ = text;
-            start
-        }
+        // A self-closed tag or an element with its content on the line.
+        _ => start,
     }
 }
 

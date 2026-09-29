@@ -74736,6 +74736,50 @@ fn task_direct_attribute_wrapper_is_the_code_three_form_the_platform_writes() {
     ));
 }
 
+/// The accounting register of the `_ДемоРасширение` extension writes
+/// `...,1,1,0,1,{0},...` after its chart and list form and exports
+/// `Managed`, `EnableTotalsSplitting` true and `FullTextSearch` `DontUse`:
+/// header+6 is the lock mode, header+7 the full-text search, header+8 the
+/// totals splitting.
+#[test]
+fn an_accounting_registers_lock_mode_and_full_text_search_have_their_own_slots() {
+    let uuid = "bab02573-c189-4387-9496-059ee0f5d55f";
+    let nil = "00000000-0000-0000-0000-000000000000";
+    let mut fields = vec!["21".to_string()];
+    fields.extend((1..=14).map(|_| "11111111-1111-1111-1111-111111111111".to_string()));
+    fields.push(format!(
+        "{{0,{{3,{{1,0,{uuid}}},\"R\",{{0}},\"\",0,0,{nil},0}}}}"
+    ));
+    fields.extend(
+        [
+            "1",
+            "0",
+            "b4bcb6f1-afc2-464e-af01-038624d119d6",
+            nil,
+            "1",
+            "1",
+            "0",
+            "1",
+            "{0}",
+            nil,
+            "{0}",
+            "{0}",
+            "{0}",
+            "0",
+        ]
+        .map(String::from),
+    );
+    let view = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        parse_register_data_lock_control_mode("AccountingRegister", &view, uuid),
+        Some("Managed")
+    );
+    assert_eq!(
+        parse_register_full_text_search("AccountingRegister", &view, uuid),
+        Some("DontUse")
+    );
+}
+
 #[test]
 fn a_bound_of_another_value_type_keeps_its_xml_type() {
     assert_eq!(
