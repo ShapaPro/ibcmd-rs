@@ -687,6 +687,10 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
+        Commands::MssqlRestructure(args) => {
+            let report = ibcmd_rs::restructure::command::run(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Commands::MssqlAuditSourceParity(mut args) => {
             ibcmd_rs::settings::commands::prepare_audit_source_parity(&mut args, subcommand)?;
             let report = ibcmd_rs::mssql::audit_source_parity(&args)?;

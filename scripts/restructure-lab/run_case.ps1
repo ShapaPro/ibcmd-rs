@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Label,
     [Parameter(Mandatory = $true)][string]$PrevSnap,
     [string]$Dynamic = 'disable',
+    [ValidateSet('8327', '85')][string]$Platform = '8327',
     [switch]$NoBackup
 )
 $ErrorActionPreference = 'Stop'
@@ -31,15 +32,16 @@ Step "xe started $xeName"
 $others = (Get-Process ibcmd -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id)" }) -join ","
 Step "other ibcmd processes before apply: [$others]"
 $t0 = Get-Date
-$rc = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -TimeoutSec 3000
+$ibcmd = if ($Platform -eq '85') { 'C:\Program Files\1cv8\8.5.1.1150\bin\ibcmd.exe' } else { 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe' }
+$rc = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -TimeoutSec 3000 -Ibcmd $ibcmd -User (Get-LabUser $Platform)
 $t1 = Get-Date
 Step ("native apply exit={0} wall={1:n1}s ({2:s} .. {3:s})" -f $rc, ($t1 - $t0).TotalSeconds, $t0, $t1)
 $others2 = (Get-Process ibcmd -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id)" }) -join ","
 Step "ibcmd processes after apply: [$others2]"
 Stop-DdlXe $xeName | Out-Null
 Step "xe stopped"
-Copy-Item "$lab\logs\native-apply-$Database.out.txt" "$lab\logs\native-apply-$Label.out.txt" -Force
-Copy-Item "$lab\logs\native-apply-$Database.err.txt" "$lab\logs\native-apply-$Label.err.txt" -Force
+Copy-Item "$lab\logs\native-apply-$Database.out" "$lab\logs\native-apply-$Label.out.txt" -Force
+Copy-Item "$lab\logs\native-apply-$Database.err" "$lab\logs\native-apply-$Label.err.txt" -Force
 python "$tools\snapshot.py" $Database "${Label}_after"; Step "after snapshot done"
 python "$tools\xe_read.py" "C:\temp\ibcmd_rs_04\ddl\$xeName*.xel" "$lab\xe\$Label"; Step "xe events read"
 python "$tools\snapdiff.py" $Database $PrevSnap $Database "${Label}_after" --max 80 | Out-File -Encoding utf8 "$lab\out\diff_$Label.txt"
