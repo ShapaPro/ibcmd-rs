@@ -5,11 +5,15 @@
 //! directory:
 //!
 //! - `config_replaced.tsv`: one line per `Config` row the staged rows replace
-//!   (every part), with its hash and, when its bytes were kept, the file;
-//! - `rows/<n>.bin`: the bytes of the rows the apply changes (or of none, with
-//!   [`RecoveryBlobs::None`]);
-//! - `special_rows.tsv` and their bytes: the dynamic-update markers and alias
-//!   rows the apply folds away;
+//!   (every part), with its hash and, when its bytes were kept, where they are
+//!   (`rows.pack@<offset>+<length>`);
+//! - `rows.pack`: the bytes of the rows the apply changes (or of none, with
+//!   [`RecoveryBlobs::None`]), one after the other, as they are stored in the
+//!   database (already deflated, so a second compression would gain nothing).
+//!   One file instead of one per row: a whole-tree stage saves 9 000 rows, and
+//!   9 000 small files cost more than their bytes;
+//! - `special_rows.tsv` and their bytes (in the pack): the dynamic-update
+//!   markers and alias rows the apply folds away;
 //! - `files_before.tsv` and `change_registrations_before.tsv`: the
 //!   `MobileVersions.dat` head and the `_MessageNo` values it resets;
 //! - `params_replaced.tsv` and their bytes: the search-information rows a new
@@ -20,10 +24,15 @@
 //! Taking an apply back is: put the kept rows back into `Config` (delete the
 //! names in `config_replaced.tsv`, insert the rows), restore the special rows,
 //! `MobileVersions.dat` and the `_MessageNo` values, and stage nothing.
+//!
+//! Where no directory is named, the artifact goes to
+//! `%TEMP%\ibcmd-rs\config-apply-recovery\<database>-<token>` and a successful
+//! run removes the older ones of the same database beyond the newest
+//! [`KEEP_DEFAULT`] ([`prune`]); a directory the caller names is never touched.
 
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -61,6 +70,8 @@ struct Manifest<'a> {
     replaced_rows: usize,
     replaced_rows_saved: usize,
     saved_bytes: u64,
+    /// The file that holds the saved bytes.
+    pack: &'a str,
     special_rows: usize,
     change_registrations_reset: usize,
     params_rows_saved: usize,
@@ -73,14 +84,141 @@ fn tsv(value: &str) -> String {
     value.replace(['\t', '\r', '\n'], " ")
 }
 
+/// How many artifacts of one database a successful run leaves in the default
+/// directory.
+pub const KEEP_DEFAULT: usize = 5;
+/// The name of the file that holds the saved bytes.
+pub const PACK_FILE: &str = "rows.pack";
+
+/// The saved rows, one after the other in a single file.
+struct Pack {
+    writer: BufWriter<fs::File>,
+    offset: u64,
+}
+
+impl Pack {
+    fn create(dir: &Path) -> Result<Self> {
+        let path = dir.join(PACK_FILE);
+        Ok(Self {
+            writer: BufWriter::with_capacity(
+                1 << 20,
+                fs::File::create(&path)
+                    .with_context(|| format!("failed to create {}", path.display()))?,
+            ),
+            offset: 0,
+        })
+    }
+
+    /// Appends the bytes; returns where they are: `rows.pack@<offset>+<length>`.
+    fn add(&mut self, bytes: &[u8]) -> Result<String> {
+        let at = format!("{PACK_FILE}@{}+{}", self.offset, bytes.len());
+        self.writer
+            .write_all(bytes)
+            .with_context(|| format!("failed to write {PACK_FILE}"))?;
+        self.offset += bytes.len() as u64;
+        Ok(at)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.writer.flush().context("failed to flush rows.pack")
+    }
+}
+
+/// The bytes a `rows.pack@<offset>+<length>` reference names.
+pub fn read_pack_entry(dir: &Path, reference: &str) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (file, range) = reference
+        .split_once('@')
+        .with_context(|| format!("{reference} is no pack reference"))?;
+    let (offset, length) = range
+        .split_once('+')
+        .with_context(|| format!("{reference} has no length"))?;
+    let mut handle = fs::File::open(dir.join(file))
+        .with_context(|| format!("failed to open {}", dir.join(file).display()))?;
+    handle.seek(SeekFrom::Start(offset.parse()?))?;
+    let mut bytes = vec![0u8; length.parse()?];
+    handle.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Where the artifact goes when the caller names no directory.
+pub fn default_root() -> PathBuf {
+    std::env::temp_dir()
+        .join("ibcmd-rs")
+        .join("config-apply-recovery")
+}
+
+/// The artifact directory of one plan of one database under `root`.
+pub fn artifact_dir(root: &Path, database: &str, token: &str) -> PathBuf {
+    root.join(format!("{}-{token}", super::safe_stem(database)))
+}
+
+/// Removes the artifacts of `database` under `root` beyond the newest `keep`
+/// (by the time in `manifest.json`, else the directory's own). Only a
+/// directory named `<database>-<16 hex digits>` is a candidate: another
+/// database, a longer name that starts alike and anything else stay. Returns
+/// the removed directories.
+pub fn prune(root: &Path, database: &str, keep: usize) -> Result<Vec<PathBuf>> {
+    let prefix = format!("{}-", super::safe_stem(database));
+    let mut found: Vec<(u64, PathBuf)> = Vec::new();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to list {}", root.display()));
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(token) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !path.is_dir()
+            || token.len() != 16
+            || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let created = fs::read(path.join("manifest.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|manifest| manifest["created_unix_seconds"].as_u64())
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|elapsed| elapsed.as_secs())
+            })
+            .unwrap_or(0);
+        found.push((created, path));
+    }
+    // newest first; equal times by name, so the choice is stable
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let doomed = found.split_off(keep.min(found.len()));
+    let mut removed = Vec::new();
+    for (_, path) in doomed {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        removed.push(path);
+    }
+    Ok(removed)
+}
+
 pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> Result<()> {
     let db = quote_ident(request.database)?;
-    fs::create_dir_all(request.dir.join("rows"))
+    fs::create_dir_all(request.dir)
         .with_context(|| format!("failed to create {}", request.dir.display()))?;
+    let mut pack = Pack::create(request.dir)?;
     let mut saved: std::collections::HashMap<(String, i32), String> =
         std::collections::HashMap::new();
     let mut saved_bytes = 0u64;
-    let mut sequence = 0usize;
 
     // Bytes of the rows the apply changes (the server compares, so unchanged
     // rows never travel).
@@ -93,12 +231,9 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
             let name = row.take_text(0)?;
             let part = i32::try_from(row.i64(1)?)?;
             let bytes = row.take_binary(2)?;
-            sequence += 1;
-            let file = format!("rows/{sequence:06}.bin");
-            fs::write(request.dir.join(&file), &bytes)
-                .with_context(|| format!("failed to write {file}"))?;
+            let at = pack.add(&bytes)?;
             saved_bytes += bytes.len() as u64;
-            saved.insert((name.to_lowercase(), part), file);
+            saved.insert((name.to_lowercase(), part), at);
             Ok(())
         })?;
     }
@@ -154,9 +289,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
             let creation = row.text(3)?.to_owned();
             let modified = row.text(4)?.to_owned();
             let bytes = row.take_binary(5)?;
-            sequence += 1;
-            let file = format!("rows/{sequence:06}.bin");
-            fs::write(request.dir.join(&file), &bytes)?;
+            let file = pack.add(&bytes)?;
             saved_bytes += bytes.len() as u64;
             special_count += 1;
             writeln!(
@@ -226,9 +359,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
                     let creation = row.text(2)?.to_owned();
                     let modified = row.text(3)?.to_owned();
                     let bytes = row.take_binary(4)?;
-                    sequence += 1;
-                    let stored = format!("rows/{sequence:06}.bin");
-                    fs::write(request.dir.join(&stored), &bytes)?;
+                    let stored = pack.add(&bytes)?;
                     saved_bytes += bytes.len() as u64;
                     params_saved += 1;
                     writeln!(
@@ -278,8 +409,10 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         file.flush()?;
     }
 
+    pack.finish()?;
+
     let manifest = Manifest {
-        schema_version: 1,
+        schema_version: 2,
         database: request.database,
         token: request.token,
         created_unix_seconds: std::time::SystemTime::now()
@@ -289,6 +422,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         replaced_rows: request.replaced.len(),
         replaced_rows_saved: saved.len(),
         saved_bytes,
+        pack: PACK_FILE,
         special_rows: special_count,
         change_registrations_reset: reset_count,
         params_rows_saved: params_saved,
@@ -310,7 +444,8 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              token {token}\n\n\
              The apply ran as one transaction: a failed run changes nothing. This directory\n\
              lets a successful run be taken back.\n\n\
-             config_replaced.tsv   every Config row (all parts) the staged rows replaced; `file` is its saved bytes\n\
+             rows.pack             the saved bytes of every row below, one after the other; a `file` value `rows.pack@<offset>+<length>` names a byte range\n\
+             config_replaced.tsv   every Config row (all parts) the staged rows replaced; `file` is where its saved bytes are\n\
              special_rows.tsv      the DynamicallyUpdated markers and _dynupdate_ alias rows that were folded away\n\
              MobileVersions.dat.before   Files.MobileVersions.dat before the new head GUID\n\
              change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\
@@ -328,4 +463,99 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         ),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ibcmd-rs-recovery-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn artifact(root: &Path, database: &str, token: &str, created: u64) -> PathBuf {
+        let dir = artifact_dir(root, database, token);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("manifest.json"),
+            format!("{{\"created_unix_seconds\": {created}}}"),
+        )
+        .unwrap();
+        fs::write(dir.join(PACK_FILE), b"x").unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_pack_hands_back_the_bytes_by_their_reference() {
+        let dir = scratch("pack");
+        let mut pack = Pack::create(&dir).unwrap();
+        let first = pack.add(b"hello").unwrap();
+        let second = pack.add(&[0u8, 1, 2, 255]).unwrap();
+        let empty = pack.add(b"").unwrap();
+        pack.finish().unwrap();
+        assert_eq!(first, "rows.pack@0+5");
+        assert_eq!(second, "rows.pack@5+4");
+        assert_eq!(empty, "rows.pack@9+0");
+        assert_eq!(read_pack_entry(&dir, &first).unwrap(), b"hello");
+        assert_eq!(
+            read_pack_entry(&dir, &second).unwrap(),
+            vec![0u8, 1, 2, 255]
+        );
+        assert!(read_pack_entry(&dir, &empty).unwrap().is_empty());
+        assert!(read_pack_entry(&dir, "no-reference").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_artifacts_of_the_database_and_nothing_else_goes() {
+        let root = scratch("prune");
+        let ours: Vec<PathBuf> = (0..7u64)
+            .map(|index| artifact(&root, "labdb", &format!("{index:016x}"), 100 + index))
+            .collect();
+        // another database whose name starts alike, and things that are no artifact
+        let longer: Vec<PathBuf> = (0..3u64)
+            .map(|index| artifact(&root, "labdb-2", &format!("{index:016x}"), 1 + index))
+            .collect();
+        fs::create_dir_all(root.join("labdb-notatoken")).unwrap();
+        fs::create_dir_all(root.join("labdb-00000000000000zz")).unwrap();
+        fs::write(
+            root.join("labdb-0000000000000009"),
+            b"a file, not a directory",
+        )
+        .unwrap();
+
+        let removed = prune(&root, "labdb", 5).unwrap();
+        assert_eq!(removed.len(), 2);
+        // the two oldest are gone, the five newest stay
+        assert!(!ours[0].exists() && !ours[1].exists());
+        assert!(ours[2..].iter().all(|dir| dir.exists()));
+        // nothing of the other database or of the odd names is touched
+        assert!(longer.iter().all(|dir| dir.exists()));
+        assert!(root.join("labdb-notatoken").exists());
+        assert!(root.join("labdb-00000000000000zz").exists());
+        assert!(root.join("labdb-0000000000000009").exists());
+        // a second run finds nothing more; a missing root is not an error
+        assert!(prune(&root, "labdb", 5).unwrap().is_empty());
+        assert!(prune(&root.join("absent"), "labdb", 5).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_orders_by_the_manifest_time_not_by_the_name() {
+        let root = scratch("order");
+        // the newest artifact has the smallest token
+        let newest = artifact(&root, "db", "0000000000000000", 900);
+        let old_a = artifact(&root, "db", "ffffffffffffffff", 100);
+        let old_b = artifact(&root, "db", "eeeeeeeeeeeeeeee", 200);
+        let removed = prune(&root, "db", 1).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(newest.exists() && !old_a.exists() && !old_b.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 }

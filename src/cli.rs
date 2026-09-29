@@ -2090,6 +2090,11 @@ pub struct MssqlConfigApplyArgs {
     pub recovery_dir: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = MssqlConfigApplyRecoveryArg::Changed)]
     pub recovery_blobs: MssqlConfigApplyRecoveryArg,
+    /// With no --recovery-dir: how many recovery artifacts of the database the
+    /// default directory (%TEMP%\ibcmd-rs\config-apply-recovery) keeps after a
+    /// successful run; older ones are removed. 0 keeps all of them.
+    #[arg(long, default_value_t = 5)]
+    pub recovery_keep: usize,
     /// The structural gate: the restructure check of `mssql-apply-check`
     /// (default), or the conservative rule.
     #[arg(long, value_enum, default_value_t = MssqlConfigApplyGateArg::ApplyCheck)]

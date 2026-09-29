@@ -104,6 +104,9 @@ pub struct ConfigApplyOptions {
     pub exclusivity: Exclusivity,
     pub recovery_dir: Option<PathBuf>,
     pub recovery_blobs: RecoveryBlobs,
+    /// With no `recovery_dir`: how many artifacts of this database the default
+    /// directory keeps after a successful run (0: all of them).
+    pub recovery_keep: usize,
     pub script_output: Option<PathBuf>,
     /// The gate; [`GateChoice::ApplyCheck`] unless asked otherwise.
     pub gate: GateChoice,
@@ -153,6 +156,7 @@ impl ConfigApplyOptions {
             exclusivity: Exclusivity::SqlSessions,
             recovery_dir: None,
             recovery_blobs: RecoveryBlobs::Changed,
+            recovery_keep: recovery::KEEP_DEFAULT,
             script_output: None,
             gate: GateChoice::ApplyCheck,
             admit_unverified_roles: false,
@@ -464,12 +468,6 @@ pub fn plan_with_gate(
     structural_gate: &dyn StructuralGate,
 ) -> Result<ConfigApplyPlan> {
     let total = Instant::now();
-    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
-        return Err(NeedsNativeApply::apply(
-            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`",
-        )
-        .into());
-    }
     let client = require_client(sql)?;
     let database = options.database.as_str();
     let db = quote_ident(database)?;
@@ -827,6 +825,21 @@ pub fn plan_with_gate(
     })?;
     let new = analysis.new;
     let mut analysis_blockers = analysis.blockers;
+    // New objects are measured on 8.3.27 only: their registrations, node rule and
+    // search records were compared with the native apply there.
+    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 && !new.is_empty()
+    {
+        let first = new
+            .objects
+            .first()
+            .map(|object| object.uuid.clone())
+            .or_else(|| new.bodies.first().map(|body| body.file_name.clone()))
+            .unwrap_or_default();
+        analysis_blockers.push(gate::GateBlocker {
+            row: first,
+            reason: "a new form, template or body is measured on 8.3.27 only; on 8.5 the platform's own apply registers it".to_owned(),
+        });
+    }
     // A new object on a change register that has no rows at all (the ERP УХ
     // corpus): the native apply writes nothing there for existing objects and
     // what it does for a new one is not measured, so the apply does not guess.
@@ -1105,10 +1118,7 @@ pub fn apply_with_gate(
         .clone()
         .ok_or_else(|| anyhow!("the plan has no recovery token"))?;
     let dir = options.recovery_dir.clone().unwrap_or_else(|| {
-        std::env::temp_dir()
-            .join("ibcmd-rs")
-            .join("config-apply-recovery")
-            .join(format!("{}-{token}", safe_stem(&options.database)))
+        recovery::artifact_dir(&recovery::default_root(), &options.database, &token)
     });
     recovery::write_recovery(
         client,
@@ -1162,6 +1172,28 @@ pub fn apply_with_gate(
             bail!("ConfigSave still holds {left} row(s) after the apply");
         }
     }
+
+    // The default directory keeps the last few artifacts of a database: the run
+    // succeeded, so the older ones go. A directory the caller named is theirs.
+    if options.recovery_dir.is_none() && options.recovery_keep > 0 {
+        match recovery::prune(
+            &recovery::default_root(),
+            &options.database,
+            options.recovery_keep,
+        ) {
+            Ok(removed) if !removed.is_empty() => plan.report.warnings.push(format!(
+                "{} older recovery artifact(s) of {} removed from {} (the newest {} are kept)",
+                removed.len(),
+                options.database,
+                recovery::default_root().display(),
+                options.recovery_keep
+            )),
+            Ok(_) => {}
+            Err(error) => plan.report.warnings.push(format!(
+                "could not prune older recovery artifacts: {error:#}"
+            )),
+        }
+    }
     plan.report.timings.total_ms = ms(total);
     Ok(plan.report)
 }
@@ -1199,6 +1231,7 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         MssqlConfigApplyExclusivityArg::Assumed => Exclusivity::Assumed,
     };
     options.recovery_dir = args.recovery_dir.clone();
+    options.recovery_keep = args.recovery_keep;
     options.recovery_blobs = match args.recovery_blobs {
         MssqlConfigApplyRecoveryArg::Changed => RecoveryBlobs::Changed,
         MssqlConfigApplyRecoveryArg::None => RecoveryBlobs::None,
@@ -1309,14 +1342,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_8_5_profile_is_refused_before_anything_is_read() {
+    fn the_8_5_profile_is_planned_like_any_other() {
+        // it needs a server, and says so; it is not turned away by its version
         let sql = SqlExec::detached("no server in a unit test");
         let options = ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_5_1_1150);
-        let error = plan(&sql, &options).err().expect("8.5 is refused");
+        let error = plan(&sql, &options).err().expect("a detached handle fails");
         assert!(
-            error.to_string().contains("measured on 8.3.27 only"),
+            !error.to_string().contains("measured on 8.3.27 only"),
             "{error}"
         );
+        assert!(error.downcast_ref::<NeedsNativeApply>().is_none());
     }
 
     #[test]
