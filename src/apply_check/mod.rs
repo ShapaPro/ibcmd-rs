@@ -33,6 +33,7 @@
 //! generator of those entries is not part of this module.
 
 mod check;
+mod dbtree;
 mod descriptor;
 mod model;
 mod plan;
@@ -43,6 +44,7 @@ mod tree_diff;
 mod trees;
 
 pub use check::{Inputs, RowProvider, check};
+pub use dbtree::check_tree_against_db;
 pub use model::{Note, ObjectChange, ObjectOp, Reason, ReasonClass, Stats, Verdict};
 pub use sql::check_staged;
 pub use trees::check_trees;
