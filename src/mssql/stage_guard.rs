@@ -543,9 +543,12 @@ fn compare_xml(state: &[u8], tree: &[u8]) -> Option<Vec<String>> {
     Some(leaves)
 }
 
-/// The differences as a reader counts them: an element only one side has is
-/// one difference, named by its `Name` when it has one, not one per value
-/// inside it.
+/// The differences as a reader counts them:
+///
+/// - an element only one side has is one difference, named by its `Name` when
+///   it has one, not one per value inside it;
+/// - a list of names (`ChildObjects/Form`) that differs is one difference per
+///   name only one side has, not one per position the others shifted to.
 fn describe_differences(
     tree: &BTreeMap<String, String>,
     state: &BTreeMap<String, String>,
@@ -553,12 +556,13 @@ fn describe_differences(
 ) -> Vec<String> {
     let mut described = Vec::new();
     let mut elements = BTreeSet::new();
+    let mut lists = BTreeSet::new();
     for difference in differences {
         let (only_here, other, here_is_tree) = match difference.kind {
             SourceDiffLeafDifferenceKind::LeftOnly => (tree, state, true),
             SourceDiffLeafDifferenceKind::RightOnly => (state, tree, false),
             SourceDiffLeafDifferenceKind::ValueOrAttrDiff => {
-                described.push(describe_leaf(difference));
+                describe_leaf_or_list(tree, state, difference, &mut lists, &mut described);
                 continue;
             }
         };
@@ -577,10 +581,101 @@ fn describe_differences(
                     ));
                 }
             }
-            _ => described.push(describe_leaf(difference)),
+            _ => describe_leaf_or_list(tree, state, difference, &mut lists, &mut described),
         }
     }
     described
+}
+
+/// A leaf that is one entry of a list of names is described with its list,
+/// once; any other leaf on its own.
+fn describe_leaf_or_list(
+    tree: &BTreeMap<String, String>,
+    state: &BTreeMap<String, String>,
+    difference: &SourceDiffLeafDifference,
+    lists: &mut BTreeSet<String>,
+    described: &mut Vec<String>,
+) {
+    let Some(list) = list_of(&difference.path) else {
+        described.push(describe_leaf(difference));
+        return;
+    };
+    let (in_tree, in_state) = (list_entries(tree, list), list_entries(state, list));
+    // A lone element is not a list.
+    if in_tree.len().max(in_state.len()) < 2 {
+        described.push(describe_leaf(difference));
+        return;
+    }
+    if !lists.insert(list.to_string()) {
+        return;
+    }
+    let (only_tree, only_state) = (
+        multiset_minus(&in_tree, &in_state),
+        multiset_minus(&in_state, &in_tree),
+    );
+    let name = readable_path(list);
+    if only_tree.is_empty() && only_state.is_empty() {
+        described.push(format!("порядок {name} другой"));
+        return;
+    }
+    for entry in only_tree {
+        described.push(format!(
+            "в дереве есть {name} «{}», в собранной конфигурации его нет",
+            shorten(&entry)
+        ));
+    }
+    for entry in only_state {
+        described.push(format!(
+            "в собранной конфигурации есть {name} «{}», в дереве его нет",
+            shorten(&entry)
+        ));
+    }
+}
+
+/// `A[1]/ChildObjects[1]/Form[2]` -> `A[1]/ChildObjects[1]/Form`: the list a
+/// text entry belongs to (not an attribute, not the only entry of its kind
+/// with children below it).
+fn list_of(path: &str) -> Option<&str> {
+    let (list, index) = path.rsplit_once('[')?;
+    let index = index.strip_suffix(']')?;
+    (!index.is_empty()
+        && index.bytes().all(|byte| byte.is_ascii_digit())
+        && !list
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| last.starts_with('@')))
+    .then_some(list)
+}
+
+/// The texts of `list[1]`, `list[2]`, ... in order.
+fn list_entries(values: &BTreeMap<String, String>, list: &str) -> Vec<String> {
+    let prefix = format!("{list}[");
+    let mut entries = values
+        .range(prefix.clone()..)
+        .take_while(|(key, _)| key.starts_with(&prefix))
+        .filter_map(|(key, value)| {
+            let index = key[prefix.len()..].strip_suffix(']')?;
+            Some((index.parse::<usize>().ok()?, value.clone()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.into_iter().map(|(_, value)| value).collect()
+}
+
+/// The entries of `left` that `right` does not account for, each name as many
+/// times as `left` has it beyond `right`.
+fn multiset_minus(left: &[String], right: &[String]) -> Vec<String> {
+    let mut remaining = right.to_vec();
+    let mut only = Vec::new();
+    for entry in left {
+        match remaining.iter().position(|other| other == entry) {
+            Some(at) => {
+                remaining.swap_remove(at);
+            }
+            None => only.push(entry.clone()),
+        }
+    }
+    only
 }
 
 /// The shortest ancestor of `path` (segment by segment, `path` itself last)
@@ -828,6 +923,44 @@ mod tests {
             leaves,
             ["в собранной конфигурации есть элемент Root/Item[2] («Два»), в дереве его нет"]
         );
+    }
+
+    #[test]
+    fn a_removed_list_entry_is_named_not_every_position_that_shifted() {
+        let state = xml(
+            "<Root><ChildObjects><Form>Первая</Form><Form>Вторая</Form><Form>Третья</Form></ChildObjects></Root>",
+        );
+        let tree =
+            xml("<Root><ChildObjects><Form>Вторая</Form><Form>Третья</Form></ChildObjects></Root>");
+        let leaves = compare_content("Catalogs/A.xml", &state, &tree).unwrap();
+        assert_eq!(
+            leaves,
+            ["в собранной конфигурации есть Root/ChildObjects/Form «Первая», в дереве его нет"]
+        );
+        // The other way, and a replaced name.
+        let leaves = compare_content("Catalogs/A.xml", &tree, &state).unwrap();
+        assert_eq!(
+            leaves,
+            ["в дереве есть Root/ChildObjects/Form «Первая», в собранной конфигурации его нет"]
+        );
+        let renamed =
+            xml("<Root><ChildObjects><Form>Вторая</Form><Form>Новая</Form></ChildObjects></Root>");
+        let leaves = compare_content("Catalogs/A.xml", &tree, &renamed).unwrap();
+        assert_eq!(
+            leaves,
+            [
+                "в дереве есть Root/ChildObjects/Form «Новая», в собранной конфигурации его нет",
+                "в собранной конфигурации есть Root/ChildObjects/Form «Третья», в дереве его нет",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reordered_list_says_so() {
+        let state = xml("<Root><ChildObjects><Form>А</Form><Form>Б</Form></ChildObjects></Root>");
+        let tree = xml("<Root><ChildObjects><Form>Б</Form><Form>А</Form></ChildObjects></Root>");
+        let leaves = compare_content("Catalogs/A.xml", &state, &tree).unwrap();
+        assert_eq!(leaves, ["порядок Root/ChildObjects/Form другой"]);
     }
 
     #[test]
