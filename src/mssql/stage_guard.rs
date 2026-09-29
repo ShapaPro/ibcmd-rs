@@ -568,6 +568,14 @@ fn describe_differences(
         };
         match missing_element(&difference.path, other) {
             Some(element) if element != difference.path => {
+                // An entry of a list of names (`.../Item[5]`, and the
+                // attributes on it) is said with its list, by name.
+                if only_here.contains_key(&element) {
+                    if let Some(list) = list_of_entry(tree, state, &element) {
+                        describe_list(tree, state, list, &mut lists, &mut described);
+                        continue;
+                    }
+                }
                 if elements.insert((here_is_tree, element.clone())) {
                     let (has, hasnt) = if here_is_tree {
                         ("в дереве", "в собранной конфигурации")
@@ -596,19 +604,40 @@ fn describe_leaf_or_list(
     lists: &mut BTreeSet<String>,
     described: &mut Vec<String>,
 ) {
-    let Some(list) = list_of(&difference.path) else {
-        described.push(describe_leaf(difference));
-        return;
-    };
-    let (in_tree, in_state) = (list_entries(tree, list), list_entries(state, list));
-    // A lone element is not a list.
-    if in_tree.len().max(in_state.len()) < 2 {
-        described.push(describe_leaf(difference));
-        return;
+    match list_of_entry(tree, state, &difference.path) {
+        Some(list) => describe_list(tree, state, list, lists, described),
+        None => described.push(describe_leaf(difference)),
     }
+}
+
+/// The list of names `entry` is an entry of (`.../Item` for `.../Item[5]`),
+/// when one of the two sides has at least two such entries: a lone element is
+/// not a list.
+fn list_of_entry<'a>(
+    tree: &BTreeMap<String, String>,
+    state: &BTreeMap<String, String>,
+    entry: &'a str,
+) -> Option<&'a str> {
+    let list = list_of(entry)?;
+    (list_entries(tree, list)
+        .len()
+        .max(list_entries(state, list).len())
+        >= 2)
+        .then_some(list)
+}
+
+/// The names a list has on one side only, said once per list.
+fn describe_list(
+    tree: &BTreeMap<String, String>,
+    state: &BTreeMap<String, String>,
+    list: &str,
+    lists: &mut BTreeSet<String>,
+    described: &mut Vec<String>,
+) {
     if !lists.insert(list.to_string()) {
         return;
     }
+    let (in_tree, in_state) = (list_entries(tree, list), list_entries(state, list));
     let (only_tree, only_state) = (
         multiset_minus(&in_tree, &in_state),
         multiset_minus(&in_state, &in_tree),
@@ -952,6 +981,27 @@ mod tests {
                 "в дереве есть Root/ChildObjects/Form «Новая», в собранной конфигурации его нет",
                 "в собранной конфигурации есть Root/ChildObjects/Form «Третья», в дереве его нет",
             ]
+        );
+    }
+
+    #[test]
+    fn a_list_entry_with_an_attribute_is_named_once() {
+        let state = xml(
+            "<Root><Content><Item kind=\"ref\">Первая</Item><Item kind=\"ref\">Вторая</Item></Content></Root>",
+        );
+        let tree = xml(
+            "<Root><Content><Item kind=\"ref\">Первая</Item><Item kind=\"ref\">Вторая</Item>\
+             <Item kind=\"ref\">Третья</Item></Content></Root>",
+        );
+        let leaves = compare_content("Subsystems/A.xml", &state, &tree).unwrap();
+        assert_eq!(
+            leaves,
+            ["в дереве есть Root/Content/Item «Третья», в собранной конфигурации его нет"]
+        );
+        let leaves = compare_content("Subsystems/A.xml", &tree, &state).unwrap();
+        assert_eq!(
+            leaves,
+            ["в собранной конфигурации есть Root/Content/Item «Третья», в дереве его нет"]
         );
     }
 
