@@ -255,6 +255,19 @@ impl OfflineRows {
         for (file_name, bytes) in staged {
             rows.insert(file_name, vec![StoredPart::memory(bytes)]);
         }
+        // What the `versions` row of the state does not list is not part of
+        // the configuration: the rows an online update that removed an object
+        // left behind, as the export of a table leaves them out.
+        if let Some(versions) = rows.get("versions")
+            && let Ok(unlisted) = super::config_dump_info::unlisted_entries(
+                &read_parts(versions)?,
+                rows.keys().map(String::as_str),
+            )
+        {
+            for file_name in unlisted {
+                rows.remove(&file_name);
+            }
+        }
         Ok(Self {
             rows,
             overlay_view: Mutex::new(None),
@@ -580,6 +593,30 @@ mod tests {
         assert_eq!(got["a"], b"new");
         assert_eq!(got["b"], b"kept");
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn rows_the_versions_of_the_state_does_not_list_are_left_out() {
+        // The generation and the two listed names; `stale` is a row an online
+        // update that removed its object left behind.
+        let generation = uuid::Uuid::new_v4().hyphenated().to_string();
+        let a = uuid::Uuid::new_v4().hyphenated().to_string();
+        let b = uuid::Uuid::new_v4().hyphenated().to_string();
+        let versions = format!("\u{feff}{{1,3,\"\",{generation},\"a\",{a},\"a.0\",{b}}}");
+        let versions = crate::module_blob::deflate_raw(versions.as_bytes()).unwrap();
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"a")),
+            ("a.0".to_string(), row(b"a.0")),
+            ("stale".to_string(), row(b"left behind")),
+        ]);
+        let state = rows
+            .with_staged([("versions".to_string(), Arc::new(versions))], &[])
+            .unwrap();
+        let got = contents(&state);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "a.0", "versions"]
+        );
     }
 
     #[test]
