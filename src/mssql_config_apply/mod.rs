@@ -268,6 +268,46 @@ fn read_blob(
     }
 }
 
+/// What a stage's `deleted` row lists, for the refusal that names it. The row
+/// is `<count>,"<row name>",<flag>,...` (a byte order mark first; `0` when
+/// nothing is removed).
+fn describe_removals(plain: &[u8]) -> String {
+    let text = String::from_utf8_lossy(versions::strip_bom(plain)).into_owned();
+    let mut tokens = text.trim().split(',');
+    let count = tokens
+        .next()
+        .and_then(|token| token.trim().parse::<usize>().ok());
+    let names: Vec<&str> = tokens
+        .filter_map(|token| {
+            token
+                .trim()
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .collect();
+    match count {
+        Some(0) if names.is_empty() => {
+            "it is empty (the platform's own import writes one to every stage)".to_owned()
+        }
+        Some(count) if count == names.len() => {
+            let overlay = names
+                .iter()
+                .filter(|name| **name == "DynamicallyUpdated" || name.contains("_dynupdate_"))
+                .count();
+            let first = names
+                .iter()
+                .find(|name| **name != "DynamicallyUpdated" && !name.contains("_dynupdate_"))
+                .map(|name| format!(", the first of them {name}"))
+                .unwrap_or_default();
+            format!(
+                "{count} row name(s), {overlay} of them rows of a dynamic update and {} others{first}",
+                count - overlay
+            )
+        }
+        _ => "a list this apply cannot read".to_owned(),
+    }
+}
+
 fn scalar_i64(client: &dyn SqlClient, query: &str) -> Result<i64> {
     match client.query_scalar(query, &[])? {
         Some(SqlValue::Int(value)) => Ok(value),
@@ -421,15 +461,42 @@ pub fn plan_with_gate(
         .map(|name| format!("N'{}'", quote_string(name)))
         .collect::<Vec<_>>()
         .join(", ");
+    // In `ConfigSave` a row `deleted` is not a marker of an unfinished
+    // operation but the stage's own list of removals (the platform's import
+    // writes one to every stage): it is judged below.
+    let unfinished_in_save = sqlgen::UNFINISHED_NAMES
+        .iter()
+        .filter(|name| **name != "deleted")
+        .map(|name| format!("N'{}'", quote_string(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let left_over = scalar_i64(
         client,
         &format!(
-            "SELECT (SELECT COUNT_BIG(*) FROM {db}.dbo.Config WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new') + (SELECT COUNT_BIG(*) FROM {db}.dbo.ConfigSave WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new')"
+            "SELECT (SELECT COUNT_BIG(*) FROM {db}.dbo.Config WHERE FileName IN ({unfinished}) OR FileName LIKE N'%.new') + (SELECT COUNT_BIG(*) FROM {db}.dbo.ConfigSave WHERE FileName IN ({unfinished_in_save}) OR FileName LIKE N'%.new')"
         ),
     )?;
     if left_over != 0 {
         bail!(
             "{left_over} row(s) of an unfinished operation (commit / dynamicCommit / dbStruFinal / convertPhase / erase_save / deleted / *.new) are recorded in Config or ConfigSave; run the native `ibcmd infobase config repair` first"
+        );
+    }
+    // Removals are not honored: this apply deletes no row that a staged row
+    // does not replace, as the native apply does not, and a `deleted` list is
+    // how a stage asks for more (docs/apply/own-apply.md, "Removals").
+    if staged
+        .iter()
+        .any(|row| row.name.eq_ignore_ascii_case("deleted"))
+    {
+        let description = match read_blob(client, database, "ConfigSave", "deleted")? {
+            Some(bytes) => match versions::inflate_row(&bytes) {
+                Ok(plain) => describe_removals(&plain),
+                Err(_) => "a list this apply cannot read".to_owned(),
+            },
+            None => "a list this apply cannot read".to_owned(),
+        };
+        bail!(
+            "the stage carries a `deleted` row, the list of removals: {description}. This apply takes the stage of this repository's `infobase config import`, which writes no such row yet, and removes nothing that a staged row does not replace; the stage of the platform's own `config import` and any removal need the native `ibcmd infobase config apply`"
         );
     }
     // An overlay of a dynamic update in Params (a `.si` row under an alias name)
@@ -1038,5 +1105,25 @@ mod tests {
     #[test]
     fn safe_stems_keep_only_file_name_characters() {
         assert_eq!(safe_stem("a b/c:d-e_f"), "a_b_c_d-e_f");
+    }
+
+    #[test]
+    fn a_deleted_row_is_described_from_its_list() {
+        // the shapes measured in the lab: the empty list, one row, the rows of a
+        // dynamic update
+        assert!(describe_removals("\u{feff}0".as_bytes()).starts_with("it is empty"));
+        let one = "\u{feff}1,\"5ff28850-03db-4a0f-b95e-c2ea4d8c516d\",0";
+        assert_eq!(
+            describe_removals(one.as_bytes()),
+            "1 row name(s), 0 of them rows of a dynamic update and 1 others, the first of them 5ff28850-03db-4a0f-b95e-c2ea4d8c516d"
+        );
+        let overlay = "\u{feff}3,\"ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b.0\",0,\"DynamicallyUpdated\",0,\"versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0";
+        assert_eq!(
+            describe_removals(overlay.as_bytes()),
+            "3 row name(s), 3 of them rows of a dynamic update and 0 others"
+        );
+        // a count that disagrees with the names, and text that is no list
+        assert!(describe_removals(b"2,\"a\",0").contains("cannot read"));
+        assert!(describe_removals(b"{1,2}").contains("cannot read"));
     }
 }

@@ -1,14 +1,25 @@
 # The own `config apply` (milestone 0.4, issues #337 and #339)
 
-`ibcmd-rs mssql-config-apply` moves what `ibcmd infobase config import`
-(native or ibcmd-rs) staged in `ConfigSave` into `Config`, the way the
-platform's exclusive `ibcmd infobase config apply --force --dynamic=disable`
-does, without the platform. It applies a configuration that needs **no
-restructuring**: changed modules, forms, templates, pictures and help pages of
-any object, and a **new form or template of an existing object**, from a full
-stage or a delta stage (a few objects and `versions`). Anything that changes the
-database's structure is refused with the list of the rows that would (use the
-native apply for it).
+`ibcmd-rs mssql-config-apply` moves what `ibcmd-rs infobase config import`
+staged in `ConfigSave` into `Config`, the way the platform's exclusive
+`ibcmd infobase config apply --force --dynamic=disable` does, without the
+platform. It applies a configuration that needs **no restructuring**: changed
+modules, forms, templates, pictures and help pages of any object, and a **new
+form or template of an existing object**, from a full stage or a delta stage (a
+few objects and `versions`). Anything that changes the database's structure is
+refused with the list of the rows that would (use the native apply for it).
+
+**Which stages it takes: those of this repository's importers only.** The stage
+of the platform's own `ibcmd infobase config import` is refused: it carries a
+`deleted` row (a list of removals, written to every stage), about 600 descriptors
+rewritten in another record shape (format 56 to 57, a `{68}` Configuration row),
+new version guids for every name and values above 10 MB cut into parts. The plan
+stops at the `deleted` row with a message that says so; the conservative gate
+would stop at the descriptors. The restructure check of track rcheck (#338,
+`apply_check::check_staged`, which replaces the gate on the next branch) refuses
+such a stage as unknown, too. Measured on the stages the import and rcheck tracks
+left in the lab: `ibcmd_rs_04_import_bsp_nat` and `ibcmd_rs_04_rcheck_nat_a2`
+(9 846 and 9 842 rows, each with a `deleted` row) are refused at once, read-only.
 
 Platform: 8.3.27 (profile `platform-8.3.27.2214`), Microsoft SQL Server. The 8.5
 profile is refused: the apply is measured on 8.3.27 only. The `Params` `.ui` rows
@@ -107,12 +118,19 @@ structure phase, no `..NG` tables (no DDL at all), no `DBNames` passes, no Confi
 marker, the promotion of `.si`, `dbStruFinal`, `UPDATE _ConfigChngR SET _MessageNo = NULL` (40 rows) with six
 `INSERT`s into `_ConfigChngR` and six into `_ConfigChngR_ExtProps` (the two new objects, three nodes each),
 the promotion of the staged rows, the clean-up and the help index. `_IDRRef`, `DBSchema` and `SchemaStorage`
-kept their bytes. What decides the path is open (trace track, question 1; its case 2n took the short path
-too, with `root`, `version` and `versions` staged). S4 adds two data points: it staged the descriptor of
-one data processor (a table-less kind) and ten body rows of objects of mixed kinds -- a constant and a report
-among them -- **without** their descriptors, and stayed on the short path; S3 staged the descriptors of a
-catalog and a document and took the long one. This apply does not care: it never renumbers ids and writes
-the same end state for both paths (S3 on the long path, S4 on the short one, both equal).
+kept their bytes. What decides the path is in the trace track's section 6.4 (`docs/apply/native-apply-trace.md`,
+37 native applies): a staged descriptor row whose content differs from `Config`'s gives the long path, and so
+do more than 20 staged rows. Seven stages of this track agree with the second part (S1, S2 and S3 have more than
+20 rows and are long; S4, S5A and S5C have fewer and are short) and with the first part for a **catalog**
+(S5B: 4 rows, the catalog owner's descriptor gains a form reference, long). They do not agree with the first part
+as written for a **data processor**: S4 (16 rows) and S5A (15 rows) stage owner descriptors that differ from
+`Config`'s -- the active text plus the references to the new forms and templates, checked by the gate --
+together with the descriptors of the new objects, and both stayed on the short path. So the rule holds for
+objects that own tables (catalogs and documents, which the native `import files` also re-saves in another
+serialization; every experiment of the trace track with a changed descriptor is of that kind), not for a
+data processor's, form's or template's descriptor. This is for the trace track (question 1). This apply
+does not care: it never renumbers ids and writes the same end state for both paths (S3 on the long path,
+S4 on the short one, both equal).
 
 A **third path** was seen for a stage of `versions` and one body row (S5C, a module added to a data
 processor, 25 s): no «Сбор служебной информации», no help-index build, `Params.DynamicallyUpdated` and the
@@ -284,7 +302,7 @@ alone from a full native set, because nothing in the results asks for it:
 | Native write | This apply | Verdict and evidence |
 |---|---|---|
 | `Config` rows: `.new` copy, `commit` marker, promotion row by row outside a transaction | one `INSERT ... SELECT` in one transaction; `commit`, `dbStruFinal`, `dynamicCommit` are never written | **required**: the rows (identical to native in S2, S3, S4). The markers exist to resume an interrupted promotion; a transaction has nothing to resume. |
-| Fold of dynamic overlays (`X_dynupdate_G` over `X`, `versions_dynupdate_G`, `DynamicallyUpdated`) | written, oldest generation first | **required** when the base has an overlay (S1-S4 all had one); rows identical. |
+| Fold of dynamic overlays (`X_dynupdate_G` over `X`, `versions_dynupdate_G`, `DynamicallyUpdated`) | written, oldest generation first; done **whether or not the stage lists those rows** (it never does) | **required** when the base has an overlay (S1-S4 all had one); rows identical. See "Dynamic-update rows" below. |
 | `_ConfigChngR._MessageNo := NULL` | written for every owner of a staged row | **required** (it is what the exchange plans read); identical in S2-S4. |
 | New objects: rows in `_ConfigChngR`, `_ConfigChngR_ExtProps` | written | **required**; identical to native but for the ids. |
 | `_ConfigChngR` and `_ExtProps` rebuilt through `..NG` tables with new ids (long path) | not written | **not required**: the platform runs on the old ids (check, apply afterwards, cold server); the short path does not renumber. |
@@ -297,12 +315,116 @@ alone from a full native set, because nothing in the results asks for it:
 | `_ExtensionsRestructNGS` clean-up | not written | scratch; identical rows in every native apply. |
 | `Params` `.ui` (3 rows) | not written | licensing records (track ui): see known differences. |
 
+### Dynamic-update rows go even when the stage omits them
+
+A database that received an online (dynamic) update carries `DynamicallyUpdated` (in `Config`
+and in `Params`), `versions_dynupdate_<g>` and, for the objects the update changed,
+`<id>_dynupdate_<g>` and `<id>_dynupdate_<g>.<n>` rows; the alias row is the text the
+configuration runs. The importers do not stage these rows (patch mode "leaves those six rows alone",
+`docs/import/patch-mode.md`), and the native apply removes them all the same: first it merges each
+alias over its base row, then the staged rows replace what they name. This apply does exactly that,
+inside its transaction, oldest generation first, whether or not the stage lists a row (the stage never
+does): the base row is deleted and the alias renamed over it, `versions_dynupdate_<g>` and the two
+`DynamicallyUpdated` markers are deleted (the `Params` one only when the stage carries a descriptor;
+the native apply leaves it after a stage of body rows alone, S5C). A `deleted_dynupdate_<g>` row (the
+removal list of a dynamic update, never seen here) and an overlay in `Params` (`.si` rows under an alias
+name) are refused, not folded.
+
+Evidence on the БСП clone, which carries one generation (`06cb0442-...`) with two objects
+(`a627e390-...`, a common module, and `ab132638-...`, a form), each with an alias descriptor and an alias
+`.0` body whose text differs from the plain `.0` row:
+
+- S2, a full patch stage that stages both plain `.0` rows: after the native and the own apply alike the
+  staged text wins, the six dynamic rows are gone, and `Config` is identical row for row (9 838 of 9 838);
+- S3, a 30-row delta stage that stages **neither** object: after both applies the two `.0` rows hold the
+  **alias text** (`6c4f62ac...` and `825c84b3...`, not the plain `a0779dc7...` and `91bc23be...`), the six
+  rows are gone, `Config` is identical (9 841 of 9 841). The alias survives as the ordinary row; nothing is
+  lost by omitting it from the stage.
+
+### Removals (the stage's `deleted` row)
+
+**What the native apply does, from the tracks that measured it.** It never deletes a `Config` row that the
+stage merely omits: a form removed from the tree leaves its three rows in `Config` (import track,
+`docs/import/patch-mode.md`, section 6.3; the trace track saw no deletion in a plain apply,
+`docs/apply/native-apply-trace.md`, section 4.1). A removal travels in the row `deleted` of the stage:
+`<BOM><count>,"<row name>",<flag>,...`, `0` when nothing is removed. Seen in the lab (read-only, in the stages
+the other tracks left): `0`; `1,"5ff28850-...",0`; and 30 names, all with flag 0, on the stage of a native import
+of an edited БСП tree -- the six dynamic-update rows of the clone and the descriptors and bodies of the
+removed objects. The native apply copies the row as `deleted.new` and deletes it **without promoting it**
+(trace, phase D2), so `Config` after the apply equals the stage minus `deleted` (ddl track); the list "drives
+the removal of the column" when an attribute is removed (trace 4.1). The platform's own import writes the row
+to every stage; the importers of this repository do not yet (import track, step 2).
+
+**What this apply does today.** It removes nothing that a staged row does not replace: every `DELETE` on
+`Config` in its script names its rows by a staged row, by the alias of a folded generation or by a
+marker (`DynamicallyUpdated`, `versions_dynupdate_<g>`). A stage that carries a `deleted` row is refused,
+empty or not, before anything is read further, with a message that says what the list holds (row count, how
+many are dynamic-update rows, the first other name) and that the native apply is the tool.
+
+**The plan to honor it**, in the order the evidence allows; each step is enabled only after the own apply
+reproduces the native end state on a twin of the same stage:
+
+1. *Empty list, or only dynamic-update rows that `Config` carries.* Both are no-ops for this apply (the fold
+   removes those rows anyway). The row is consumed: left out of the moved rows, of the moved-row count and of the
+   postconditions, and `ConfigSave` is emptied as ever. Needed from the import track: a stage of its importer with
+   `deleted` on a БСП clone with an overlay, applied natively and by this apply, `Config` equal. This unblocks
+   every stage the importer writes once it writes `deleted` at all.
+2. *A removed form, template or body.* The rows the list names (the descriptor `<uuid>` and the bodies
+   `<uuid>.<n>`) are deleted in the same transaction, only when the owner's staged descriptor differs from the
+   active one by exactly the removed references (the inverse of the new-object analysis in `objects::analyze`) and
+   the list names exactly the object's rows. What is **not known** and must come from the native twin of the
+   `formdel` edit that track import stages alone: whether the native apply deletes the named rows at all; what it
+   does to the object's `_ConfigChngR` and `_ConfigChngR_ExtProps` rows (deleted or kept) and to its record in the
+   main `.si`; whether `DBNames` keeps the entry (it did for an attribute); which path it takes (short or long);
+   the `_MessageNo` of the owner. The apply then writes the same.
+3. *A name that has a table or a column* (catalog, attribute, tabular section, register): structural, refused as
+   before; the native apply removes the column.
+
+Until step 2 lands nothing is deleted that `deleted` does not name, because nothing is deleted at all.
+
+### Which native path these writes correspond to, and why
+
+**The short path.** The write set is the one the native apply runs when it takes the short path (trace track,
+section 6.4; here S4, S5A, S5C): the staged rows into `Config` with the fold of a dynamic overlay,
+`_MessageNo` reset in place for the owners of the staged rows, registrations for new objects, `.si` for new
+objects, `MobileVersions.dat`; no register rebuild, no ConfigCAS garbage collection, no `..NG` DDL. Proved against a
+native twin on three stages: `Config`, `_ConfigChngR`, `_ConfigChngR_ExtProps`, all 16 `.si` texts and the
+other service tables equal but for the documented differences (`docs/apply/evidence/own-apply/s4-write-families.md`
+holds the trace comparison of S4 with the kit's `compare_traces.py`: native 195 write statements in 24
+transactions, this apply 17 in one; the rows this apply leaves out are the `.ui`, the `.new` copies, the 16 `.sinew`
+rows, the markers and the `_ExtensionsRestructNGS` clean-up).
+
+**What happens where the native apply takes the long path** (more than 20 staged rows, or the descriptor of a
+catalog or a document that differs: S1, S2, S3, S5B). This apply writes the same short-path set and leaves the
+long-path extras out. Accepted by the platform in every such case, each time with the platform's own tools on the
+result: `config check`, a native `config apply` afterwards ("Обновление конфигурации базы данных не требуется"),
+`generation-id`, `config export` (byte-identical to the native twin's, S2), a cold `ibsrv` and a new session in the
+1C cluster. The extras, one by one:
+
+| Long-path extra | Why it is not written |
+|---|---|
+| `_ConfigChngR` / `_ExtProps` rebuilt through `..NG` tables, new `_IDRRef` | Only renumbers; the registrations keep their ids and stay consistent. The rebuild is DDL (create, load, drop, rename) in a transaction that has none. |
+| `SchemaStorage` walk 100 -> 200 -> 400 -> 500 -> 100, `DBSchema` rewritten | Same bytes before and after (S2, S3); a state other than 100 is refused, so nothing is left half-way. |
+| ConfigCAS garbage collection, `CAS_GC_Info`, `gc.mrk`, `_ExtensionsRestructNGS` | Bookkeeping of the extension store; "unreferenced" is not decoded (trace 4.1), and no reader of the main configuration depends on it. |
+| Help index (`userDocs_ru*`, `userPostings_ru*`, `userVocabulary_ru*`) | Needs the platform's indexer; only help search reads it (known difference). |
+| 16 `.si` rows and `siVersions` rewritten | Content unchanged for module, form and template edits (S2-S4); the main row is edited when new objects add records. |
+| `DBNames*` passes | Thrown away by the native apply itself unless a table was added or renamed. |
+
+**Why not choose by the rule, or write every extra.** The rule (a changed table-owning descriptor, more than 20
+rows) describes what the native apply does, not what the platform needs to read the result: the short-path result
+is accepted after a stage the native apply takes on the long path. An extra that needs the platform's indexer or
+a collector this program cannot reproduce cannot be written whatever the rule says; the register rebuild could be, but
+would add DDL and renumbering that nothing reads. Each extra that is ever added needs the trace comparison
+(`compare_traces.py`) against a native twin first; this comparison was done on the short path (S4) and, for the long
+path, as end-state comparisons (S2, S3, S5B), not as a trace of a long native apply. It is the check to run before
+writing any long extra, and to run once on a long stage of 21 to 30 rows if a reader of the extras turns up.
+
 ## Safety
 
 - **Fail closed**: an unknown storage layout (table fingerprint of the profile), an
   unsupported platform profile, a `deleted_dynupdate_*` row, an unfinished operation,
-  a reused generation, an unlisted staged row (warning), any structural blocker: no
-  write.
+  a `deleted` row in the stage (removals), a reused generation, an unlisted staged row
+  (warning), any structural blocker: no write.
 - **Plan without locks, verify under locks**: the plan reads metadata and server-side
   fingerprints only; the transaction re-checks them after taking the locks.
 - **Exclusive access** is proven by SQL Server's session list, not assumed. A working
@@ -442,6 +564,28 @@ not the apply):
   became one part in the native twin too, see "What the native apply does"), so a stage with parts needs
   the platform's own import.
 
+The native log as an oracle. The native apply names in its log the objects it treated as changed
+(«Объект изменен: X», «Новый объект: X») and the phases it ran. Against every stage of this track (the
+logs are `logs\native_*.out` in the lab):
+
+| Stage | «Объект изменен» / «Новый объект» | «Обработка структуры базы данных» | «Построение индекса справки» | This apply's gate |
+|---|---|---|---|---|
+| S1 (base-free stage, new form and template) | БизнесПроцесс.Задание | yes | yes | refused: `root` changes; `dad11c2e-....7`, the body of БизнесПроцесс.Задание, which the source-asset registry does not name |
+| S2 (227 edits) | none | yes | yes | passes |
+| S3 (delta of 3 objects) | none | yes | yes | passes |
+| S4 (new form and template) | none | no | no | passes |
+| S5A (help, first template, first form) | none | no | yes | passes |
+| S5B (form of a catalog) | none | yes | no | passes |
+| S5C (object module added) | none | no | no | passes |
+
+The one object the platform called changed is the one the gate refuses, by its body (the route-point
+flowchart `Задание.7`, which the base-free importer recompiles); no stage the gate passed made the native
+log report an object, and no new form or template is reported as «Новый объект» (forms and templates are
+not objects for that log). The direction that matters -- a change the platform reports and the gate passes --
+is empty on all seven stages; the wider matrix of edits is measured with the same oracle by track rcheck
+(`docs/apply/restructuring-check.md`). The structure line marks the long path exactly: S1, S2, S3 and S5B have it,
+S4, S5A and S5C do not (rows and descriptors against the trace track's rule: see "The short path").
+
 Exclusivity with a real 1C process: an `ibsrv` (standalone server) started on a staged twin holds 23
 connections; the apply refuses with the sessions listed, and a second apply started meanwhile is
 refused by the in-transaction check (`THROW 57302`) -- both leave the database unchanged.
@@ -487,6 +631,9 @@ the snapshot row, every saved file hashes to its manifest entry).
   although only the edited ones differ from `Config` (9 517 staged, 9 515 identical in the cluster proof); the native apply
   moves them all too. A mode that would leave the byte-identical rows out is possible, and would differ from the native
   apply only in `Creation`/`Modified` of those rows -- a proposal, not done.
+- **Removals** are not honored: a stage with a `deleted` row is refused, and no row is deleted that a
+  staged row does not replace (see "Removals"). The stage of the platform's own import is refused for the same
+  reason and for its rewritten descriptors.
 - **8.5** is refused: the apply is measured on 8.3.27 only.
 - The help index and the extension CAS garbage are left as they are; they are caches.
 - A working process that keeps a pooled connection makes the SQL exclusivity check refuse; the

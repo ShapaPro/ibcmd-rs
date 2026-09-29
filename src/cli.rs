@@ -168,7 +168,9 @@ pub enum Commands {
     /// configuration that needs no restructuring: changed modules, forms,
     /// templates, pictures and help pages of any object, and new forms and
     /// templates of existing objects. Anything else is refused with the list
-    /// of the rows that need the native apply.
+    /// of the rows that need the native apply. Takes the stage of this
+    /// program's `infobase config import` only; a stage with a `deleted` row
+    /// (removals, and every stage of the platform's own import) is refused.
     MssqlConfigApply(MssqlConfigApplyArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
