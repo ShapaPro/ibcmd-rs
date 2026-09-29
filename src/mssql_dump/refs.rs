@@ -2877,8 +2877,14 @@ pub(super) fn metadata_declared_leaves_exclude_string(
                 | ConstantValueType::Reference { .. } => {}
                 ConstantValueType::String { .. } => excludes = false,
                 // An unresolved form type can itself be string-like; without
-                // its definition this predicate has no safe answer.
-                ConstantValueType::TypeId { .. } => return None,
+                // its definition this predicate has no safe answer. An
+                // extension names the types of the configuration it extends
+                // by id only, and the platform reads them as references there.
+                ConstantValueType::TypeId { .. } => {
+                    if super::extension::active().is_none() {
+                        return None;
+                    }
+                }
                 ConstantValueType::ReferenceTypeSet { reference } => {
                     let leaves = type_set_leaves.get(reference)?;
                     if !visiting.insert(reference.clone()) {

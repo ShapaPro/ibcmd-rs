@@ -87,6 +87,9 @@ pub(crate) fn extension_root_xml(
     let name_prefix = parse_1c_quoted_string(field(42)?)?;
     push_optional_simple_property_xml(&mut insert, "NamePrefix", Some(&name_prefix));
     let compatibility = refs::configuration_compatibility_mode_xml(field(43)?)?;
+    if let Ok(packed_version) = field(43)?.parse::<u32>() {
+        context.note_compatibility(packed_version);
+    }
     push_optional_simple_property_xml(
         &mut insert,
         "ConfigurationExtensionCompatibilityMode",

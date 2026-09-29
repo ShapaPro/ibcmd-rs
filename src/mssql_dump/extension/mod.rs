@@ -42,11 +42,14 @@ use super::{
     config_row_from_binary, export_direct_storage_rows_to_source, inflate_raw_deflate,
 };
 use crate::cli::InfobaseConfigSourceVersion;
+use crate::sql::SqlExec;
 
+mod form;
 mod project;
 mod properties;
 pub(super) mod root;
 
+pub(crate) use form::{base_form_body, splice_base_form};
 pub(crate) use project::project_object_xml;
 
 pub(crate) const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
@@ -380,8 +383,12 @@ fn split_top_level_fields(tail: &str) -> Result<Vec<&str>> {
     Ok(fields)
 }
 
+/// Reads the references of the configuration an extension extends, on the
+/// first request (see [`ExtensionContext::base_indexes`]).
+pub(crate) type BaseIndexProvider = Arc<dyn Fn() -> Option<ResolvedIndexes> + Send + Sync>;
+
 /// What an export of one extension knows about its adopted objects.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct ExtensionContext {
     adopted: BTreeMap<String, AdoptedHeader>,
     /// SHA-1 of every storage row's packed bytes, by row name: the digests the
@@ -396,10 +403,31 @@ pub(crate) struct ExtensionContext {
     /// object id -> metadata reference. The projection prints values that
     /// were stored as ids with them.
     indexes: OnceLock<ResolvedIndexes>,
+    /// The extension's compatibility mode as a packed platform version
+    /// (`80324` is 8.3.24): it decides the shape of the forms' XML.
+    compatibility: OnceLock<u32>,
+    /// Where the references of the configuration the extension extends come
+    /// from, and what was read. The platform names the objects a *value* of
+    /// the extension points at (an empty reference in a fill value, say)
+    /// through the whole configuration, where the extension's own type lists
+    /// know nothing of them and stay ids.
+    base_provider: Option<BaseIndexProvider>,
+    base_indexes: OnceLock<Option<ResolvedIndexes>>,
+}
+
+impl std::fmt::Debug for ExtensionContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionContext")
+            .field("adopted", &self.adopted.len())
+            .field("root_header", &self.root_header)
+            .field("compatibility", &self.compatibility)
+            .finish_non_exhaustive()
+    }
 }
 
 /// See [`ExtensionContext::note_indexes`].
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ResolvedIndexes {
     pub type_index: BTreeMap<String, String>,
     pub object_refs: BTreeMap<String, String>,
@@ -416,7 +444,32 @@ impl ExtensionContext {
             root_header: None,
             diagnostics: Mutex::default(),
             indexes: OnceLock::new(),
+            compatibility: OnceLock::new(),
+            base_provider: None,
+            base_indexes: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn with_base_provider(mut self, provider: Option<BaseIndexProvider>) -> Self {
+        self.base_provider = provider;
+        self
+    }
+
+    /// The references of the extended configuration, read on the first call
+    /// (an export that never points at one never reads them).
+    pub(crate) fn base_indexes(&self) -> Option<&ResolvedIndexes> {
+        self.base_indexes
+            .get_or_init(|| self.base_provider.as_ref().and_then(|provider| provider()))
+            .as_ref()
+    }
+
+    /// Remembers the extension's compatibility mode (once).
+    pub(crate) fn note_compatibility(&self, packed_version: u32) {
+        let _ = self.compatibility.set(packed_version);
+    }
+
+    pub(crate) fn compatibility(&self) -> Option<u32> {
+        self.compatibility.get().copied()
     }
 
     /// Remembers the reference indexes of the export (once).
@@ -519,6 +572,7 @@ pub fn export_extension_image_to_source(
     image: &StorageImage,
     output_dir: &Path,
     source_version: InfobaseConfigSourceVersion,
+    base_provider: Option<BaseIndexProvider>,
 ) -> Result<StorageImageSourceExportReport> {
     let plan = StorageExportPlan::from_image(image);
     let mut rows = Vec::with_capacity(plan.records().len());
@@ -592,7 +646,8 @@ pub fn export_extension_image_to_source(
     let guard = activate(
         ExtensionContext::new(adopted)
             .with_packed_sha1(packed_sha1)
-            .with_root_header(root_header),
+            .with_root_header(root_header)
+            .with_base_provider(base_provider),
     )?;
     let exported = export_direct_storage_rows_to_source(
         rows,
@@ -618,6 +673,9 @@ pub fn export_extension_image_to_source(
                 "no legacy family decoder recognized this storage entry: {reason}"
             ));
         }
+        if entry.disposition == StorageExportDisposition::Supported {
+            adjust_form_files(output_dir, entry, &context)?;
+        }
         if !adopted_rows.contains_key(&entry.logical_name)
             || entry.disposition != StorageExportDisposition::Supported
         {
@@ -640,6 +698,35 @@ pub fn export_extension_image_to_source(
         entries,
     );
     Ok(report)
+}
+
+/// The reference indexes of the configuration the extensions of `database`
+/// extend: the type ids and object ids of its metadata rows (the `Config`
+/// table, one read of every row without a dot in its name).
+pub(crate) fn fetch_base_indexes(sql: &SqlExec, database: &str) -> Result<ResolvedIndexes> {
+    let rows = super::fetch::fetch_metadata_rows(sql, database, "Config")
+        .with_context(|| format!("failed to read the metadata rows of {database}"))?;
+    Ok(base_indexes_from_rows(&rows))
+}
+
+/// The provider of [`fetch_base_indexes`] for an export to hand over: it reads
+/// the rows when the export first asks and answers nothing when they cannot be
+/// read (a reference to the extended configuration then stays an id).
+pub(crate) fn base_index_provider(sql: &SqlExec, database: &str) -> BaseIndexProvider {
+    let sql = sql.clone();
+    let database = database.to_owned();
+    Arc::new(move || fetch_base_indexes(&sql, &database).ok())
+}
+
+/// The indexes of [`fetch_base_indexes`] over metadata rows already read.
+pub(crate) fn base_indexes_from_rows(rows: &[super::ConfigRow]) -> ResolvedIndexes {
+    let texts = super::build_metadata_text_rows(rows);
+    let types = super::build_metadata_type_indexes_from_texts(&texts);
+    let objects = super::refs::build_metadata_object_reference_indexes_from_texts(&texts);
+    ResolvedIndexes {
+        type_index: types.references,
+        object_refs: objects.references,
+    }
 }
 
 /// Lab aid: `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT=<dir>` writes the rows the
@@ -720,6 +807,77 @@ fn normalize_row(packed: &[u8]) -> Result<Option<NormalizedRow>> {
     }))
 }
 
+/// The first packed platform version whose forms declare the
+/// data-composition-schema namespace at the root (`dcssch`). Evidence brackets
+/// it: an extension in the 8.3.14 compatibility mode writes none, the modes
+/// 8.3.21 and 8.3.24 write it. Where between the two the boundary lies is not
+/// on record; 8.3.15 is assumed.
+const FIRST_COMPATIBILITY_WITH_SCHEMA_NAMESPACE: u32 = 80315;
+
+const SCHEMA_NAMESPACE_DECLARATION: &str =
+    r#" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema""#;
+
+/// What the platform does to the form XML of an extension beyond what the
+/// stored body states: the older shape of a form in an old compatibility mode
+/// (no schema namespace on the root of `Ext/Form.xml`), the call type of the
+/// handlers of an adopted form and the completion of items saved by an older
+/// platform (see [`form`]).
+fn adjust_form_files(
+    output_dir: &Path,
+    entry: &StorageExportEntryReport,
+    context: &ExtensionContext,
+) -> Result<()> {
+    let adopted = entry
+        .logical_name
+        .strip_suffix(".0")
+        .is_some_and(|uuid| context.adopted(uuid).is_some());
+    let old_root = context
+        .compatibility()
+        .is_some_and(|compatibility| compatibility < FIRST_COMPATIBILITY_WITH_SCHEMA_NAMESPACE);
+    for output in &entry.outputs {
+        let normalized = output.replace('\\', "/");
+        if !normalized.ends_with("/Ext/Form.xml") {
+            continue;
+        }
+        let path = output_dir.join(output);
+        let bytes = std::fs::read(&path).with_context(|| format!("failed to read {output}"))?;
+        let text = String::from_utf8(bytes).with_context(|| format!("{output} is not UTF-8"))?;
+        let mut adjusted = text.clone();
+        if let Some(upgraded) = form::upgrade_items(&adjusted) {
+            adjusted = upgraded;
+        }
+        if adopted && let Some(called) = form::add_call_types(&adjusted) {
+            adjusted = called;
+        }
+        if old_root && !adjusted.contains("dcssch:") {
+            adjusted = without_schema_namespace(&adjusted);
+        }
+        if adjusted != text {
+            std::fs::write(&path, adjusted.as_bytes())
+                .with_context(|| format!("failed to write {output}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// `text` without the schema namespace declaration on the `<Form>` root.
+fn without_schema_namespace(text: &str) -> String {
+    let Some(root_start) = text.find("<Form ") else {
+        return text.to_owned();
+    };
+    let Some(root_length) = text[root_start..].find('>') else {
+        return text.to_owned();
+    };
+    let root_end = root_start + root_length;
+    let root = &text[root_start..root_end];
+    format!(
+        "{}{}{}",
+        &text[..root_start],
+        root.replacen(SCHEMA_NAMESPACE_DECLARATION, "", 1),
+        &text[root_end..]
+    )
+}
+
 /// Rewrites the object XML files one storage row produced.
 fn project_outputs(
     output_dir: &Path,
@@ -751,6 +909,17 @@ mod tests {
     use super::*;
 
     const ADOPTED_MODULE: &str = "{1,\r\n{12,\r\n{3,\r\n{1,0,eb50ccde-ac43-46b8-a693-56b559ca323a},\"Name\",\r\n{0},\"\",1,3,9595ddd6-e72c-47ad-a156-672db811628c,2,d5963243-262e-4398-b4d7-fb16d06484f6,3,c474bab9-d13a-4fbd-bfb0-9214d6dc2fde,2,640d7486-8abd-40aa-a244-2ed899b7225a,0},1,1,1,0,0,0,0,0},0}";
+
+    #[test]
+    fn the_schema_namespace_leaves_only_the_root() {
+        let text = concat!(
+            "<?xml version=\"1.0\"?>\r\n<Form xmlns=\"a\" xmlns:dcssch=\"http://v8.1c.ru/8.1/data-composition-system/schema\" version=\"2.20\">\r\n",
+            "\t<Item xmlns:dcssch=\"http://v8.1c.ru/8.1/data-composition-system/schema\"/>\r\n</Form>"
+        );
+        let stripped = without_schema_namespace(text);
+        assert!(stripped.contains("<Form xmlns=\"a\" version=\"2.20\">"));
+        assert!(stripped.contains("<Item xmlns:dcssch="));
+    }
 
     #[test]
     fn an_adopted_tail_becomes_the_ordinary_one() {

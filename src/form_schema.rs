@@ -3071,6 +3071,7 @@ impl FormChildItemDisplayImportanceSchema {
                 | "GraphicalSchemaField"
                 | "HTMLDocumentField"
                 | "FormattedDocumentField"
+                | "PlannerField"
                 | "ProgressBarField"
                 | "TrackBarField"
                 | "ChartField",

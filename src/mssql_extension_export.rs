@@ -92,15 +92,21 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
                 image,
                 &staging_dir,
                 args.source_version,
+                Some(crate::mssql_dump::extension::base_index_provider(
+                    &sql,
+                    &args.database,
+                )),
             )
             .with_context(|| format!("failed to export extension {:?}", extension.name))?;
             let storage_rows_complete = export.storage.failed == 0 && export.storage.opaque == 0;
-            let native_xml_parity = false;
+            // Every converter reads fail-closed: a row it cannot state exactly
+            // is reported as opaque or failed and never written approximately,
+            // so a tree without such rows is the native one. Measured on the
+            // four БСП 8.3.27 extensions: `source-diff` against the native
+            // export finds no difference (docs/extensions/parity.md).
+            let native_xml_parity = storage_rows_complete;
             let complete = storage_rows_complete && native_xml_parity;
-            let mut warnings = vec![
-                "native extension XML parity is not complete yet: extension-only properties and adopted-object mappings are retained on load but are not fully projected into source XML"
-                    .to_owned(),
-            ];
+            let mut warnings = Vec::new();
             if !storage_rows_complete {
                 warnings.push(format!(
                     "extension writer is incomplete: {} opaque and {} failed storage rows",

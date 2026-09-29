@@ -4858,7 +4858,11 @@ pub(super) fn format_ext_picture_xml(
         source_version.as_str(),
         xml_bool(transparent_pixel.is_some())
     );
-    if let Some((x, y)) = transparent_pixel {
+    // `-1,-1` is the absence of a pixel; the load-transparent flag stays.
+    if let Some((x, y)) = transparent_pixel
+        && x >= 0
+        && y >= 0
+    {
         xml.push_str(&format!(
             "\t\t<xr:TransparentPixel x=\"{x}\" y=\"{y}\"/>\r\n"
         ));
