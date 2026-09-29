@@ -66,8 +66,13 @@ struct ApplyReportFile<'a> {
 
 /// The sessions the messages list before "and N more".
 const SESSIONS_SHOWN: usize = 10;
-/// What the own apply's error says when it finds other sessions.
-const SESSIONS_MARKER: &str = "exclusive access is not established";
+/// What the own apply's error says when it finds other sessions (before
+/// the transaction, and the transaction's own assertion when one connects in
+/// between).
+const SESSIONS_MARKERS: [&str; 2] = [
+    "exclusive access is not established",
+    "another session is connected to the database",
+];
 /// What it says when it cannot look for them.
 const SESSIONS_BLIND_MARKER: &str = "exclusive access cannot be proven";
 
@@ -258,7 +263,7 @@ pub fn classify(
         return Outcome::Refused(structural_text(&refusal.verdict));
     }
     let text = format!("{error:#}");
-    if text.contains(SESSIONS_MARKER) {
+    if SESSIONS_MARKERS.iter().any(|marker| text.contains(marker)) {
         return sessions_outcome(&sessions_of(), terminate, &text);
     }
     if text.contains(SESSIONS_BLIND_MARKER) {
@@ -511,6 +516,24 @@ mod tests {
         match classify(&error, SessionTerminate::Disable, &|| Vec::new()) {
             Outcome::Failed(text) => {
                 assert!(text.contains("К базе подключены другие сеансы"), "{text}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_that_connects_during_the_transaction_is_the_same_refusal() {
+        // the script's own assertion (THROW 57302), reached when one connects
+        // between the look at the sessions and the transaction
+        let error = anyhow!("the config apply transaction failed; the database is unchanged")
+            .context(
+                "another session is connected to the database; the apply needs exclusive access",
+            );
+        match classify(&error, SessionTerminate::Disable, &|| {
+            vec![session(90, "PC", "1CV8C")]
+        }) {
+            Outcome::Failed(text) => {
+                assert!(text.contains("компьютер: PC, приложение: 1CV8C"), "{text}")
             }
             other => panic!("{other:?}"),
         }
