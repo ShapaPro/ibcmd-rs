@@ -23,6 +23,8 @@ the "ODBC Driver 18 for SQL Server", PowerShell 7, SQL Server with Windows authe
 | `guard_table.py` | the guard probe results next to the matrix verdict of each change |
 | `native_complete.py` | the lab's completeness test of a native `config import` stage (has `versions`, no `commit` / `*.new` row, every changed entry of `versions` has its row) |
 | `native_subset.ps1` | native `config import` of a tree with only the named edits, to find which edit the platform refuses |
+| `run_guard_acceptance.ps1` | the guard's acceptance on a БСП clone: every edit of `edits.py` through the drop-in `config import` with its default flags; refusals must leave ConfigSave byte-identical (fingerprint before and after), carried edits must stage; results in `out\guard-acceptance\<tag>.json` |
+| `run_uha_guard.ps1` | what the guard costs on ERP УХ, offline (`IBCMD_RS_BASE_ROWS_DIR`, `--script-only`) inside the heavy lock: wall and CPU seconds, peak memory, the stage's timing lines; results in `out\uha-guard\<tag>.json` |
 
 Typical run:
 

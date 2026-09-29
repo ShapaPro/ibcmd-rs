@@ -637,6 +637,20 @@ pub enum InfobaseImportStageMode {
     BaseFree,
 }
 
+/// Whether `infobase config import` checks the state its stage would leave
+/// against the tree before it writes anything (`--verify`, `--no-verify`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InfobaseImportVerify {
+    /// Check a patch stage, which starts from the target's own rows and can
+    /// leave a change of the tree out; trust a stage compiled from the tree.
+    #[default]
+    Auto,
+    /// Check every stage (`--verify`).
+    On,
+    /// Check nothing (`--no-verify`).
+    Off,
+}
+
 /// `infobase config export`: what the drop-in command line (`crate::dropin`)
 /// or the research round trip asks for.
 #[derive(Debug, Clone)]
@@ -736,6 +750,8 @@ pub struct InfobaseConfigImportArgs {
     pub script_output: Option<PathBuf>,
     /// Patch the target's rows, compile every row, or decide by the target.
     pub stage_mode: InfobaseImportStageMode,
+    /// Check the state the stage would leave against the tree first.
+    pub verify: InfobaseImportVerify,
     /// Root directory with hierarchical XML sources.
     pub source_dir: PathBuf,
 }
@@ -2760,6 +2776,13 @@ pub struct MssqlStageSourceObjectsArgs {
     /// Config. With --script-only it runs fully offline.
     #[arg(long, conflicts_with = "per_row")]
     pub base_free: bool,
+    /// Before anything is written, export the state the stage would leave --
+    /// the stored rows with the staged ones in place of theirs -- with the
+    /// model and compare every file with the tree. A difference refuses the
+    /// stage and ConfigSave is left as it was. `infobase config import` does
+    /// this by itself for a patch stage (`--no-verify` there skips it).
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Args)]

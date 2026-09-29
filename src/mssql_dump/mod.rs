@@ -1071,6 +1071,7 @@ use form_ref_index::FormObjectRefIndex;
 use forms::*;
 use metadata::*;
 use moxel::*;
+pub(crate) use output_writer::FileSink;
 use output_writer::OutputWriter;
 use refs::*;
 use role_rights::*;
@@ -2180,6 +2181,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             source_version,
             args.collect_all_source_asset_diagnostics,
             model_export::requested(args.model_export, args.legacy_export),
+            None,
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -2270,6 +2272,131 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         timings: total_timings,
         tables: reports,
     })
+}
+
+/// The rows a state export starts from.
+pub(crate) enum StateBase<'a> {
+    /// Nothing is stored: the staged rows are the whole configuration (a
+    /// stage for an empty infobase, offline).
+    Nothing,
+    /// A folder of `<FileName>__part<N>.bin` files: the Config table as the
+    /// lab keeps it (`IBCMD_RS_BASE_ROWS_DIR`).
+    Folder(&'a Path),
+    /// The Config table of a database, every part of every row.
+    Database {
+        sql: &'a crate::sql::SqlExec,
+        database: &'a str,
+    },
+}
+
+/// A row a stage writes into ConfigSave: its file name and stored bytes.
+pub(crate) struct StagedRow<'a> {
+    pub file_name: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// What exporting a staged state did.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StateExportReport {
+    /// Rows of the state: the stored ones as the storage publishes them, the
+    /// staged ones in place of theirs.
+    pub state_rows: usize,
+    /// Milliseconds spent reading the stored rows and building the state.
+    pub read_ms: u64,
+    /// Milliseconds the export took.
+    pub export_ms: u64,
+}
+
+/// Exports the configuration a stage would leave -- `staged` over the stored
+/// rows (see [`offline_rows::OfflineRows::with_staged`]) -- through the model
+/// export into `sink`, as the platform's export of that state would write it.
+/// Nothing is written to disk and no query reaches a server but the one read
+/// of the stored rows; `output_root` only names the files (the sink receives
+/// `output_root` joined with each relative path). `ConfigDumpInfo.xml` is not
+/// produced: it holds generation ids no stage keeps.
+pub(crate) fn export_staged_state(
+    base: StateBase<'_>,
+    staged: &[StagedRow<'_>],
+    source_version: InfobaseConfigSourceVersion,
+    output_root: &Path,
+    sink: Arc<dyn FileSink>,
+) -> Result<StateExportReport> {
+    let started = Instant::now();
+    // Each run resolves the dynamic generation of the state it was given.
+    dynamic_generation::clear_storage_generation_overlays();
+    let stored = match base {
+        StateBase::Nothing => offline_rows::OfflineRows::from_memory(std::iter::empty()),
+        StateBase::Folder(dir) => offline_rows::OfflineRows::load(dir)?,
+        StateBase::Database { sql, database } => offline_rows::OfflineRows::from_memory(
+            fetch_all_config_rows(sql, database)?
+                .into_iter()
+                .map(|row| (row.file_name, Arc::new(row.binary))),
+        ),
+    };
+    let state = stored.with_staged(
+        staged
+            .iter()
+            .map(|row| (row.file_name.to_owned(), Arc::new(row.bytes.to_vec()))),
+    )?;
+    let state_rows = state.len();
+    let read_ms = elapsed_ms(started);
+
+    let export_started = Instant::now();
+    let dumped = {
+        let _active = offline_rows::activate_rows(state)?;
+        let sql = crate::sql::SqlExec::detached("a staged state is exported from memory");
+        let plan = MssqlExportInventoryPlan::new(
+            MssqlConfigurationTableRole::Current,
+            false,
+            true,
+            true,
+            false,
+            false,
+        );
+        dump_table_rows_streamed(
+            &sql,
+            "",
+            &BTreeSet::new(),
+            plan,
+            output_root,
+            false,
+            false,
+            true,
+            true,
+            source_version,
+            false,
+            model_export::requested(false, false),
+            Some(sink),
+        )
+    };
+    dynamic_generation::clear_storage_generation_overlays();
+    dumped?;
+    Ok(StateExportReport {
+        state_rows,
+        read_ms,
+        export_ms: elapsed_ms(export_started),
+    })
+}
+
+/// Every row of the Config table, assembled from its parts, read the way the
+/// export reads it: in batches of contiguous names, each on several
+/// connections when the client allows.
+fn fetch_all_config_rows(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let headers = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
+    let file_names = headers
+        .iter()
+        .map(|header| header.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::with_capacity(file_names.len());
+    for batch in build_dump_file_name_batches(&headers, &file_names) {
+        let selected = batch.into_iter().collect::<BTreeSet<_>>();
+        rows.extend(fetch_binary_rows(sql, database, table, &selected, true)?);
+    }
+    Ok(rows)
 }
 
 fn ensure_collect_all_strict_gates(
@@ -3733,6 +3860,7 @@ fn dump_table_rows_streamed(
     source_version: InfobaseConfigSourceVersion,
     collect_all_source_asset_diagnostics: bool,
     model_export: bool,
+    sink: Option<Arc<dyn FileSink>>,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
@@ -4874,8 +5002,12 @@ fn dump_table_rows_streamed(
     }
 
     // The files go to writer threads of their own, so a worker converting a
-    // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`).
-    let output = OutputWriter::from_env().with_existing_folder(output_dir);
+    // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`). With a sink
+    // they go to the sink instead and nothing is written.
+    let output = match sink {
+        Some(sink) => OutputWriter::from_env_to_sink(sink),
+        None => OutputWriter::from_env().with_existing_folder(output_dir),
+    };
     let context = DumpRowContext {
         output: &output,
         model_export: model.as_ref(),

@@ -11,6 +11,11 @@
 //! The folder is listed once. A query looks its names up (or walks the rows
 //! once when it filters by shape), and the selected parts are read in
 //! parallel, in the order the query returns them.
+//!
+//! The rows may as well be held in memory ([`OfflineRows::from_memory`]):
+//! the state a stage would leave in the storage, built by
+//! [`OfflineRows::with_staged`], is exported through the same reads without a
+//! folder on disk.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -22,14 +27,40 @@ use rayon::prelude::*;
 
 use super::config_rows::{BinaryConfigRow, ConfigRowHeader};
 use super::dynamic_generation::{
-    StorageGenerationOverlay, is_dynamic_generation_alias, storage_generation_overlay_for,
+    StorageGenerationOverlay, dynamic_generation_history, is_dynamic_generation_alias,
+    storage_generation_overlay, storage_generation_overlay_for,
 };
+
+/// Where the bytes of one stored part are.
+#[derive(Debug, Clone)]
+enum PartSource {
+    File(PathBuf),
+    Memory(Arc<Vec<u8>>),
+}
 
 /// One stored part.
 #[derive(Debug, Clone)]
 struct StoredPart {
-    path: PathBuf,
+    source: PartSource,
     bytes: u64,
+}
+
+impl StoredPart {
+    fn memory(bytes: Arc<Vec<u8>>) -> Self {
+        Self {
+            bytes: bytes.len() as u64,
+            source: PartSource::Memory(bytes),
+        }
+    }
+
+    fn read(&self) -> Result<Vec<u8>> {
+        match &self.source {
+            PartSource::File(path) => {
+                fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+            }
+            PartSource::Memory(bytes) => Ok(bytes.as_ref().clone()),
+        }
+    }
 }
 
 /// The parts of one stored row, in part order (0, 1, ...).
@@ -78,7 +109,11 @@ impl Drop for OfflineRowsGuard {
 
 /// Makes `dir` the Config table of this process until the guard drops.
 pub(super) fn activate(dir: &Path) -> Result<OfflineRowsGuard> {
-    let rows = OfflineRows::load(dir)?;
+    activate_rows(OfflineRows::load(dir)?)
+}
+
+/// Makes `rows` the Config table of this process until the guard drops.
+pub(super) fn activate_rows(rows: OfflineRows) -> Result<OfflineRowsGuard> {
     let mut active = ACTIVE
         .write()
         .map_err(|_| anyhow!("offline rows lock is poisoned"))?;
@@ -112,21 +147,18 @@ fn parse_part_file_name(name: &str) -> Option<(String, i32)> {
 /// The stored bytes of one row: its parts concatenated in order.
 fn read_parts(parts: &[StoredPart]) -> Result<Vec<u8>> {
     if let [part] = parts {
-        return fs::read(&part.path)
-            .with_context(|| format!("failed to read {}", part.path.display()));
+        return part.read();
     }
     let mut binary = Vec::with_capacity(parts.iter().map(|part| part.bytes).sum::<u64>() as usize);
     for part in parts {
-        binary.extend(
-            fs::read(&part.path)
-                .with_context(|| format!("failed to read {}", part.path.display()))?,
-        );
+        binary.extend(part.read()?);
     }
     Ok(binary)
 }
 
 impl OfflineRows {
-    fn load(dir: &Path) -> Result<Self> {
+    /// The rows of a folder of `<FileName>__part<N>.bin` files.
+    pub(super) fn load(dir: &Path) -> Result<Self> {
         let mut found = BTreeMap::<String, BTreeMap<i32, StoredPart>>::new();
         let entries =
             fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
@@ -143,7 +175,7 @@ impl OfflineRows {
             found.entry(file_name).or_default().insert(
                 part_no,
                 StoredPart {
-                    path: entry.path(),
+                    source: PartSource::File(entry.path()),
                     bytes,
                 },
             );
@@ -162,6 +194,61 @@ impl OfflineRows {
                 }
             }
             rows.insert(file_name, parts.into_values().collect());
+        }
+        Ok(Self {
+            rows,
+            overlay_view: Mutex::new(None),
+        })
+    }
+
+    /// Rows held in memory, one part each: file name -> stored bytes.
+    pub(super) fn from_memory(rows: impl IntoIterator<Item = (String, Arc<Vec<u8>>)>) -> Self {
+        Self {
+            rows: rows
+                .into_iter()
+                .map(|(file_name, bytes)| (file_name, vec![StoredPart::memory(bytes)]))
+                .collect(),
+            overlay_view: Mutex::new(None),
+        }
+    }
+
+    /// The number of stored rows.
+    pub(super) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The configuration a stage of `staged` rows leaves in this storage once
+    /// it is applied: what the storage publishes (an active dynamic
+    /// generation's aliases under their plain names, see
+    /// [`dynamic_generation`]), with each staged row in place of the stored
+    /// row of its name. The apply drops the aliases of what it replaces, so a
+    /// staged row is never shadowed by one; the generation history itself is
+    /// left out, since nothing is aliased any more.
+    pub(super) fn with_staged(
+        self,
+        staged: impl IntoIterator<Item = (String, Arc<Vec<u8>>)>,
+    ) -> Result<Self> {
+        let mut rows = self.rows;
+        if let Some(marker) = rows.remove(super::DYNAMIC_UPDATE_MARKER_ROW) {
+            let history = dynamic_generation_history(&read_parts(&marker)?).ok_or_else(|| {
+                anyhow!(
+                    "{} is not a generation history",
+                    super::DYNAMIC_UPDATE_MARKER_ROW
+                )
+            })?;
+            let overlay = storage_generation_overlay(&history, rows.keys().map(String::as_str));
+            let mut published = BTreeMap::new();
+            for (file_name, parts) in std::mem::take(&mut rows) {
+                if let Some(name) = overlay.published_name(&file_name) {
+                    published.insert(name.to_string(), parts);
+                } else if !is_dynamic_generation_alias(&file_name) && !overlay.hides(&file_name) {
+                    published.insert(file_name, parts);
+                }
+            }
+            rows = published;
+        }
+        for (file_name, bytes) in staged {
+            rows.insert(file_name, vec![StoredPart::memory(bytes)]);
         }
         Ok(Self {
             rows,
@@ -339,11 +426,7 @@ impl OfflineRows {
         let read = crate::parallel::install(|| {
             parts
                 .par_iter()
-                .map(|(file_name, part)| {
-                    let bytes = fs::read(&part.path)
-                        .with_context(|| format!("failed to read {}", part.path.display()))?;
-                    Ok(((*file_name).clone(), bytes))
-                })
+                .map(|(file_name, part)| Ok(((*file_name).clone(), part.read()?)))
                 .collect::<Result<Vec<_>>>()
         })??;
         Ok(read.into_iter().collect())
@@ -352,7 +435,54 @@ impl OfflineRows {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_part_file_name;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use super::{OfflineRows, parse_part_file_name, read_parts};
+
+    const GENERATION: &str = "06cb0442-0c47-4fad-986a-f08f28287c1b";
+
+    fn row(bytes: &[u8]) -> Arc<Vec<u8>> {
+        Arc::new(bytes.to_vec())
+    }
+
+    fn names(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// The stored rows by name, without going through a table view (another
+    /// test may have installed a generation overlay for `Config`).
+    fn contents(rows: &OfflineRows) -> BTreeMap<String, Vec<u8>> {
+        rows.rows
+            .iter()
+            .map(|(name, parts)| (name.clone(), read_parts(parts).unwrap()))
+            .collect()
+    }
+
+    /// A storage an online update touched: `a.0` and `versions` have an alias
+    /// holding the text the infobase reads, `c.0` too.
+    fn generation_rows() -> OfflineRows {
+        OfflineRows::from_memory([
+            (
+                "DynamicallyUpdated".to_string(),
+                row(format!("{{1,1,{GENERATION}}}").as_bytes()),
+            ),
+            ("a".to_string(), row(b"a plain")),
+            ("a.0".to_string(), row(b"a.0 before the online update")),
+            (
+                format!("a_dynupdate_{GENERATION}.0"),
+                row(b"a.0 after the online update"),
+            ),
+            ("c.0".to_string(), row(b"c.0 before")),
+            (format!("c_dynupdate_{GENERATION}.0"), row(b"c.0 after")),
+            ("versions".to_string(), row(b"versions before")),
+            (
+                format!("versions_dynupdate_{GENERATION}"),
+                row(b"versions after"),
+            ),
+            ("z".to_string(), row(b"untouched")),
+        ])
+    }
 
     #[test]
     fn part_file_names_split_at_the_last_part_marker() {
@@ -366,5 +496,93 @@ mod tests {
         );
         assert_eq!(parse_part_file_name("versions.bin"), None);
         assert_eq!(parse_part_file_name("root__part0.txt"), None);
+    }
+
+    #[test]
+    fn rows_held_in_memory_answer_the_reads_a_folder_does() {
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"first")),
+            ("b.0".to_string(), row(b"second")),
+        ]);
+        assert_eq!(rows.len(), 2);
+        let read = rows
+            .rows_named("Config", &names(&["b.0", "missing"]))
+            .unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].file_name, "b.0");
+        assert_eq!(read[0].binary, b"second");
+        assert_eq!(read[0].data_size, 6);
+        let headers = rows.headers("Config", &BTreeSet::new()).unwrap();
+        assert_eq!(
+            headers
+                .iter()
+                .map(|header| (header.file_name.as_str(), header.part_no, header.data_size))
+                .collect::<Vec<_>>(),
+            vec![("a", 0, 5), ("b.0", 0, 6)]
+        );
+        let metadata = rows.rows("Config", |name| !name.contains('.')).unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].file_name, "a");
+        assert_eq!(
+            rows.part0_rows().unwrap().get("a").map(Vec::as_slice),
+            Some(&b"first"[..])
+        );
+        assert!(
+            rows.rows_named("ConfigSave", &names(&["a"])).is_err(),
+            "only the Config table is served"
+        );
+    }
+
+    #[test]
+    fn a_staged_row_takes_the_place_of_the_row_and_of_its_alias() {
+        let state = generation_rows()
+            .with_staged([
+                ("a.0".to_string(), row(b"a.0 staged")),
+                ("versions".to_string(), row(b"versions staged")),
+                ("new.0".to_string(), row(b"a row the storage lacked")),
+            ])
+            .unwrap();
+        let got = contents(&state);
+        assert_eq!(got["a.0"], b"a.0 staged");
+        assert_eq!(got["versions"], b"versions staged");
+        assert_eq!(got["new.0"], b"a row the storage lacked");
+        // What the online update changed and the stage leaves alone stays as
+        // the infobase reads it.
+        assert_eq!(got["c.0"], b"c.0 after");
+        assert_eq!(got["a"], b"a plain");
+        assert_eq!(got["z"], b"untouched");
+        // Neither an alias nor the history is left.
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "a.0", "c.0", "new.0", "versions", "z"]
+        );
+    }
+
+    #[test]
+    fn a_storage_without_a_generation_is_only_overlaid() {
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"old")),
+            ("b".to_string(), row(b"kept")),
+        ]);
+        let state = rows.with_staged([("a".to_string(), row(b"new"))]).unwrap();
+        let got = contents(&state);
+        assert_eq!(got["a"], b"new");
+        assert_eq!(got["b"], b"kept");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_generation_history_is_an_error() {
+        let rows = OfflineRows::from_memory([(
+            "DynamicallyUpdated".to_string(),
+            row(b"{1,2,not-a-uuid}"),
+        )]);
+        let error = rows
+            .with_staged(Vec::<(String, Arc<Vec<u8>>)>::new())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("generation history"),
+            "{error:#}"
+        );
     }
 }

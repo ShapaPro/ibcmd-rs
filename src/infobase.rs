@@ -20,8 +20,8 @@ use walkdir::WalkDir;
 use crate::adapters::mssql_legacy::MssqlLegacyAdapter;
 use crate::cli::{
     InfobaseConfigExportArgs, InfobaseConfigFormat, InfobaseConfigImportArgs,
-    InfobaseConfigSourceVersion, InfobaseImportStageMode, MssqlDumpConfigArgs,
-    MssqlStageSourceObjectsArgs,
+    InfobaseConfigSourceVersion, InfobaseImportStageMode, InfobaseImportVerify,
+    MssqlDumpConfigArgs, MssqlStageSourceObjectsArgs,
 };
 use crate::legacy_version::LegacyVersionAxes;
 use crate::platform::PlatformSpec;
@@ -76,6 +76,10 @@ pub struct InfobaseConfigImportReport {
     pub staged_rows_before: i64,
     pub staged_rows_after: i64,
     pub scripts: Vec<PathBuf>,
+    /// What the guard compared with the tree before the stage was written
+    /// (absent when it did not run: a stage compiled from the tree, or
+    /// `--no-verify`).
+    pub verification: Option<crate::mssql::StageVerification>,
 }
 
 /// The export refuses a directory that already holds files, as the
@@ -344,6 +348,13 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         }
     };
     stage_args.base_free = base_free;
+    // A patch stage starts from the target's own rows and can leave a change
+    // of the tree out without a word: the guard checks it unless asked not to.
+    stage_args.verify = match args.verify {
+        InfobaseImportVerify::On => true,
+        InfobaseImportVerify::Off => false,
+        InfobaseImportVerify::Auto => !base_free,
+    };
     let report = crate::mssql::stage_source_objects(&stage_args)?;
 
     Ok(InfobaseConfigImportReport {
@@ -366,6 +377,7 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         staged_rows_before: report.before.row_count,
         staged_rows_after: report.after.row_count,
         scripts: report.scripts,
+        verification: report.verification,
     })
 }
 
@@ -407,6 +419,8 @@ fn build_import_stage_args(
         per_row: false,
         bcp_executable: None,
         base_free: matches!(args.stage_mode, InfobaseImportStageMode::BaseFree),
+        // Decided by `import_config` once the mode is known.
+        verify: false,
     })
 }
 
@@ -1021,6 +1035,7 @@ mod tests {
             path_prefix: vec!["Catalogs/Валюты".to_string()],
             script_output: Some(PathBuf::from(r"C:\temp\stage.sql")),
             stage_mode: InfobaseImportStageMode::Auto,
+            verify: InfobaseImportVerify::Auto,
             source_dir: PathBuf::from(r".\fixtures\source"),
         }
     }

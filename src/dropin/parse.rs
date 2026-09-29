@@ -77,6 +77,8 @@ pub enum Opt {
     DbPwdEnv,
     BaseFree,
     Exclusivity,
+    Verify,
+    NoVerify,
 }
 
 /// How an option is spelled and whether it takes a value.
@@ -172,6 +174,8 @@ const IMPORT_OPTIONS: &[OptSpec] = &[
     valued(Opt::Out, &["out"], Some('o')),
     valued(Opt::Extension, &["extension"], Some('e')),
     flag(Opt::BaseFree, &["base-free"], None),
+    flag(Opt::Verify, &["verify"], None),
+    flag(Opt::NoVerify, &["no-verify"], None),
 ];
 
 const APPLY_OPTIONS: &[OptSpec] = &[
@@ -422,6 +426,10 @@ pub struct ExportRequest {
 pub struct ImportRequest {
     pub common: Common,
     pub base_free: bool,
+    /// `--verify`: check the staged state against the tree in every mode.
+    pub verify: bool,
+    /// `--no-verify`: check nothing.
+    pub no_verify: bool,
     /// The directory as given.
     pub path: OsString,
 }
@@ -730,9 +738,17 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
             if as_path.is_file() {
                 return Err(Refusal::ImportArchive(as_path));
             }
+            if scan.has(Opt::Verify) && scan.has(Opt::NoVerify) {
+                return Err(Refusal::Conflict {
+                    first: "--verify".to_string(),
+                    second: "--no-verify".to_string(),
+                });
+            }
             Invocation::Import(ImportRequest {
                 common,
                 base_free: scan.has(Opt::BaseFree),
+                verify: scan.has(Opt::Verify),
+                no_verify: scan.has(Opt::NoVerify),
                 path,
             })
         }

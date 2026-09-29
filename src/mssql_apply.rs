@@ -350,6 +350,7 @@ pub fn apply_source_change(
                 per_row: true,
                 bcp_executable: None,
                 base_free: false,
+                verify: false,
             },
         )?)?
     };
