@@ -1,0 +1,645 @@
+//! Refusing what needs a restructuring.
+//!
+//! The own apply moves rows; it does not change the database's structure.
+//! Whether a staged configuration needs that is decided here, behind
+//! [`StructuralGate`], so that the full check of the restructure-check track
+//! (`check_staged`) can replace [`ConservativeGate`] at the one call site in
+//! `plan`.
+//!
+//! The conservative rule admits exactly what the acceptance of #337 names and
+//! nothing else:
+//!
+//! - the service rows `root` and `version` unchanged, `versions` replaced;
+//! - a descriptor row that exists in `Config` and inflates to the same text
+//!   (only the compression differs);
+//! - a body row whose owner kind and suffix the source-asset registry names as
+//!   a module, a form, a template, a picture or a help page.
+//!
+//! Every other change -- a descriptor whose text differs, a new object, a
+//! predefined-data, rights, interface or package body, an unknown row name --
+//! is a blocker.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use anyhow::Result;
+use serde::Serialize;
+
+use crate::compiler::families::assets::{SourceAssetRegistry, SourceAssetRole};
+use crate::metadata_model::brace::parse_row;
+use crate::metadata_model::export::names::{
+    may_own_objects, own_header, owned_objects, root_kinds,
+};
+use crate::sql::{SqlClient, SqlParam};
+
+use super::model::{RowMeta, RowName, classify_name, quote_ident};
+use super::versions::{inflate_row, strip_bom};
+
+/// One reason the staged configuration is not for the own apply.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateBlocker {
+    pub row: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GateStats {
+    pub rows_identical: usize,
+    pub descriptors_layout_only: usize,
+    pub service_rows: usize,
+    /// Changed body rows by the role the registry gives them.
+    pub bodies_by_role: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GateVerdict {
+    /// The staged configuration needs a restructuring (or something the own
+    /// apply does not know how to do): refuse.
+    pub restructuring_required: bool,
+    pub blockers: Vec<GateBlocker>,
+    /// Blockers beyond the ones listed.
+    pub blockers_omitted: usize,
+    pub stats: GateStats,
+    pub gate: String,
+}
+
+const MAX_LISTED_BLOCKERS: usize = 200;
+
+impl GateVerdict {
+    fn block(&mut self, row: &str, reason: impl Into<String>) {
+        self.restructuring_required = true;
+        if self.blockers.len() < MAX_LISTED_BLOCKERS {
+            self.blockers.push(GateBlocker {
+                row: row.to_owned(),
+                reason: reason.into(),
+            });
+        } else {
+            self.blockers_omitted += 1;
+        }
+    }
+}
+
+/// What a gate may look at.
+pub struct GateInput<'a> {
+    pub client: &'a dyn SqlClient,
+    pub database: &'a str,
+    /// Every `ConfigSave` row.
+    pub staged: &'a [RowMeta],
+    /// The `Config` rows that share a name with a staged row, by lower-cased
+    /// (name, part).
+    pub active: &'a HashMap<(String, i32), RowMeta>,
+}
+
+pub trait StructuralGate {
+    fn name(&self) -> &'static str;
+    fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict>;
+}
+
+/// The rule above.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConservativeGate {
+    /// Also pass changed body rows of the roles that are neither structural
+    /// nor a module/form/template/picture/help page -- command interface,
+    /// rights, package, splash and the like -- without proving that their text
+    /// is unchanged. For a stage that `infobase config import` made from a tree
+    /// exported out of this very database: the importer rewrites every row of
+    /// the tree, and some kinds come back in another (equivalent) layout.
+    pub admit_unverified_roles: bool,
+}
+
+impl StructuralGate for ConservativeGate {
+    fn name(&self) -> &'static str {
+        "conservative"
+    }
+
+    fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict> {
+        let mut verdict = GateVerdict {
+            gate: self.name().to_owned(),
+            ..GateVerdict::default()
+        };
+        let mut changed_bodies: Vec<(&RowMeta, String, String)> = Vec::new();
+        let mut descriptors_to_compare = 0usize;
+        for row in input.staged {
+            let active = input.active.get(&row.key());
+            let identical = active.is_some_and(|active| active.sha256 == row.sha256);
+            match classify_name(&row.name) {
+                RowName::Service(name) => {
+                    verdict.stats.service_rows += 1;
+                    if name != "versions" && !identical {
+                        verdict.block(&row.name, format!("the service row {name} changes"));
+                    }
+                }
+                _ if identical => verdict.stats.rows_identical += 1,
+                RowName::Descriptor(_) => match active {
+                    Some(_) => descriptors_to_compare += 1,
+                    None => verdict.block(
+                        &row.name,
+                        "a new object: the own apply does not create objects yet",
+                    ),
+                },
+                RowName::Body { owner, suffix } => {
+                    if row.part != 0 {
+                        verdict.block(&row.name, "a body row with a part number other than 0");
+                    } else {
+                        changed_bodies.push((row, owner.to_owned(), suffix.to_owned()));
+                    }
+                }
+                RowName::Other => verdict.block(
+                    &row.name,
+                    "a row name the own apply does not know (not a service row, descriptor or body row)",
+                ),
+            }
+        }
+        if descriptors_to_compare > 0 {
+            compare_descriptors(input, &mut verdict)?;
+        }
+        if !changed_bodies.is_empty() {
+            classify_bodies(
+                input,
+                &changed_bodies,
+                self.admit_unverified_roles,
+                &mut verdict,
+            )?;
+        }
+        Ok(verdict)
+    }
+}
+
+const DESCRIPTOR_PATTERN: &str = "________-____-____-____-____________";
+
+/// Descriptor rows whose bytes differ from the active row's must still inflate
+/// to the same text.
+fn compare_descriptors(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Result<()> {
+    let db = quote_ident(input.database)?;
+    let query = format!(
+        "SELECT s.FileName, s.BinaryData, c.BinaryData FROM {db}.dbo.ConfigSave s JOIN {db}.dbo.Config c ON c.FileName = s.FileName AND c.PartNo = s.PartNo \
+         WHERE s.PartNo = 0 AND s.FileName LIKE N'{DESCRIPTOR_PATTERN}' AND HASHBYTES('SHA2_256', s.BinaryData) <> HASHBYTES('SHA2_256', c.BinaryData) ORDER BY s.FileName"
+    );
+    input.client.read_rows(&query, &[], &mut |mut row| {
+        let name = row.take_text(0)?;
+        let staged = row.take_binary(1)?;
+        let active = row.take_binary(2)?;
+        match (inflate_row(&staged), inflate_row(&active)) {
+            (Ok(staged), Ok(active)) if staged == active => {
+                verdict.stats.descriptors_layout_only += 1;
+            }
+            (Ok(_), Ok(_)) => verdict.block(
+                &name,
+                "the descriptor's text differs from the active one: a metadata change, possibly structural",
+            ),
+            _ => verdict.block(&name, "a descriptor row that does not inflate"),
+        }
+        Ok(())
+    })
+}
+
+/// The kind of every object a body row can belong to.
+#[derive(Default)]
+struct KindMap {
+    by_uuid: HashMap<String, &'static str>,
+    /// Uuids named inside an owner's descriptor that have no descriptor row:
+    /// nested objects such as commands.
+    nested: HashSet<String>,
+}
+
+fn read_kinds(input: &GateInput<'_>) -> Result<KindMap> {
+    let db = quote_ident(input.database)?;
+    // The configuration's own descriptor is named by the `root` row.
+    let root = input
+        .client
+        .query_scalar(
+            &format!(
+                "SELECT BinaryData FROM {db}.dbo.Config WHERE FileName = N'root' AND PartNo = 0"
+            ),
+            &[],
+        )?
+        .and_then(|value| match value {
+            crate::sql::SqlValue::Binary(bytes) => Some(bytes),
+            _ => None,
+        });
+    let mut config_uuid = None;
+    if let Some(bytes) = root {
+        let plain = inflate_row(&bytes)?;
+        let text = std::str::from_utf8(strip_bom(&plain))
+            .unwrap_or_default()
+            .to_owned();
+        config_uuid = text
+            .trim()
+            .strip_prefix("{2,")
+            .and_then(|rest| rest.split(',').next())
+            .map(|value| value.trim().to_ascii_lowercase());
+    }
+    let Some(config_uuid) = config_uuid else {
+        anyhow::bail!("the root row does not name the configuration");
+    };
+    let mut kinds = KindMap::default();
+    let mut descriptors: Vec<(String, String)> = Vec::new();
+    let query = format!(
+        "SELECT FileName, BinaryData FROM {db}.dbo.Config WHERE PartNo = 0 AND FileName LIKE N'{DESCRIPTOR_PATTERN}'"
+    );
+    let mut top_level: Option<HashMap<String, &'static str>> = None;
+    let mut configuration_object: Option<String> = None;
+    input.client.read_rows(&query, &[], &mut |mut row| {
+        let name = row.take_text(0)?.to_ascii_lowercase();
+        let bytes = row.take_binary(1)?;
+        let Ok(plain) = inflate_row(&bytes) else {
+            return Ok(());
+        };
+        let Ok(text) = String::from_utf8(strip_bom(&plain).to_vec()) else {
+            return Ok(());
+        };
+        if name == config_uuid {
+            if let Ok(tree) = parse_row(&plain) {
+                top_level = Some(root_kinds(&tree));
+                // The configuration object has an id of its own; its modules
+                // and pages are the body rows of that id.
+                configuration_object = own_header(&tree).map(|(uuid, _)| uuid);
+            }
+        }
+        descriptors.push((name, text));
+        Ok(())
+    })?;
+    if let Some(top_level) = top_level {
+        for (uuid, kind) in top_level {
+            kinds.by_uuid.insert(uuid, kind);
+        }
+    }
+    kinds.by_uuid.insert(config_uuid, "Configuration");
+    if let Some(uuid) = configuration_object {
+        kinds.by_uuid.insert(uuid, "Configuration");
+    }
+    let mut owned = Vec::new();
+    for (name, text) in &descriptors {
+        if kinds.by_uuid.contains_key(name) && may_own_objects(text) {
+            if let Ok(tree) = parse_row(text.as_bytes()) {
+                for (kind, uuid) in owned_objects(&tree) {
+                    owned.push((kind, uuid));
+                }
+            }
+        }
+    }
+    for (kind, uuid) in owned {
+        kinds.by_uuid.entry(uuid).or_insert(kind);
+    }
+    // Nested objects (commands): a uuid in a top-level descriptor's text that
+    // is no row of its own.
+    kinds.nested = descriptors
+        .iter()
+        .filter(|(name, _)| kinds.by_uuid.contains_key(name))
+        .flat_map(|(_, text)| uuids_in(text))
+        .filter(|uuid| !kinds.by_uuid.contains_key(uuid))
+        .collect();
+    Ok(kinds)
+}
+
+fn uuids_in(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 36 <= bytes.len() {
+        if bytes[index + 8] == b'-'
+            && bytes[index + 13] == b'-'
+            && bytes[index + 18] == b'-'
+            && bytes[index + 23] == b'-'
+            && super::model::is_uuid_text(&text[index..index + 36])
+        {
+            out.push(text[index..index + 36].to_ascii_lowercase());
+            index += 36;
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
+/// The roles a body row may have and still leave the database's structure
+/// alone.
+fn role_is_admitted(role: SourceAssetRole) -> bool {
+    matches!(
+        role,
+        SourceAssetRole::Module
+            | SourceAssetRole::OrdinaryApplicationModule
+            | SourceAssetRole::ExternalConnectionModule
+            | SourceAssetRole::ManagedApplicationModule
+            | SourceAssetRole::SessionModule
+            | SourceAssetRole::CommandModule
+            | SourceAssetRole::FormModule
+            | SourceAssetRole::ObjectModule
+            | SourceAssetRole::ManagerModule
+            | SourceAssetRole::ValueManagerModule
+            | SourceAssetRole::RecordSetModule
+            | SourceAssetRole::Picture
+            | SourceAssetRole::Help
+    )
+}
+
+/// The family the registry knows an owner kind by.
+fn registry_family(kind: &str) -> &str {
+    kind
+}
+
+/// Roles that change neither the database's structure nor code, and that
+/// `admit_unverified_roles` lets through.
+fn role_is_unverified_ok(role: SourceAssetRole) -> bool {
+    matches!(
+        role,
+        SourceAssetRole::CommandInterface
+            | SourceAssetRole::Splash
+            | SourceAssetRole::ParentConfigurations
+            | SourceAssetRole::HomePageWorkArea
+            | SourceAssetRole::MainSectionCommandInterface
+            | SourceAssetRole::MobileClientSignature
+            | SourceAssetRole::ClientApplicationInterface
+            | SourceAssetRole::MainSectionPicture
+            | SourceAssetRole::StandaloneContent
+            | SourceAssetRole::Rights
+            | SourceAssetRole::Package
+    )
+}
+
+fn classify_bodies(
+    input: &GateInput<'_>,
+    changed: &[(&RowMeta, String, String)],
+    admit_unverified: bool,
+    verdict: &mut GateVerdict,
+) -> Result<()> {
+    let kinds = read_kinds(input)?;
+    // Rows whose role is not admitted may still be a no-op: same text, other
+    // compression.
+    let mut to_compare: Vec<(&RowMeta, String, Comparator)> = Vec::new();
+    for (row, owner, suffix) in changed {
+        let owner_key = owner.to_ascii_lowercase();
+        let kind = match kinds.by_uuid.get(&owner_key) {
+            Some(kind) => *kind,
+            None if kinds.nested.contains(&owner_key) => "Command",
+            None => {
+                verdict.block(
+                    &row.name,
+                    "the body's owner is not an object of the active configuration",
+                );
+                continue;
+            }
+        };
+        // Templates carry no registry route: their `.0` body is the template.
+        if matches!(kind, "Template" | "CommonTemplate") && suffix == "0" {
+            *verdict
+                .stats
+                .bodies_by_role
+                .entry("Template".to_owned())
+                .or_default() += 1;
+            continue;
+        }
+        // An exchange plan's content body lists the objects it exchanges; the
+        // importer writes the list in another order. The same set is no change.
+        if kind == "ExchangePlan" && suffix == "1" {
+            to_compare.push((
+                row,
+                "the exchange plan's content (the set of exchanged objects) differs".to_owned(),
+                Comparator::UnorderedContent,
+            ));
+            continue;
+        }
+        match SourceAssetRegistry.route_by_suffix(registry_family(kind), suffix) {
+            Some(route) if role_is_admitted(route.role()) => {
+                *verdict
+                    .stats
+                    .bodies_by_role
+                    .entry(format!("{:?}", route.role()))
+                    .or_default() += 1;
+            }
+            Some(route) if admit_unverified && role_is_unverified_ok(route.role()) => {
+                *verdict
+                    .stats
+                    .bodies_by_role
+                    .entry(format!("{:?} (unverified)", route.role()))
+                    .or_default() += 1;
+            }
+            Some(route) => to_compare.push((
+                row,
+                format!("a {kind} body of role {:?}: not a module, form, template, picture or help page", route.role()),
+                // The standalone content lists ids; the importer sorts them.
+                if route.role() == SourceAssetRole::StandaloneContent {
+                    Comparator::UnorderedUuids
+                } else {
+                    Comparator::Inflated
+                },
+            )),
+            None => to_compare.push((
+                row,
+                format!("a {kind} body with suffix .{suffix} that the source-asset registry does not name"),
+                Comparator::Inflated,
+            )),
+        }
+    }
+    compare_bodies(input, &to_compare, verdict)
+}
+
+/// How a body row that no role admits is compared with the active row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comparator {
+    /// The inflated texts are equal.
+    Inflated,
+    /// `{2,N,<id>,<flag>,...,0}`: the same pairs, in any order.
+    UnorderedContent,
+    /// The same text with its uuids blanked out, and the same uuids in any
+    /// order.
+    UnorderedUuids,
+}
+
+/// Two texts equal but for the order of their uuids.
+fn uuid_sets_equal(staged: &[u8], active: &[u8]) -> bool {
+    let (Ok(staged), Ok(active)) = (
+        std::str::from_utf8(strip_bom(staged)),
+        std::str::from_utf8(strip_bom(active)),
+    ) else {
+        return false;
+    };
+    let blank = |text: &str| {
+        let mut out = String::with_capacity(text.len());
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if index + 36 <= bytes.len()
+                && text.is_char_boundary(index)
+                && text.is_char_boundary(index + 36)
+                && super::model::is_uuid_text(&text[index..index + 36])
+            {
+                out.push('#');
+                index += 36;
+            } else {
+                let ch = text[index..]
+                    .chars()
+                    .next()
+                    .expect("index is a char boundary");
+                out.push(ch);
+                index += ch.len_utf8();
+            }
+        }
+        out
+    };
+    let mut a = uuids_in(staged);
+    let mut b = uuids_in(active);
+    a.sort();
+    b.sort();
+    a == b && blank(staged) == blank(active)
+}
+
+/// Content bodies (`{2,N,<uuid>,<flag>,...,0}`) equal as sets of pairs.
+fn content_sets_equal(staged: &[u8], active: &[u8]) -> bool {
+    fn pairs(bytes: &[u8]) -> Option<Vec<(String, String)>> {
+        let text = std::str::from_utf8(strip_bom(bytes)).ok()?;
+        let inner = text.trim().strip_prefix('{')?.strip_suffix('}')?;
+        let tokens = inner.split(',').map(str::trim).collect::<Vec<_>>();
+        if tokens.first() != Some(&"2") {
+            return None;
+        }
+        let count = tokens.get(1)?.parse::<usize>().ok()?;
+        if tokens.len() != 2 + 2 * count + 1 || tokens.last() != Some(&"0") {
+            return None;
+        }
+        let mut out = tokens[2..2 + 2 * count]
+            .chunks(2)
+            .map(|pair| (pair[0].to_ascii_lowercase(), pair[1].to_owned()))
+            .collect::<Vec<_>>();
+        out.sort();
+        Some(out)
+    }
+    match (pairs(staged), pairs(active)) {
+        (Some(staged), Some(active)) => staged == active,
+        _ => false,
+    }
+}
+
+/// The rows that are not admitted by role must be no change once compared as
+/// their kind requires.
+fn compare_bodies(
+    input: &GateInput<'_>,
+    rows: &[(&RowMeta, String, Comparator)],
+    verdict: &mut GateVerdict,
+) -> Result<()> {
+    let db = quote_ident(input.database)?;
+    let comparators: HashMap<String, Comparator> = rows
+        .iter()
+        .map(|(row, _, comparator)| (row.name.to_lowercase(), *comparator))
+        .collect();
+    let mut equal: HashSet<String> = HashSet::new();
+    for chunk in rows.chunks(400) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("@P{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT s.FileName, s.BinaryData, c.BinaryData FROM {db}.dbo.ConfigSave s JOIN {db}.dbo.Config c ON c.FileName = s.FileName AND c.PartNo = s.PartNo              WHERE s.PartNo = 0 AND s.FileName IN ({placeholders})"
+        );
+        let params = chunk
+            .iter()
+            .map(|(row, _, _)| SqlParam::Text(row.name.as_str()))
+            .collect::<Vec<_>>();
+        input.client.read_rows(&query, &params, &mut |mut row| {
+            let name = row.take_text(0)?;
+            let staged = row.take_binary(1)?;
+            let active = row.take_binary(2)?;
+            let key = name.to_lowercase();
+            let is_equal = match comparators.get(&key) {
+                Some(Comparator::UnorderedContent) => match (inflate_row(&staged), inflate_row(&active)) {
+                    (Ok(staged), Ok(active)) => content_sets_equal(&staged, &active),
+                    _ => false,
+                },
+                Some(Comparator::UnorderedUuids) => match (inflate_row(&staged), inflate_row(&active)) {
+                    (Ok(staged), Ok(active)) => uuid_sets_equal(&staged, &active),
+                    _ => false,
+                },
+                _ => matches!((inflate_row(&staged), inflate_row(&active)), (Ok(staged), Ok(active)) if staged == active),
+            };
+            if is_equal {
+                equal.insert(key);
+            }
+            Ok(())
+        })?;
+    }
+    for (row, reason, _) in rows {
+        if equal.contains(&row.name.to_lowercase()) {
+            *verdict
+                .stats
+                .bodies_by_role
+                .entry("layout-only".to_owned())
+                .or_default() += 1;
+        } else {
+            verdict.block(&row.name, reason.as_str());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuids_are_found_in_descriptor_text() {
+        let text = "{3,{1,0,b4e1435c-482c-4e14-afee-045b1489fcd0},\"X\",7f89218f-417a-4e94-9be0-0085d83c9c2d,B866D5A8-2333-4865-961B-A5C8E9BFC05E}";
+        let found = uuids_in(text);
+        assert_eq!(found.len(), 3);
+        assert!(found.contains(&"b866d5a8-2333-4865-961b-a5c8e9bfc05e".to_owned()));
+    }
+
+    #[test]
+    fn admitted_roles_are_modules_forms_pictures_and_help() {
+        assert!(role_is_admitted(SourceAssetRole::ObjectModule));
+        assert!(role_is_admitted(SourceAssetRole::FormModule));
+        assert!(role_is_admitted(SourceAssetRole::Help));
+        assert!(role_is_admitted(SourceAssetRole::Picture));
+        assert!(!role_is_admitted(SourceAssetRole::Rights));
+        assert!(!role_is_admitted(SourceAssetRole::Predefined));
+        assert!(!role_is_admitted(SourceAssetRole::CommandInterface));
+        assert!(!role_is_admitted(SourceAssetRole::Package));
+    }
+
+    #[test]
+    fn the_registry_names_the_bodies_the_gate_admits() {
+        let route = SourceAssetRegistry.route_by_suffix("Catalog", "3").unwrap();
+        assert_eq!(route.role(), SourceAssetRole::ManagerModule);
+        let route = SourceAssetRegistry.route_by_suffix("Form", "0").unwrap();
+        assert_eq!(route.role(), SourceAssetRole::FormModule);
+        let route = SourceAssetRegistry.route_by_suffix("Command", "2").unwrap();
+        assert_eq!(route.role(), SourceAssetRole::CommandModule);
+        // predefined data has a route, with a role the gate does not admit
+        let route = SourceAssetRegistry
+            .route_by_suffix("Catalog", "1c")
+            .unwrap();
+        assert_eq!(route.role(), SourceAssetRole::Predefined);
+        assert!(!role_is_admitted(route.role()));
+    }
+
+    #[test]
+    fn exchange_plan_content_compares_as_a_set() {
+        let a = b"{2,3,190bc52e-0d51-4dfc-9f16-99ed71ebfa75,0,f81b51c5-57e4-41f8-9ad5-3d2717351b95,0,1685c406-d0cb-4e0a-a3b0-036c8c22942a,1,0}";
+        let b = b"{2,3,1685c406-d0cb-4e0a-a3b0-036c8c22942a,1,190bc52e-0d51-4dfc-9f16-99ed71ebfa75,0,f81b51c5-57e4-41f8-9ad5-3d2717351b95,0,0}";
+        assert!(content_sets_equal(a, b));
+        // another flag, another set
+        let c = b"{2,3,1685c406-d0cb-4e0a-a3b0-036c8c22942a,0,190bc52e-0d51-4dfc-9f16-99ed71ebfa75,0,f81b51c5-57e4-41f8-9ad5-3d2717351b95,0,0}";
+        assert!(!content_sets_equal(a, c));
+        assert!(!content_sets_equal(a, b"{2,3,x}"));
+    }
+
+    #[test]
+    fn uuid_lists_compare_in_any_order_but_not_across_structure() {
+        let a = b"{2,2,190bc52e-0d51-4dfc-9f16-99ed71ebfa75,f81b51c5-57e4-41f8-9ad5-3d2717351b95}";
+        let b = b"{2,2,f81b51c5-57e4-41f8-9ad5-3d2717351b95,190bc52e-0d51-4dfc-9f16-99ed71ebfa75}";
+        assert!(uuid_sets_equal(a, b));
+        let c = b"{2,3,f81b51c5-57e4-41f8-9ad5-3d2717351b95,190bc52e-0d51-4dfc-9f16-99ed71ebfa75}";
+        assert!(!uuid_sets_equal(a, c));
+        let d = b"{2,2,f81b51c5-57e4-41f8-9ad5-3d2717351b95,00000000-0d51-4dfc-9f16-99ed71ebfa75}";
+        assert!(!uuid_sets_equal(a, d));
+    }
+
+    #[test]
+    fn a_blocker_list_is_capped_but_counted() {
+        let mut verdict = GateVerdict::default();
+        for index in 0..(MAX_LISTED_BLOCKERS + 5) {
+            verdict.block(&format!("row{index}"), "x");
+        }
+        assert!(verdict.restructuring_required);
+        assert_eq!(verdict.blockers.len(), MAX_LISTED_BLOCKERS);
+        assert_eq!(verdict.blockers_omitted, 5);
+    }
+}
