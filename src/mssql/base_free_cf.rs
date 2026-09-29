@@ -26,7 +26,6 @@ pub fn base_free_entries(
     if !failures.is_empty() {
         let shown = failures
             .iter()
-            .take(20)
             .map(|failure| {
                 format!(
                     "{} {} {}: {}",
