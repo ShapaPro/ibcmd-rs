@@ -45,7 +45,8 @@ use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 
 use check_gate::ApplyCheckGate;
 pub use errors::{
-    ExclusiveAccessRefused, ExclusiveAccessUnprovable, NativeCommand, NeedsNativeApply,
+    BackupRequired, ExclusiveAccessRefused, ExclusiveAccessUnprovable, NativeCommand,
+    NeedsNativeApply,
 };
 use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase};
 use model::{RowMeta, hex_lower, quote_ident, quote_string};
@@ -222,8 +223,22 @@ pub struct ApplyTimings {
     pub gate_ms: u128,
     pub fingerprints_ms: u128,
     pub recovery_ms: u128,
+    /// The copy-only backup a structural apply takes before its transaction.
+    pub backup_ms: u128,
     pub sql_ms: u128,
     pub total_ms: u128,
+}
+
+/// The way back the operator gave a structural apply, as the report and the
+/// recovery artifact name it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupRecord {
+    /// `file`: the apply took the backup; `acknowledged`: the operator says they
+    /// have one.
+    pub kind: &'static str,
+    pub path: Option<String>,
+    /// How long the backup took (`file` only).
+    pub seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,6 +295,8 @@ pub struct ConfigApplyReport {
     pub gate: Option<GateVerdict>,
     /// The restructuring the gate let through and the script runs in its transaction.
     pub structure: Option<StructurePhase>,
+    /// The backup taken, or the operator's word that they have one.
+    pub backup: Option<BackupRecord>,
     pub new_objects: Option<NewObjectsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
@@ -473,9 +490,7 @@ fn merge_params_rewrites(
 /// write nothing that stays.
 fn require_backup(policy: &BackupPolicy, structural: bool, writes: bool) -> Result<()> {
     if structural && writes && *policy == BackupPolicy::None {
-        bail!(
-            "this stage restructures tables (the old ones are dropped inside the transaction, and the recovery artifact cannot bring them back): take a SQL Server backup and say so with --i-have-a-backup, or let the apply take one with --recovery-backup <file>"
-        );
+        return Err(BackupRequired.into());
     }
     Ok(())
 }
@@ -588,6 +603,7 @@ pub fn plan_with_gate(
         dynamic: None,
         gate: None,
         structure: None,
+        backup: None,
         new_objects: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
@@ -1110,6 +1126,11 @@ pub fn plan_with_gate(
     report.not_written = vec![
         "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written; the native apply re-encrypts two of them on every apply".to_owned(),
     ];
+    if structure.is_some() && options.backup == BackupPolicy::None {
+        report.warnings.push(
+            "the stage restructures tables: a real run needs --recovery-backup <file> (recommended) or --i-have-a-backup".to_owned(),
+        );
+    }
     if structure.is_some() {
         report.not_written.push(
             "the pre-image of the rebuilt tables: the old tables are dropped inside the transaction, so a committed restructuring is taken back from a SQL Server backup (the recovery artifact keeps the Config rows and the cache rows only)".to_owned(),
@@ -1216,7 +1237,59 @@ pub fn apply_with_gate(
         return Ok(plan.report);
     }
 
-    // The recovery artifact first: the pre-image of what the script overwrites.
+    // A restructuring needs the operator's word about a way back, and a backup asked
+    // for is taken before anything is written (a rehearsal and a dry run write
+    // nothing that stays).
+    require_backup(
+        &options.backup,
+        plan.report.structure.is_some(),
+        !options.rehearse,
+    )?;
+    let mut backup = None;
+    let mut backup_ms = 0u128;
+    match &options.backup {
+        BackupPolicy::None => {}
+        BackupPolicy::Acknowledged => {
+            backup = Some(BackupRecord {
+                kind: "acknowledged",
+                path: None,
+                seconds: None,
+            });
+        }
+        BackupPolicy::File(file) if !options.rehearse => {
+            if file.exists() {
+                bail!(
+                    "the backup file {} exists already: the apply does not overwrite a backup; name another file",
+                    file.display()
+                );
+            }
+            let started = Instant::now();
+            let db = quote_ident(&options.database)?;
+            client
+                .execute(
+                    &format!(
+                        "BACKUP DATABASE {db} TO DISK = N'{}' WITH COPY_ONLY, COMPRESSION",
+                        quote_string(&file.display().to_string())
+                    ),
+                    &[],
+                )
+                .with_context(|| {
+                    format!(
+                        "the backup to {} failed; nothing was changed",
+                        file.display()
+                    )
+                })?;
+            backup_ms = ms(started);
+            backup = Some(BackupRecord {
+                kind: "file",
+                path: Some(file.display().to_string()),
+                seconds: Some(backup_ms as f64 / 1000.0),
+            });
+        }
+        BackupPolicy::File(_) => {}
+    }
+
+    // The recovery artifact: the pre-image of what the script overwrites.
     let started = Instant::now();
     let token = plan
         .report
@@ -1226,6 +1299,8 @@ pub fn apply_with_gate(
     let dir = options.recovery_dir.clone().unwrap_or_else(|| {
         recovery::artifact_dir(&recovery::default_root(), &options.database, &token)
     });
+    plan.report.backup = backup;
+    plan.report.timings.backup_ms = backup_ms;
     recovery::write_recovery(
         client,
         &recovery::RecoveryRequest {
@@ -1245,44 +1320,11 @@ pub fn apply_with_gate(
                 .inputs
                 .as_ref()
                 .map_or(&[][..], |inputs| inputs.params_rewrites.as_slice()),
+            backup: plan.report.backup.as_ref(),
         },
     )?;
     plan.report.recovery_dir = Some(dir);
     plan.report.timings.recovery_ms = ms(started);
-
-    // A structural apply has its way back before it starts.
-    require_backup(
-        &options.backup,
-        plan.report.structure.is_some(),
-        !options.rehearse,
-    )?;
-    if plan.report.structure.is_some()
-        && !options.rehearse
-        && let BackupPolicy::File(file) = &options.backup
-    {
-        let started = Instant::now();
-        let db = quote_ident(&options.database)?;
-        client
-            .execute(
-                &format!(
-                    "BACKUP DATABASE {db} TO DISK = N'{}' WITH COPY_ONLY, COMPRESSION, INIT",
-                    quote_string(&file.display().to_string())
-                ),
-                &[],
-            )
-            .with_context(|| {
-                format!(
-                    "the backup to {} failed; nothing was changed",
-                    file.display()
-                )
-            })?;
-        plan.report.warnings.push(format!(
-            "a copy-only backup of {} was taken to {} in {:.1} s before the restructuring",
-            options.database,
-            file.display(),
-            started.elapsed().as_secs_f64()
-        ));
-    }
 
     let started = Instant::now();
     if let Err(error) = client.run_script(&script, ScriptVariables::Refuse) {
@@ -1377,10 +1419,9 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         MssqlConfigApplyRecoveryArg::None => RecoveryBlobs::None,
     };
     options.script_output = args.script_output.clone();
-    options.allow_restructure = match args.allow_restructure {
-        Some(crate::cli::MssqlConfigApplyRestructureArg::S1) => Some(AllowRestructure::S1),
-        None => None,
-    };
+    options.allow_restructure = args
+        .allow_restructure
+        .map(|crate::cli::MssqlConfigApplyRestructureArg::S1| AllowRestructure::S1);
     options.backup = match (&args.recovery_backup, args.i_have_a_backup) {
         (Some(file), _) => BackupPolicy::File(file.clone()),
         (None, true) => BackupPolicy::Acknowledged,
@@ -1449,6 +1490,13 @@ fn refusal_report(error: &anyhow::Error, database: &str) -> Option<serde_json::V
             "database": database,
             "in_transaction": refusal.in_transaction,
             "sessions": refusal.sessions,
+        }));
+    }
+    if error.downcast_ref::<BackupRequired>().is_some() {
+        return Some(serde_json::json!({
+            "refused": "backup_required",
+            "database": database,
+            "message": error.to_string(),
         }));
     }
     if let Some(refusal) = error.downcast_ref::<ExclusiveAccessUnprovable>() {
@@ -1662,10 +1710,14 @@ mod tests {
     fn a_structural_apply_that_writes_needs_a_word_about_a_backup() {
         // no restructuring: nothing is asked
         assert!(require_backup(&BackupPolicy::None, false, true).is_ok());
-        // a restructuring that writes and no backup said: refused
+        // a restructuring that writes and no backup said: refused, by type, in Russian, naming both
         let error = require_backup(&BackupPolicy::None, true, true).unwrap_err();
+        assert!(error.downcast_ref::<BackupRequired>().is_some(), "{error}");
         assert!(error.to_string().contains("--i-have-a-backup"), "{error}");
         assert!(error.to_string().contains("--recovery-backup"), "{error}");
+        assert!(error.to_string().contains("резервная копия"), "{error}");
+        let report = refusal_report(&error, "db").unwrap();
+        assert_eq!(report["refused"], "backup_required");
         // said either way, or nothing kept (a rehearsal, a dry run)
         assert!(require_backup(&BackupPolicy::Acknowledged, true, true).is_ok());
         assert!(require_backup(&BackupPolicy::File(PathBuf::from("x.bak")), true, true).is_ok());
@@ -1689,5 +1741,26 @@ mod tests {
             error.to_string().contains("--allow-restructure s1"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_backup_is_named_in_the_report() {
+        let taken = BackupRecord {
+            kind: "file",
+            path: Some("F:/b.bak".to_owned()),
+            seconds: Some(1.5),
+        };
+        let json = serde_json::to_value(&taken).unwrap();
+        assert_eq!(json["kind"], "file");
+        assert_eq!(json["path"], "F:/b.bak");
+        assert_eq!(json["seconds"], 1.5);
+        let said = serde_json::to_value(BackupRecord {
+            kind: "acknowledged",
+            path: None,
+            seconds: None,
+        })
+        .unwrap();
+        assert_eq!(said["kind"], "acknowledged");
+        assert!(said["path"].is_null());
     }
 }

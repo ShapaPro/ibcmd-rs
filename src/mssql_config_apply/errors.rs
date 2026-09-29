@@ -129,6 +129,26 @@ impl fmt::Display for ExclusiveAccessUnprovable {
 
 impl std::error::Error for ExclusiveAccessUnprovable {}
 
+/// A restructuring is about to write and the operator has not said how to go
+/// back: the old tables are dropped inside the transaction, and the recovery
+/// artifact keeps the `Config` rows and the cache rows only. Nothing was
+/// written. The words are Russian, as the platform's own refusals are.
+#[derive(Debug, Clone, Default)]
+pub struct BackupRequired;
+
+impl fmt::Display for BackupRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "Применение меняет структуру таблиц базы данных: старые таблицы удаляются внутри транзакции, а артефакт восстановления возвращает только строки Config и кэши. \
+Нужна резервная копия SQL Server. Укажите `--recovery-backup <путь>` (рекомендуется: перед транзакцией применение само снимет копию \
+`BACKUP DATABASE ... WITH COPY_ONLY, COMPRESSION` в этот файл и назовёт её в отчёте и в артефакте восстановления) или `--i-have-a-backup` \
+(вы подтверждаете, что копия у вас есть; это будет записано в отчёте).",
+        )
+    }
+}
+
+impl std::error::Error for BackupRequired {}
+
 /// The SQL Server error (code, message) behind a failed request, if the
 /// failure was the server's answer to it.
 pub(super) fn server_error_of(error: &Error) -> Option<(u32, String)> {
@@ -279,6 +299,17 @@ mod tests {
         ] {
             assert!(from_transaction_code(number, "x", "lab", Vec::new).is_none());
         }
+    }
+
+    #[test]
+    fn backup_required_is_typed_russian_and_names_both_options() {
+        let error = Error::new(BackupRequired);
+        assert!(error.downcast_ref::<BackupRequired>().is_some());
+        let text = error.to_string();
+        assert!(text.contains("--recovery-backup <путь>"), "{text}");
+        assert!(text.contains("--i-have-a-backup"), "{text}");
+        assert!(text.contains("рекомендуется"), "{text}");
+        assert!(text.contains("резервная копия"), "{text}");
     }
 
     #[test]

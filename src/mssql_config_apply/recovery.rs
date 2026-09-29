@@ -58,6 +58,9 @@ pub struct RecoveryRequest<'a> {
     pub new_objects: &'a NewObjects,
     /// Every `Params` row the script rewrites.
     pub params_rewrites: &'a [ParamsRewrite],
+    /// The backup taken (or acknowledged) before a restructuring; the artifact
+    /// names it.
+    pub backup: Option<&'a super::BackupRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +81,9 @@ struct Manifest<'a> {
     new_objects: usize,
     appended_files: usize,
     blobs: &'a str,
+    /// The way back for the tables: a backup file, or the operator's word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<&'a super::BackupRecord>,
 }
 
 fn tsv(value: &str) -> String {
@@ -432,6 +438,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
             RecoveryBlobs::Changed => "changed",
             RecoveryBlobs::None => "none",
         },
+        backup: request.backup,
     };
     fs::write(
         request.dir.join("manifest.json"),
@@ -450,7 +457,9 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              MobileVersions.dat.before   Files.MobileVersions.dat before the new head GUID\n\
              change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\
              params_replaced.tsv   the search-information rows of Params (and siVersions) rewritten for new forms/templates, with their old bytes\n\
-             new_registrations.tsv the new objects registered in _ConfigChngR (per node) and the files listed for them\n\n\
+             new_registrations.tsv the new objects registered in _ConfigChngR (per node) and the files listed for them\n\
+             manifest.json `backup`  the backup taken before a restructuring (file, seconds) or the operator's word that one exists;\n\
+                                   the rebuilt tables come back only from it\n\n\
              To take the apply back: stage the saved rows in ConfigSave (name, part, sizes, attributes,\n\
              creation, modified, bytes), then run `ibcmd-rs mssql-config-apply` (or the native apply)\n\
              on the stopped database; restore special_rows.tsv, MobileVersions.dat, the Params rows and\n\
