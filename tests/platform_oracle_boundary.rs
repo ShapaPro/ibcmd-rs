@@ -68,23 +68,35 @@ fn released_infobase_mode_refuses_rather_than_runs_the_platform() {
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("Указана неполная команда"), "{stdout}");
     }
-    // What the platform would do is refused by name, with no PATH to find
-    // it on and nothing launched.
-    let output = run(&[
-        "infobase",
-        "config",
-        "apply",
-        "--dbms=MSSQLServer",
-        "--db-server=localhost",
-        "--db-name=ibcmd_rs_boundary",
-        "--force",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("не поддерживается в этой версии ibcmd-rs"),
-        "{stderr}"
-    );
+    // What only the platform does is refused by name, with no PATH to find
+    // it on and nothing launched. `config apply` itself is served by
+    // ibcmd-rs (without the platform) since 0.4; its dynamic update is not.
+    for args in [
+        &[
+            "infobase",
+            "create",
+            "--dbms=MSSQLServer",
+            "--db-server=localhost",
+            "--db-name=ibcmd_rs_boundary",
+        ][..],
+        &[
+            "infobase",
+            "config",
+            "apply",
+            "--dbms=MSSQLServer",
+            "--db-server=localhost",
+            "--db-name=ibcmd_rs_boundary",
+            "--dynamic=force",
+        ][..],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("не поддерживается в этой версии ibcmd-rs"),
+            "{args:?}: {stderr}"
+        );
+    }
 }
 
 #[test]
