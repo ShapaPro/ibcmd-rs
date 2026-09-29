@@ -1,7 +1,9 @@
 //! The derived caches of a new object (issue #403, part of S1 = #391): the `Params` `*.si` rows the
-//! platform rewrites when a configuration change adds an object or a tabular section.
+//! platform rewrites when a configuration change adds a catalog, a document or a tabular section
+//! ([`plan::new_object`], [`plan::new_tabular_section`]).
 //!
-//! See `docs/apply/derived-caches.md` for the measurements behind every rule here.
+//! See `docs/apply/derived-caches.md` for the measurements behind every rule here; the lab kit of the
+//! proofs is `scripts/apply-trace/lab/s1g-caches/`.
 
 pub mod facts;
 pub mod help_props;
