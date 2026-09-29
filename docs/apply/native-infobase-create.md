@@ -1,8 +1,9 @@
-# What native `infobase create` writes (SQL Server, 8.3.27)
+# What native `infobase create` writes (SQL Server, 8.3.27 and 8.5)
 
-Issue #342 (0.4, track "trace"). Evidence: three runs of the native `ibcmd infobase create` on empty SQL
+Issue #342 (0.4, track "trace"). Evidence: four runs of the native `ibcmd infobase create` on empty SQL
 Server databases, each traced (Extended Events) and compared row by row before and after with the capture
-kit of `scripts/apply-trace/`. Platform `ibcmd` 8.3.27.2214, SQL Server 2025 (17.0.1135), 2026-09-29.
+kit of `scripts/apply-trace/`. Platform `ibcmd` 8.3.27.2214 (runs 1-3) and 8.5.1.1150 (run 4, section 8), SQL Server 2025
+(17.0.1135), 2026-09-29.
 The verbatim material a re-implementation needs is in `docs/apply/evidence/native-create-8.3.27/`:
 `ddl-ru_RU.sql` (every DDL statement of run 1, in order), `ddl-en_US-differences.sql` (what run 3 adds),
 `DBSchema.txt` (the 22114-byte schema text, with BOM), `DBNames.txt` (the inflated numbering, 3236 bytes) and
@@ -13,10 +14,11 @@ The verbatim material a re-implementation needs is in `docs/apply/evidence/nativ
 | 1 | `infobase create --dbms=MSSQLServer --db-server=localhost --db-name=<db> --data=<dir> --locale=ru_RU` | empty, no table, collation Cyrillic_General_CI_AS | 72 tables, 3.8 s wall, 2.9 s of SQL |
 | 2 | the same command, another empty database | the same | identical but for per-instance random values |
 | 3 | `--locale=en_US` | the same | the collation of the database and of the text columns changes to Latin1_General_CI_AS |
+| 4 | platform **8.5.1.1150**, `--locale=ru_RU` | the same | the same 72 tables and 141 DDL statements; only `ibparams.inf` differs (section 8) |
 
 Nothing else needs to exist before the call: no login, no database option. `--create-database` was not used
 (the database was made by `restore-clone.ps1 -Corpus empty`); `--date-offset` (default 2000) was not varied.
-Not covered here (planned, not measured yet): platform 8.5, other locales.
+Not covered here (planned, not measured yet): other locales, `en_US` on 8.5.
 
 ## 1. What the platform does, in order
 
@@ -172,7 +174,7 @@ and prove it equal to the replay by the same diff. Do not try to derive the rand
 the platform itself draws them fresh for each infobase.
 
 **Open questions** (not blocking): which locale names map to which collations besides the two tested; the same
-capture on 8.5 (planned); whether a database created with `--create-database` differs from a pre-made one (file
+capture with `en_US` on 8.5; whether a database created with `--create-database` differs from a pre-made one (file
 placement only, by the platform's documentation; not run).
 
 ## 7. What follows a create (case 3 of `native-apply-trace.md`)
@@ -200,3 +202,41 @@ What is missing after the failed apply compared with an apply of an existing inf
 exist) and the three help-index files `userDocs_ru.bin`, `userVocabulary_ru.bin`, `userPostings_ru.bin` (the
 step after the failure), and the row of `_Const3050` (deleted, not re-inserted). Whether these matter is an open
 question of `native-apply-trace.md`.
+
+## 8. Platform 8.5.1.1150
+
+Run 4: `C:\Program Files\1cv8\8.5.1.1150\bin\ibcmd.exe infobase create --dbms=MSSQLServer --db-server=localhost
+--db-name=<db> --data=<dir> --locale=ru_RU` on a new empty database (collation Cyrillic_General_CI_AS), traced like
+the others (capture `c85-native-create`; exit 0, 24.0 s on a busy machine against 3.8 s on an idle one, 444 events,
+426 statements, 9 explicit transactions). Evidence: `docs/apply/evidence/native-create-8.5/` (`diff-vs-8.3.27.md` is the
+kit's diff of the two created databases, `decoded-rows.md` the differing rows).
+
+**The 8.5 create writes what the 8.3.27 create writes.** Measured:
+
+* the same 72 tables, the same 141 DDL statements (72 `CREATE TABLE`, 68 `CREATE INDEX`, 1 `CREATE FUNCTION`), in the same
+  order, statement for statement once the automatic constraint names (`PK__...`) are masked;
+* `DBSchema` (22 114 B, with BOM), `SchemaStorage`, `DBNames`, `evlogparams.inf`, `locale.inf`, `Files.dbcopiesparams`
+  byte-identical; the same rows in the same six tables;
+* **`IBVersion = 7`, `PlatformVersionReq = 80313` unchanged**: an 8.5 create does not require a newer platform than an
+  8.3.27 one (the field is not the version of the platform that created the infobase);
+* dates of the rows written by create are real years (2026), as in 8.3.27.
+
+**Differences** (all of them): the three random values (`log.inf` guid, `DBNamesVersion-DBNames` guid, the u64 in
+`ibparams.inf`), the `service_broker_guid` of the new database, and the text of **`ibparams.inf`, 293 B on 8.5 against
+325 B on 8.3.27**: 8.5 writes the two nested groups without their trailing fields.
+
+```
+8.3.27: {20,0,0,1,"",1200,86400,0000..,0000..,-1,0,4,5,30,"",
+         {0,"",3,8,3,30,"","","",<u64>,465,1,"","","","",160,0,0,0,432000,1,0,0,"",1,1,600,0,2,"/AccessToken",""},
+         0,0,0,0,0,432000,0,0,2,0,0,0,
+         {3,6,3,60,"","","",0,465,1,"","","","",600,0,2,"",""} }
+8.5   : {20,0,0,1,"",1200,86400,0000..,0000..,-1,0,4,5,30,"",
+         {0,"",3,8,3,30,"","","",<u64>,465,1,"","","","",160,0,0,0,432000,1,0,0,"",1,1,600},
+         0,0,0,0,0,432000,0,0,2,0,0,0,
+         {3,6,3,60,"","","",0,465,1,"","","","",600},0}
+```
+
+(8.5 omits `,0,2,"/AccessToken",""` in the first group and `,0,2,"",""` in the last one, and closes the whole value with
+`,0`.) **Consequence for a re-implementation:** one template serves both platforms except `ibparams.inf`, which has to
+be chosen by the target platform. The first apply that follows a create is the subject of `native-apply-trace.md`
+(section 6.3, measured on 8.3.27); on 8.5 it was not traced (section 11 there covers case 1 on an existing infobase).
