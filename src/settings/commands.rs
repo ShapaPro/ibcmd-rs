@@ -119,6 +119,7 @@ pub fn prepare_dump_config_with(
                 },
             )?
         };
+        crate::platform::note_export_platform(platform);
         args.source_version = platform.xml_version();
     }
     Ok(())
@@ -262,6 +263,7 @@ pub fn prepare_dump_extension_with(
             DatabaseTarget::new(Some(args.server.as_str()), &args.database),
             PlatformHint::None,
         )?;
+        crate::platform::note_export_platform(platform);
         args.source_version = platform.xml_version();
     }
     Ok(())

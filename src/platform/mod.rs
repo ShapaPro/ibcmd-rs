@@ -66,6 +66,10 @@ pub const CONSTANT_XML_FORMAT: &str = "platform.xml_format";
 pub const CONSTANT_FORM_LAYOUT: &str = "platform.form_layout";
 /// Profile constant prefix: `platform.feature.<name>` = the feature's uuid.
 pub const CONSTANT_FEATURE_PREFIX: &str = "platform.feature.";
+/// Profile constant: `main` when the build writes `ButtonImportance` `Main`
+/// on a default button whose record holds the code of no importance of its
+/// own (8.5.1.1529; 8.5.1.1150 writes nothing there).
+pub const CONSTANT_DEFAULT_BUTTON_IMPORTANCE: &str = "platform.form.default_button_importance";
 /// The palette-colours feature (since 8.5.1): every `PaletteColor` object a
 /// configuration holds reports it, and its `version` row lists it.
 pub const FEATURE_PALETTE_COLORS: &str = "palette-colors";
@@ -157,6 +161,10 @@ struct Entry {
     features: Vec<PlatformFeature>,
     native_profile: Option<MssqlNativePlatformProfile>,
     live_activation: bool,
+    /// See [`CONSTANT_DEFAULT_BUTTON_IMPORTANCE`]. A release never has it: it
+    /// stands for the builds that agree on the XML format, the form layout and
+    /// the features, and keeps the behavior of the oldest of them.
+    default_button_importance: bool,
 }
 
 #[derive(Debug)]
@@ -228,6 +236,7 @@ fn build_registry() -> Result<Registry> {
             features: first.features.clone(),
             native_profile: None,
             live_activation: false,
+            default_button_importance: false,
         });
     }
     let mut entries = builds;
@@ -298,6 +307,14 @@ fn build_entry(
         .capabilities
         .get(&main_write)
         .is_some_and(|state| state.value == CapabilityState::Supported);
+    let default_button_importance = match constant(CONSTANT_DEFAULT_BUTTON_IMPORTANCE) {
+        None => false,
+        Some("main") => true,
+        Some(other) => bail!(
+            "platform profile `{}` declares an unknown {CONSTANT_DEFAULT_BUTTON_IMPORTANCE} `{other}`",
+            profile.id
+        ),
+    };
     Ok(Some(Entry {
         name,
         release,
@@ -307,6 +324,7 @@ fn build_entry(
         features,
         native_profile,
         live_activation,
+        default_button_importance,
     }))
 }
 
@@ -416,6 +434,13 @@ impl PlatformSpec {
         format!("Version{major}_{minor}_{patch}")
     }
 
+    /// Whether the build writes `ButtonImportance` `Main` on a default button
+    /// whose record holds the code of no importance of its own (see
+    /// [`CONSTANT_DEFAULT_BUTTON_IMPORTANCE`]).
+    pub fn writes_default_button_importance(&self) -> bool {
+        self.entry.default_button_importance
+    }
+
     /// The native MSSQL profile of an exact build, when one is declared.
     pub fn native_profile(&self) -> Option<MssqlNativePlatformProfile> {
         self.entry.native_profile
@@ -428,6 +453,27 @@ impl PlatformSpec {
     pub fn live_activation(&self) -> bool {
         self.entry.live_activation
     }
+}
+
+static EXPORT_DEFAULT_BUTTON_IMPORTANCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Records the platform an export command runs for, once, at its start: the
+/// writers of the XML spell a few things by the build (the XML format alone
+/// does not tell 8.5.1.1150 from 8.5.1.1529). With no platform named, or a
+/// release, the export keeps the spelling of the oldest build the registry
+/// knows for the format.
+pub fn note_export_platform(platform: PlatformSpec) {
+    EXPORT_DEFAULT_BUTTON_IMPORTANCE.store(
+        platform.writes_default_button_importance(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// See [`PlatformSpec::writes_default_button_importance`], for the platform
+/// [`note_export_platform`] recorded.
+pub fn export_writes_default_button_importance() -> bool {
+    EXPORT_DEFAULT_BUTTON_IMPORTANCE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Parses a platform version: an exact build (`8.3.27.2214`) or a release

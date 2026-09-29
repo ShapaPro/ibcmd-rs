@@ -1391,7 +1391,11 @@ fn upgrade_button(edits: &mut XmlEdits<'_>, button: usize) -> Result<()> {
 /// importance of its own) on a default button: 8.5.1.1529 writes `Main`, as
 /// it does for the 8.3.27 default button [`upgrade_button`] reads (fixture
 /// `v85_extension/v85_form`: a button saved by 8.5 with `DefaultButton`
-/// `true` and code `1`).
+/// `true` and code `1`). 8.5.1.1150 writes nothing there: three default
+/// buttons of the БСП 8.5 configuration (`DataProcessors/ИнформационныйЦентр`,
+/// `Reports/ИсторияРазмераПриложения`) carry code `1` and no importance in its
+/// own dump. The rule therefore applies to the builds whose registry profile
+/// declares `platform.form.default_button_importance`.
 fn default_button_importance(
     edits: &mut XmlEdits<'_>,
     button: usize,
@@ -1554,7 +1558,9 @@ pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
                 object_refs,
                 &mut assets,
             )?;
-            default_button_importance(&mut edits, element, item)?;
+            if crate::platform::export_writes_default_button_importance() {
+                default_button_importance(&mut edits, element, item)?;
+            }
         }
     }
     for (element, id) in commands {

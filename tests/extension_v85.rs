@@ -15,7 +15,7 @@ fn assert_case(case: &str, input: &str) {
         .args(["cf", "export"])
         .arg(common::fixture(input))
         .arg(&out)
-        .args(["--source-version", "2.21", "--overwrite"])
+        .args(["--platform", "8.5.1.1529", "--overwrite"])
         .output()
         .expect("run ibcmd-rs");
     assert!(
