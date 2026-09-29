@@ -1107,6 +1107,12 @@ pub fn decode_source_asset(
     }
 }
 
+/// The storage payload of a module body (`Module.bsl` and its kin), as
+/// `compile_source_asset` writes it; for callers that already know the row.
+pub fn encode_source_module(text: &[u8]) -> Result<Vec<u8>, AssetCodecError> {
+    encode_module(text)
+}
+
 fn encode_module(text: &[u8]) -> Result<Vec<u8>, AssetCodecError> {
     str::from_utf8(text)
         .map_err(|_| AssetCodecError::InvalidModel("module is not UTF-8".into()))?;

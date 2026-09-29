@@ -20,7 +20,7 @@ use ibcmd_core::{
     model::{CanonicalConfiguration, CanonicalObject},
     profile::EffectiveProfile,
     storage::{
-        MultipartIdentity, StoragePatch, StoragePatchEntry, StoragePatchOutcome,
+        MultipartIdentity, StorageKey, StoragePatch, StoragePatchEntry, StoragePatchOutcome,
         StoragePatchTarget, StorageProvenance,
     },
     validate::{ValidatedConfiguration, validate_configuration},
@@ -41,7 +41,7 @@ use super::{
     families::{
         assets::{
             AssetCodecProfile, SourceAssetCodec, SourceAssetPayload, SourceAssetRegistry,
-            SourceAssetRoute, compile_source_asset,
+            SourceAssetRoute, compile_source_asset, encode_source_module,
         },
         business_process::{BusinessProcessMetadataProfile, compile_business_process_metadata},
         catalog::{CatalogMetadataProfile, compile_catalog_metadata},
@@ -239,6 +239,165 @@ pub fn compile_extension_overlay_source_tree(
     target_profile: &EffectiveProfile,
 ) -> Result<BootstrapCompilation, BootstrapCompileError> {
     compile_source_tree_mode(tree, xml_dialect, target_profile, true)
+}
+
+/// Compiles the module bodies of an extension source tree for an overlay on
+/// the extension's active rows, without decoding the objects' metadata.
+///
+/// An overlay keeps every metadata row of the active image
+/// (`compile_extension_overlay_source_tree`), so a module needs nothing from
+/// its owner's document but the owner's family and uuid. The document of an
+/// *adopted* object lists only the properties the extension records (no
+/// `Synonym`, no property inventory of its family), which the metadata decoders
+/// refuse, and the root object of an extension carries properties with no
+/// base-free projection. This compile reads the family and uuid off each
+/// owner's document, consumes the document without decoding it, and compiles
+/// the `.bsl` module bodies under it. Any other file (a form, a picture, a
+/// template) is refused as `UnconsumedSource` or `UnsupportedAssetCodec`: it
+/// needs the full compile.
+pub fn compile_extension_module_overlay(
+    tree: &SourceTree,
+    target_profile: &EffectiveProfile,
+) -> Result<BootstrapCompilation, BootstrapCompileError> {
+    tree.validate()
+        .map_err(|source| BootstrapCompileError::SourceTree(source.to_string()))?;
+    let storage_profile = target_profile
+        .storage_profile
+        .as_ref()
+        .map(|coordinate| coordinate.value.clone())
+        .ok_or(BootstrapCompileError::MissingTargetCoordinate(
+            "storage_profile",
+        ))?;
+
+    let mut metadata_sources = Vec::<MetadataSource>::new();
+    let mut consumed_indexes = BTreeSet::<usize>::new();
+    let mut non_source_indexes = BTreeSet::<usize>::new();
+    for (source_index, source) in tree.entries().iter().enumerate() {
+        let path = source.path().as_str();
+        if !path.to_ascii_lowercase().ends_with(".xml") {
+            continue;
+        }
+        let document = XmlReader::from_slice(source.bytes()).map_err(|error| {
+            BootstrapCompileError::InvalidXml {
+                path: path.to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+        if classify_export_manifest(&document, path)? {
+            non_source_indexes.insert(source_index);
+            consumed_indexes.insert(source_index);
+            continue;
+        }
+        if document.root().name().local() != "MetaDataObject" {
+            continue;
+        }
+        let (family, uuid) = metadata_family_and_uuid(&document).ok_or_else(|| {
+            BootstrapCompileError::InvalidMetadataEnvelope {
+                path: path.to_owned(),
+                message: "MetaDataObject must contain exactly one metadata element with a uuid"
+                    .to_owned(),
+            }
+        })?;
+        consumed_indexes.insert(source_index);
+        // The root object is retained from the active image with the rest of
+        // the metadata rows; it owns no module.
+        if family == "Configuration" {
+            continue;
+        }
+        metadata_sources.push(MetadataSource {
+            owner_directory: owner_directory(path, &family),
+            path: path.to_owned(),
+            family,
+            uuid,
+        });
+    }
+
+    let assets = resolve_assets(tree, &metadata_sources, &consumed_indexes)?;
+    let mut compiled = BTreeMap::<String, StoragePatchEntry>::new();
+    for asset in &assets {
+        let source = &tree.entries()[asset.source_index];
+        if !matches!(asset.route.codec(), SourceAssetCodec::Module) {
+            return Err(BootstrapCompileError::UnsupportedAssetCodec {
+                path: source.path().as_str().to_owned(),
+                family: asset.route.owner_family().to_owned(),
+                codec: asset.route.codec(),
+            });
+        }
+        let bytes =
+            encode_source_module(source.bytes()).map_err(|error| BootstrapCompileError::Asset {
+                path: source.path().as_str().to_owned(),
+                message: error.to_string(),
+            })?;
+        // The row of an object's module is `<uuid><suffix>`; a caller that
+        // overlays it checks the row exists in the image it overlays.
+        let key = StorageKey::new(&format!("{}{}", asset.owner_uuid, asset.route.suffix()))
+            .map_err(|error| BootstrapCompileError::Graph(error.to_string()))?;
+        let provenance = StorageProvenance::new(&format!(
+            "extension-overlay:module:{}:{}",
+            asset.route.owner_family(),
+            asset.route.relative_path()
+        ))
+        .map_err(|error| BootstrapCompileError::Patch(error.to_string()))?;
+        let entry = StoragePatchEntry::new(
+            StoragePatchTarget::new(key, MultipartIdentity::single(), provenance),
+            StoragePatchOutcome::compiled(bytes)
+                .map_err(|error| BootstrapCompileError::Patch(error.to_string()))?,
+        );
+        insert_compiled(&mut compiled, entry)?;
+    }
+
+    let patch_retained_budget = tree
+        .entries()
+        .iter()
+        .map(|entry| entry.bytes().len())
+        .sum::<usize>()
+        .saturating_mul(BOOTSTRAP_PATCH_RETENTION_FACTOR);
+    let patch = StoragePatch::with_retained_byte_limit(
+        compiled.into_values().collect(),
+        patch_retained_budget,
+    )
+    .map_err(|source| BootstrapCompileError::Patch(source.to_string()))?;
+    patch
+        .preflight()
+        .map_err(|source| BootstrapCompileError::Patch(source.to_string()))?;
+    Ok(BootstrapCompilation {
+        target_profile: target_profile.id.clone(),
+        storage_profile,
+        source_files: tree.entries().len(),
+        metadata_files: metadata_sources.len(),
+        asset_files: assets.len(),
+        non_source_files: non_source_indexes.len(),
+        patch,
+    })
+}
+
+/// The family and uuid a `MetaDataObject` document declares on its one
+/// metadata element, read without decoding the object.
+fn metadata_family_and_uuid(document: &XmlDocument) -> Option<(String, ObjectUuid)> {
+    let mut elements = document.root().children().iter().filter_map(|node| {
+        if let XmlNode::Element(element) = node {
+            Some(element)
+        } else {
+            None
+        }
+    });
+    let element = elements.next()?;
+    if elements.next().is_some() {
+        return None;
+    }
+    let uuid = element
+        .attributes()
+        .iter()
+        .find_map(|attribute| match attribute.kind() {
+            AttributeKind::Ordinary(name) if name.prefix().is_none() && name.local() == "uuid" => {
+                Some(attribute.value())
+            }
+            _ => None,
+        })?;
+    Some((
+        element.name().local().to_owned(),
+        ObjectUuid::parse(uuid).ok()?,
+    ))
 }
 
 fn compile_source_tree_mode(
@@ -2183,6 +2342,120 @@ mod tests {
             .get(&ProfileId::parse("platform-8.3.27.1989").unwrap())
             .unwrap()
             .clone()
+    }
+
+    /// What the platform exports for an object an extension adopted: the header,
+    /// the properties the extension records and no property inventory of the
+    /// family (no `Synonym`, no `Global`, ...).
+    const ADOPTED_COMMON_MODULE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+  <CommonModule uuid="20000000-0000-4000-8000-000000000001">
+    <InternalInfo/>
+    <Properties>
+      <ObjectBelonging>Adopted</ObjectBelonging>
+      <Name>Portable</Name>
+      <Comment/>
+      <ExtendedConfigurationObject>30000000-0000-4000-8000-000000000001</ExtendedConfigurationObject>
+    </Properties>
+  </CommonModule>
+</MetaDataObject>"#;
+
+    /// An extension root with a property no base-free projection exists for.
+    const EXTENSION_ROOT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+  <Configuration uuid="10000000-0000-4000-8000-000000000001">
+    <Properties>
+      <Name>Extension</Name>
+      <DefaultRoles><xr:Item xsi:type="xr:MDObjectRef">Role.Administrator</xr:Item></DefaultRoles>
+    </Properties>
+    <ChildObjects><CommonModule>Portable</CommonModule></ChildObjects>
+  </Configuration>
+</MetaDataObject>"#;
+
+    const DUMP_INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo" version="2.20"><ConfigVersions/></ConfigDumpInfo>"#;
+
+    fn adopted_module_tree(extra: Vec<SourceEntry>) -> SourceTree {
+        let mut entries = vec![
+            entry("Configuration.xml", EXTENSION_ROOT.as_bytes()),
+            entry("ConfigDumpInfo.xml", DUMP_INFO.as_bytes()),
+            entry(
+                "CommonModules/Portable.xml",
+                ADOPTED_COMMON_MODULE.as_bytes(),
+            ),
+            entry(
+                "CommonModules/Portable/Ext/Module.bsl",
+                b"Procedure Smoke() Export
+EndProcedure",
+            ),
+        ];
+        entries.extend(extra);
+        SourceTree::new(entries).unwrap()
+    }
+
+    /// An overlay retains every metadata row of the active image, so a module of
+    /// an adopted object needs its owner's family and uuid and nothing else: the
+    /// document that the metadata decoders refuse (and the root that has no
+    /// base-free projection) are consumed unread, and the module is the one row.
+    #[test]
+    fn a_module_overlay_reads_only_the_owner_family_and_uuid() {
+        let tree = adopted_module_tree(Vec::new());
+        assert!(
+            compile_extension_overlay_source_tree(
+                &tree,
+                XmlDialect::parse("2.20").unwrap(),
+                &target_profile(),
+            )
+            .is_err(),
+            "the full compile refuses an adopted object's document"
+        );
+
+        let overlay = compile_extension_module_overlay(&tree, &target_profile()).unwrap();
+        assert_eq!(overlay.source_files(), 4);
+        assert_eq!(overlay.metadata_files(), 1);
+        assert_eq!(overlay.asset_files(), 1);
+        assert_eq!(overlay.non_source_files(), 1);
+        let keys = overlay
+            .patch()
+            .entries()
+            .iter()
+            .map(|entry| entry.target().key().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["20000000-0000-4000-8000-000000000001.0"]);
+
+        // The row is the one an ordinary compile of the same module writes.
+        let full = compile_bootstrap_source_tree(
+            &full_tree(),
+            XmlDialect::parse("2.20").unwrap(),
+            &target_profile(),
+        )
+        .unwrap();
+        let ordinary = full
+            .patch()
+            .entries()
+            .iter()
+            .find(|entry| entry.target().key().as_str() == keys[0])
+            .unwrap();
+        assert_eq!(overlay.patch().entries()[0].outcome(), ordinary.outcome());
+    }
+
+    #[test]
+    fn a_module_overlay_refuses_a_body_that_is_not_a_module() {
+        // A template, a picture or a form body needs the full compile.
+        let tree = adopted_module_tree(vec![entry(
+            "CommonModules/Portable/Ext/Picture.png",
+            b"not a module",
+        )]);
+        let error = compile_extension_module_overlay(&tree, &target_profile()).unwrap_err();
+        assert_eq!(error.code(), "unconsumed_source", "{error}");
+
+        // A document that is no metadata object is not an owner either.
+        let tree = adopted_module_tree(vec![entry(
+            "CommonModules/Portable/Ext/Form.xml",
+            br#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+        )]);
+        let error = compile_extension_module_overlay(&tree, &target_profile()).unwrap_err();
+        assert_eq!(error.code(), "unconsumed_source", "{error}");
     }
 
     #[test]
