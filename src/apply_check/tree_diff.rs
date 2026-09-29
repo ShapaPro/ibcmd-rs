@@ -10,10 +10,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::metadata_model::xml::Element;
 
 /// One step of the path from the object's element to a change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Seg {
     /// The element's local name (`Attribute`, `Properties`, `Type`), or
     /// `@type` for an attribute of the element before it.
@@ -23,7 +25,8 @@ pub struct Seg {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChangeOp {
     Added,
     Removed,

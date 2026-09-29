@@ -386,7 +386,7 @@ pub fn check_staged(sql: &SqlExec, database: &str, xml_version: Option<&str>) ->
         .into_iter()
         .map(|(name, bytes)| (name, content(&bytes)))
         .collect();
-    let staged_service = ["root", "version", "versions"]
+    let staged_service = ["root", "version", "versions", "deleted"]
         .iter()
         .filter(|name| save_names.contains_key(**name))
         .map(|name| name.to_string())
@@ -394,6 +394,7 @@ pub fn check_staged(sql: &SqlExec, database: &str, xml_version: Option<&str>) ->
     let fetched = rows.db.rows("ConfigSave", &staged_service)?;
     inputs.staged_root = fetched.get("root").map(|bytes| content(bytes));
     inputs.staged_version = fetched.get("version").map(|bytes| content(bytes));
+    inputs.staged_deleted = fetched.get("deleted").map(|bytes| content(bytes));
     if let Some(bytes) = fetched.get("versions") {
         inputs.staged_has_versions = true;
         inputs.new_versions = parse_versions(&content(bytes))?;

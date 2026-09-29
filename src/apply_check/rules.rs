@@ -17,6 +17,7 @@
 //! their descriptors is applied by copying rows.
 
 use super::roles::Effect;
+use super::rule_id::RuleId;
 use super::tree_diff::{Change, ChangeOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,24 +31,24 @@ pub enum Class {
 #[derive(Debug, Clone, Copy)]
 pub struct Decision {
     pub class: Class,
-    pub rule: &'static str,
+    pub rule: RuleId,
 }
 
-const fn safe(rule: &'static str) -> Decision {
+const fn safe(rule: RuleId) -> Decision {
     Decision {
         class: Class::Safe,
         rule,
     }
 }
 
-const fn structure(rule: &'static str) -> Decision {
+const fn structure(rule: RuleId) -> Decision {
     Decision {
         class: Class::Structure,
         rule,
     }
 }
 
-const fn data(rule: &'static str) -> Decision {
+const fn data(rule: RuleId) -> Decision {
     Decision {
         class: Class::Data,
         rule,
@@ -283,10 +284,10 @@ fn child_of(tag: &str) -> Option<Child> {
 pub fn decide(kind: &str, change: &Change) -> Decision {
     let names = change.names();
     if owns_no_stored_data(kind) {
-        return safe("the kind owns no stored data");
+        return safe(RuleId::KindOwnsNoStoredData);
     }
     let Some(section) = names.first().copied() else {
-        return structure("the object itself changed");
+        return structure(RuleId::ObjectChanged);
     };
     match section {
         "Properties" => decide_property(kind, &names[1..]),
@@ -294,121 +295,113 @@ pub fn decide(kind: &str, change: &Change) -> Decision {
         // one is what adding or dropping the object itself is.
         "ChildObjects" if kind == "Configuration" => match names.get(1).copied() {
             Some(listed_kind) => decide_lifecycle(listed_kind),
-            None => structure("the objects of the configuration changed"),
+            None => structure(RuleId::ConfigurationObjectsChanged),
         },
         "ChildObjects" => decide_child(&names[1..], change),
-        "InternalInfo" => structure("generated types of the object changed"),
-        _ => structure("a part of the descriptor no rule covers"),
+        "InternalInfo" => structure(RuleId::GeneratedTypesChanged),
+        _ => structure(RuleId::DescriptorPartNotCovered),
     }
 }
 
 fn decide_property(kind: &str, names: &[&str]) -> Decision {
     let Some(tag) = names.first().copied() else {
-        return structure("the properties changed");
+        return structure(RuleId::PropertiesChanged);
     };
     if tag == "StandardAttributes" {
         // `StandardAttributes/StandardAttribute[Code]/FillChecking`
         return match names.get(2).copied() {
             Some(property) if SAFE_ATTRIBUTE_PROPERTIES.contains(&property) => {
-                safe("presentation of a standard attribute")
+                safe(RuleId::StandardAttributePresentation)
             }
-            _ => structure("a standard attribute's property no rule covers"),
+            _ => structure(RuleId::StandardAttributePropertyNotCovered),
         };
     }
     if safe_property(kind, tag) {
-        safe("presentation or behaviour property")
+        safe(RuleId::PresentationProperty)
     } else if kind == "ScheduledJob" {
-        data("the platform keeps the scheduled jobs in a table of its own")
+        data(RuleId::ScheduledJobStored)
     } else {
-        structure("a property no rule covers")
+        structure(RuleId::PropertyNotCovered)
     }
 }
 
 fn decide_child(names: &[&str], change: &Change) -> Decision {
     let Some(tag) = names.first().copied() else {
-        return structure("the child objects changed");
+        return structure(RuleId::ChildObjectsChanged);
     };
     let Some(child) = child_of(tag) else {
-        return structure("a kind of child object no rule covers");
+        return structure(RuleId::ChildKindNotCovered);
     };
     let whole = names.len() == 1;
     match child {
-        Child::Interface => safe("commands, forms and templates are rows and lists of names"),
+        Child::Interface => safe(RuleId::InterfaceRows),
         Child::Column => {
             if whole {
                 return match change.op {
-                    ChangeOp::Added | ChangeOp::Removed => {
-                        structure("a column is added or dropped")
-                    }
-                    _ => structure("the columns changed order"),
+                    ChangeOp::Added | ChangeOp::Removed => structure(RuleId::ColumnAddedOrDropped),
+                    _ => structure(RuleId::ColumnsReordered),
                 };
             }
             match (names.get(1).copied(), names.get(2).copied()) {
                 (Some("Properties"), Some(property))
                     if SAFE_ATTRIBUTE_PROPERTIES.contains(&property) =>
                 {
-                    safe("presentation or behaviour of an attribute")
+                    safe(RuleId::AttributePresentation)
                 }
-                (Some("Properties"), Some(_)) => {
-                    structure("a property of an attribute no rule covers")
-                }
-                _ => structure("a part of an attribute no rule covers"),
+                (Some("Properties"), Some(_)) => structure(RuleId::AttributePropertyNotCovered),
+                _ => structure(RuleId::AttributePartNotCovered),
             }
         }
         Child::TabularSection => {
             if whole {
-                return structure("a tabular section is added, dropped or moved");
+                return structure(RuleId::TabularSectionAddedDroppedMoved);
             }
             match names.get(1).copied() {
                 Some("Properties") => match names.get(2).copied() {
                     Some("Name" | "Synonym" | "Comment" | "ToolTip" | "FillChecking") => {
-                        safe("presentation of a tabular section")
+                        safe(RuleId::TabularSectionPresentation)
                     }
                     Some("StandardAttributes") => match names.get(4).copied() {
                         Some(property) if SAFE_ATTRIBUTE_PROPERTIES.contains(&property) => {
-                            safe("presentation of a tabular section's standard attribute")
+                            safe(RuleId::TabularSectionStandardAttributePresentation)
                         }
-                        _ => structure("a tabular section's standard attribute no rule covers"),
+                        _ => structure(RuleId::TabularSectionStandardAttributeNotCovered),
                     },
-                    _ => structure("a property of a tabular section no rule covers"),
+                    _ => structure(RuleId::TabularSectionPropertyNotCovered),
                 },
                 Some("ChildObjects") => {
                     // The attributes of the tabular section.
                     let rest = &names[2..];
                     match rest.first().copied().and_then(child_of) {
                         Some(Child::Column) if rest.len() == 1 => {
-                            structure("a column of a tabular section is added, dropped or moved")
+                            structure(RuleId::TabularSectionColumnAddedDroppedMoved)
                         }
                         Some(Child::Column) => match (rest.get(1).copied(), rest.get(2).copied()) {
                             (Some("Properties"), Some(property))
                                 if SAFE_ATTRIBUTE_PROPERTIES.contains(&property) =>
                             {
-                                safe("presentation or behaviour of a tabular section's attribute")
+                                safe(RuleId::TabularSectionAttributePresentation)
                             }
-                            _ => structure(
-                                "a property of a tabular section's attribute no rule covers",
-                            ),
+                            _ => structure(RuleId::TabularSectionAttributePropertyNotCovered),
                         },
-                        _ => structure("a part of a tabular section no rule covers"),
+                        _ => structure(RuleId::TabularSectionPartNotCovered),
                     }
                 }
-                _ => structure("a part of a tabular section no rule covers"),
+                _ => structure(RuleId::TabularSectionPartNotCovered),
             }
         }
         Child::EnumValue => {
             if whole {
                 return match change.op {
-                    ChangeOp::Added | ChangeOp::Removed => {
-                        data("a value of an enumeration is added or dropped")
-                    }
-                    _ => data("the values of an enumeration changed order"),
+                    ChangeOp::Added | ChangeOp::Removed => data(RuleId::EnumValueAddedOrDropped),
+                    _ => data(RuleId::EnumValuesReordered),
                 };
             }
             match (names.get(1).copied(), names.get(2).copied()) {
                 (Some("Properties"), Some("Name" | "Synonym" | "Comment")) => {
-                    safe("presentation of an enumeration value")
+                    safe(RuleId::EnumValuePresentation)
                 }
-                _ => structure("a part of an enumeration value no rule covers"),
+                _ => structure(RuleId::EnumValuePartNotCovered),
             }
         }
     }
@@ -417,9 +410,9 @@ fn decide_child(names: &[&str], change: &Change) -> Decision {
 /// Judges the appearance or disappearance of a whole object.
 pub fn decide_lifecycle(kind: &str) -> Decision {
     if owns_no_stored_data(kind) {
-        safe("the kind owns no stored data")
+        safe(RuleId::KindOwnsNoStoredData)
     } else {
-        structure("an object that owns tables or stored data is added or dropped")
+        structure(RuleId::ObjectWithStorageAddedOrDropped)
     }
 }
 

@@ -41,6 +41,7 @@ use super::descriptor::{self, ObjectRef};
 use super::model::{ObjectOp, Reason, ReasonClass, Verdict};
 use super::plan::{self, Decoder, Plan};
 use super::roles::{Effect, RowName, file_role, parse_row_name};
+use super::rule_id::RuleId;
 use super::sql::active_of;
 use super::trees::full_name;
 
@@ -323,13 +324,14 @@ pub(super) fn compare_planned(
     for (rel, why) in &scan.unreadable {
         verdict.stats.unreadable += 1;
         let name = full_name(rel);
-        verdict.push_reason(Reason {
-            class: ReasonClass::Unknown,
-            object: name.clone(),
-            file_name: rel.clone(),
-            property: String::new(),
-            change: why.clone(),
-        });
+        verdict.push_reason(Reason::step(
+            ReasonClass::Unknown,
+            RuleId::TreeFileUnreadable,
+            &name,
+            rel,
+            "",
+            why,
+        ));
         descriptor::unresolved(
             &ObjectRef {
                 kind: "",
@@ -347,16 +349,17 @@ pub(super) fn compare_planned(
     let mut objects = Vec::<&TreeObject>::new();
     for object in &scan.objects {
         if let Some(first) = seen.insert(object.uuid.as_str(), object) {
-            verdict.push_reason(Reason {
-                class: ReasonClass::Unknown,
-                object: full_name(&object.rel),
-                file_name: object.rel.clone(),
-                property: String::new(),
-                change: format!(
+            verdict.push_reason(Reason::step(
+                ReasonClass::Unknown,
+                RuleId::SameObjectTwice,
+                &full_name(&object.rel),
+                &object.rel,
+                "",
+                &format!(
                     "the same object (uuid {}) is also in {}",
                     object.uuid, first.rel
                 ),
-            });
+            ));
             continue;
         }
         objects.push(object);
@@ -371,13 +374,14 @@ pub(super) fn compare_planned(
     let outcomes = match outcomes {
         Ok(outcomes) => outcomes,
         Err(error) => {
-            verdict.push_reason(Reason {
-                class: ReasonClass::Unknown,
-                object: "Configuration".to_string(),
-                file_name: String::new(),
-                property: String::new(),
-                change: format!("the comparison could not run: {error:#}"),
-            });
+            verdict.push_reason(Reason::step(
+                ReasonClass::Unknown,
+                RuleId::ComparisonFailed,
+                "Configuration",
+                "",
+                "",
+                &format!("the comparison could not run: {error:#}"),
+            ));
             return verdict;
         }
     };
@@ -442,11 +446,15 @@ pub(super) fn compare_planned(
                 differing += 1;
                 verdict.stats.unreadable += 1;
                 verdict.push_reason(Reason {
-                    class: ReasonClass::Unknown,
-                    object: label.clone(),
-                    file_name: object.rel.clone(),
-                    property: String::new(),
-                    change: error,
+                    kind: kind.clone(),
+                    ..Reason::step(
+                        ReasonClass::Unknown,
+                        RuleId::RowUndecodable,
+                        &label,
+                        &object.rel,
+                        "",
+                        &error,
+                    )
                 });
                 descriptor::unresolved(
                     &ObjectRef {
@@ -488,14 +496,14 @@ pub(super) fn compare_planned(
                     &mut verdict,
                 ),
                 None => {
-                    verdict.push_reason(Reason {
-                        class: ReasonClass::Unknown,
-                        object: label.clone(),
-                        file_name: name.clone(),
-                        property: String::new(),
-                        change: "removed: a descriptor of a kind the check cannot place"
-                            .to_string(),
-                    });
+                    verdict.push_reason(Reason::step(
+                        ReasonClass::Unknown,
+                        RuleId::RemovedDescriptorUnplaced,
+                        &label,
+                        name,
+                        "",
+                        "removed: a descriptor of a kind the check cannot place",
+                    ));
                     descriptor::unresolved(
                         &ObjectRef {
                             kind: "",

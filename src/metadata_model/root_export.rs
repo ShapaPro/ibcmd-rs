@@ -239,6 +239,49 @@ fn read_row(row: &Brace) -> Result<RootRow<'_>> {
     })
 }
 
+/// A Configuration row a later platform staged, in the `{68}` shape, whose
+/// extension compatibility mode (field 43) is the edition of that platform
+/// while the compatibility mode (field 26) is the configuration's own: the
+/// row [`decode`] refuses, because no corpus shows which of the two the
+/// platform prints. The pair of a `{67}` row and this row appears in the
+/// staged image of every native import of a configuration kept in an older
+/// compatibility mode (`docs/apply/restructuring-check.md`, section 8.9): the
+/// import leaves the compatibility mode alone (it decides the record
+/// versions) and stores its own edition as the extension one.
+///
+/// Returns the row with field 43 set to field 26's value (which [`decode`]
+/// accepts) and the value field 43 held, for the caller to put back into the
+/// decoded `ConfigurationExtensionCompatibilityMode`. `None` when the row is
+/// not of that kind (the fields agree, the extension mode is the older one,
+/// the shape is another, the row is not a Configuration row): [`decode`] then
+/// speaks for it. The export does not call this: it keeps refusing what no
+/// corpus shows.
+pub(crate) fn fold_split_compatibility(row: &Brace) -> Option<(Brace, u32)> {
+    let parsed = read_row(row).ok()?;
+    if parsed.shape != ConfigurationShape::V68 {
+        return None;
+    }
+    let compatibility = packed(parsed.tuple, 26).ok()?;
+    let extension = packed(parsed.tuple, 43).ok()?;
+    if extension <= compatibility {
+        return None;
+    }
+    let section = SECTIONS
+        .iter()
+        .position(|section| matches!(section.wrapper, Wrapper::Properties))?;
+    let mut folded = row.clone();
+    let tuple = folded
+        .as_list_mut()?
+        .get_mut(3 + section)?
+        .as_list_mut()?
+        .get_mut(1)?
+        .as_list_mut()?
+        .get_mut(1)?
+        .as_list_mut()?;
+    *tuple.get_mut(43)? = Brace::atom(compatibility);
+    Some((folded, extension))
+}
+
 /// (kind, uuid) of every object the configuration lists, in stored order.
 pub fn top_level_objects(row: &Brace) -> Result<Vec<(String, String)>> {
     let row = read_row(row)?;
@@ -308,7 +351,7 @@ fn code(tuple: &[Brace], index: usize, table: &[(&'static str, &str)]) -> Result
 }
 
 /// `80324` -> `Version8_3_24`.
-fn version_text(value: u32) -> String {
+pub(crate) fn version_text(value: u32) -> String {
     format!(
         "Version{}_{}_{}",
         value / 10000,

@@ -31,6 +31,8 @@ use super::descriptor::{self, ObjectRef};
 use super::model::{Note, ObjectOp, Reason, ReasonClass, Verdict};
 use super::plan::{self, Decoder, Plan};
 use super::roles::{BodyRole, Effect, RowName, body_role, parse_row_name};
+use super::rule_id::RuleId;
+use super::upgrade::RowProof;
 
 /// Everything the check reads before it decides which body rows it needs.
 #[derive(Default)]
@@ -52,6 +54,9 @@ pub struct Inputs {
     pub staged_descriptors: BTreeMap<String, Vec<u8>>,
     pub staged_root: Option<Vec<u8>>,
     pub staged_version: Option<Vec<u8>>,
+    /// The `deleted` row a native import writes (`0` when it deleted no
+    /// file).
+    pub staged_deleted: Option<Vec<u8>>,
     /// Whether the ConfigSave holds a `versions` row, and what it lists.
     pub staged_has_versions: bool,
     pub new_inventory: BTreeSet<String>,
@@ -77,6 +82,14 @@ pub trait Describe {
     fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
         self.describe_row(kind, row).map(|element| (element, false))
     }
+
+    /// A staged row that decodes to the stored row's tree although its bytes
+    /// differ: whether it differs by the record format only (`upgrade`). A
+    /// describer that has no raw rows says [`RowProof::Unavailable`], and the
+    /// check treats the row as one it cannot explain.
+    fn prove_upgrade(&self, _kind: &str, _old: &[u8], _staged: &[u8]) -> RowProof {
+        RowProof::Unavailable
+    }
 }
 
 impl Describe for Decoder {
@@ -87,22 +100,21 @@ impl Describe for Decoder {
     fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
         self.decode_staged(kind, row)
     }
+
+    fn prove_upgrade(&self, kind: &str, old: &[u8], staged: &[u8]) -> RowProof {
+        RowProof::of(kind, old, staged)
+    }
 }
 
 fn reason(
     class: ReasonClass,
+    rule: RuleId,
     object: &str,
     file_name: &str,
     property: &str,
     change: &str,
 ) -> Reason {
-    Reason {
-        class,
-        object: object.to_string(),
-        file_name: file_name.to_string(),
-        property: property.to_string(),
-        change: change.to_string(),
-    }
+    Reason::step(class, rule, object, file_name, property, change)
 }
 
 fn effect_class(effect: Effect) -> Option<ReasonClass> {
@@ -176,6 +188,7 @@ pub fn check(inputs: &Inputs, rows: &dyn RowProvider) -> Verdict {
             None => {
                 verdict.push_reason(reason(
                     ReasonClass::Unknown,
+                    RuleId::VersionsListsUnknownFile,
                     name,
                     name,
                     "",
@@ -248,6 +261,7 @@ pub(super) fn plan_problems(old_plan: &Plan, new_plan: &Plan, verdict: &mut Verd
         }
         verdict.push_reason(reason(
             ReasonClass::Unknown,
+            RuleId::DescriptorsUnreadable,
             "Configuration",
             "",
             "",
@@ -265,6 +279,7 @@ fn staged_inventory(inputs: &Inputs, verdict: &mut Verdict) -> BTreeSet<String> 
     }
     verdict.push_reason(reason(
         ReasonClass::Unknown,
+        RuleId::NoVersionsRow,
         "ConfigSave",
         "versions",
         "",
@@ -298,6 +313,7 @@ pub(crate) fn check_planned(
     {
         verdict.push_reason(reason(
             ReasonClass::Structure,
+            RuleId::RootRowChanged,
             "Configuration",
             "root",
             "",
@@ -309,6 +325,7 @@ pub(crate) fn check_planned(
     {
         verdict.push_reason(reason(
             ReasonClass::Structure,
+            RuleId::VersionRowChanged,
             "Configuration",
             "version",
             "",
@@ -349,6 +366,7 @@ pub(crate) fn check_planned(
             RowName::Service(_) => {}
             RowName::DynamicMarker | RowName::Alias => verdict.push_reason(reason(
                 ReasonClass::Unknown,
+                RuleId::OnlineUpdateRow,
                 name,
                 name,
                 "",
@@ -358,6 +376,7 @@ pub(crate) fn check_planned(
                 if !new_inventory.contains(name) {
                     verdict.push_reason(reason(
                         ReasonClass::Unknown,
+                        RuleId::DescriptorNotListed,
                         name,
                         name,
                         "",
@@ -371,6 +390,7 @@ pub(crate) fn check_planned(
                     let label = labels.of(name);
                     verdict.push_reason(reason(
                         ReasonClass::Unknown,
+                        RuleId::StagedDescriptorUnreadable,
                         &label,
                         name,
                         "",
@@ -396,6 +416,7 @@ pub(crate) fn check_planned(
                             None => {
                                 verdict.push_reason(reason(
                                     ReasonClass::Unknown,
+                                    RuleId::NewDescriptorUnplaced,
                                     &label,
                                     name,
                                     "",
@@ -421,6 +442,7 @@ pub(crate) fn check_planned(
                 if !new_inventory.contains(name) {
                     verdict.push_reason(reason(
                         ReasonClass::Unknown,
+                        RuleId::BodyRowNotListed,
                         &labels.of(owner),
                         name,
                         "",
@@ -442,8 +464,25 @@ pub(crate) fn check_planned(
                     }
                 }
             }
+            // The row a native import writes to list the files it deleted:
+            // `0` says there are none, and then it changes nothing. A list of
+            // files is a removal the staged `versions` row must agree with;
+            // nothing here has read one, so it is refused.
+            RowName::Other if name == DELETED_ROW => {
+                if !inputs.staged_deleted.as_deref().is_some_and(lists_no_file) {
+                    verdict.push_reason(reason(
+                        ReasonClass::Unknown,
+                        RuleId::DeletedRowNotEmpty,
+                        DELETED_ROW,
+                        name,
+                        "",
+                        "the deleted row lists files (or could not be read): a removal is judged by the staged versions row, and this row is not one the check has read",
+                    ));
+                }
+            }
             RowName::Other => verdict.push_reason(reason(
                 ReasonClass::Unknown,
+                RuleId::RowUnknown,
                 name,
                 name,
                 "",
@@ -475,6 +514,7 @@ pub(crate) fn check_planned(
                 verdict.stats.unreadable += 1;
                 verdict.push_reason(reason(
                     class,
+                    RuleId::BodyRowUnreadable,
                     &label,
                     name,
                     &role_name,
@@ -486,6 +526,7 @@ pub(crate) fn check_planned(
                 verdict.stats.unreadable += 1;
                 verdict.push_reason(reason(
                     class,
+                    RuleId::BodyRowUnreadable,
                     &label,
                     name,
                     &role_name,
@@ -507,6 +548,7 @@ pub(crate) fn check_planned(
                 }
                 Some(old) => verdict.push_reason(reason(
                     class,
+                    RuleId::BodyContentChanged,
                     &label,
                     name,
                     &role_name,
@@ -514,6 +556,7 @@ pub(crate) fn check_planned(
                 )),
                 None => verdict.push_reason(reason(
                     class,
+                    RuleId::BodyRowAdded,
                     &label,
                     name,
                     &role_name,
@@ -541,6 +584,7 @@ pub(crate) fn check_planned(
         };
         verdict.push_reason(reason(
             ReasonClass::Unknown,
+            RuleId::StagedVersionsPartial,
             &label,
             name,
             "versions",
@@ -568,6 +612,7 @@ pub(crate) fn check_planned(
                     None => {
                         verdict.push_reason(reason(
                             ReasonClass::Unknown,
+                            RuleId::RemovedDescriptorUnplaced,
                             &label,
                             name,
                             "",
@@ -587,12 +632,18 @@ pub(crate) fn check_planned(
                             property: role.name.to_string(),
                             change: "removed".to_string(),
                         }),
-                        Some(class) => {
-                            verdict.push_reason(reason(class, &label, name, role.name, "removed"))
-                        }
+                        Some(class) => verdict.push_reason(reason(
+                            class,
+                            RuleId::BodyRowRemoved,
+                            &label,
+                            name,
+                            role.name,
+                            "removed",
+                        )),
                     },
                     None => verdict.push_reason(reason(
                         ReasonClass::Unknown,
+                        RuleId::BodyRowRemoved,
                         &label,
                         name,
                         &format!("row .{suffix}"),
@@ -606,6 +657,7 @@ pub(crate) fn check_planned(
             RowName::Service(_) | RowName::DynamicMarker | RowName::Alias => {}
             RowName::Other => verdict.push_reason(reason(
                 ReasonClass::Unknown,
+                RuleId::RemovedRowUnknown,
                 name,
                 name,
                 "",
@@ -615,6 +667,16 @@ pub(crate) fn check_planned(
     }
     verdict.stats.added_files = new_inventory.difference(&inputs.old_inventory).count();
     verdict
+}
+
+/// The name of the row a native import lists the deleted files in.
+const DELETED_ROW: &str = "deleted";
+
+/// Whether the content of the `deleted` row is the empty list (`0`, with or
+/// without the byte order mark).
+fn lists_no_file(content: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(content);
+    text.trim_start_matches('\u{feff}').trim() == "0"
 }
 
 /// The items of an exchange plan's content, order aside: the platform keeps
@@ -705,6 +767,7 @@ fn compare_descriptor(
     let Some(kind) = kind_of(name) else {
         verdict.push_reason(reason(
             ReasonClass::Unknown,
+            RuleId::DescriptorKindUnknown,
             &label,
             name,
             "",
@@ -728,36 +791,13 @@ fn compare_descriptor(
                 &new_element,
                 verdict,
             );
-            if count == 0 && upgraded {
-                // The platform that imported the stage writes the record
-                // format of its own edition; the descriptor is the same.
-                verdict.push_note(Note {
-                    object: label.clone(),
-                    file_name: name.to_string(),
-                    property: String::new(),
-                    change: "the row is in another record format; the descriptor is the same"
-                        .to_string(),
-                });
-            } else if count == 0 {
-                verdict.push_reason(reason(
-                    ReasonClass::Unknown,
-                    &label,
-                    name,
-                    "",
-                    &format!(
-                        "the {kind} row differs ({} -> {} bytes) but both sides decode to the same XML",
-                        old.len(),
-                        staged.len()
-                    ),
-                ));
-                descriptor::unresolved(
-                    &ObjectRef {
-                        kind,
-                        name: &label,
-                        file_name: name,
-                        id: name,
-                    },
-                    ObjectOp::Changed,
+            if count == 0 {
+                same_tree(
+                    kind,
+                    (name, &label),
+                    (old, staged),
+                    upgraded,
+                    describe,
                     verdict,
                 );
             }
@@ -766,6 +806,7 @@ fn compare_descriptor(
             verdict.stats.unreadable += 1;
             verdict.push_reason(reason(
                 ReasonClass::Unknown,
+                RuleId::RowUndecodable,
                 &label,
                 name,
                 "",
@@ -781,6 +822,67 @@ fn compare_descriptor(
                 ObjectOp::Changed,
                 verdict,
             );
+        }
+    }
+}
+
+/// A staged descriptor whose bytes differ from the stored ones and that
+/// decodes to the same tree: the decoder may not carry every field, so the
+/// rows themselves are compared. Harmless only when the difference is the
+/// record format of the platform that staged the row (`upgrade`); else a
+/// reason that names the first place nothing explains.
+fn same_tree(
+    kind: &str,
+    (name, label): (&str, &str),
+    (old, staged): (&[u8], &[u8]),
+    decoded_in_another_format: bool,
+    describe: &dyn Describe,
+    verdict: &mut Verdict,
+) {
+    let object = ObjectRef {
+        kind,
+        name: label,
+        file_name: name,
+        id: name,
+    };
+    let sizes = format!("{} -> {} bytes", old.len(), staged.len());
+    match describe.prove_upgrade(kind, old, staged) {
+        RowProof::Proven(_) => verdict.stats.format_upgrades += 1,
+        RowProof::Refuted(deviation) => {
+            verdict.push_reason(reason(
+                ReasonClass::Unknown,
+                RuleId::RowFormatUpgradeUnproven,
+                label,
+                name,
+                "",
+                &format!(
+                    "the {kind} row differs ({sizes}) and decodes to the same XML,                      but the difference is not a known record-format upgrade: {}",
+                    deviation.describe()
+                ),
+            ));
+            descriptor::unresolved(&object, ObjectOp::Changed, verdict);
+        }
+        RowProof::Unavailable if decoded_in_another_format => {
+            // The platform that imported the stage writes the record
+            // format of its own edition; the descriptor is the same.
+            verdict.push_note(Note {
+                object: label.to_string(),
+                file_name: name.to_string(),
+                property: String::new(),
+                change: "the row is in another record format; the descriptor is the same"
+                    .to_string(),
+            });
+        }
+        RowProof::Unavailable => {
+            verdict.push_reason(reason(
+                ReasonClass::Unknown,
+                RuleId::RowDecodesToSameXml,
+                label,
+                name,
+                "",
+                &format!("the {kind} row differs ({sizes}) but both sides decode to the same XML"),
+            ));
+            descriptor::unresolved(&object, ObjectOp::Changed, verdict);
         }
     }
 }
