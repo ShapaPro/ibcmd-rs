@@ -2875,6 +2875,7 @@ pub(super) fn metadata_declared_leaves_exclude_string(
                 ConstantValueType::Boolean
                 | ConstantValueType::Number { .. }
                 | ConstantValueType::DateTime { .. }
+                | ConstantValueType::BinaryData { .. }
                 | ConstantValueType::Reference { .. } => {}
                 ConstantValueType::String { .. } => excludes = false,
                 // An unresolved form type can itself be string-like; without
@@ -5264,6 +5265,20 @@ const PACKED_PLATFORM_VERSION_8_5_1: u32 = 80501;
 
 pub(super) fn configuration_compatibility_mode_xml(value: &str) -> Option<String> {
     configuration_compatibility_mode_xml_under(value, MAX_EVIDENCED_PACKED_PLATFORM_VERSION)
+}
+
+/// As `configuration_compatibility_mode_xml`, by the edition that writes the
+/// XML: 8.5 prints `80501` as `Version8_5_1`, where 8.3.27 clamps it.
+pub(super) fn configuration_compatibility_mode_xml_for(
+    value: &str,
+    source_version: InfobaseConfigSourceVersion,
+) -> Option<String> {
+    let ceiling = if source_version == InfobaseConfigSourceVersion::V2_21 {
+        PACKED_PLATFORM_VERSION_8_5_1
+    } else {
+        MAX_EVIDENCED_PACKED_PLATFORM_VERSION
+    };
+    configuration_compatibility_mode_xml_under(value, ceiling)
 }
 
 fn configuration_compatibility_mode_xml_under(value: &str, ceiling: u32) -> Option<String> {

@@ -728,6 +728,9 @@ pub struct InfobaseConfigExportArgs {
     pub sqlcmd: Option<PathBuf>,
     /// Clear a non-empty output directory first (the research round trip).
     /// The drop-in export refuses one, as the platform's own export does.
+    /// Export this configuration extension instead of the configuration
+    /// (`--extension` of the platform's `config export`).
+    pub extension: Option<String>,
     pub overwrite: bool,
     /// Count the exported files for the report (walks the whole tree).
     pub count_files: bool,
@@ -1717,6 +1720,18 @@ pub struct MssqlExtensionListArgs {
     pub format: MssqlExtensionListFormat,
 }
 
+/// Which stored image of an extension `mssql-dump-extension` reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MssqlExtensionImage {
+    /// The staged image (`ConfigCASSave`) when the extension has staged rows,
+    /// as the native `config export --extension` does; otherwise the active one.
+    Auto,
+    /// Only the active image, the one the extension registry names.
+    Active,
+    /// Only the staged image; fails when the extension has no staged rows.
+    Staged,
+}
+
 #[derive(Debug, Args)]
 pub struct MssqlDumpExtensionArgs {
     /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
@@ -1764,6 +1779,11 @@ pub struct MssqlDumpExtensionArgs {
     /// Replace an existing output tree.
     #[arg(long)]
     pub overwrite: bool,
+    /// Which stored image to export: the staged one when the extension has
+    /// staged rows (what the native export does), the active one, or exactly
+    /// one of them.
+    #[arg(long, value_enum, default_value_t = MssqlExtensionImage::Auto)]
+    pub image: MssqlExtensionImage,
     /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
     /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
     #[arg(

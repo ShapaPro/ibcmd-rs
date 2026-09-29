@@ -145,6 +145,8 @@ pub fn apply_source_change(
             all_extensions: false,
             output_dir: active_root.clone(),
             overwrite: false,
+            // The generation a change applies to is the registry's.
+            image: crate::cli::MssqlExtensionImage::Active,
             platform: None,
             source_version: args.source_version,
         })?;

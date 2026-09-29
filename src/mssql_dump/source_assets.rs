@@ -1456,7 +1456,7 @@ fn configuration_source_asset_kind(
 ) -> Option<SourceAssetKind> {
     use crate::compiler::families::assets::SourceAssetRole;
     match role {
-        SourceAssetRole::Splash | SourceAssetRole::MainSectionPicture => {
+        SourceAssetRole::Splash | SourceAssetRole::Logo | SourceAssetRole::MainSectionPicture => {
             Some(SourceAssetKind::ExtPicture)
         }
         SourceAssetRole::Help => Some(SourceAssetKind::Help),

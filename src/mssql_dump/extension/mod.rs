@@ -1023,4 +1023,329 @@ mod tests {
         let text = "{1,{3,{1,0,eb50ccde-ac43-46b8-a693-56b559ca323a},\"N\",{0},\"\",5,0,00000000-0000-0000-0000-000000000000,0}}";
         assert!(normalize_descriptor(text).is_err());
     }
+
+    /// The extension context is process-wide, and the ordinary converters read
+    /// it: a test that runs an extension export beside the other tests of this
+    /// process would turn some of them into extension conversions. Such a test
+    /// runs again alone in a child process (`test` is its name in the crate);
+    /// this returns `false` in the parent, whose verdict is the child's, and
+    /// `true` where the body is to run.
+    fn alone(test: &str) -> bool {
+        const CHILD: &str = "IBCMD_RS_ISOLATED_EXTENSION_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{test} failed alone:
+{stdout}
+{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    /// The extension `_ДемоПустоеРасширение` of the БСП 8.3.27 and the БСП 8.5
+    /// demonstration bases: the same two rows in both, and the tree each
+    /// platform's own `config export --extension` wrote for them
+    /// (`tests/fixtures/native-evidence/extension-empty/`). 8.5 prints two
+    /// empty captions after the version; the tree is otherwise the same.
+    #[test]
+    fn the_empty_extension_exports_to_the_native_tree_of_both_platforms() {
+        if !alone(
+            "mssql_dump::extension::tests::the_empty_extension_exports_to_the_native_tree_of_both_platforms",
+        ) {
+            return;
+        }
+        use crate::mssql_dump::cas::{CasHash, CasStorageRow, resolve_cas_storage_image};
+        use crate::mssql_extension_stage::{
+            ConfigInfoIdentity, ExtensionStageRow, generate_configinfo_manifest,
+        };
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write as _;
+
+        // One export at a time: the extension context is process-wide.
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _guard = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        const ROOT: &str = "6a5f6dac-3040-4142-b853-482f745e1e4b";
+        const LANGUAGE: &str = "efc14f05-e4ab-4235-8c63-9082143c3ca9";
+        let rows: [(&str, &[u8]); 2] = [
+            (
+                ROOT,
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/rows/6a5f6dac-3040-4142-b853-482f745e1e4b.bin"
+                ),
+            ),
+            (
+                LANGUAGE,
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/rows/efc14f05-e4ab-4235-8c63-9082143c3ca9.bin"
+                ),
+            ),
+        ];
+        let identity = ConfigInfoIdentity {
+            storage_format: 80_324,
+            configuration_id: uuid::Uuid::parse_str(ROOT).unwrap(),
+            descriptor: Vec::new(),
+        };
+        let stage = rows
+            .iter()
+            .map(|(name, packed)| ExtensionStageRow::new(*name, packed.to_vec()))
+            .collect::<Vec<_>>();
+        let manifest = generate_configinfo_manifest(&identity, &stage).unwrap();
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&manifest).unwrap();
+        let packed_manifest = encoder.finish().unwrap();
+        let root_hash = CasHash::for_packed_bytes(&packed_manifest);
+        let mut cas = vec![CasStorageRow::new(root_hash, packed_manifest)];
+        cas.extend(rows.iter().map(|(_, packed)| {
+            CasStorageRow::new(CasHash::for_packed_bytes(packed), packed.to_vec())
+        }));
+        let image = resolve_cas_storage_image(root_hash, cas).unwrap();
+
+        let native_8_3_27: [(&str, &[u8]); 3] = [
+            (
+                "Configuration.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/Configuration.xml"
+                ),
+            ),
+            (
+                "ConfigDumpInfo.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/ConfigDumpInfo.xml"
+                ),
+            ),
+            (
+                "Languages/Русский.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/Language.xml"
+                ),
+            ),
+        ];
+        let native_8_5_1: [(&str, &[u8]); 3] = [
+            (
+                "Configuration.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/Configuration.xml"
+                ),
+            ),
+            (
+                "ConfigDumpInfo.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/ConfigDumpInfo.xml"
+                ),
+            ),
+            (
+                "Languages/Русский.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/Language.xml"
+                ),
+            ),
+        ];
+        for (version, native) in [
+            (InfobaseConfigSourceVersion::V2_20, native_8_3_27),
+            (InfobaseConfigSourceVersion::V2_21, native_8_5_1),
+        ] {
+            let out = std::env::temp_dir().join(format!(
+                "ibcmd-extension-empty-{}-{}",
+                std::process::id(),
+                version.as_str()
+            ));
+            let _ = std::fs::remove_dir_all(&out);
+            let report = export_extension_image_to_source(&image, &out, version, None).unwrap();
+            assert_eq!((report.storage.failed, report.storage.opaque), (0, 0));
+            for (path, expected) in native {
+                let written = std::fs::read(out.join(path)).unwrap_or_default();
+                assert!(
+                    written == expected,
+                    "{path} of the {} tree differs from the native one",
+                    version.as_str()
+                );
+            }
+            let _ = std::fs::remove_dir_all(&out);
+        }
+    }
+
+    /// Platform-made fixtures of upstream PR 387 (`tests/fixtures/external`,
+    /// present once that PR is merged, or named by `IBCMD_UPSTREAM_FIXTURES`):
+    /// an extension as a `.cfe` container beside the tree the 8.3.27.2214
+    /// platform dumped for it. These are the cases the extension export equals
+    /// byte for byte. Each was set apart by a probe that changes one value, so
+    /// they tell apart what the two BSP extensions of the first corpus could
+    /// not (the code type and length ids of a catalog, the write mode and
+    /// periodicity of a register, the default roles and the managed
+    /// application module of the root, the members 3, 21 and 49 of the root
+    /// tuple).
+    const UPSTREAM_MATCHING_CASES: [&str; 22] = [
+        "extension_roots/values",
+        "extension_roots/spellings",
+        "extension_roots/modules",
+        "extension_roots/roles",
+        "extension_roots/values_v85",
+        "adopted/props_all",
+        "adopted/props_b0",
+        "adopted/props_b1",
+        "adopted/props_b2",
+        "adopted/module_all",
+        "adopted/module_b0",
+        "adopted/module_b1",
+        "adopted/module_b2",
+        "adopted/catalog_modules",
+        "adopted/catalog_object_module",
+        "adopted/document_children",
+        "adopted/form_events",
+        "adopted/form_events_shared",
+        "adopted/role",
+        "adopted/subscription",
+        "adopted/kinds",
+        "adopted/foreign_links",
+    ];
+
+    /// The other upstream cases: each fails closed or differs, and is listed in
+    /// `docs/extensions/parity.md` (predefined items and exchange plan content
+    /// of an adopted object, widened types with a check value, and a container
+    /// whose CAS content is missing).
+    const UPSTREAM_OPEN_CASES: [&str; 4] = [
+        "adopted/predefined",
+        "adopted/exchange_plan",
+        "adopted/widened",
+        "extension_roots/unknown_property",
+    ];
+
+    /// The files of the case that our export does not reproduce (an empty list
+    /// when the case matches), or a reason the case could not be run.
+    fn upstream_case_differences(
+        root: &std::path::Path,
+        case: &str,
+    ) -> Result<Vec<String>, String> {
+        use crate::mssql_dump::cas::{CasHash, CasStorageRow, resolve_cas_storage_image};
+        use ibcmd_core::artifact::StorageProfileId;
+        use ibcmd_core::limits::ResourceLimits;
+
+        let dir = root.join(case);
+        let cfe = std::fs::read(dir.join("input.cfe")).map_err(|error| error.to_string())?;
+        let archive = ibcmd_cf::archive::decode_packed_archive(
+            std::io::Cursor::new(cfe),
+            ResourceLimits::default(),
+            StorageProfileId::parse("storage:cfe").unwrap(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut root_hash = None;
+        let mut rows = Vec::new();
+        for entry in archive.entries() {
+            let packed = entry.payload().to_vec();
+            let hash = CasHash::for_packed_bytes(&packed);
+            if entry.name() == "configinfo" {
+                root_hash = Some(hash);
+            }
+            rows.push(CasStorageRow::new(hash, packed));
+        }
+        let root_hash = root_hash.ok_or("the container has no configinfo")?;
+        let image =
+            resolve_cas_storage_image(root_hash, rows).map_err(|error| error.to_string())?;
+
+        // One export at a time: the extension context is process-wide.
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _guard = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let out = std::env::temp_dir().join(format!(
+            "ibcmd-upstream-{}-{}",
+            std::process::id(),
+            case.replace('/', "-")
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        export_extension_image_to_source(&image, &out, InfobaseConfigSourceVersion::V2_20, None)
+            .map_err(|error| format!("{error:#}"))?;
+
+        // The dump info compares with its version stamps blanked, as elsewhere.
+        fn blanked(bytes: &[u8]) -> String {
+            let text = String::from_utf8_lossy(bytes);
+            let mut result = String::new();
+            let mut rest: &str = &text;
+            while let Some(at) = rest.find("configVersion=\"") {
+                result.push_str(&rest[..at + 15]);
+                rest = &rest[at + 15..];
+                rest = &rest[rest.find('"').unwrap_or(0)..];
+            }
+            result.push_str(rest);
+            result
+        }
+        let mut differing = Vec::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let relative = path.strip_prefix(&dir).unwrap().to_owned();
+                if relative == std::path::Path::new("input.cfe") {
+                    continue;
+                }
+                let expected = std::fs::read(&path).unwrap();
+                let ours = std::fs::read(out.join(&relative)).ok();
+                let same = match &ours {
+                    Some(ours) if relative.ends_with("ConfigDumpInfo.xml") => {
+                        blanked(ours) == blanked(&expected)
+                    }
+                    Some(ours) => *ours == expected,
+                    None => false,
+                };
+                if !same {
+                    differing.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&out);
+        differing.sort();
+        Ok(differing)
+    }
+
+    #[test]
+    fn the_export_equals_the_platform_dumps_of_the_upstream_fixtures() {
+        if !alone(
+            "mssql_dump::extension::tests::the_export_equals_the_platform_dumps_of_the_upstream_fixtures",
+        ) {
+            return;
+        }
+        let root = std::env::var_os("IBCMD_UPSTREAM_FIXTURES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external")
+            });
+        if !root.join("adopted").is_dir() {
+            eprintln!(
+                "upstream extension fixtures are not present at {}",
+                root.display()
+            );
+            return;
+        }
+        let mut failures = Vec::new();
+        for case in UPSTREAM_MATCHING_CASES {
+            match upstream_case_differences(&root, case) {
+                Ok(differing) if differing.is_empty() => {}
+                Ok(differing) => failures.push(format!("{case}: {differing:?}")),
+                Err(reason) => failures.push(format!("{case}: {reason}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        for case in UPSTREAM_OPEN_CASES {
+            eprintln!(
+                "open upstream case {case}: {:?}",
+                upstream_case_differences(&root, case)
+            );
+        }
+    }
 }

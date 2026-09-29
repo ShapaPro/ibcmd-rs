@@ -85,6 +85,7 @@ pub enum SourceAssetRole {
     Package,
     CommandInterface,
     Splash,
+    Logo,
     ParentConfigurations,
     HomePageWorkArea,
     MainSectionCommandInterface,
@@ -525,6 +526,8 @@ const ROUTES: &[SourceAssetRoute] = &[
     ),
     route!("XDTOPackage", Package, ".0", "Ext/Package.bin", RawBinary),
     route!("Configuration", Splash, ".2", "Ext/Splash.xml", Picture),
+    // An 8.5 extension may override the logo (`Ext/Logo.xml`, ServiceDesk).
+    route!("Configuration", Logo, ".1", "Ext/Logo.xml", Picture),
     route!("Configuration", Help, ".3", "Ext/Help.xml", Help),
     route!(
         "Configuration",
@@ -1102,6 +1105,12 @@ pub fn decode_source_asset(
         | SourceAssetCodec::CommandInterface
         | SourceAssetCodec::Deferred => Err(AssetCodecError::DeferredRoute),
     }
+}
+
+/// The storage payload of a module body (`Module.bsl` and its kin), as
+/// `compile_source_asset` writes it; for callers that already know the row.
+pub fn encode_source_module(text: &[u8]) -> Result<Vec<u8>, AssetCodecError> {
+    encode_module(text)
 }
 
 fn encode_module(text: &[u8]) -> Result<Vec<u8>, AssetCodecError> {

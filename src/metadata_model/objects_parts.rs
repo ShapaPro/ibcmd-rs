@@ -469,6 +469,11 @@ impl<'a> Obj<'a> {
                 .ok_or_else(|| anyhow!("Characteristic has no CharacteristicValues"))?;
             let source = |element: &Element| -> Result<Brace> {
                 let from = element.attr("from").unwrap_or_default();
+                // A characteristic can name no source; it stores the nil uuid
+                // (the БСП 8.5 extension catalog `_ДемоСегментыПартнеровРасширение`).
+                if from.trim().is_empty() {
+                    return Ok(brace_list![num(1), nil()]);
+                }
                 Ok(brace_list![num(1), Brace::uuid(&self.resolve(from)?)])
             };
             let body = brace_list![

@@ -271,8 +271,15 @@ pub(in crate::mssql_dump) fn down_convert_form_body_8_5_1(
     let layout = Node::List(root_members).to_text();
 
     let mut trailing = Vec::with_capacity(body.trailing.len());
-    for block in &body.trailing {
-        if block.trim_start().starts_with('{') {
+    // The base form of an adopted form is a record of its own: its items number
+    // the same ids as the form's, so it is left as it is and its facts are kept
+    // apart (`form_extension::with_adopted_form_parts` converts it as a body of
+    // its own).
+    let base_slot = super::super::form_extension::adopted_base_record_slot(body);
+    for (index, block) in body.trailing.iter().enumerate() {
+        if Some(index) == base_slot {
+            trailing.push(block.clone());
+        } else if block.trim_start().starts_with('{') {
             let node = parse_node(block)?;
             let node = convert_primitives(node, &mut facts);
             let node = convert_items(node, &mut facts)?;
@@ -651,6 +658,11 @@ pub(in crate::mssql_dump) fn bag_revision(
         ("37", "14", "3", 14) => ("3", 0),
         ("37", "15", "4", 14) => ("3", 1),
         ("37", "17", "1", 16) => ("1", 0),
+        // A planner field (19): the БСП 8.5 extension ServiceDesk keeps the same
+        // form as its 8.3.27 version, and the bag has the same revision and
+        // length in both (its event list gains `BeforeCreate`, which the event
+        // reader takes by count).
+        ("37", "19", "1", 11) => ("1", 0),
         // A Gantt chart (12) and a PDF document (20) field: no 8.5 BSP form
         // carries one, and ERP УХ's are all in the 8.3.27 layout, so their
         // 8.5 bags are unmeasured; they are read, and loaded, as 8.3.27
