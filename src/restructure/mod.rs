@@ -18,6 +18,7 @@
 //! The brace text is `metadata_model::brace`, shared with the model export. Findings and measurements:
 //! `docs/apply/restructuring.md`.
 
+pub mod caches;
 pub mod catalog;
 pub mod command;
 pub mod exec;
