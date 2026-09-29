@@ -35,11 +35,15 @@ interfaces. What differs from the target in a way those rows cannot carry is now
    `<uuid>.<n>`) are listed in the platform's `deleted` row and their names go out of `versions`. The rows of an
    online (dynamic) update of the target that are still pending (`DynamicallyUpdated`, `<uuid>_dynupdate_<generation>`,
    `versions_dynupdate_<generation>`) are listed too, as the platform's own import lists them.
-6. The rows are staged over the target's as before (one transaction that replaces ConfigSave), with two changes of
+6. **The rows a stage patches start from what the storage publishes.** When an online (dynamic) update of the target
+   is pending, its alias rows (`<uuid>_dynupdate_<generation>`, `versions_dynupdate_<generation>` first among them)
+   hold the current content, and the staged `versions` is based on that one: the apply's gate flags ids that come from
+   the plain row as unknown otherwise.
+7. The rows are staged over the target's as before (one transaction that replaces ConfigSave), with two changes of
    shape that make ConfigSave the platform's own: the dates are 2000 years ahead (the platform's `_YearOffset`, 4026,
    where the stage wrote 2026), and a row larger than 10 000 000 bytes is written in parts of that size, each part
    carrying the whole `DataSize`.
-7. **The guard** exports the state the apply would leave - the target's rows as the storage publishes them, the
+8. **The guard** exports the state the apply would leave - the target's rows as the storage publishes them, the
    `deleted` names removed, the staged rows in place - and compares it with the tree. Whatever the build got wrong
    still refuses the import.
 
@@ -84,6 +88,10 @@ ours (no name only on one side). In `all19` the native apply also dropped the co
 (`_Reference3347` has 8 columns against 9 in an untouched clone) although the `deleted` row does not name the
 attribute: the platform finds the removal itself.
 
+Run again on the merged `feat/0.4` (1d55fe46, with master's #387 and track apply's checkpoint 2) with the final
+binary: `add5` 12 201 of 12 201, `rem2` 12 190 of 12 190, `all19` 12 196 of 12 196 files identical (native apply 257 s,
+451 s and 80 s on a busy and a quiet machine).
+
 The regression of the whole matrix (`run_guard_acceptance.ps1 -Expect override`, 24 cases, the import only, guard on,
 the clone never applied): every edit of `edits.py` loads and passes the guard (22 edits and the control; the removed
 template `tpldel` is the new one), and the two edits that leave a reference to a removed catalog (`catdel`,
@@ -99,7 +107,27 @@ predefined item `predefdel` removed while the forms' queries still name it (the 
 
 ## 4. Cost
 
-COSTS
+The comparison of the tree with the target is the new work of every patch stage, the build of the objects is the new
+work of a stage that has something to build. Measured with the stage's own timing lines
+(`IBCMD_RS_STAGE_TIMING=1`, `run_uha_import.ps1`):
+
+| stage of an unchanged tree | compare the tree with the target | base rows read | guard | rows into tempdb | move into ConfigSave | whole import | peak memory |
+|---|---|---|---|---|---|---|---|
+| БСП 8.3.27 | 1.1 s | 3.9 s | 3-12 s | 7 s | 3-126 s (SQL Server, machine load) | 27-44 s on a quiet machine | not measured apart |
+| ERP УХ 8.3.27, a real database, a quiet machine | 20.9 s | 19.8 s | 63.5 s (rows 8.4 s, export 54.9 s) | 14.2 s | 120.3 s | 725 s wall, 1 316 s CPU | 8.5 GB |
+| the same on a machine busy with other work | 76-114 s | 64-110 s | 157-281 s | 45-84 s | 250-256 s | 1 476-1 926 s wall | 6.6-8.5 GB |
+
+On УХ the tree is the unchanged native tree: the comparison found nothing to build (no spurious `Changed` among
+56 758 descriptors), the guard compared 140 708 of 140 708 files identical, and the 156 pending online-update rows of the
+clone went into `deleted`. A stage with changes adds the setup of the base-free context (the walk, the reads of all
+descriptor XMLs, the name index): 64 s on the base-free stage of УХ, once, when there is an object to build.
+
+The guard on a base-free stage of УХ (offline, `run_uha_guard.ps1 -BaseFree`): 77.8 s on a stage of 109.5 s on a quiet
+machine (94 s of 121 s when the machine was busy), 8.0 GB.
+
+Two things made the guard cheaper on УХ and are worth knowing when the cost is measured again: it takes the rows the stage
+has read (`StateBase::Prefetched`, 195 s of reading a second time saved), and a base-free stage hashes the tree's files
+beside the export (a scan after it cost 68 s, reading each file when the export produced it 177 s more).
 
 ## 5. Where it lives
 
@@ -132,6 +160,9 @@ why it is detached, which is how a writer knows it works for a base-free object 
 - **A partial import** (`--path-prefix`) builds and compiles inside the prefix, removes nothing and does not clear
   the pending online update. `--per-row` and an offline stage (`--script-only` with `IBCMD_RS_BASE_ROWS_DIR`) do
   not compare the tree with a database at all, so they carry nothing new.
+- **Every row is still staged** (9 521 rows for an unchanged tree on БСП, 116 717 on УХ), as before: only a row
+  that differs from Config needs to be written (#395). The plan of this stage - which objects are new, changed or
+  removed - is the input that change needs.
 - **Not run:** platform 8.5 (dialect 2.21) with builds; ERP УХ with real changes (a second copy of the tree is not
   allowed in the lab; the run is of the unchanged tree, so the build path costs there are the setup of the
   base-free stage: about 64 s for the walk, the descriptor reads and the context).
