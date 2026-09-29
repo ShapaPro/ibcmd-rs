@@ -32,6 +32,9 @@ pub mod registers;
 pub mod root;
 pub mod simple;
 
+#[cfg(test)]
+mod slot_evidence_tests;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};

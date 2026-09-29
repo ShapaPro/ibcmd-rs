@@ -584,10 +584,13 @@ static CHART_OF_ACCOUNTS: Layout = Layout {
         Text("CodeMask"),
         Number("CodeLength"),
         Number("DescriptionLength"),
-        Code("EditType", EDIT_TYPE),
+        // The chart of an extension separates the next slot from EditType
+        // (AutoOrderByCode false, EditType InDialog): slot 24 is the flag and
+        // slot 27 the edit type, `1` (InDialog) on every chart on record.
+        Flag("AutoOrderByCode"),
         Number("OrderLength"),
         Code("DefaultPresentation", DEFAULT_PRESENTATION),
-        Flag("AutoOrderByCode"),
+        Code("EditType", EDIT_TYPE),
         Reference("DefaultObjectForm"),
         Reference("DefaultListForm"),
         Reference("DefaultChoiceForm"),
@@ -666,7 +669,14 @@ static CHART_OF_CALCULATION_TYPES: Layout = Layout {
         Flag("UseStandardCommands"),
         Number("CodeLength"),
         Code("CodeType", CODE_TYPE),
-        Code("EditType", EDIT_TYPE),
+        // The chart of an extension separates slot 27 from EditType
+        // (DependenceOnCalculationTypes DontUse, EditType InDialog): the
+        // dependence rides slot 27 and the edit type slot 35, `1` (InDialog)
+        // on every chart on record.
+        Code(
+            "DependenceOnCalculationTypes",
+            DEPENDENCE_ON_CALCULATION_TYPES,
+        ),
         References("BaseCalculationTypes"),
         Flag("ActionPeriodUse"),
         Number("DescriptionLength"),
@@ -674,10 +684,7 @@ static CHART_OF_CALCULATION_TYPES: Layout = Layout {
         Reference("DefaultObjectForm"),
         Reference("DefaultListForm"),
         Reference("DefaultChoiceForm"),
-        Code(
-            "DependenceOnCalculationTypes",
-            DEPENDENCE_ON_CALCULATION_TYPES,
-        ),
+        Code("EditType", EDIT_TYPE),
         References("BasedOn"),
         Flag("IncludeHelpInContents"),
         Code("ChoiceMode", CHOICE_MODE),
