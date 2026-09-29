@@ -449,6 +449,86 @@ pub fn insert_field(table: &mut Brace, at: usize, field: &FieldEntry) -> Result<
     Ok(())
 }
 
+/// Replaces the field of the same name in a table entry (its type entries changed; the place stays).
+pub fn replace_field(table: &mut Brace, field: &FieldEntry) -> Result<()> {
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let fields = items
+        .get_mut(4)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no field list")?;
+    let position = fields
+        .iter()
+        .skip(1)
+        .position(|node| FieldEntry::parse(node).is_ok_and(|found| found.name == field.name))
+        .with_context(|| format!("the table has no field {}", field.name))?
+        + 1;
+    fields[position] = field.to_brace();
+    Ok(())
+}
+
+/// Removes the field `name` from a table entry, fixes the count and returns the field.
+pub fn remove_field(table: &mut Brace, name: &str) -> Result<FieldEntry> {
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let fields = items
+        .get_mut(4)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no field list")?;
+    let position = fields
+        .iter()
+        .skip(1)
+        .position(|node| FieldEntry::parse(node).is_ok_and(|field| field.name == name))
+        .with_context(|| format!("the table has no field {name}"))?
+        + 1;
+    let field = FieldEntry::parse(&fields.remove(position))?;
+    fields[0] = Brace::atom(fields.len() - 1);
+    Ok(field)
+}
+
+/// Removes the declared indexes that name the field `field` from a table entry, fixes the count and
+/// returns their names. The indexes the platform makes for an indexed attribute go
+/// (`ByFieldFld12`, `ByOwnerFieldFld12`, `ByParentFieldFld12`, `ByField5561`); the date index of a document
+/// with an additional-order attribute (`ByDocDate`, which lists the attribute last) stays and loses the field
+/// from its list (case b2; the name is reported as `ByDocDate (- Fld12)`); an index of another kind that names
+/// the field is refused.
+pub fn remove_field_indexes(table: &mut Brace, field: &str) -> Result<Vec<String>> {
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let indexes = items
+        .get_mut(6)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no index list")?;
+    let mut removed = Vec::new();
+    let mut position = 1;
+    while position < indexes.len() {
+        let index = IndexEntry::parse(&indexes[position])?;
+        if index.fields.iter().any(|name| name == field) {
+            if index.name == "ByDocDate" && index.fields.last().is_some_and(|last| last == field) {
+                let names = indexes[position]
+                    .as_list_mut()
+                    .and_then(|entry| entry.get_mut(2))
+                    .and_then(Brace::as_list_mut)
+                    .context("the date index has no field list")?;
+                names.pop();
+                names[0] = Brace::atom(names.len() - 1);
+                removed.push(format!("ByDocDate (- {field})"));
+                position += 1;
+                continue;
+            }
+            if !index.name.starts_with("By") || !index.name.contains("Field") {
+                bail!(
+                    "index {} names the field {field}: it is not one of the indexes of an indexed attribute",
+                    index.name
+                );
+            }
+            removed.push(index.name);
+            indexes.remove(position);
+        } else {
+            position += 1;
+        }
+    }
+    indexes[0] = Brace::atom(indexes.len() - 1);
+    Ok(removed)
+}
+
 // ---------------------------------------------------------------------------
 // The SQL a table stands for.
 

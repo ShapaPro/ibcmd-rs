@@ -75,6 +75,14 @@ pub struct MssqlRestructureArgs {
     /// With --through-apply: the folder of the apply's recovery artifact.
     #[arg(long)]
     pub recovery_dir: Option<PathBuf>,
+    /// With --through-apply: a structural apply drops the old tables in its transaction and is taken back
+    /// from a backup only, so it refuses unless it has one. This takes a COPY_ONLY backup of the database
+    /// into the file (a path on the SQL Server host) before the apply runs (recommended)...
+    #[arg(long)]
+    pub recovery_backup: Option<PathBuf>,
+    /// ...and this says that the caller has taken one.
+    #[arg(long)]
+    pub i_have_a_backup: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +92,25 @@ pub struct AdditionReport {
     pub field: String,
     pub number: u64,
     pub position: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovalReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub number: u64,
+    pub indexes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WideningReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub number: u64,
+    pub from: u64,
+    pub to: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +135,8 @@ pub struct ObjectReport {
     pub name: String,
     pub uuid: String,
     pub additions: Vec<AdditionReport>,
+    pub removals: Vec<RemovalReport>,
+    pub widenings: Vec<WideningReport>,
     pub tables: Vec<TableReport>,
 }
 
@@ -224,6 +253,25 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
     Ok(report)
 }
 
+/// `BACKUP DATABASE ... TO DISK = <path> WITH COPY_ONLY, COMPRESSION, INIT` on the server.
+fn take_backup(sql: &crate::sql::SqlExec, database: &str, path: &std::path::Path) -> Result<()> {
+    use crate::mssql_config_apply::model::quote_ident;
+    let client = sql
+        .client()
+        .context("the backup needs the built-in SQL client")?;
+    let path = path.to_string_lossy().replace('\'', "''");
+    client
+        .execute(
+            &format!(
+                "BACKUP DATABASE {} TO DISK = N'{path}' WITH COPY_ONLY, COMPRESSION, INIT",
+                quote_ident(database)?
+            ),
+            &[],
+        )
+        .with_context(|| format!("the backup into {path} failed: nothing was restructured"))?;
+    Ok(())
+}
+
 fn plan_options(args: &MssqlRestructureArgs) -> PlanOptions {
     PlanOptions {
         names_version: args.names_version.clone(),
@@ -279,7 +327,21 @@ fn run_through_apply(
     };
     options.recovery_dir = args.recovery_dir.clone();
     options.script_output = args.script_output.clone();
-    let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args));
+    // A run that writes needs a backup; a dry run and a rehearsal write nothing.
+    let writes = !args.dry_run && !args.rehearse;
+    let have_backup = args.i_have_a_backup || args.recovery_backup.is_some();
+    let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args))
+        .backup_missing(writes && !have_backup);
+    if let (true, Some(path)) = (writes, &args.recovery_backup) {
+        // Plan first: a stage without a restructuring needs no backup.
+        let mut probe = options.clone();
+        probe.dry_run = true;
+        probe.script_output = None;
+        let planned = apply_with_gate(&sql, &probe, &gate)?;
+        if planned.structure.is_some() {
+            take_backup(&sql, &args.database, path)?;
+        }
+    }
     let mode = if args.dry_run {
         "through-apply, dry-run"
     } else if args.rehearse {
@@ -352,6 +414,29 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
                         field: addition.field.name.clone(),
                         number: addition.number,
                         position: addition.position,
+                    })
+                    .collect(),
+                removals: object
+                    .removals
+                    .iter()
+                    .map(|removal| RemovalReport {
+                        attribute: removal.name.clone(),
+                        uuid: removal.uuid.clone(),
+                        field: removal.field.name.clone(),
+                        number: removal.number,
+                        indexes: removal.indexes.clone(),
+                    })
+                    .collect(),
+                widenings: object
+                    .widenings
+                    .iter()
+                    .map(|widening| WideningReport {
+                        attribute: widening.name.clone(),
+                        uuid: widening.uuid.clone(),
+                        field: widening.after.name.clone(),
+                        number: widening.number,
+                        from: widening.from,
+                        to: widening.to,
                     })
                     .collect(),
                 tables: object

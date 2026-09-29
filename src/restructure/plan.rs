@@ -7,10 +7,10 @@
 //!
 //! What is checked, fail closed (anything else is refused with the reason):
 //! 1. the staged image holds the same files as the stored one (no object added or removed) plus the
-//!    `deleted` marker with no deletion in it;
-//! 2. across every descriptor row of every kind, no attribute is removed and none changes its type or its
-//!    indexing; the new attributes (uuids with no field yet) all sit in the own attributes of catalogs or
-//!    documents;
+//!    `deleted` marker, which names removed attributes and nothing else;
+//! 2. across every descriptor row of every kind, the new, the removed and the retyped attributes all sit in
+//!    the own attributes of catalogs or documents; none changes its indexing; a retyped one is a variable
+//!    string whose limit grows;
 //! 3. each such object is otherwise unchanged as far as its table goes (its shape: hierarchy, code and
 //!    description lengths, number length, ...; its tabular sections) and it has no predefined data, no data
 //!    history, no subordination;
@@ -34,7 +34,8 @@ use crate::restructure::object::{ObjectFacts, ObjectKind};
 use crate::restructure::registry::{self, ObjectAdditions};
 use crate::restructure::schema::{
     Column, DbSchema, FieldEntry, PhysicalTable, SqlType, TableView, TypeEntry, create_index_sql,
-    create_table_sql, field_columns, insert_field, physical_tables,
+    create_table_sql, field_columns, insert_field, physical_tables, remove_field,
+    remove_field_indexes, replace_field,
 };
 use crate::restructure::storage::EMPTY_GENERATION;
 use crate::restructure::xdto;
@@ -137,6 +138,34 @@ impl Addition {
     }
 }
 
+/// One removed attribute and the field that goes with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Removal {
+    pub uuid: String,
+    pub name: String,
+    /// The number of its `Fld` entry in `DBNames` (the entry stays there).
+    pub number: u64,
+    /// The field the stored entry had.
+    pub field: FieldEntry,
+    /// The declared indexes that went with the field.
+    pub indexes: Vec<String>,
+}
+
+/// One widened attribute: a variable string that gets a longer limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Widening {
+    pub uuid: String,
+    pub name: String,
+    /// The number of its `Fld` entry in `DBNames`.
+    pub number: u64,
+    /// The field the stored entry had, and the field it becomes (the same but for the length).
+    pub before: FieldEntry,
+    pub after: FieldEntry,
+    /// The limit before and after, in characters.
+    pub from: u64,
+    pub to: u64,
+}
+
 /// One physical table of the rebuilt object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TablePlan {
@@ -158,6 +187,8 @@ pub struct ObjectPlan {
     pub object_uuid: String,
     pub object_name: String,
     pub additions: Vec<Addition>,
+    pub removals: Vec<Removal>,
+    pub widenings: Vec<Widening>,
     pub tables: Vec<TablePlan>,
     /// The columns of `Method::AlterAdd`.
     pub alter: Vec<AlterColumn>,
@@ -196,6 +227,52 @@ pub struct Plan {
     pub caches: Vec<CacheUpdate>,
 }
 
+impl ObjectPlan {
+    /// `new attributes Fld1 = A, Fld2 = B; removed attributes Fld3 = C`.
+    pub fn changes(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.additions.is_empty() {
+            parts.push(format!(
+                "new attributes {}",
+                self.additions
+                    .iter()
+                    .map(|addition| format!("{} = {}", addition.field.name, addition.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.removals.is_empty() {
+            parts.push(format!(
+                "removed attributes {}",
+                self.removals
+                    .iter()
+                    .map(|removal| format!("{} = {}", removal.field.name, removal.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.widenings.is_empty() {
+            parts.push(format!(
+                "widened attributes {}",
+                self.widenings
+                    .iter()
+                    .map(|widening| format!(
+                        "{} = {} ({} -> {})",
+                        widening.after.name, widening.name, widening.from, widening.to
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        parts.join("; ")
+    }
+
+    /// The attributes are added or removed (the derived caches list them), not only changed in place.
+    pub fn changes_the_attribute_list(&self) -> bool {
+        !self.additions.is_empty() || !self.removals.is_empty()
+    }
+}
+
 impl Plan {
     /// Every physical table of every rebuilt object.
     pub fn tables(&self) -> impl Iterator<Item = &TablePlan> {
@@ -207,6 +284,20 @@ impl Plan {
         self.objects
             .iter()
             .flat_map(|object| object.additions.iter())
+    }
+
+    /// Every removed attribute of every object.
+    pub fn removals(&self) -> impl Iterator<Item = &Removal> {
+        self.objects
+            .iter()
+            .flat_map(|object| object.removals.iter())
+    }
+
+    /// Every widened attribute of every object.
+    pub fn widenings(&self) -> impl Iterator<Item = &Widening> {
+        self.objects
+            .iter()
+            .flat_map(|object| object.widenings.iter())
     }
 }
 
@@ -345,24 +436,72 @@ fn check_files(image: &StagedImage) -> Result<()> {
             added.first()
         );
     }
-    if let Some(deleted) = &image.deleted {
-        let text = String::from_utf8_lossy(&row_bytes(deleted)).into_owned();
-        if text.trim_start_matches('\u{feff}').trim() != "0" {
-            bail!("the staged image deletes objects ({text:?}): not supported");
+    Ok(())
+}
+
+/// The list the `deleted` row of a stage holds: `<count>,"<id>",<flag>,...` (a byte order mark first;
+/// `0` for a stage that removes nothing). The platform's import writes one whenever the stage removes a
+/// metadata element that has an id -- an attribute is one -- and lists the ids with the flag 1.
+pub fn parse_deleted(stored: &[u8]) -> Result<Vec<(String, i64)>> {
+    let bytes = row_bytes(stored);
+    let text = String::from_utf8(bytes).context("the deleted row is not UTF-8")?;
+    let text = text.trim_start_matches('\u{feff}').trim();
+    let mut tokens = text.split(',').map(str::trim);
+    let count: usize = tokens
+        .next()
+        .and_then(|token| token.parse().ok())
+        .context("the deleted row has no count")?;
+    let mut list = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = tokens
+            .next()
+            .and_then(|token| token.strip_prefix('"')?.strip_suffix('"'))
+            .context("the deleted row lists fewer names than it counts")?;
+        let flag: i64 = tokens
+            .next()
+            .and_then(|token| token.parse().ok())
+            .context("the deleted row has a name without a flag")?;
+        list.push((id.to_ascii_lowercase(), flag));
+    }
+    if tokens.next().is_some() {
+        bail!("the deleted row has text after its list");
+    }
+    Ok(list)
+}
+
+/// The stage's `deleted` row may name the attributes the stage removes and nothing else: a removed
+/// file or object is not this restructuring's.
+fn check_deleted(image: &StagedImage, removed: &BTreeSet<String>) -> Result<()> {
+    let Some(stored) = &image.deleted else {
+        return Ok(());
+    };
+    for (id, flag) in parse_deleted(stored)? {
+        if !removed.contains(&id) {
+            bail!(
+                "the staged image deletes {id}, which is not an attribute it removes: not supported"
+            );
+        }
+        if flag != 1 {
+            bail!("the deleted row gives {id} the flag {flag}, the platform writes 1");
         }
     }
     Ok(())
 }
 
-/// The new attributes of one object.
+/// The new and the removed attributes of one object.
 struct Change {
-    /// The descriptor of the object that got attributes.
+    /// The descriptor of the object whose attributes changed.
     owner: String,
     /// The new attributes' uuids.
     added: BTreeSet<String>,
+    /// The removed attributes' uuids.
+    removed: BTreeSet<String>,
+    /// The uuids of the attributes whose type text differs (`check_object` and `plan_object` decide
+    /// whether it is a widening of a variable string, the one change of a type that is supported).
+    retyped: BTreeSet<String>,
 }
 
-/// Compares the attribute inventory of the two images: the new attributes by object.
+/// Compares the attribute inventory of the two images: the new and the removed attributes by object.
 fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
     // Only descriptors whose text differs are parsed: the rest cannot have changed a fact.
     let mut differing = BTreeSet::new();
@@ -377,6 +516,8 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
     let old = attribute_inventory(&image.old_descriptors, &differing)?;
     let new = attribute_inventory(&image.new_descriptors, &differing)?;
     let mut added: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut removed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut retyped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (uuid, entry) in &new {
         match old.get(uuid) {
             None => {
@@ -387,11 +528,10 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
             }
             Some(before) => {
                 if before.pattern != entry.pattern {
-                    bail!(
-                        "attribute {} of {} changes its type: not supported",
-                        entry.name,
-                        entry.owner
-                    );
+                    retyped
+                        .entry(entry.owner.clone())
+                        .or_default()
+                        .insert(uuid.clone());
                 }
                 if before.flag != entry.flag {
                     bail!(
@@ -411,36 +551,131 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
             }
         }
     }
-    if let Some((uuid, entry)) = old.iter().find(|(uuid, _)| !new.contains_key(*uuid)) {
+    for (uuid, entry) in &old {
+        if !new.contains_key(uuid) {
+            removed
+                .entry(entry.owner.clone())
+                .or_default()
+                .insert(uuid.clone());
+        }
+    }
+    let owners: BTreeSet<&String> = added
+        .keys()
+        .chain(removed.keys())
+        .chain(retyped.keys())
+        .collect();
+    if owners.is_empty() {
         bail!(
-            "attribute {} ({uuid}) of {} is removed: not supported",
-            entry.name,
-            entry.owner
+            "the staged image adds no attribute, removes none and retypes none: nothing this prototype restructures"
         );
     }
-    if added.is_empty() {
-        bail!("the staged image adds no attribute: nothing this prototype restructures");
-    }
-    Ok(added
+    Ok(owners
         .into_iter()
-        .map(|(owner, added)| Change { owner, added })
+        .map(|owner| Change {
+            owner: owner.clone(),
+            added: added.get(owner).cloned().unwrap_or_default(),
+            removed: removed.get(owner).cloned().unwrap_or_default(),
+            retyped: retyped.get(owner).cloned().unwrap_or_default(),
+        })
         .collect())
 }
 
 // ---------------------------------------------------------------------------
 // The plan.
 
-/// The select-list expression of a column of the new table: the old column of the same name,
-/// or the default of a column the old table did not have.
+/// The field a widened variable string becomes, and the limit before and after. Only a longer limit of a
+/// limited variable string is supported: the column stays `nvarchar(n)` and the copy reads it as it is. A
+/// fixed string, an unlimited one (`nvarchar(max)`), a shorter limit, another kind of type and any other
+/// difference of the type text are refused.
+fn widened_field(
+    before: &AttributeFacts,
+    after: &AttributeFacts,
+    stored: &FieldEntry,
+    nullable: bool,
+) -> Result<(FieldEntry, u64, u64)> {
+    const VARIABLE: u64 = 0x8000_0000;
+    let refuse = |why: &str| {
+        anyhow::anyhow!(
+            "attribute {} changes its type ({why}): only a longer limit of a variable string is supported",
+            after.name
+        )
+    };
+    let (Ok(was), Ok(now)) = (
+        type_entries(&before.pattern_node),
+        type_entries(&after.pattern_node),
+    ) else {
+        return Err(refuse("a type that is not mapped to a field"));
+    };
+    let ([was], [now]) = (was.as_slice(), now.as_slice()) else {
+        return Err(refuse("a composite type"));
+    };
+    if was.tag != "S" || now.tag != "S" {
+        return Err(refuse("not a string"));
+    }
+    if was.a & VARIABLE == 0 || now.a & VARIABLE == 0 {
+        return Err(refuse("a fixed string"));
+    }
+    let (from, to) = (was.a & !VARIABLE, now.a & !VARIABLE);
+    if from == 0 || to == 0 {
+        return Err(refuse("an unlimited string"));
+    }
+    if to < from {
+        return Err(refuse("the limit is shorter"));
+    }
+    if to == from {
+        return Err(refuse(
+            "the limit is the same, another part of the type differs",
+        ));
+    }
+    let item = |node: &Brace| {
+        node.as_list()
+            .and_then(|items| items.get(1))
+            .and_then(Brace::as_list)
+            .map(<[Brace]>::to_vec)
+    };
+    let same_but_length = match (item(&before.pattern_node), item(&after.pattern_node)) {
+        (Some(a), Some(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(&b).enumerate().all(|(index, (x, y))| {
+                    index == 1
+                        || crate::metadata_model::brace::serialize(x)
+                            == crate::metadata_model::brace::serialize(y)
+                })
+        }
+        _ => false,
+    };
+    if !same_but_length {
+        return Err(refuse("more than the limit differs"));
+    }
+    if stored.types.as_slice() != std::slice::from_ref(was) || stored.nullable != nullable {
+        return Err(refuse("the stored field is not what the stored type makes"));
+    }
+    Ok((
+        FieldEntry::new(&stored.name, nullable, vec![now.clone()]),
+        from,
+        to,
+    ))
+}
+
+/// The select-list expression of a column of the new table: the old column of the same name (a widened
+/// string is read as it is, the new column is longer), or the default of a column the old table did not
+/// have.
 fn select_expr(
     column: &Column,
     alias: &str,
     old: &HashMap<&str, &Column>,
+    widened: bool,
     folder_marker: Option<&str>,
     entry: Option<&TypeEntry>,
 ) -> Result<String> {
     if let Some(before) = old.get(column.name.as_str()) {
-        if before.sql_type != column.sql_type || before.nullable != column.nullable {
+        let widening = widened
+            && before.nullable == column.nullable
+            && matches!(
+                (&before.sql_type, &column.sql_type),
+                (SqlType::NVarChar(from), SqlType::NVarChar(to)) if to > from
+            );
+        if !widening && (before.sql_type != column.sql_type || before.nullable != column.nullable) {
             bail!(
                 "column {} changes from {:?} to {:?}: a type change is converted by the platform, not by this prototype",
                 column.name,
@@ -609,6 +844,11 @@ struct Running {
 pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     check_files(&inputs.staged)?;
     let changes = find_changes(&inputs.staged)?;
+    let removed_everywhere: BTreeSet<String> = changes
+        .iter()
+        .flat_map(|change| change.removed.iter().cloned())
+        .collect();
+    check_deleted(&inputs.staged, &removed_everywhere)?;
 
     let schema = DbSchema::parse(&inputs.schema).context("the stored DBSchema")?;
     let main_names = DbNames::parse_row(&inputs.main_names).context("the stored DBNames")?;
@@ -700,11 +940,14 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // The caches list the attributes (the XDTO model its properties, the object registry its records) and
+    // say nothing of a string's limit: a stage that only widens strings leaves them as they are.
     let mut caches = Vec::new();
-    if !options.skip_xdto {
+    let lists_change = objects.iter().any(ObjectPlan::changes_the_attribute_list);
+    if lists_change && !options.skip_xdto {
         caches.push(xdto_update(inputs, &prepared, &objects)?);
     }
-    if !options.skip_registry {
+    if lists_change && !options.skip_registry {
         caches.push(registry_update(inputs, &prepared, &objects)?);
     }
     if !caches.is_empty() {
@@ -773,8 +1016,100 @@ fn plan_object(
     check_stored_fields(&item.old, &old_view, &old_fields, stored.main_names)?;
     let has_folder = old_fields.iter().any(|field| field.name == "Folder");
 
-    let mut additions = Vec::new();
     let mut fields_now = old_fields.clone();
+    // The new table entry: the stored one, the removed fields (and their indexes) out first, then the new
+    // fields in. The names of the removed stay in DBNames: the platform never takes an entry out.
+    let mut entry = stored.schema.tables()[old_position].clone();
+    let mut removals = Vec::new();
+    for attribute in item.old.attributes() {
+        if !item.change.removed.contains(&attribute.uuid) {
+            continue;
+        }
+        let number = stored
+            .main_names
+            .number_of(&attribute.uuid, "Fld")
+            .with_context(|| format!("attribute {} has no number in DBNames", attribute.name))?;
+        let field_name = format!("Fld{number}");
+        let position = fields_now
+            .iter()
+            .position(|field| field.name == field_name)
+            .with_context(|| format!("the stored table has no field {field_name}"))?;
+        let field = fields_now.remove(position);
+        let taken = remove_field(&mut entry, &field_name)?;
+        if taken != field {
+            bail!("the field {field_name} of the entry is not the field of the table view");
+        }
+        let indexes = remove_field_indexes(&mut entry, &field_name)
+            .with_context(|| format!("attribute {}", attribute.name))?;
+        removals.push(Removal {
+            uuid: attribute.uuid.clone(),
+            name: attribute.name.clone(),
+            number,
+            field,
+            indexes,
+        });
+    }
+    if removals.len() != item.change.removed.len() {
+        bail!(
+            "some removed attributes are not among the own attributes of {} {}",
+            kind.label(),
+            new_facts.name()
+        );
+    }
+    if method == Method::AlterAdd && !removals.is_empty() {
+        bail!("the alter method adds columns only");
+    }
+
+    // The retyped attributes: each is a variable string whose limit grows. The field keeps its place and its
+    // name; only its type entry changes (declared indexes name the field, so they stay as they are).
+    let mut widenings = Vec::new();
+    for attribute in new_facts.attributes() {
+        if !item.change.retyped.contains(&attribute.uuid) {
+            continue;
+        }
+        let Some(before) = item
+            .old
+            .attributes()
+            .iter()
+            .find(|candidate| candidate.uuid == attribute.uuid)
+        else {
+            continue;
+        };
+        let number = stored
+            .main_names
+            .number_of(&attribute.uuid, "Fld")
+            .with_context(|| format!("attribute {} has no number in DBNames", attribute.name))?;
+        let field_name = format!("Fld{number}");
+        let position = fields_now
+            .iter()
+            .position(|field| field.name == field_name)
+            .with_context(|| format!("the stored table has no field {field_name}"))?;
+        let nullable = new_facts.nullable(attribute, has_folder);
+        let (after, from, to) = widened_field(before, attribute, &fields_now[position], nullable)?;
+        replace_field(&mut entry, &after)?;
+        widenings.push(Widening {
+            uuid: attribute.uuid.clone(),
+            name: attribute.name.clone(),
+            number,
+            before: fields_now[position].clone(),
+            after: after.clone(),
+            from,
+            to,
+        });
+        fields_now[position] = after;
+    }
+    if widenings.len() != item.change.retyped.len() {
+        bail!(
+            "some retyped attributes are not among the own attributes of {} {}",
+            kind.label(),
+            new_facts.name()
+        );
+    }
+    if method == Method::AlterAdd && !widenings.is_empty() {
+        bail!("the alter method adds columns only");
+    }
+
+    let mut additions = Vec::new();
     // Metadata order decides both the numbers and the places.
     let attributes = new_facts.attributes();
     for (index, attribute) in attributes.iter().enumerate() {
@@ -834,8 +1169,6 @@ fn plan_object(
         );
     }
 
-    // The new table entry: the stored one with the fields inserted.
-    let mut entry = stored.schema.tables()[old_position].clone();
     for addition in &additions {
         insert_field(&mut entry, addition.position, &addition.field)?;
     }
@@ -874,11 +1207,15 @@ fn plan_object(
                 let base = format!("_{}", addition.field.name);
                 column.name == base || column.name.starts_with(&format!("{base}_"))
             });
+            let widened = widenings
+                .iter()
+                .any(|widening| column.name == format!("_{}", widening.after.name));
             insert_columns.push(column.name.clone());
             insert_values.push(select_expr(
                 column,
                 &alias,
                 &old_columns,
+                widened,
                 new_field.and_then(|addition| addition.folder_marker()),
                 new_field.and_then(|addition| addition.field.types.first()),
             )?);
@@ -919,6 +1256,8 @@ fn plan_object(
             object_uuid: new_facts.uuid().to_owned(),
             object_name: new_facts.name().to_owned(),
             additions,
+            removals,
+            widenings,
             tables,
             alter,
         },
@@ -927,14 +1266,17 @@ fn plan_object(
 }
 
 /// The cache row of the XDTO model: a property for each new attribute, after the property of the
-/// attribute before it.
+/// attribute before it, and no property for a removed one.
 fn xdto_update(
     inputs: &Inputs,
     prepared: &[Prepared],
     objects: &[ObjectPlan],
 ) -> Result<CacheUpdate> {
     let first = prepared
-        .first()
+        .iter()
+        .zip(objects)
+        .find(|(_, object)| object.changes_the_attribute_list())
+        .map(|(item, _)| item)
         .context("no object to update the XDTO model for")?;
     let needle = format!("{}.{}", first.new.kind().xdto_object(), first.new.name());
     for (name, stored) in &inputs.cache_rows {
@@ -951,6 +1293,10 @@ fn xdto_update(
             let kind = item.new.kind();
             let type_name = format!("{}.{}", kind.xdto_object(), item.new.name());
             let attributes = item.new.attributes();
+            for removal in &object.removals {
+                model.remove_property(&type_name, &removal.name)?;
+                count += 1;
+            }
             for addition in &object.additions {
                 let index = attributes
                     .iter()
@@ -978,7 +1324,7 @@ fn xdto_update(
         return Ok(CacheUpdate {
             row_name: name.clone(),
             row: deflate(&model.to_text())?,
-            what: format!("{count} property line(s) in the XDTO model"),
+            what: format!("{count} property line(s) added or removed in the XDTO model"),
             set_creation: true,
         });
     }
@@ -1022,12 +1368,22 @@ fn registry_update(
             added,
         })
         .collect();
-    let updated = registry::add_attributes(&text, &additions)?;
+    let removed: BTreeSet<String> = objects
+        .iter()
+        .flat_map(|object| object.removals.iter().map(|removal| removal.uuid.clone()))
+        .collect();
+    let mut updated = registry::remove_attributes(&text, &removed)?;
     let count: usize = added.iter().map(BTreeSet::len).sum();
+    if count > 0 {
+        updated = registry::add_attributes(&updated, &additions)?;
+    }
     Ok(CacheUpdate {
         row_name: name.clone(),
         row: deflate(&updated)?,
-        what: format!("{count} record(s) of attributes in the object registry"),
+        what: format!(
+            "{count} record(s) of attributes added, {} removed in the object registry",
+            removed.len()
+        ),
         set_creation: true,
     })
 }
@@ -1098,16 +1454,23 @@ fn check_object(old: &ObjectFacts, new: &ObjectFacts, change: &Change) -> Result
             new.name()
         );
     }
-    // The stored attributes are the new ones in the same order, with the same type and indexing.
-    let kept: Vec<&AttributeFacts> = new
+    // The attributes that stay are the same in both images, in the same order, with the same type (a
+    // retyped one is judged by `widening`) and indexing: the stored ones without the removed against the
+    // staged ones without the new.
+    let kept_before: Vec<&AttributeFacts> = old
+        .attributes()
+        .iter()
+        .filter(|attribute| !change.removed.contains(&attribute.uuid))
+        .collect();
+    let kept_after: Vec<&AttributeFacts> = new
         .attributes()
         .iter()
         .filter(|attribute| !change.added.contains(&attribute.uuid))
         .collect();
-    let same_attributes = kept.len() == old.attributes().len()
-        && kept.iter().zip(old.attributes()).all(|(after, before)| {
+    let same_attributes = kept_after.len() == kept_before.len()
+        && kept_after.iter().zip(&kept_before).all(|(after, before)| {
             after.uuid == before.uuid
-                && after.pattern == before.pattern
+                && (after.pattern == before.pattern || change.retyped.contains(&after.uuid))
                 && after.indexing == before.indexing
                 && after.usage == before.usage
         });
@@ -1459,17 +1822,11 @@ impl Plan {
             .iter()
             .map(|object| {
                 format!(
-                    "{} {} ({}): {} new attribute(s) -> {}",
+                    "{} {} ({}): {}",
                     object.kind.label(),
                     object.object_name,
                     object.object,
-                    object.additions.len(),
-                    object
-                        .additions
-                        .iter()
-                        .map(|addition| format!("{} = {}", addition.field.name, addition.name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    object.changes()
                 )
             })
             .collect::<Vec<_>>()

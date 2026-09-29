@@ -2,7 +2,7 @@
 //!
 //! The apply asks its gate whether the staged configuration is something it may move. The conservative
 //! gate refuses every descriptor whose text differs. This gate lets through the changes of the set S1 --
-//! built so far: new attributes of catalogs and documents -- and hands the apply the structure work to run
+//! built so far: new, removed and widened (variable strings) attributes of catalogs and documents -- and hands the apply the structure work to run
 //! in its own transaction ([`StructurePhase`]); everything else stays a refusal, with the reason.
 //!
 //! The decision is a chain, and every link fails closed:
@@ -29,6 +29,7 @@ use crate::mssql_config_apply::gate::{
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
 use crate::restructure::plan::{Inputs, Plan, PlanOptions, plan};
 use crate::restructure::reader::{ClientSource, read_inputs};
+use crate::restructure::script::consume_deleted_sql;
 use crate::sql::SqlExec;
 
 pub const GATE_NAME: &str = "s1";
@@ -38,6 +39,11 @@ pub const GATE_NAME: &str = "s1";
 pub enum Operation {
     /// `ChildObjects/Attribute[X]: added`.
     AddAttribute(String),
+    /// `ChildObjects/Attribute[X]: removed`.
+    RemoveAttribute(String),
+    /// `ChildObjects/Attribute[X]/Properties/Type/StringQualifiers/Length: a -> b`. Whether it is a longer
+    /// limit of a variable string (and not a shorter one) is the plan's to judge.
+    WidenString(String),
     /// Designed (section 12.3) but not built in this version: the operation and what it is about.
     NotBuilt {
         operation: &'static str,
@@ -114,15 +120,9 @@ pub fn classify_reason(reason: &Reason) -> std::result::Result<Operation, String
             if let Some(attribute) = named(child, "Attribute") {
                 match (rest, word) {
                     ([], "added") => Ok(Operation::AddAttribute(attribute)),
-                    ([], "removed") => Ok(Operation::NotBuilt {
-                        operation: "delete an attribute",
-                        subject: attribute,
-                    }),
+                    ([], "removed") => Ok(Operation::RemoveAttribute(attribute)),
                     (["Properties", "Type", "StringQualifiers", "Length"], _) => {
-                        Ok(Operation::NotBuilt {
-                            operation: "widen a string",
-                            subject: attribute,
-                        })
+                        Ok(Operation::WidenString(attribute))
                     }
                     (["Properties", "Indexing"], _) => Ok(Operation::NotBuilt {
                         operation: "switch the index of an attribute",
@@ -158,6 +158,14 @@ pub fn classify(verdict: &Verdict) -> (Vec<ObjectOperations>, Vec<Refusal>) {
         });
     }
     for reason in &verdict.reasons {
+        // The `deleted` row of a stage that removes attributes: the check does not know the row;
+        // `decide` reads it and lets it through when it names removed attributes and nothing else.
+        if reason.class == ReasonClass::Unknown
+            && reason.file_name == "deleted"
+            && reason.object == "deleted"
+        {
+            continue;
+        }
         match classify_reason(reason) {
             Ok(Operation::NotBuilt { operation, subject }) => refusals.push(Refusal {
                 row: reason.file_name.clone(),
@@ -197,7 +205,8 @@ fn sha256_upper(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The plan as the apply takes it: T-SQL for its transaction and the cache rows as guarded rewrites.
+/// The plan as the apply takes it: T-SQL for its transaction and the cache rows as guarded rewrites. The
+/// stage's `deleted` row, when there is one, is consumed by the phase (the apply does not move it).
 fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
     let mut params_rewrites = Vec::new();
     for cache in &plan.caches {
@@ -219,8 +228,15 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             set_creation: cache.set_creation,
         });
     }
+    let mut sql = plan.phase_sql("@now")?;
+    let mut consumed = 0;
+    if let Some(deleted) = &inputs.staged.deleted {
+        sql.push_str(&consume_deleted_sql(&sha256_upper(deleted)));
+        consumed = 1;
+    }
     Ok(StructurePhase {
-        sql: plan.phase_sql("@now")?,
+        sql,
+        consumed_staged_rows: consumed,
         params_rewrites,
         tables: plan
             .tables()
@@ -231,16 +247,11 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             .iter()
             .map(|object| {
                 format!(
-                    "{} {} ({}): new attributes {}",
+                    "{} {} ({}): {}",
                     object.kind.label(),
                     object.object_name,
                     object.object,
-                    object
-                        .additions
-                        .iter()
-                        .map(|addition| format!("{} = {}", addition.field.name, addition.name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    object.changes()
                 )
             })
             .collect(),
@@ -255,10 +266,24 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
 /// The decision, from what the database said: the conservative verdict, the check's verdict, the plan's
 /// input. Pure, so that the refusals are testable without a database.
 pub fn decide(
+    verdict: GateVerdict,
+    check: &Verdict,
+    inputs: &Inputs,
+    options: &PlanOptions,
+) -> (GateVerdict, Option<StructurePhase>) {
+    decide_with(verdict, check, inputs, options, false)
+}
+
+/// The refusal a structural apply gets without a backup (the decision of 12.4.4, 12.9).
+pub const BACKUP_REQUIRED: &str = "a structural apply drops the old tables inside its transaction and a committed restructuring is taken back from a backup only: pass --recovery-backup <path> (a COPY_ONLY backup is taken first) or --i-have-a-backup";
+
+/// [`decide`], and with `backup_missing` a structure phase is not handed over.
+pub fn decide_with(
     mut verdict: GateVerdict,
     check: &Verdict,
     inputs: &Inputs,
     options: &PlanOptions,
+    backup_missing: bool,
 ) -> (GateVerdict, Option<StructurePhase>) {
     verdict.gate = format!("{GATE_NAME} (the conservative rule and the S1 restructurings)");
     if !verdict.restructuring_required {
@@ -291,34 +316,56 @@ pub fn decide(
         Err(error) => return refuse(verdict, "", format!("{error:#}")),
     };
 
-    // The two decoders agree: the same objects, the same new attributes.
-    let planned: BTreeMap<String, BTreeSet<&str>> = plan
+    // The two decoders agree: the same objects, the same new, removed and widened attributes.
+    type Names<'a> = (BTreeSet<&'a str>, BTreeSet<&'a str>, BTreeSet<&'a str>);
+    let planned: BTreeMap<String, Names<'_>> = plan
         .objects
         .iter()
         .map(|object| {
             (
                 object.object_uuid.to_ascii_lowercase(),
-                object
-                    .additions
-                    .iter()
-                    .map(|addition| addition.name.as_str())
-                    .collect(),
+                (
+                    object
+                        .additions
+                        .iter()
+                        .map(|addition| addition.name.as_str())
+                        .collect(),
+                    object
+                        .removals
+                        .iter()
+                        .map(|removal| removal.name.as_str())
+                        .collect(),
+                    object
+                        .widenings
+                        .iter()
+                        .map(|widening| widening.name.as_str())
+                        .collect(),
+                ),
             )
         })
         .collect();
-    let named_by_check: BTreeMap<String, BTreeSet<&str>> = operations
+    let named_by_check: BTreeMap<String, Names<'_>> = operations
         .iter()
         .map(|object| {
+            let names = |wanted: fn(&Operation) -> Option<&str>| -> BTreeSet<&str> {
+                object.operations.iter().filter_map(wanted).collect()
+            };
             (
                 object.row.to_ascii_lowercase(),
-                object
-                    .operations
-                    .iter()
-                    .filter_map(|operation| match operation {
+                (
+                    names(|operation| match operation {
                         Operation::AddAttribute(name) => Some(name.as_str()),
-                        Operation::NotBuilt { .. } => None,
-                    })
-                    .collect(),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        Operation::RemoveAttribute(name) => Some(name.as_str()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        Operation::WidenString(name) => Some(name.as_str()),
+                        _ => None,
+                    }),
+                ),
             )
         })
         .collect();
@@ -332,14 +379,20 @@ pub fn decide(
         );
     }
 
-    // The planned objects' descriptors are the blockers the plan answers for; another blocker is a
+    // The planned objects' descriptors are the blockers the plan answers for, and so is the stage's
+    // `deleted` row (the plan checked that it names removed attributes only); another blocker is a
     // change this gate does not cover.
-    verdict
-        .blockers
-        .retain(|blocker| !planned.contains_key(&blocker.row.to_ascii_lowercase()));
+    let has_deleted = inputs.staged.deleted.is_some();
+    verdict.blockers.retain(|blocker| {
+        let row = blocker.row.to_ascii_lowercase();
+        !planned.contains_key(&row) && !(has_deleted && row == "deleted")
+    });
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;
     if verdict.restructuring_required {
         return (verdict, None);
+    }
+    if backup_missing {
+        return refuse(verdict, "", BACKUP_REQUIRED.to_owned());
     }
     match phase_of(&plan, inputs) {
         Ok(phase) => (verdict, Some(phase)),
@@ -352,6 +405,9 @@ pub struct S1Gate<'a> {
     sql: &'a SqlExec,
     conservative: ConservativeGate,
     options: PlanOptions,
+    /// A structural apply that writes needs a backup (taken or acknowledged): without one the gate
+    /// refuses. Not needed by a dry run and a rehearsal, which write nothing.
+    backup_missing: bool,
     prepared: RefCell<Option<StructurePhase>>,
 }
 
@@ -361,8 +417,15 @@ impl<'a> S1Gate<'a> {
             sql,
             conservative,
             options,
+            backup_missing: false,
             prepared: RefCell::new(None),
         }
+    }
+
+    /// The gate refuses a restructuring unless the caller has a backup ([`BACKUP_REQUIRED`]).
+    pub fn backup_missing(mut self, missing: bool) -> Self {
+        self.backup_missing = missing;
+        self
     }
 }
 
@@ -399,9 +462,14 @@ impl StructuralGate for S1Gate<'_> {
             );
             return Ok(verdict);
         }
-        let (verdict, phase) = decide(verdict, &check, &inputs, &self.options);
+        let (verdict, phase) =
+            decide_with(verdict, &check, &inputs, &self.options, self.backup_missing);
         *self.prepared.borrow_mut() = phase;
         Ok(verdict)
+    }
+
+    fn judges_deleted_row(&self) -> bool {
+        true
     }
 
     fn take_structure(&self) -> Option<StructurePhase> {

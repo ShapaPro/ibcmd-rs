@@ -192,3 +192,40 @@ fn sql_types_follow_the_entry_tags() {
     assert_eq!(sql_type(&wide).unwrap(), SqlType::BigInt);
     assert_eq!(SqlType::Numeric(7, 0).ddl(), "numeric(7, 0)");
 }
+
+/// The entry of `Reference20` of the fixture with the given index list (in the platform's layout).
+fn entry_with_indexes(indexes: &str) -> crate::metadata_model::brace::Brace {
+    let mut entry = DbSchema::parse(STAGED).unwrap().tables()[0].clone();
+    entry.as_list_mut().unwrap()[6] =
+        crate::metadata_model::brace::parse_row(indexes.as_bytes()).unwrap();
+    entry
+}
+
+#[test]
+fn deleting_a_field_takes_its_own_index_out_and_the_field_out_of_the_date_index() {
+    // The index list of a document with an additional-order attribute (case b2): the date index lists the
+    // attribute last, the attribute has an index of its own.
+    let indexes = "{3,\r\n{\"ByDocNum\",1,\r\n{2,\"Number\",\"ID\"},0,0,0,\r\n{0},0,0},\r\n{\"ByDocDate\",1,\r\n{4,\"Date_Time\",\"ID\",\"Marked\",\"Fld154\"},0,0,0,\r\n{0},0,0},\r\n{\"ByFieldFld154\",1,\r\n{4,\"Fld154\",\"Date_Time\",\"ID\",\"Marked\"},0,0,0,\r\n{0},0,0}}";
+    let mut entry = entry_with_indexes(indexes);
+    let removed = remove_field_indexes(&mut entry, "Fld154").unwrap();
+    assert_eq!(removed, ["ByDocDate (- Fld154)", "ByFieldFld154"]);
+    let list = entry.as_list().unwrap()[6].clone();
+    let text = crate::metadata_model::brace::serialize(&list);
+    assert!(text.starts_with("{2,"), "{text}");
+    assert!(text.contains("\"ByDocDate\""), "{text}");
+    assert!(
+        text.contains("{3,\"Date_Time\",\"ID\",\"Marked\"}"),
+        "{text}"
+    );
+    assert!(!text.contains("Fld154"), "{text}");
+
+    // An index of another kind that names the field is refused.
+    let other = "{2,\r\n{\"ByDocNum\",1,\r\n{2,\"Number\",\"ID\"},0,0,0,\r\n{0},0,0},\r\n{\"ByOther\",1,\r\n{2,\"Fld154\",\"ID\"},0,0,0,\r\n{0},0,0}}";
+    let mut refused = entry_with_indexes(other);
+    assert!(
+        remove_field_indexes(&mut refused, "Fld154")
+            .unwrap_err()
+            .to_string()
+            .contains("not one of the indexes of an indexed attribute")
+    );
+}

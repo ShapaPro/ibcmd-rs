@@ -29,6 +29,7 @@ pub mod code {
     pub const COPY_COUNT: u32 = 57403;
     pub const STRUCTURE: u32 = 57404;
     pub const PUBLISH: u32 = 57405;
+    pub const DELETED_ROW: u32 = 57406;
 }
 
 fn quote(text: &str) -> String {
@@ -138,6 +139,35 @@ fn assert_structure(sql: &mut String, table: &PhysicalTable, suffix: &str) {
         code::STRUCTURE,
         &format!("{object} has indexes the model does not"),
     );
+}
+
+/// Consumes the stage's `deleted` row: the list of the attributes the stage removes, which the gate has
+/// checked and the plan has taken out of the schema. The apply does not move the row into `Config` (it
+/// is a marker of the stage, not a file); the phase deletes it under a guard on its content, and tells
+/// the apply that it consumed one staged row.
+pub fn consume_deleted_sql(sha256_upper: &str) -> String {
+    let mut sql = String::new();
+    writeln!(sql, "-- restructure: the stage's list of removals").unwrap();
+    assert_that(
+        &mut sql,
+        &format!(
+            "(SELECT COUNT_BIG(*) FROM dbo.ConfigSave WHERE FileName = N'deleted') <> 1              OR (SELECT COUNT_BIG(*) FROM dbo.ConfigSave WHERE FileName = N'deleted' AND PartNo = 0              AND CONVERT(varchar(64), HASHBYTES('SHA2_256', BinaryData), 2) = '{sha256_upper}') <> 1"
+        ),
+        code::DELETED_ROW,
+        "the deleted row of the stage is not the one the restructure was planned from",
+    );
+    writeln!(
+        sql,
+        "DELETE FROM dbo.ConfigSave WHERE FileName = N'deleted';"
+    )
+    .unwrap();
+    assert_that(
+        &mut sql,
+        "@@ROWCOUNT <> 1",
+        code::DELETED_ROW,
+        "the deleted row of the stage was not consumed",
+    );
+    sql
 }
 
 impl Plan {

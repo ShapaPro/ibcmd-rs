@@ -1,7 +1,10 @@
 //! The S1 gate: which reasons of the restructuring check are operations, and what the gate lets through
 //! (the fixtures of case a2 stand in for the database).
 
-use super::tests_plan::{CATALOG, NEW_ROW, OLD_ROW, inputs, options};
+use super::tests_plan::{
+    CATALOG, NEW_ROW, OLD_ROW, client_as_string, inputs, options, string_client_inputs,
+    widen_client,
+};
 use crate::apply_check::{Reason, ReasonClass, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
 use crate::restructure::s1::{Operation, classify, classify_reason, decide};
@@ -77,15 +80,15 @@ fn the_reasons_of_the_check_are_s1_operations_or_refusals() {
         other => panic!("{other:?}"),
     };
     assert_eq!(
-        not_built(attribute("", "removed (a column is added or dropped)")),
-        "delete an attribute"
+        attribute("", "removed (a column is added or dropped)"),
+        Ok(Operation::RemoveAttribute("Х".to_owned()))
     );
     assert_eq!(
-        not_built(attribute(
+        attribute(
             "/Properties/Type/StringQualifiers/Length",
             "50 -> 100 (a property of an attribute no rule covers)"
-        )),
-        "widen a string"
+        ),
+        Ok(Operation::WidenString("Х".to_owned()))
     );
     assert_eq!(
         not_built(attribute(
@@ -209,6 +212,69 @@ fn a_planned_attribute_is_let_through_and_its_blocker_withdrawn() {
 }
 
 #[test]
+fn a_widened_string_is_let_through_and_narrowing_is_not() {
+    let widened = widen_client(
+        &client_as_string(OLD_ROW, 50),
+        "{\"S\",50,1}",
+        "{\"S\",200,1}",
+    );
+    let staged = string_client_inputs(&widened);
+    let check = Verdict {
+        needs_restructuring: true,
+        reasons: vec![structure(
+            "Catalog._ДемоПартнеры",
+            "ChildObjects/Attribute[Клиент]/Properties/Type/StringQualifiers/Length",
+            "50 -> 200 (a property of an attribute no rule covers)",
+        )],
+        ..Verdict::default()
+    };
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &staged, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert!(phase.objects[0].contains("widened attributes"));
+    assert!(phase.objects[0].contains("(50 -> 200)"));
+    assert!(phase.params_rewrites.is_empty() && phase.caches.is_empty());
+    assert!(phase.sql.contains("create table dbo._Reference20NG"));
+
+    // The check names another attribute than the plan widens: the decoders disagree.
+    let mut other = check.clone();
+    other.reasons[0].property =
+        "ChildObjects/Attribute[Другой]/Properties/Type/StringQualifiers/Length".to_owned();
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &other, &staged, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        verdict
+            .blockers
+            .iter()
+            .any(|blocker| blocker.reason.contains("disagree")),
+        "{:?}",
+        verdict.blockers
+    );
+
+    // A shorter limit: the check names it the same way, the plan refuses it.
+    let narrowed = widen_client(
+        &client_as_string(OLD_ROW, 50),
+        "{\"S\",50,1}",
+        "{\"S\",20,1}",
+    );
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check,
+        &string_client_inputs(&narrowed),
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        verdict
+            .blockers
+            .iter()
+            .any(|blocker| blocker.reason.contains("the limit is shorter")),
+        "{:?}",
+        verdict.blockers
+    );
+}
+
+#[test]
 fn nothing_is_let_through_that_the_gate_does_not_cover() {
     let base = inputs(OLD_ROW, NEW_ROW);
 
@@ -234,8 +300,8 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
     let mut check = check_of_a2();
     check.reasons.push(structure(
         "Catalog._ДемоПартнеры",
-        "ChildObjects/Attribute[Х]",
-        "removed (a column is added or dropped)",
+        "ChildObjects/Attribute[Х]/Properties/Indexing",
+        "DontIndex -> Index (a property of an attribute no rule covers)",
     ));
     let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());

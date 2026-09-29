@@ -73,7 +73,9 @@ fn join(parts: &Parts) -> Vec<u8> {
     let mut lines = encoded.as_bytes().chunks(LINE).peekable();
     while let Some(line) = lines.next() {
         text.push_str(std::str::from_utf8(line).unwrap_or_default());
-        if lines.peek().is_some() {
+        // Every full line ends with the separator, the last one too when it is full (case b2: the base64
+        // of the model was a multiple of 64 characters long and the platform wrote the separator before `}`).
+        if lines.peek().is_some() || line.len() == LINE {
             text.push_str(SEPARATOR);
         }
     }
@@ -153,6 +155,36 @@ impl Model {
     ) -> Result<()> {
         insert_property(&mut self.parts, object_type, after, standard, name, line)
     }
+
+    /// Removes the property line of the attribute `name` from the object type `object_type`.
+    pub fn remove_property(&mut self, object_type: &str, name: &str) -> Result<()> {
+        delete_property(&mut self.parts, object_type, name)
+    }
+}
+
+fn delete_property(parts: &mut Parts, object_type: &str, name: &str) -> Result<()> {
+    let start_tag = format!("<objectType name=\"{object_type}\">");
+    let start = find(&parts.xml, start_tag.as_bytes(), 0)
+        .with_context(|| format!("the model has no {start_tag}"))?;
+    let end = find(&parts.xml, b"</objectType>", start).context("the object type is not closed")?;
+    let named = format!(" name=\"{name}\"");
+    let at = find(&parts.xml[..end], named.as_bytes(), start)
+        .with_context(|| format!("{object_type} has no property {name}"))?;
+    // The whole line, its terminator included.
+    let line_start = parts.xml[..at]
+        .windows(2)
+        .rposition(|pair| pair == b"\r\n")
+        .map(|position| position + 2)
+        .filter(|line_start| *line_start > start)
+        .context("the property line is not on a line of its own")?;
+    let line_end =
+        find(&parts.xml[..end], b"\r\n", at).context("the property line is not terminated")? + 2;
+    let line = std::str::from_utf8(&parts.xml[line_start..line_end]).unwrap_or_default();
+    if !line.trim_start().starts_with("<property ") {
+        bail!("{object_type}: the line with name {name} is not a property: {line:?}");
+    }
+    parts.xml.drain(line_start..line_end);
+    Ok(())
 }
 
 fn insert_property(
@@ -216,6 +248,19 @@ mod tests {
         })
     }
 
+    #[test]
+    fn a_full_last_line_ends_with_the_separator_too() {
+        // 48 bytes are exactly 64 base64 characters: the platform wrote the separator before the closing
+        // brace (case b2); a partial last line has none.
+        let full = String::from_utf8(row(&"a".repeat(48))).unwrap();
+        assert!(full.ends_with("\r\r\n}\r\n}\r\n}"), "{full:?}");
+        let partial = String::from_utf8(row(&"a".repeat(49))).unwrap();
+        assert!(partial.ends_with("==}\r\n}\r\n}"), "{partial:?}");
+        // Both read back.
+        assert_eq!(split(full.as_bytes()).unwrap().xml.len(), 48);
+        assert_eq!(split(partial.as_bytes()).unwrap().xml.len(), 49);
+    }
+
     const MODEL: &str = "\u{feff}<model xmlns=\"http://v8.1c.ru/8.1/xdto\">\r\n\t<package>\r\n\t\t<objectType name=\"CatalogObject.X\">\r\n\t\t\t<property name=\"Code\" type=\"xs:string\"/>\r\n\t\t\t<property name=\"Кл\" type=\"xs:boolean\" lowerBound=\"0\"/>\r\n\t\t\t<property name=\"Таб\" type=\"d4p1:Row\" lowerBound=\"0\" upperBound=\"99999\"/>\r\n\t\t</objectType>\r\n\t</package>\r\n</model>";
 
     #[test]
@@ -236,6 +281,36 @@ mod tests {
         assert!(lines.len() > 1);
         assert!(lines[..lines.len() - 1].iter().all(|line| line.len() == 64));
         assert_eq!(split(&text).unwrap().xml, MODEL.as_bytes());
+    }
+
+    #[test]
+    fn a_removed_property_is_the_reverse_of_an_added_one() {
+        let entry = TypeEntry::new("S", 0x8000_0032, 0, "", 0);
+        let line = property_line(&entry, "Новый", true).unwrap();
+        let added = add_property(
+            &row(MODEL),
+            "CatalogObject.X",
+            Some("Кл"),
+            &[],
+            "Новый",
+            &line,
+        )
+        .unwrap();
+        let mut model = Model::open(&added).unwrap();
+        model.remove_property("CatalogObject.X", "Новый").unwrap();
+        assert_eq!(model.to_text(), row(MODEL));
+        // The first, a middle and the last property go the same way.
+        for name in ["Code", "Кл", "Таб"] {
+            let mut model = Model::open(&row(MODEL)).unwrap();
+            model.remove_property("CatalogObject.X", name).unwrap();
+            let xml = String::from_utf8(model.xml().to_vec()).unwrap();
+            assert!(!xml.contains(&format!(" name=\"{name}\"")), "{name}");
+            assert_eq!(xml.matches("<property ").count(), 2);
+        }
+        // Refusals: no such type, no such property, the type's own name is no property.
+        let mut model = Model::open(&row(MODEL)).unwrap();
+        assert!(model.remove_property("CatalogObject.Y", "Кл").is_err());
+        assert!(model.remove_property("CatalogObject.X", "Нет").is_err());
     }
 
     #[test]

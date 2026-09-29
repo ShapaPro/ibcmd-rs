@@ -28,6 +28,8 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | `xe_read.py`, `xe_shapes.py`, `timeline.py`, `extract_ddl.py` | XE file -> JSONL, normalised statement story per session, phase timeline, the structure statements as a readable SQL log |
 | `si_diff.py` | the `Params` `*.si` cache rows between two snapshots, after inflate (the XDTO model row is shown decoded from its base64 block) |
 | `compare_tables.ps1`, `compare_config.ps1`, `dbschema_cmp.py` | twin comparison (S1): the rows of tables of two databases with `EXCEPT` both ways (every column but the row version); the `Config` rows one twin has and the other has not, by name; `DBSchema` entries and `DBNames` text of two snapshots of two databases |
+| `edit_cases_s2.py`, `stage_case.ps1` | S1 wave 1 (issues #398-#400): `edit_cases_s2.py <out> b1\|b2\|c1\|d0\|d1` makes the edited files of a case on the pristine БСП (delete attributes, delete an additional-order attribute, widen strings, the index flag alone, the index flag on and off); `stage_case.ps1 -Case <c>` restores a pristine clone, stages the case with the native partial import, snapshots and backs up the staged state and restores the two twins (`_nat`, `_own`) from the backup |
+| `twin_check.ps1`, `inject_failure.ps1`, `tamper_stage.py` | the twin protocol of 12.6 for a case whose twins are both applied: `twin_check.ps1` = checks 2-6 in one run (snapshot, tables / columns / indexes, `EXCEPT` of every rebuilt table taken from the report, `Config`, `DBSchema` / `DBNames`, the `.si` rows); `inject_failure.ps1` = check 12 (the generated script with a `THROW` before `COMMIT` on a fresh twin, a digest of the whole database before and after); `tamper_stage.py` changes one staged row (inflate, edit, deflate) to make the refusals of check 11 testable |
 | `params_row.ps1`, `cache_variant.ps1` | S1 cache experiments: read / replace / delete one `Params` `*.si` row of a lab database; start a server on a variant (a row absent or stale) and run a probe job (what the platform needs of each cache row, section 12.5) |
 
 ## Decode and check
@@ -55,7 +57,7 @@ types and tabular sections). Each edit keeps the original and the edited file un
 `edit85.py` makes case a on the 8.5 (2.21) dialect, `edit_second.py <tree> <catalog> <name> ...` adds a second / third attribute
 (the `ALTER TABLE` experiment). `edit_cases_s1.py` makes the types case of S1 (T1): attributes of every primitive type
 (boolean, strings of every kind, integer / fractional / non-negative numbers, dates, time) in five catalogs and a document,
-one stage; `jobs/types_t1.bsl` is the session job that reads, serializes, writes and queries them.
+one stage; `jobs/types_t1.bsl` is the session job that reads, serializes, writes and queries them. `jobs/s2_b1.bsl` and `jobs/s2_c1.bsl` are the session jobs of the deletion and widening cases (rows and a digest of the kept values, XDTO, write and read back, query by the widened attribute).
 
 ## Typical run
 

@@ -770,7 +770,7 @@ string widening, a plain new catalog or document -- catalogs and documents only.
 
 | question | answer |
 |---|---|
-| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section, switch the index of an attribute, widen a variable string, add a plain object. **Built** (12.8): adding attributes of every primitive type. Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
+| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section, switch the index of an attribute, widen a variable string, add a plain object. **Built**: adding attributes of every primitive type (12.8), deleting an attribute and widening a string (12.11). Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
 | where the structure work runs | **inside the apply's transaction**: the apply's locks and assertions, then the *structure phase*, then the fold of dynamic generations, the move of the staged rows, the resets and the caches, the postconditions, `COMMIT`. One SERIALIZABLE script; any failed assertion rolls the rebuilt tables back with everything else; no `Status 200/400/500` is ever visible and there is nothing to resume |
 | how the apply asks | the gate it already has (`StructuralGate::check`) plus `take_structure()` and `ScriptInputs.structure_sql`: about 100 lines in `mssql_config_apply` (half of them comments and a test), and no dependency of it on `restructure` (12.4) |
 | which caches | attribute operations change two `Params` rows -- the XDTO model and the object registry -- and `siVersions`; a new object needs three more. **Deleting a stale row is not a cheap route**: with `1a621f0f` or `a07b62f0` absent the server does not start (12.5) |
@@ -804,8 +804,8 @@ the ConfigSave of the twin); the code matches the *property path* and the first 
 | reason (`[structure] <object>: <property>: <change>`) | S1 operation | built |
 |---|---|---|
 | `Catalog.X`, `Document.X`: `ChildObjects/Attribute[A]`: `added (a column is added or dropped)` | add an attribute | **yes** |
-| `...`: `ChildObjects/Attribute[A]`: `removed (a column is added or dropped)` | delete an attribute | no |
-| `...`: `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`: `50 -> 100 (a property of an attribute no rule covers)` | widen a string | no |
+| `...`: `ChildObjects/Attribute[A]`: `removed (a column is added or dropped)` | delete an attribute | **yes** |
+| `...`: `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`: `50 -> 100 (a property of an attribute no rule covers)` | widen a string (the plan judges the direction: a shorter limit is refused) | **yes** |
 | `...`: `ChildObjects/Attribute[A]/Properties/Indexing`: `DontIndex -> Index (a property of an attribute no rule covers)` | switch the index | no |
 | `...`: `ChildObjects/TabularSection[T]`: `added (a tabular section is added, dropped or moved)` | add a tabular section (its attributes are not separate reasons of a new section) | no |
 | `Catalog.X`: (no property): `added (Catalog; an object that owns tables or stored data is added or dropped)` **and** `Configuration`: `ChildObjects/Catalog[X]`: `added (...)` | add an object (the pair) | no |
@@ -821,7 +821,9 @@ table that is not built ("designed (12.3) but not built in this version"). One r
 The check reads descriptors with rcheck's decoder; the plan reads them through `metadata_model::objects::layout`. The gate
 lets a stage through only when both name the same objects and, for each, the same attributes (`decide` in `s1.rs`): a
 change one of them does not see is a disagreement and a refusal. The plan checks besides (fail closed, `plan.rs`): the
-images add no file, the `deleted` marker is empty, no attribute changes its type, indexing or `Use`, the object keeps its
+images add no file, the `deleted` marker names removed attributes and nothing else, no attribute changes its indexing or
+`Use`, a retyped attribute is a variable string whose limit grows (a fixed or unlimited string, a shorter limit, any other
+type change and every difference of the type text but the limit are refused), the object keeps its
 shape (hierarchy, code and description lengths, number length, owners, data history), the object has no predefined data
 (a non-empty `RefSInf`), no companion table but its change-registration table, and **every stored attribute maps to the
 field the stored `DBSchema` entry has** -- the generator reproduces the stored entry before it is trusted to extend it.
@@ -832,7 +834,7 @@ field the stored `DBSchema` entry has** -- the generator reproduces the stored e
 |---|---|---|
 | **delta stage**: the changed descriptors plus `root`, `version`, `versions` (a native `import files --partial`; our patch-mode import) | 4 rows (case a2), 9 rows (the types case: 6 descriptors); the check's reasons are the real changes only | accepted |
 | **whole image** of a native import (`import files` of the tree exported from the same database) | the a2 image restored as `s1_full`, 9 839 rows: **400 reasons** = 1 real (`structure`: the attribute) + 396 `unknown` "the row differs (a -> b bytes) but both sides decode to the same XML" (record version 56 -> 57) + 2 for the `Configuration` `{68}` row ("fields 26 and 43 hold 80324 and 80327") + 1 for the `deleted` row | refused: the noise is `unknown`, so the stage is |
-| a stage with a `deleted` row (a whole native import writes `0`) | the apply refuses any `deleted` row before it asks the gate | refused by the apply (a delta stage has none) |
+| a stage with a `deleted` row | a whole native import writes `0`; a partial import that removes attributes writes `<n>,"<attribute id>",1,...` (one id per removed attribute, flag 1; measured, case b1: 10th row of the stage, 266 bytes). The apply refuses any `deleted` row before it asks the gate, unless the gate says it judges them (`StructuralGate::judges_deleted_row`) | the S1 gate judges it: every id must be an attribute the stage removes (flag 1) and nothing else; the structure phase then deletes the row itself under its content hash (`consumed_staged_rows`, the apply's counts are adjusted). Any other id, an object or a file: refused |
 
 Lifting the whole-image refusal is a classification job (sub-issue S1-H): the source-tree route the check track advises
 (`mssql-apply-check --tree` on the import's input) is the reliable input meanwhile; treating "same XML" rows as noise needs
@@ -847,8 +849,8 @@ rebuilds the tables whose `DBSchema` entry differs, and nothing else.
 | operation | `DBSchema` | `DBNames` | tables | copy | caches | evidence | state |
 |---|---|---|---|---|---|---|---|
 | **add an attribute** (catalog, document) | the field entry `{"Fld<n>",<nullable>,{<type entries>}}` inserted after the field of the attribute before it (the first after the standard fields) | `Fld` entry appended, `n` = max over the main header and every `DBNames-Ext-*` header + 1, in the objects' order of the configuration's lists and the attributes' metadata order | the object's **main table and all its sub-tables** rebuilt (a2: 3 tables; the types case: 11 tables of 6 objects) | by column name; the new column gets the default of its type: string `''`, fixed string spaces, number `0`, date/time `2001-01-01 00:00:00`, boolean `0x00`, uuid 16 zero bytes, value storage `0x0101...`; nullable (`NULL` for the rows the attribute does not apply to) only for an attribute `Use ForItem` / `ForFolder` of a hierarchical catalog | XDTO model (one `<property>` line), object registry (one record: kind 36 catalog, 41 document), `siVersions` | a2, b, h, types case (T1) | **built** |
-| **delete an attribute** | the field entry removed; the `ByField...` index entries that name it go with it | unchanged: the entry stays (case f: header 11038 -> 11038, 6464 entries -> 6464) | the main table and its sub-tables rebuilt without the column and its indexes (f: `_Reference20` lost `_Fld11034` and two indexes) | by column name; the dropped column's data is not carried | XDTO line removed, registry record removed and the count decremented, `siVersions` | f | designed |
-| **widen a string** (variable length, `b > a`) | the type entry of the field `{"S",0x80000000\|a}` -> `\|b`; indexes as they were | unchanged (g) | rebuilt (g: `_Fld11034 nvarchar(50)` -> `(100)`) | the column copied as it is | none expected (the XDTO type is `xs:string` without a length facet -- checked against the property lines of the types case; **inferred**) | g (together with the index flag) | designed. Narrowing, a change between fixed / variable / unlimited, and every other type change is data conversion (case k, done by the 1C engine): refuse |
+| **delete an attribute** | the field entry removed; the indexes of the attribute go with it (`ByFieldFld<n>`, `ByOwnerFieldFld<n>`, `ByParentFieldFld<n>`); in a document with an additional-order attribute the date index `ByDocDate` **stays** and loses the field from its list (b2); the indexes that stay are **renumbered** (`_Document1564_5` -> `_4`) | unchanged: the entries of the removed attributes stay (b1: the header and the count as they were, plus the new numbers of the attributes the same stage adds) | the main table and **all its sub-tables** rebuilt without the column and its indexes (b1: 8 tables of 6 objects; b2: 4 tables of 2) | by column name; the dropped column's data is not carried | XDTO lines removed, registry records removed and the count decremented, `siVersions` | f, b1, b2 | **built** (S1-B). The stage's `deleted` row lists the removed attributes (12.2.3) and is consumed by the phase |
+| **widen a string** (variable length, `b > a`) | the type entry of the field `{"S",0x80000000\|a}` -> `\|b`; the field keeps its place, the declared indexes stay as they are | unchanged (g, c1) | the object's **main table and all its sub-tables rebuilt** (c1: 5 objects, 10 tables -- the platform rebuilds, it does not `ALTER COLUMN`); the column `nvarchar(a)` -> `nvarchar(b)` | the column copied as it is | **none**: the text of all 16 `.si` rows is the same before and after the platform's apply (c1, measured) | g, c1 | **built** (S1-C). Narrowing, a fixed string, an unlimited one (`nvarchar(max)` is another column type), a change between them and every other type change is data conversion (case k, done by the 1C engine): refuse |
 | **switch the index** (`DontIndex` <-> `Index`) | index entries added / removed for the field: for a catalog with hierarchy two unique indexes `(sep, _ParentIDRRef, _Folder, <field>, _IDRRef)` and `(sep, <field>, _IDRRef)`, numbered after the existing ones | unchanged | rebuilt (g; the flag alone is not traced: whether the platform only creates the index or rebuilds is the first thing the sub-issue measures) | as it is | none expected | g | designed |
 | **add a tabular section** (with attributes) | a new sub-table entry in the object's entry: `_<Owner>_IDRRef`, the separator, `_KeyField`, `_LineNo<m>`, one field per attribute; a unique clustered index on the separator, the owner key and `_KeyField`, an index on its first attribute | `VT` and `LineNo` (the section's uuid) and one `Fld` per attribute: h: 11039, 11040, 11041, 11042 | **only the new table is created** (h: `_Reference15_VT11039`), empty; the object's main table is not rebuilt | none | XDTO (a `Row` object type and the property of the section), registry (kind 39 and kind 14 records), the per-class index `2203278d` (its tabular-section group) | h | designed. An attribute added to an *existing* section rebuilds that sub-table alone (h: `_Reference20_VT159`): the same machinery, a separate case |
 | **add an object** (plain catalog or document) | a new table entry before `ConfigChngR` (c: `_Reference11036` with its four indexes) | a `Reference` entry (c: 11036; no `ReferenceChngR` until an exchange plan lists the catalog; a `RefSInf` when the catalog has predefined data: refuse) numbered from the counter | a new table, empty | none | XDTO (three object types), registry, `2203278d`, `a07b62f0` and the rest of the derived rows; the `Config` rows of the object and its registration for the exchange-plan nodes (the apply's own new-object registration) | c | designed. The largest: 12.5 |
@@ -891,9 +893,9 @@ whole 9.3 MB script, rolled back) left the database as it was.
 
 | file | change |
 |---|---|
-| `gate.rs` | `StructurePhase {sql, params_rewrites, tables, objects, caches}`; `StructuralGate::take_structure(&self) -> Option<StructurePhase>` with a default `None` (the conservative gate is untouched); `GateVerdict::block` becomes `pub` so that a gate outside the module can block what it does not cover |
-| `sqlgen.rs` | `ScriptInputs.structure_sql: Option<String>`; `render_apply_script` puts it after `@now` and before the fold; a test that it sits between the assertions and the move |
-| `mod.rs` | after the gate: `let structure = structural_gate.take_structure()`; its `params_rewrites` join the apply's (**a clash on the same row is a refusal**: the search-information row `1a621f0f` is also rewritten for a new form or template, and chaining the two edits is not built); `tables_touched`, `not_written`, `ConfigApplyReport.structure` |
+| `gate.rs` | `StructurePhase {sql, consumed_staged_rows, params_rewrites, tables, objects, caches}`; `StructuralGate::take_structure(&self) -> Option<StructurePhase>` with a default `None` (the conservative gate is untouched); `StructuralGate::judges_deleted_row(&self) -> bool` with a default `false` (the stage's `deleted` row lists removed attributes: the apply refuses it before the gate unless the gate judges it); `GateVerdict::block` becomes `pub` so that a gate outside the module can block what it does not cover |
+| `sqlgen.rs` | `ScriptInputs.structure_sql: Option<String>` and `consumed_staged_rows`; `render_apply_script` puts the text after `@now` and before the fold; the unfinished-operation check does not count a `deleted` row of `ConfigSave` when the phase consumes it, and the two `@@ROWCOUNT` assertions of the move and the cleanup expect `staged.rows - consumed_staged_rows`; a test that the text sits between the assertions and the move |
+| `mod.rs` | the refusal of a `deleted` row is skipped when the gate judges it; after the gate: `let structure = structural_gate.take_structure()`; its `params_rewrites` join the apply's (**a clash on the same row is a refusal**: the search-information row `1a621f0f` is also rewritten for a new form or template, and chaining the two edits is not built); `tables_touched`, `not_written`, `ConfigApplyReport.structure` |
 | `restructure/s1.rs` | `S1Gate` (holds the `SqlExec`, the conservative gate and the plan options): `check` = conservative verdict -> `check_staged` -> `classify` -> plan -> `decide`; `take_structure` |
 | `restructure/script.rs` | `Plan::phase_sql(now)`: the plan as T-SQL with `THROW` assertions (57400..57405) |
 | `restructure/reader.rs` | `RowSource`: the plan's input read through the apply's client (`ClientSource`) as well as through a dedicated connection |
@@ -924,10 +926,13 @@ at recovery. **Measured** with a `THROW` injected as the last statement before `
 all of it back -- `ConfigSave` 9 rows, `Config` 9847, no `NG` table, no new column, `SchemaStorage` `Status 100` with the
 hash it had, `DBNames` and the `DynamicallyUpdated` marker as they were. What a committed restructuring cannot give is its own undo: the old tables are dropped in the transaction.
 The apply's recovery artifact keeps the `Config` rows and the cache rows; for the tables the answer is a SQL Server
-backup taken before (`BACKUP DATABASE ... WITH COPY_ONLY`), which is also how the lab makes twins. **Proposal**: a
-structural apply refuses without `--recovery-backup <file>` (the command takes the backup) or `--i-have-a-backup`;
-Pavel's decision, S1-A. The log of the whole copy is in one transaction: fine for a catalog, not for 100 GB, so the
-gate refuses when the rebuilt tables exceed a limit (S1-J) and points to the native apply.
+backup taken before (`BACKUP DATABASE ... WITH COPY_ONLY`), which is also how the lab makes twins. **Decided** (the
+coordinator, after Pavel): a structural apply **refuses unless** `--recovery-backup <path>` (the apply takes a COPY_ONLY
+backup first; recommended) **or** `--i-have-a-backup` is given; a dry run and a rehearsal write nothing and need neither.
+Track apply implements it in S1-A (#397); `mssql-restructure --through-apply` has both flags already (`S1Gate` refuses
+with `BACKUP_REQUIRED` and the backup is taken only when the plan has a structure phase). The log of the whole copy is
+in one transaction: fine for a catalog, not for 100 GB, so the gate refuses when the rebuilt tables exceed a limit
+(S1-J) and points to the native apply.
 
 #### 12.4.5 What the transaction does not include
 
@@ -943,7 +948,7 @@ does not change. Compared after inflate, native against native before (the chang
 
 | row | role (decoded so far) | attribute add / delete | widen, index flag | tabular section | new object |
 |---|---|---|---|---|---|
-| `1a621f0f` | object registry: pre-order records `uuid,parent,kind,"name",{1,1,{"ru","synonym"}},flag,flag`, the count in the header (kinds: 35 catalog, 36 catalog attribute, 41 document attribute, 39 tabular section, 14 its attribute) | +/- one record, count +/- 1 | none | +records | +records |
+| `1a621f0f` | object registry: pre-order records `uuid,parent,kind,"name",{1,1,{"ru","synonym"}},flag,flag`, the count in the header (kinds: 35 catalog, 36 catalog attribute, 41 document attribute, 39 tabular section, 14 its attribute) | +/- one record, count +/- 1 | none (widening: measured, c1; the index flag alone: d0) | +records | +records |
 | `ea13a2c9` | XDTO model of the configuration: `{2,1,{{#base64:<XML>}}}`, 64-character lines, CR CR LF | +/- one `<property>` line in `CatalogObject.X` / `DocumentObject.X` | none (inferred) | + a row object type and the section's property | + three object / value types |
 | `2203278d` | per-class index of object ids `{29,<class>,<count>,<ids...>` | none | none | the tabular-section group | count + 1 and the id |
 | `a07b62f0` | names -> tables list `{1089,"Constant.X","Константа.X",<uuid>,1,0,"Const3892",3892,...` | none | none | none | entry, count + 1 |
@@ -1041,8 +1046,8 @@ to three days, L ~ a week of an agent.
 | **S1-J** | Size guard, chunked copy | a limit on the rows / bytes of the rebuilt tables, the refusal that points to the native apply; the chunked copy is 0.5 | wave 0 | a synthetic table above the limit is refused; the limit is measured (log growth, time) | S, ddl |
 | **S1-K** | End to end with our import | tree edit -> our `infobase config import` -> `mssql-config-apply` -> compare with native import + native apply; every operation; cluster session; ERP УХ with the coordinator's OK | S1-A, and the import track's fix of the silently dropped attribute (10.1) | the twin protocol with our import as the stager, БСП 8.3.27; then УХ | L, import + ddl |
 
-Where an operation plugs in (all in `src/restructure/`): `plan.rs::find_changes` (detects; today it refuses removed,
-retyped and re-indexed attributes), `check_object` (what else may differ), `plan_object` (fields -> the new entry -> the
+Where an operation plugs in (all in `src/restructure/`): `plan.rs::find_changes` (detects new, removed and retyped
+attributes; it refuses re-indexed ones), `check_object` (what else may differ), `plan_object` (fields -> the new entry -> the
 tables -> the copy), `xdto_update` / `registry_update` (the caches), `s1.rs::classify_reason` (flip `NotBuilt` to a built
 operation) and `decide` (the agreement of the two decoders), `script.rs` (nothing to change unless a new kind of statement
 appears). Each sub-issue starts with the corpus test of its case (`tests_corpus.rs`: the plan made offline from the staged
@@ -1111,9 +1116,9 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
 
 ### 12.9 Open questions and risks
 
-1. **Backup policy of a structural apply** (12.4.4): a committed restructuring is taken back from a SQL Server backup only.
-   Refuse without one, or trust the operator? Pavel's decision; the design assumes "refuse without `--recovery-backup` or
-   `--i-have-a-backup`".
+1. **Backup policy of a structural apply** (12.4.4): decided. A committed restructuring is taken back from a SQL Server
+   backup only, so a structural apply refuses unless `--recovery-backup <path>` (COPY_ONLY, taken first) or
+   `--i-have-a-backup` is given.
 2. **The search-information row clash** (12.4.2): a stage that adds an attribute *and* a form to the same catalog rewrites
    `1a621f0f` twice; the gate refuses it (the apply's edit and ours are both insertions and commute, but the merge is not
    built). Split the stage, or build the chain in S1-A.
@@ -1142,8 +1147,58 @@ Repo (`docs/apply/evidence/restructuring/`, this phase): `s1-reasons.txt` (what 
 types case from the ConfigSave, the other cases from `--tree`, and the whole native image), `s1-t1-twin-compare.txt` (the
 checks of 12.6 on the types case, with the numbers of 12.8), `s1-t1-session.txt` (the job output of the cluster session, native and
 ours), `s1-cache-necessity.txt` (the cache experiment of 12.5), `s1-seam-script.sql` (the generated transaction with the
-binary values shortened). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
+binary values shortened), and for wave 1 (12.11) `s2-wave1-twin-compare.txt` (the checks of 12.6 for b1, b2, c1) and
+`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
 `out/except_*`, `out/si_diff_*`, `out/dbschema_cmp_*`, `out/config_cmp_*`, `out/export_diff_*`, `out/session_t1_*`, `logs/cache_bisect*.log`,
 `xe/s1_t1/`, `snap/ibcmd_rs_04_ddl_s1_*`. Tools: `scripts/restructure-lab/` (`compare_tables.ps1`, `compare_config.ps1`,
 `dbschema_cmp.py`, `params_row.ps1`, `cache_variant.ps1`, `edit_cases_s1.py`, `jobs/types_t1.bsl`). Tests: `tests_s1.rs` (the gate),
 `tests_plan.rs` (`the_phase_text_is_the_statements_with_assertions`), `tests_corpus.rs` (the types case).
+
+### 12.11 Wave 1: delete an attribute (S1-B #398) and widen a string (S1-C #399)
+
+Cases on the **pristine** БСП 8.3.27 (every row is record version 56; the restructuring check cannot yet read a row a native
+import has rewritten as version 57 -- S1-H), made by `edit_cases_s2.py` and staged by the native `import files --partial`
+(`stage_case.ps1`); twins from one COPY_ONLY backup; ours through the apply (`mssql-restructure --through-apply
+--i-have-a-backup`). The checks are those of 12.6; the numbers are in `s2-wave1-twin-compare.txt`.
+
+| case | stage | native | ours |
+|---|---|---|---|
+| **b1** | 11 attributes deleted in 6 objects (the middle, the last, the first, indexed ones of a flat catalog, a hierarchical catalog and a document; the only attribute of an object; a nullable field of a hierarchical catalog; an unlimited string) and 2 replaced (deleted and added in one stage) | 8 tables rebuilt, indexes renumbered, `DBNames` grows by the two new numbers only | apply 51 s (rehearsal 97 s with the planning) |
+| **b2** | an additional-order attribute deleted from a catalog and from a document | the catalog loses `ByFieldFld179`; `ByDocDate` of the document **stays and loses the field** (`{4,...,"Fld4062"}` -> `{3,...}`), its own index goes; 4 tables | apply 4 s |
+| **c1** | 6 variable strings widened in 5 objects (a catalog up to the limit of 1024; a hierarchical catalog, two attributes, one indexed; a document, one indexed and one by a single character) | 10 tables rebuilt (main tables and all sub-tables), **no cache row changes**, `DBNames` unchanged | apply 13 s (rehearsal 44 s) |
+
+| check | b1 | b2 | c1 |
+|---|---|---|---|
+| 1. the plan offline from the staged snapshot equals native's | `corpus_plan_of_the_deletion_case_equals_the_native_result`: `DBNames` text, every `DBSchema` entry but `DbCopies*`, XDTO and registry rows after inflate | `corpus_plan_of_the_additional_order_deletion_case_...` | `corpus_plan_of_the_widening_case_...`: also that the plan writes no cache and that all 16 `.si` rows are the same text before and after native's apply |
+| 2. tables, columns, indexes | identical but the drift list | the same | the same |
+| 3. data of the rebuilt tables, `EXCEPT` both ways | 0 rows (8 tables) | 0 rows (4 tables) | 0 rows (10 tables) |
+| 4. `Config`, whole table | **0 rows on either side** | the same | the same |
+| 5. `DBSchema`, `DBNames` | 1761 entries, only `DbCopies*` differ; `DBNames` text equal | the same | the same |
+| 6. the `.si` rows | 16 of 16 | 16 of 16 | 16 of 16 |
+| 7. native `config apply` on our twin | «не требуется» | «не требуется» | «не требуется» |
+| 8. native export of both | 12 198 of 12 198 identical | 12 198 of 12 198 | 12 198 of 12 198 |
+| 9. cluster session | identical, 49 lines | identical | identical, 48 lines |
+| 10. a rehearsal changes nothing | `snapdiff` empty | empty | empty |
+| 11. refusals (dry run on a real stage that has one change more) | the `deleted` row names an id that is no removed attribute: `S1: the staged image deletes aaaaaaaa-..., which is not an attribute it removes` | (unit tests: an index of another kind that names the field) | a limit made shorter: `S1: attribute ИмяХеш changes its type (the limit is shorter)`; `root` changed: `the service row root changes` |
+| 12. `THROW` before `COMMIT` on a fresh twin | digest of the whole database unchanged (`Config`, `Params`, schema and names hashes, every column and index, no `NG` table) | unchanged | unchanged |
+
+What wave 1 taught:
+
+* **The stage of a deletion carries a `deleted` row** (`<n>,"<attribute id>",1,...`, one id per removed attribute). The apply
+  refused every such row before it asked the gate and its script refused it as an unfinished-operation marker. The seam
+  grew `StructuralGate::judges_deleted_row` and `StructurePhase::consumed_staged_rows` (12.4.2); the gate accepts only ids of
+  attributes the same stage removes, the phase deletes the row under its content hash.
+* **Indexes are renumbered** after a deletion (`_Reference22_4`, ...): the physical names are `_<Table>_<ordinal>`; the model
+  recomputes them from the entry, which is why the byte-level comparison works.
+* **`ByDocDate` is not an attribute index**: it lists the additional-order attribute last, and the platform keeps it, one
+  field shorter. Any other index that names the field is refused.
+* **The base64 of the XDTO model row**: when its length is a multiple of 64 the platform writes the line separator after
+  the last (full) line too (case b2 hit it: 25 173 135 bytes against our 25 173 132). Found by the offline comparison, fixed
+  and pinned by a test.
+* **Widening rebuilds the object** (main table and all sub-tables) although only a column type changes, and writes no cache.
+* **Code that still refers to a deleted attribute**: the object module of `_ДемоНачислениеЗарплаты` uses `ПериодРегистрации`;
+  reading that document as an object in a session hangs on native's result and on ours alike (queries work), so the b2
+  session job reads the document by queries only (including an ordering by date, which uses `ByDocDate`). The gate cannot
+  see code: deleting an attribute breaks the modules that use it, whichever route deleted it.
+* The plan judges the *direction* of a limit change, the restructuring check names both directions the same way
+  (`Length: a -> b`); the two decoders agree on which attribute, the plan refuses a shorter limit, a fixed or unlimited string.

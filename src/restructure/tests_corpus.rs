@@ -297,7 +297,8 @@ fn inputs_of(staged: &Snapshot) -> Inputs {
 /// system tables the platform upgraded on its own), and the derived caches -- the XDTO model and the
 /// object registry -- as text (only the deflate stream differs).
 fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot) {
-    // The derived caches.
+    // The derived caches (a plan that writes none -- a stage that only widens strings -- is checked by the
+    // test itself against the rows before).
     let cache = |name: &str| {
         plan.caches
             .iter()
@@ -307,12 +308,31 @@ fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot)
     for name in [
         "ea13a2c9-0c2f-40fa-b855-710387e3271d.si",
         "1a621f0f-5568-4183-bd9f-f6ef670e7090.si",
-    ] {
+    ]
+    .into_iter()
+    .filter(|_| !plan.caches.is_empty())
+    {
         let update = cache(name);
         let native_row = inflate(&after.row("Params", name).unwrap()).unwrap();
         let ours_row = inflate(&update.row).unwrap();
-        assert_eq!(ours_row.len(), native_row.len(), "{name}");
-        assert!(ours_row == native_row, "{name} differs from the platform's");
+        if ours_row != native_row {
+            let at = ours_row
+                .iter()
+                .zip(&native_row)
+                .position(|(a, b)| a != b)
+                .unwrap_or(ours_row.len().min(native_row.len()));
+            let show = |row: &[u8]| {
+                String::from_utf8_lossy(&row[at.saturating_sub(60)..(at + 120).min(row.len())])
+                    .into_owned()
+            };
+            panic!(
+                "{name} differs from the platform's at byte {at} ({} vs {} bytes):\nours:   {:?}\nnative: {:?}",
+                ours_row.len(),
+                native_row.len(),
+                show(&ours_row),
+                show(&native_row)
+            );
+        }
     }
 
     // DBNames: exactly what the platform stored.
@@ -441,6 +461,101 @@ fn corpus_plan_of_the_types_case_equals_the_native_result() {
             "Reference9367",
             "Document39"
         ]
+    );
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-B: eleven attributes deleted in six objects of the pristine БСП -- the middle, the last, the first,
+/// indexed ones (of a flat catalog, a hierarchical one and a document), the only attribute of an object,
+/// the field of a hierarchical catalog that is nullable -- and two replaced (deleted and added in one
+/// stage), against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_deletion_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b1_base", "b1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the deletion case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let removed: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.removals.len())
+        .sum();
+    let added: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.additions.len())
+        .sum();
+    assert_eq!((removed, added), (11, 2));
+    assert_eq!(plan.objects.len(), 6);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-C: six variable strings widened in five objects of the pristine БСП -- a catalog, a hierarchical
+/// catalog (two attributes, one indexed), a document (one indexed, one widened by a single character), the
+/// widest allowed (1024) -- against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_widening_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_c1_base", "c1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_c1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the widening case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let widened: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.widenings.len())
+        .sum();
+    assert_eq!(widened, 6);
+    assert_eq!(plan.objects.len(), 5);
+    // Nothing is added or removed, so no cache row is written (XDTO, registry and siVersions stay): the
+    // platform, too, left the text of all sixteen rows as it was.
+    assert!(plan.caches.is_empty());
+    let rows = staged.rows("Params");
+    let mut compared = 0;
+    for (name, part) in rows.keys().filter(|(name, _)| name.ends_with(".si")) {
+        let before = inflate(&staged.row("Params", name).unwrap()).unwrap();
+        let native = inflate(&after.row("Params", name).unwrap()).unwrap();
+        assert!(before == native, "{name} ({part}) changed natively");
+        compared += 1;
+    }
+    assert_eq!(compared, 16);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-B, the additional-order index: an attribute of a catalog and one of a document that have it are
+/// deleted; the catalog loses the index of the attribute, the document keeps `ByDocDate` (which listed the
+/// attribute last) and loses the field from its list.
+#[test]
+fn corpus_plan_of_the_additional_order_deletion_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b2_base", "b2_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b2_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the additional-order deletion case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let removed: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.removals.len())
+        .sum();
+    assert_eq!((removed, plan.objects.len()), (2, 2));
+    assert!(
+        plan.objects
+            .iter()
+            .flat_map(|object| object.removals.iter())
+            .any(|removal| removal
+                .indexes
+                .iter()
+                .any(|name| name.starts_with("ByDocDate")))
     );
     assert_equals_native(&plan, &after);
 }
