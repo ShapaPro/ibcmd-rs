@@ -68,8 +68,10 @@ const CONFIGURATION_COMMAND_INTERFACE_UUID: &str = "00000000-0000-0000-0000-0000
 /// and an apply of it leaves behind, has no such pairs and a declared count
 /// that is not kept up to date: 9 834 for 9 836 pairs in a native stage of the
 /// БСП demo, 9 835 or 9 836 for 9 836 or 9 837 in the databases an apply left
-/// (measured on the 0.4 lab databases). The platform reads the pairs and pays
-/// no attention to the count, so neither does a `Config` row's reader.
+/// (measured on the 0.4 lab databases). The platform still reads all the pairs
+/// -- the configuration it publishes has every object they name -- but lists
+/// only the first `count` of them in `ConfigDumpInfo.xml`, so a `Config` row's
+/// reader keeps them all and marks those ([`ConfigVersionEntry::counted`]).
 ///
 /// A CF archive's `versions` storage element embeds no service pairs either --
 /// confirmed by decoding the `versions` element's content against three
@@ -110,6 +112,11 @@ struct ConfigVersionEntry {
     id: String,
     /// The `configVersion` as written: 40 hex digits.
     version: String,
+    /// Whether the entry is among the first `count` pairs of its row, the ones
+    /// the platform lists in `ConfigDumpInfo.xml`. Every entry of a row that
+    /// states its count exactly is; see [`VersionsBlobOrigin`]. The inventory
+    /// check and the children of an object read every entry.
+    counted: bool,
 }
 
 struct ConfigDumpMetadata {
@@ -213,6 +220,7 @@ pub(super) fn write_extension_config_dump_info(
         .map(|(id, digest)| ConfigVersionEntry {
             id: id.clone(),
             version: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            counted: true,
         })
         .collect::<Vec<_>>();
     write_config_dump_info_entries(
@@ -300,6 +308,15 @@ fn write_config_dump_info_entries(
     let mut names = BTreeMap::<String, String>::new();
     let mut unresolved_top_routes = Vec::<String>::new();
     for entry in versions {
+        // The platform lists the first `count` pairs of the row and no more
+        // (see [`VersionsBlobOrigin`]): what lies beyond it -- the last entries
+        // of a row a native import staged, at most a few, which may be a whole
+        // object -- is left out with its children. Its files are written all
+        // the same.
+        if !entry.counted {
+            children_by_owner.remove(&entry.id);
+            continue;
+        }
         // A configuration under vendor support stores each parent
         // configuration's full `.cf` as a row named by the configuration root
         // and the parent's uuid. The platform writes it out as
@@ -440,9 +457,14 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
             "Config versions row has {} fields, not two header fields and name/version pairs",
             fields.len()
         );
+    } else if count > (fields.len() - 2) / 2 {
+        bail!(
+            "Config versions row declares {count} pairs but contains {} fields",
+            fields.len()
+        );
     }
 
-    let mut named = BTreeMap::<String, Uuid>::new();
+    let mut named = BTreeMap::<String, (Uuid, bool)>::new();
     let mut generation_seen = false;
     for (pair_index, pair) in fields[2..].chunks_exact(2).enumerate() {
         let name = parse_1c_quoted_string(pair[0].trim())
@@ -457,7 +479,11 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
             generation_seen = true;
             continue;
         }
-        if named.insert(name.clone(), version).is_some() {
+        // The generation entry is the first of the `count` pairs.
+        if named
+            .insert(name.clone(), (version, pair_index < count))
+            .is_some()
+        {
             bail!("Config versions row contains duplicate entry {name}");
         }
     }
@@ -468,9 +494,10 @@ fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<Co
     Ok(named
         .into_iter()
         .filter(|(name, _)| !VERSIONS_EMBEDDED_SERVICE_NAMES.contains(&name.as_str()))
-        .map(|(id, version)| ConfigVersionEntry {
+        .map(|(id, (version, counted))| ConfigVersionEntry {
             id,
             version: config_version(version),
+            counted,
         })
         .collect())
 }
@@ -517,7 +544,11 @@ fn parse_extension_config_info(text: &str) -> Result<Vec<ConfigVersionEntry>> {
     }
     Ok(named
         .into_iter()
-        .map(|(id, version)| ConfigVersionEntry { id, version })
+        .map(|(id, version)| ConfigVersionEntry {
+            id,
+            version,
+            counted: true,
+        })
         .collect())
 }
 
@@ -1000,6 +1031,7 @@ mod tests {
         let versions = vec![ConfigVersionEntry {
             id: "object.0".to_owned(),
             version: config_version(Uuid::nil()),
+            counted: true,
         }];
         let names = [
             "object.0",
@@ -1023,10 +1055,12 @@ mod tests {
             ConfigVersionEntry {
                 id: "object.0".to_owned(),
                 version: config_version(Uuid::from_u128(1)),
+                counted: true,
             },
             ConfigVersionEntry {
                 id: "deleted".to_owned(),
                 version: config_version(Uuid::nil()),
+                counted: true,
             },
         ];
         let names = ["object.0", "root", "version", "versions"]
@@ -1115,12 +1149,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["kept", "kept.0", "other"]
         );
+        // The row declares 2 pairs for 4: the generation entry and `kept` are
+        // the ones the platform lists in ConfigDumpInfo.xml, and the two after
+        // them belong to the configuration all the same.
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.counted)
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.counted)
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
         // A CF archive states its count exactly and is still held to it.
         assert!(parse_versions_blob(&row, VersionsBlobOrigin::CfStorageImage).is_err());
         assert_eq!(
             unlisted_entries(&row, ["kept", "removed", "root", "versions"]).unwrap(),
             BTreeSet::from(["removed".to_owned()])
         );
+    }
+
+    #[test]
+    fn a_row_that_states_its_count_exactly_is_listed_whole() {
+        let row = versions_row(&["a", "a.0", "b"]);
+        let entries = parse_versions_blob(&row, VersionsBlobOrigin::MssqlConfigTable).unwrap();
+        assert!(entries.iter().all(|entry| entry.counted));
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn a_row_that_declares_more_pairs_than_it_holds_is_refused() {
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+
+        let version = "00000000-0000-0000-0000-000000000001";
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(format!("{{1,5,\"\",{version},\"a\",{version}}}").as_bytes())
+            .unwrap();
+        let row = encoder.finish().unwrap();
+        assert!(parse_versions_blob(&row, VersionsBlobOrigin::MssqlConfigTable).is_err());
     }
 
     #[test]

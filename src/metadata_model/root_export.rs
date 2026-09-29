@@ -242,8 +242,12 @@ fn read_row(row: &Brace) -> Result<RootRow<'_>> {
 /// A Configuration row a later platform staged, in the `{68}` shape, whose
 /// extension compatibility mode (field 43) is the edition of that platform
 /// while the compatibility mode (field 26) is the configuration's own: the
-/// row [`decode`] refuses, because no corpus shows which of the two the
-/// platform prints. The pair of a `{67}` row and this row appears in the
+/// row [`decode`] used to refuse, because no corpus showed which of the two
+/// the platform prints. The native export of such a stage shows it: field 26 is
+/// `CompatibilityMode` and field 43 `ConfigurationExtensionCompatibilityMode`
+/// (`Version8_3_24` and `Version8_3_27` for the БСП demo), and [`decode`] reads
+/// the row that way on the platform that writes the shape. The pair of a `{67}`
+/// row and this row appears in the
 /// staged image of every native import of a configuration kept in an older
 /// compatibility mode (`docs/apply/restructuring-check.md`, section 8.9): the
 /// import leaves the compatibility mode alone (it decides the record
@@ -254,8 +258,8 @@ fn read_row(row: &Brace) -> Result<RootRow<'_>> {
 /// decoded `ConfigurationExtensionCompatibilityMode`. `None` when the row is
 /// not of that kind (the fields agree, the extension mode is the older one,
 /// the shape is another, the row is not a Configuration row): [`decode`] then
-/// speaks for it. The export does not call this: it keeps refusing what no
-/// corpus shows.
+/// speaks for it. The comparison of a stage with a tree calls this to read the
+/// row as the tree's `{67}`-shaped twin; the export reads the split row itself.
 pub(crate) fn fold_split_compatibility(row: &Brace) -> Option<(Brace, u32)> {
     let parsed = read_row(row).ok()?;
     if parsed.shape != ConfigurationShape::V68 {
@@ -481,17 +485,29 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     let head = header(item(first, 1)?)?;
 
     // Compatibility: fields 26 and 43 hold the same value in every row
-    // `root.rs` writes; the 60-field shape is read at 43, the others at 26.
+    // `root.rs` writes and in every corpus; the 60-field shape is read at 43,
+    // the others at 26.
+    //
+    // The one row that differs is the one a native import stages for an older
+    // configuration: it is rewritten to the shape the platform writes, with the
+    // configuration's own compatibility in field 26 and the platform's edition
+    // in field 43 (80324 and 80327 in the stage of the БСП demo, twice). The
+    // platform prints field 26 as `CompatibilityMode` and field 43 as
+    // `ConfigurationExtensionCompatibilityMode`.
     let compat_26 = packed(t, 26)?;
     let compat_43 = packed(t, 43)?;
-    if compat_26 != compat_43 {
+    let staged = compat_43 > compat_26
+        && shape == ConfigurationShape::V68
+        && own_shape == ConfigurationShape::V68;
+    if compat_26 != compat_43 && !staged {
         bail!(
             "Configuration fields 26 and 43 hold {compat_26} and {compat_43}; no corpus shows which one the platform prints"
         );
     }
-    if compat_26 > platform.compatibility_packed() {
+    if compat_26.max(compat_43) > platform.compatibility_packed() {
         bail!(
-            "compatibility {compat_26} is newer than the platform the tree is written for ({platform})"
+            "compatibility {} is newer than the platform the tree is written for ({platform})",
+            compat_26.max(compat_43)
         );
     }
     let compatibility = version_text(compat_26);
@@ -499,6 +515,8 @@ pub(crate) fn decode(row: &Brace, context: &ExportContext) -> Result<Element> {
     // a tuple older than the one it writes, the stored value otherwise.
     let extension_compatibility = if shape < own_shape {
         platform.compatibility_mode()
+    } else if staged {
+        version_text(compat_43)
     } else {
         compatibility.clone()
     };
@@ -1035,6 +1053,18 @@ mod tests {
             export_descriptor("Configuration", &row, &context).unwrap(),
             xml
         );
+        // The row a native import stages: the compatibility in field 26 is the
+        // configuration's own (8.3.24), the extension compatibility in field 43
+        // is the platform's edition.
+        let text = String::from_utf8(row.clone()).unwrap();
+        let staged = text.replacen("80327", "80324", 1);
+        assert_ne!(staged, text);
+        let exported = export_descriptor("Configuration", staged.as_bytes(), &context).unwrap();
+        assert!(exported.contains("<CompatibilityMode>Version8_3_24</CompatibilityMode>"));
+        assert!(exported.contains(
+            "<ConfigurationExtensionCompatibilityMode>Version8_3_27</ConfigurationExtensionCompatibilityMode>"
+        ));
+        assert_eq!(exported.replace("Version8_3_24", "Version8_3_27"), xml);
         let tree = parse_row(&row).unwrap();
         let names = object_names("Configuration", &tree).unwrap();
         assert_eq!(names.uuid, "11111111-1111-1111-1111-111111111111");
