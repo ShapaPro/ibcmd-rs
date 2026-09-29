@@ -22,12 +22,12 @@ interfaces. What differs from the target in a way those rows cannot carry is now
    row takes no `Attributes` from a Config row (`Kind 0`), and its names are appended to `versions`.
 3. **A changed descriptor**: the descriptor is compiled from the tree and used when it is not the row the stage would
    leave anyway. The comparison is between the compiler's text and the patched row (the target's row with the name,
-   synonym and comment of the tree), and it matters: the check compares exported XML, and several objects of a
-   native tree differ from the target's export only in how the model writes them (on БСП 17 catalogs and charts of
-   characteristic types for the predefined data, nested subsystems, ...). A change of the header alone leaves the
-   target's row - with the state the XML does not carry, such as the always-used flag of a constant, which is copied
-   into a compiled constant in any case. An object a patch stage does not stage at all (a nested subsystem) is
-   built whole when its compiled descriptor differs from the target's.
+   synonym and comment of the tree), and it matters: the check compares exported XML, so an object whose export
+   differs from its file only in how the model writes it would count as changed, and a change of the header alone
+   is carried by the patch. In both cases the target's row stays - with the state the XML does not carry, such as
+   the always-used flag of a constant, which is copied into a compiled constant in any case. An object a patch
+   stage does not stage at all (a nested subsystem) is built whole when its compiled descriptor differs from the
+   target's.
 4. **Predefined data**: the stored row is patched item by item as before. When the tree's set of items is not the
    row's (an item added, an item removed; the nil-uuid root row of a hierarchical catalog is not an item) the row
    cannot be patched, and the object is built whole with its predefined data compiled from the tree.
@@ -117,8 +117,8 @@ work of a stage that has something to build. Measured with the stage's own timin
 | ERP УХ 8.3.27, a real database, a quiet machine | 20.9 s | 19.8 s | 63.5 s (rows 8.4 s, export 54.9 s) | 14.2 s | 120.3 s | 725 s wall, 1 316 s CPU | 8.5 GB |
 | the same on a machine busy with other work | 76-114 s | 64-110 s | 157-281 s | 45-84 s | 250-256 s | 1 476-1 926 s wall | 6.6-8.5 GB |
 
-On УХ the tree is the unchanged native tree: the comparison found nothing to build (no spurious `Changed` among
-56 758 descriptors), the guard compared 140 708 of 140 708 files identical, and the 156 pending online-update rows of the
+On УХ the tree is the unchanged native tree: the comparison left nothing to build or compile among the 56 758
+descriptors, the guard compared 140 708 of 140 708 files identical, and the 156 pending online-update rows of the
 clone went into `deleted`. A stage with changes adds the setup of the base-free context (the walk, the reads of all
 descriptor XMLs, the name index): 64 s on the base-free stage of УХ, once, when there is an object to build.
 
