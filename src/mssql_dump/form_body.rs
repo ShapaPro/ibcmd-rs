@@ -1283,6 +1283,7 @@ pub(super) struct FormAttributeMetadataOwner {
     exact_single_type_reference: Option<String>,
     has_dynamic_list_settings: bool,
     main_table: Option<String>,
+    manual_query: bool,
     /// The attribute's own `<AdditionalColumns>` groups, so a bound chain that
     /// reaches one of their tables can name a column by its declared id
     /// instead of falling back to the item's own name.
@@ -6442,6 +6443,7 @@ impl<'s> FormDynamicListFieldFacts<'s> {
                 &self.field_names_with_settings,
                 &self.secondary_names,
                 main_table,
+                settings.is_some_and(|settings| settings.manual_query),
                 self.universe.is_some(),
                 |item_id, field_name, secondary| self.resolves(item_id, field_name, secondary),
             ) else {
@@ -7026,12 +7028,13 @@ fn form_dynamic_list_use_always_field_name(
     field_name_by_item_id: &BTreeMap<String, String>,
     secondary_name_by_item_id: &BTreeMap<String, String>,
     main_table: Option<&str>,
+    manual_query: bool,
     has_universe: bool,
     resolves: impl Fn(&str, &str, Option<&str>) -> bool,
 ) -> Option<String> {
     let has_main_table = main_table.is_some();
     match item_id {
-        "10000000" if form_dynamic_list_default_picture_is_out_of_table(main_table) => {
+        "10000000" if form_dynamic_list_default_picture_is_out_of_table(main_table, manual_query) => {
             Some(format!("~{}.DefaultPicture", attribute_name))
         }
         "10000000" => Some(format!("{}.DefaultPicture", attribute_name)),
@@ -10639,6 +10642,10 @@ pub(super) fn form_attribute_metadata_owner(
         exact_single_type_reference,
         has_dynamic_list_settings: attribute.settings.is_some(),
         main_table,
+        manual_query: attribute
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.manual_query),
         additional_columns: attribute.additional_columns.clone(),
     }
 }
@@ -11107,7 +11114,10 @@ fn collect_form_attribute_data_path_columns(
         // left unmarked rather than guessed, exactly as the row-picture reader
         // leaves it.
         if let Some(settings) = attribute.settings.as_ref()
-            && form_dynamic_list_default_picture_is_out_of_table(settings.main_table.as_deref())
+            && form_dynamic_list_default_picture_is_out_of_table(
+                settings.main_table.as_deref(),
+                settings.manual_query,
+            )
         {
             owner_scoped_bindings
                 .unresolvable_columns
@@ -27028,17 +27038,28 @@ pub(super) fn form_dynamic_list_default_picture_is_out_of_main_table(
     attribute: &FormAttributeMetadataOwner,
 ) -> bool {
     attribute.has_dynamic_list_settings
-        && form_dynamic_list_default_picture_is_out_of_table(attribute.main_table.as_deref())
+        && form_dynamic_list_default_picture_is_out_of_table(
+            attribute.main_table.as_deref(),
+            attribute.manual_query,
+        )
 }
 
 /// The same test against the main table a dynamic list declares, for the
 /// readers that hold the table itself rather than a metadata-owner record.
-pub(super) fn form_dynamic_list_default_picture_is_out_of_table(main_table: Option<&str>) -> bool {
+pub(super) fn form_dynamic_list_default_picture_is_out_of_table(
+    main_table: Option<&str>,
+    manual_query: bool,
+) -> bool {
+    // An `Enum` list reads its default picture from the table after all when
+    // its query is the platform's own: 1C:Документооборот's
+    // `Enums/СтатусыПриглашений` list forms and the `Enum.ТипыОбъектов` list
+    // of `Catalogs/АлгоритмыПроверки/Forms/ФормаСписка` (`ManualQuery`
+    // false) are dumped without `~`.
     match main_table {
         None => true,
-        Some(main_table) => main_table
-            .split_once('.')
-            .is_some_and(|(family, _)| matches!(family, "Enum" | "FilterCriterion")),
+        Some(main_table) => main_table.split_once('.').is_some_and(|(family, _)| {
+            family == "FilterCriterion" || (family == "Enum" && manual_query)
+        }),
     }
 }
 
