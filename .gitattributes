@@ -5,3 +5,4 @@ tests/fixtures/form_choice_parameters_slot27_live.json text eol=lf
 crates/ibcmd-schema/data/** text eol=lf
 tests/fixtures/mssql_extension_list_snapshot.json text eol=lf
 *.sh text eol=lf
+tests/fixtures/external/** -text
