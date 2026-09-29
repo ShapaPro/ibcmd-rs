@@ -217,6 +217,9 @@ pub struct ScriptInputs {
     /// not folded (the native apply deletes what the list names). Empty: the
     /// generations, if any, are folded.
     pub dropped_rows: Vec<String>,
+    /// The structure phase of a restructuring the gate let through (T-SQL, see
+    /// `gate::StructurePhase`): run after the assertions and `@now`, before the fold and the move.
+    pub structure_sql: Option<String>,
 }
 
 /// The consumed names as a SQL list (`N'a', N'b'`); `None` when nothing is
@@ -431,6 +434,16 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         "DECLARE @now datetime2(6) = DATEADD(year, @offset, CONVERT(datetime2(6), SYSDATETIME()));"
     )
     .unwrap();
+
+    // A restructuring the gate let through: the tables are rebuilt and the schema published inside
+    // this transaction, so a failed assertion below rolls them back too.
+    if let Some(structure) = &input.structure_sql {
+        writeln!(sql, "-- structure phase").unwrap();
+        sql.push_str(structure);
+        if !structure.ends_with('\n') {
+            sql.push('\n');
+        }
+    }
 
     // The dynamic rows a `deleted` list names are deleted, and the ordinary rows
     // stay as they are (measured: the native apply keeps the text from before
@@ -878,7 +891,45 @@ mod tests {
             consumed_names: Vec::new(),
             consumed_row_count: 0,
             dropped_rows: Vec::new(),
+            structure_sql: None,
         }
+    }
+
+    #[test]
+    fn a_structure_phase_runs_inside_the_transaction_between_the_assertions_and_the_move() {
+        let mut with = inputs();
+        with.structure_sql = Some("-- restructure marker\nSELECT 1;".to_owned());
+        let sql = render_apply_script(&with).unwrap();
+        let begin = sql.find("BEGIN TRANSACTION;").unwrap();
+        let drift = sql.find("Params.DynamicallyUpdated changed since").unwrap();
+        let now = sql.find("DECLARE @now datetime2(6)").unwrap();
+        let phase = sql.find("-- restructure marker").unwrap();
+        let fold_or_move = sql.find("INSERT dbo.Config").unwrap();
+        let commit = sql.find("COMMIT TRANSACTION;").unwrap();
+        assert!(
+            begin < drift
+                && drift < now
+                && now < phase
+                && phase < fold_or_move
+                && fold_or_move < commit
+        );
+        // ahead of the fold of a dynamic generation, too
+        let mut folding = with;
+        folding.generations =
+            vec![Uuid::parse_str("719baa18-69ed-439a-8962-1de53d98e05e").unwrap()];
+        let folded = render_apply_script(&folding).unwrap();
+        assert!(
+            folded.find("-- restructure marker").unwrap()
+                < folded
+                    .find("UPDATE dbo.Config SET FileName = LEFT(FileName")
+                    .unwrap()
+        );
+        // without a phase the script is what it was
+        assert!(
+            !render_apply_script(&inputs())
+                .unwrap()
+                .contains("-- structure phase")
+        );
     }
 
     #[test]

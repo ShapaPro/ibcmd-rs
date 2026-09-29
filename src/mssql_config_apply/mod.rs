@@ -47,11 +47,11 @@ use check_gate::ApplyCheckGate;
 pub use errors::{
     ExclusiveAccessRefused, ExclusiveAccessUnprovable, NativeCommand, NeedsNativeApply,
 };
-use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate};
+use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase};
 use model::{RowMeta, hex_lower, quote_ident, quote_string};
 use sqlgen::{
-    AppendedFile, FilesRewrite, Fingerprint, NewRegistration, NodeLiteral, ScriptInputs,
-    fingerprint_select, render_apply_script, replaced_source, special_config_source,
+    AppendedFile, FilesRewrite, Fingerprint, NewRegistration, NodeLiteral, ParamsRewrite,
+    ScriptInputs, fingerprint_select, render_apply_script, replaced_source, special_config_source,
     special_params_source, staged_source,
 };
 
@@ -76,6 +76,30 @@ pub enum RecoveryBlobs {
     Changed,
     /// Only the manifest of hashes.
     None,
+}
+
+/// A class of restructuring the apply lets through instead of refusing it
+/// (`--allow-restructure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AllowRestructure {
+    /// S1 of the restructure track (#391): attributes, tabular sections, string widening, the
+    /// index flag and plain new catalogs and documents, rebuilt inside the apply's transaction.
+    S1,
+}
+
+/// What the operator says about a copy to go back to. A restructuring drops the
+/// old tables inside the transaction; the recovery artifact keeps the `Config`
+/// rows and the cache rows only, so the way back is a SQL Server backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupPolicy {
+    /// Nothing said: a structural apply is refused.
+    None,
+    /// `--i-have-a-backup`: the operator has one.
+    Acknowledged,
+    /// `--recovery-backup <file>`: the apply takes `BACKUP DATABASE ... WITH COPY_ONLY`
+    /// to this file (a path the SQL Server service can write) before the transaction.
+    File(PathBuf),
 }
 
 /// Which structural gate judges the stage.
@@ -110,6 +134,11 @@ pub struct ConfigApplyOptions {
     pub script_output: Option<PathBuf>,
     /// The gate; [`GateChoice::ApplyCheck`] unless asked otherwise.
     pub gate: GateChoice,
+    /// A class of restructuring to let through; it replaces the gate by the
+    /// restructure track's, which starts from the same checks.
+    pub allow_restructure: Option<AllowRestructure>,
+    /// The backup a structural apply needs (see [`BackupPolicy`]).
+    pub backup: BackupPolicy,
     /// See [`ConservativeGate::admit_unverified_roles`]; only with
     /// [`GateChoice::Conservative`].
     pub admit_unverified_roles: bool,
@@ -130,13 +159,33 @@ fn xml_version_of(profile: MssqlNativePlatformProfile) -> Option<&'static str> {
 pub fn structural_gate<'a>(
     sql: &'a SqlExec,
     options: &ConfigApplyOptions,
-) -> Box<dyn StructuralGate + 'a> {
-    match options.gate {
+) -> Result<Box<dyn StructuralGate + 'a>> {
+    if let Some(kind) = options.allow_restructure {
+        return restructure_gate(kind, sql, options);
+    }
+    Ok(match options.gate {
         GateChoice::ApplyCheck => Box::new(ApplyCheckGate::new(
             sql,
             xml_version_of(options.platform_profile),
         )),
         GateChoice::Conservative => Box::new(options.conservative_gate()),
+    })
+}
+
+/// The gate that lets a class of restructuring through. The restructure track's
+/// S1 gate (`restructure::s1::S1Gate`, #391) starts from the same checks, prepares
+/// the structure phase and hands it over through [`StructuralGate::take_structure`];
+/// it is built here, in the one place that builds gates.
+fn restructure_gate<'a>(
+    kind: AllowRestructure,
+    _sql: &'a SqlExec,
+    _options: &ConfigApplyOptions,
+) -> Result<Box<dyn StructuralGate + 'a>> {
+    match kind {
+        AllowRestructure::S1 => Err(NeedsNativeApply::apply(
+            "--allow-restructure s1: the S1 gate of the restructure track (#391) is not part of this build; run the native `ibcmd infobase config apply`",
+        )
+        .into()),
     }
 }
 
@@ -159,6 +208,8 @@ impl ConfigApplyOptions {
             recovery_keep: recovery::KEEP_DEFAULT,
             script_output: None,
             gate: GateChoice::ApplyCheck,
+            allow_restructure: None,
+            backup: BackupPolicy::None,
             admit_unverified_roles: false,
         }
     }
@@ -227,6 +278,8 @@ pub struct ConfigApplyReport {
     pub stage: Option<StageSummary>,
     pub dynamic: Option<DynamicSummary>,
     pub gate: Option<GateVerdict>,
+    /// The restructuring the gate let through and the script runs in its transaction.
+    pub structure: Option<StructurePhase>,
     pub new_objects: Option<NewObjectsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
@@ -394,6 +447,39 @@ fn describe_removals(plain: &[u8]) -> String {
     }
 }
 
+/// The cache rows a restructuring rewrites joined with the search information a
+/// new form or template rewrites. Both edit the same stored bytes (the object
+/// registry `1a621f0f`, `siVersions`); chaining the two edits is not built, so a
+/// row both want is a refusal: the stage is applied in two steps.
+fn merge_params_rewrites(
+    mut own: Vec<ParamsRewrite>,
+    phase: &[ParamsRewrite],
+) -> Result<Vec<ParamsRewrite>> {
+    if let Some(clash) = phase
+        .iter()
+        .find(|rewrite| own.iter().any(|other| other.file_name == rewrite.file_name))
+    {
+        bail!(
+            "the restructuring and the new forms or templates of the stage both rewrite Params.{}: apply them in two steps",
+            clash.file_name
+        );
+    }
+    own.extend(phase.iter().cloned());
+    Ok(own)
+}
+
+/// A structural apply that writes needs the operator's word about a way back:
+/// the old tables are dropped in the transaction. A dry run and a rehearsal
+/// write nothing that stays.
+fn require_backup(policy: &BackupPolicy, structural: bool, writes: bool) -> Result<()> {
+    if structural && writes && *policy == BackupPolicy::None {
+        bail!(
+            "this stage restructures tables (the old ones are dropped inside the transaction, and the recovery artifact cannot bring them back): take a SQL Server backup and say so with --i-have-a-backup, or let the apply take one with --recovery-backup <file>"
+        );
+    }
+    Ok(())
+}
+
 fn scalar_i64(client: &dyn SqlClient, query: &str) -> Result<i64> {
     match client.query_scalar(query, &[])? {
         Some(SqlValue::Int(value)) => Ok(value),
@@ -457,7 +543,7 @@ pub struct ConfigApplyPlan {
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
-    let gate = structural_gate(sql, options);
+    let gate = structural_gate(sql, options)?;
     plan_with_gate(sql, options, gate.as_ref())
 }
 
@@ -501,6 +587,7 @@ pub fn plan_with_gate(
         stage: None,
         dynamic: None,
         gate: None,
+        structure: None,
         new_objects: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
@@ -886,6 +973,9 @@ pub fn plan_with_gate(
         return Err(anyhow::Error::new(StructuralRefusal { verdict }));
     }
     report.gate = Some(verdict);
+    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
+    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
+    let structure = structural_gate.take_structure();
 
     // Fingerprints the script asserts.
     let started = Instant::now();
@@ -941,7 +1031,10 @@ pub fn plan_with_gate(
     // The `Params` rows to rewrite: the search information of new objects.
     // The `.ui` rows (the platform's configuration-licensing records) are never
     // written.
-    let params_rewrites = new.search_info.clone();
+    let mut params_rewrites = new.search_info.clone();
+    if let Some(phase) = &structure {
+        params_rewrites = merge_params_rewrites(params_rewrites, &phase.params_rewrites)?;
+    }
 
     let mut touched = vec!["Config", "ConfigSave"];
     if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
@@ -957,6 +1050,12 @@ pub fn plan_with_gate(
         touched.push("Files");
     }
     report.tables_touched = touched.into_iter().map(str::to_owned).collect();
+    if let Some(phase) = &structure {
+        report
+            .tables_touched
+            .extend(["SchemaStorage", "DBSchema"].map(str::to_owned));
+        report.tables_touched.extend(phase.tables.iter().cloned());
+    }
     let nodes_seen = if new.is_empty() || !has_change_registrations {
         0
     } else {
@@ -1011,8 +1110,13 @@ pub fn plan_with_gate(
     report.not_written = vec![
         "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written; the native apply re-encrypts two of them on every apply".to_owned(),
     ];
+    if structure.is_some() {
+        report.not_written.push(
+            "the pre-image of the rebuilt tables: the old tables are dropped inside the transaction, so a committed restructuring is taken back from a SQL Server backup (the recovery artifact keeps the Config rows and the cache rows only)".to_owned(),
+        );
+    }
     report.not_written.extend([
-        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
+        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records or a restructuring changes a cache (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
         "the extension CAS garbage collection (ConfigCAS, Files CAS_GC_Info, extd_props_cached/gc.mrk)".to_owned(),
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
@@ -1048,7 +1152,9 @@ pub fn plan_with_gate(
         consumed_names,
         consumed_row_count,
         dropped_rows,
+        structure_sql: structure.as_ref().map(|phase| phase.sql.clone()),
     };
+    report.structure = structure;
     let script = render_apply_script(&inputs)?;
     let script_sha = hex_lower(&Sha256::digest(script.as_bytes()));
     report.script_sha256 = Some(script_sha.clone());
@@ -1071,7 +1177,7 @@ pub fn apply_staged_configuration(
     sql: &SqlExec,
     options: &ConfigApplyOptions,
 ) -> Result<ConfigApplyReport> {
-    let gate = structural_gate(sql, options);
+    let gate = structural_gate(sql, options)?;
     apply_with_gate(sql, options, gate.as_ref())
 }
 
@@ -1143,6 +1249,40 @@ pub fn apply_with_gate(
     )?;
     plan.report.recovery_dir = Some(dir);
     plan.report.timings.recovery_ms = ms(started);
+
+    // A structural apply has its way back before it starts.
+    require_backup(
+        &options.backup,
+        plan.report.structure.is_some(),
+        !options.rehearse,
+    )?;
+    if plan.report.structure.is_some()
+        && !options.rehearse
+        && let BackupPolicy::File(file) = &options.backup
+    {
+        let started = Instant::now();
+        let db = quote_ident(&options.database)?;
+        client
+            .execute(
+                &format!(
+                    "BACKUP DATABASE {db} TO DISK = N'{}' WITH COPY_ONLY, COMPRESSION, INIT",
+                    quote_string(&file.display().to_string())
+                ),
+                &[],
+            )
+            .with_context(|| {
+                format!(
+                    "the backup to {} failed; nothing was changed",
+                    file.display()
+                )
+            })?;
+        plan.report.warnings.push(format!(
+            "a copy-only backup of {} was taken to {} in {:.1} s before the restructuring",
+            options.database,
+            file.display(),
+            started.elapsed().as_secs_f64()
+        ));
+    }
 
     let started = Instant::now();
     if let Err(error) = client.run_script(&script, ScriptVariables::Refuse) {
@@ -1237,11 +1377,22 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         MssqlConfigApplyRecoveryArg::None => RecoveryBlobs::None,
     };
     options.script_output = args.script_output.clone();
+    options.allow_restructure = match args.allow_restructure {
+        Some(crate::cli::MssqlConfigApplyRestructureArg::S1) => Some(AllowRestructure::S1),
+        None => None,
+    };
+    options.backup = match (&args.recovery_backup, args.i_have_a_backup) {
+        (Some(file), _) => BackupPolicy::File(file.clone()),
+        (None, true) => BackupPolicy::Acknowledged,
+        (None, false) => BackupPolicy::None,
+    };
     options.gate = match args.gate {
         crate::cli::MssqlConfigApplyGateArg::ApplyCheck => GateChoice::ApplyCheck,
         crate::cli::MssqlConfigApplyGateArg::Conservative => GateChoice::Conservative,
     };
-    if args.admit_unverified_roles && options.gate != GateChoice::Conservative {
+    if args.admit_unverified_roles
+        && (options.gate != GateChoice::Conservative || options.allow_restructure.is_some())
+    {
         bail!(
             "--admit-unverified-roles is a switch of the conservative gate: add --gate conservative"
         );
@@ -1458,5 +1609,85 @@ mod tests {
             "exclusive_access_unprovable"
         );
         assert!(refusal_report(&anyhow::anyhow!("plain"), "db").is_none());
+    }
+
+    fn rewrite(name: &str) -> ParamsRewrite {
+        ParamsRewrite {
+            file_name: name.to_owned(),
+            old_data_size: 1,
+            old_sha256_hex: String::new(),
+            new_bytes: Vec::new(),
+            set_creation: false,
+        }
+    }
+
+    #[test]
+    fn a_cache_row_both_the_restructuring_and_a_new_form_want_is_a_refusal() {
+        // distinct rows join
+        let joined = merge_params_rewrites(
+            vec![rewrite("2203278d-ef4f-4f68-98f1-feb257d53ecc.si")],
+            &[rewrite("ea13a2c9-0c2f-40fa-b855-710387e3271d.si")],
+        )
+        .unwrap();
+        assert_eq!(joined.len(), 2);
+        // the object registry row (1a621f0f) is rewritten by both: two steps
+        let error = merge_params_rewrites(
+            vec![
+                rewrite("1a621f0f-5568-4183-bd9f-f6ef670e7090.si"),
+                rewrite("siVersions"),
+            ],
+            &[
+                rewrite("ea13a2c9-0c2f-40fa-b855-710387e3271d.si"),
+                rewrite("1a621f0f-5568-4183-bd9f-f6ef670e7090.si"),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Params.1a621f0f-5568-4183-bd9f-f6ef670e7090.si")
+                && error.to_string().contains("in two steps"),
+            "{error}"
+        );
+        // a restructuring alone brings its own rows
+        assert_eq!(
+            merge_params_rewrites(Vec::new(), &[rewrite("siVersions")])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_structural_apply_that_writes_needs_a_word_about_a_backup() {
+        // no restructuring: nothing is asked
+        assert!(require_backup(&BackupPolicy::None, false, true).is_ok());
+        // a restructuring that writes and no backup said: refused
+        let error = require_backup(&BackupPolicy::None, true, true).unwrap_err();
+        assert!(error.to_string().contains("--i-have-a-backup"), "{error}");
+        assert!(error.to_string().contains("--recovery-backup"), "{error}");
+        // said either way, or nothing kept (a rehearsal, a dry run)
+        assert!(require_backup(&BackupPolicy::Acknowledged, true, true).is_ok());
+        assert!(require_backup(&BackupPolicy::File(PathBuf::from("x.bak")), true, true).is_ok());
+        assert!(require_backup(&BackupPolicy::None, true, false).is_ok());
+    }
+
+    #[test]
+    fn the_s1_class_is_not_built_into_this_binary_and_says_so() {
+        let sql = SqlExec::detached("no server in a unit test");
+        let mut options =
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214);
+        options.allow_restructure = Some(AllowRestructure::S1);
+        let error = structural_gate(&sql, &options)
+            .err()
+            .expect("no S1 gate here");
+        assert!(
+            error.downcast_ref::<NeedsNativeApply>().is_some(),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("--allow-restructure s1"),
+            "{error}"
+        );
     }
 }

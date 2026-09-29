@@ -32,6 +32,7 @@ use crate::metadata_model::export::names::{
 use crate::sql::{SqlClient, SqlParam};
 
 use super::model::{RowMeta, RowName, classify_name, quote_ident};
+use super::sqlgen::ParamsRewrite;
 use super::versions::{inflate_row, strip_bom};
 
 /// One reason the staged configuration is not for the own apply.
@@ -88,7 +89,9 @@ pub struct GateVerdict {
 pub(super) const MAX_LISTED_BLOCKERS: usize = 200;
 
 impl GateVerdict {
-    pub(super) fn block(&mut self, row: &str, reason: impl Into<String>) {
+    /// Adds a blocker. Public: a gate outside this module blocks what it does not
+    /// cover, too.
+    pub fn block(&mut self, row: &str, reason: impl Into<String>) {
         self.restructuring_required = true;
         if self.blockers.len() < MAX_LISTED_BLOCKERS {
             self.blockers.push(GateBlocker {
@@ -126,9 +129,40 @@ pub struct GateInput<'a> {
     pub consumed_rows: &'a HashSet<String>,
 }
 
+/// What a gate that lets a restructuring through hands to the apply: the structure work as T-SQL for
+/// the apply's own transaction, and the `Params` cache rows it makes stale. The apply runs the text
+/// after its fingerprint assertions and before it folds the dynamic generations and moves the rows
+/// (one transaction: a failed assertion rolls the rebuilt tables back with everything else), and
+/// writes the cache rows through its guarded rewrite ([`ParamsRewrite`]), together with its own.
+///
+/// The text assumes what the script gives it: a transaction with `XACT_ABORT ON`, the exclusive locks
+/// on `Config`, `ConfigSave`, `Params` and `Files`, exclusive access to the database, the variable
+/// `@now` (the timestamp the platform writes). It declares variables with the prefix `@ddl_` only and
+/// does not read `Config`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StructurePhase {
+    #[serde(skip)]
+    pub sql: String,
+    #[serde(skip)]
+    pub params_rewrites: Vec<ParamsRewrite>,
+    /// The tables the phase rebuilds or creates.
+    pub tables: Vec<String>,
+    /// One line per changed object.
+    pub objects: Vec<String>,
+    /// One line per cache row the phase rewrites (`Params.<row>: what`).
+    pub caches: Vec<String>,
+}
+
 pub trait StructuralGate {
     fn name(&self) -> &'static str;
     fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict>;
+
+    /// The structure phase the last [`StructuralGate::check`] prepared for the stage, when the gate
+    /// lets a restructuring through instead of refusing it. Taken once; a gate that refuses
+    /// restructurings (the conservative one, the restructure check) has none.
+    fn take_structure(&self) -> Option<StructurePhase> {
+        None
+    }
 }
 
 /// The rule above.
