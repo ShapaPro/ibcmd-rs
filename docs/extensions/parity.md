@@ -22,9 +22,10 @@ against). The ordinary export is unchanged: the offline export of the main
 configuration from saved rows (`mssql-dump-config --rows-dir`) still equals the
 native one in all 12198 files of the БСП 8.3.27 corpus and in all 140709 files
 of the ERP УХ 8.3.27 corpus. The default export writes descriptors through the
-metadata model, which the extension work does not touch; the extension export
-shares the *legacy converters* with `--legacy-export`, so that path was measured
-too: the БСП 8.3.27 corpus is identical in all 12198 files and the ERP УХ 8.3.27 corpus in all 140709 files (the only extra entry is the dump's own manifest.json).
+metadata model (issue #389 later corrected three slot pairs there, see "Compile
+side" below; the offline empty-database cycles show the same differences before
+and after); the extension export shares the *legacy converters* with
+`--legacy-export`, so that path was measured too: the БСП 8.3.27 corpus is identical in all 12198 files and the ERP УХ 8.3.27 corpus in all 140709 files (the only extra entry is the dump's own manifest.json).
 
 The export reports `native_xml_parity: true` when no storage row is opaque or
 failed. That is a claim about the readers and not a proof: they read fail-closed
@@ -125,6 +126,62 @@ relaxed for an extension export only unless noted.
   escapes, each behind a quote (`"\d83d"\dcce`); the container reader took the
   first quote for the end of the string and lost the module. Both the scan and
   the decoding of `module_blob` now follow the rule `mssql_dump` already used.
+
+### Compile side: the same pairs (issue #389)
+
+The extension's own register and charts were the first objects on record whose
+values tell two neighbouring slots apart, so they exposed the same mistakes in
+the base-free compile. It had two independent copies of them, both fixed:
+
+* the metadata model (`src/metadata_model`: the default main export and the
+  empty-database compile) had three pairs swapped: chart of accounts
+  `AutoOrderByCode`/`EditType` (slots 24/27), chart of calculation types
+  `DependenceOnCalculationTypes`/`EditType` (27/35) and accounting register
+  `DataLockControlMode`/`FullTextSearch` (21/22). Each pair holds one value on
+  every ordinary object, so compile and export agreed with the stored rows of
+  all four corpora and the main export stayed exact;
+* the typed compiler (`src/compiler/families/business_object/register_native.rs`,
+  used by `cf bootstrap` and the extension overlay) had been written from an
+  earlier reading of the rows: seven properties of the chart of accounts, eight
+  of the chart of calculation types, six of the chart of characteristic types
+  and three of the accounting register sat in another property's slot, a
+  period adjustment did not write the 31-slot record, and the recalculation's
+  lock mode stood where the collection count belongs. The calculation register
+  (`ActionPeriod` 17, `BasePeriod` 18) was right.
+
+The slots, as the samples of the four corpora (БСП 8.3.27, БСП 8.5, ERP УХ
+8.3.27, the extension) separate them:
+
+| object (slots) | property: slot, the values that fix it |
+|---|---|
+| accounting register (30; 31 as `{22,22,...}` with a period adjustment), 10 samples | `DataLockControlMode` 21: `1` on the extension's register, `0` on nine; `FullTextSearch` 22: `0` on all ten (by elimination); `Correspondence` 20; `EnableTotalsSplitting` 23; `PeriodAdjustmentLength` last: `1` on the two ERP УХ registers |
+| chart of accounts (57), 6 samples | `AutoOrderByCode` 24: `0` on the extension's chart, `1` on five; `CheckUnique` 34: `0` on two ERP УХ charts; `CodeSeries` 35: `1` on the two БСП charts; `DataLockControlMode` 36: `0` on two ERP УХ charts; `EditType` 27, `ChoiceMode` 31, `CreateOnInput` 49 hold one value on all six |
+| chart of calculation types (63), 5 samples | `DependenceOnCalculationTypes` 27: `0` on the extension's chart; `ActionPeriodUse` 29; `IncludeHelpInContents` 37: `1` on the two ERP УХ charts; `DataLockControlMode` 41: `0` on the two ERP УХ charts; `CodeAllowedLength` 53: `0` on ERP УХ `Начисления`; `EditType` 35, `ChoiceMode` 38, `QuickChoice` 39, `CreateOnInput` 55 hold one value on all five |
+| chart of characteristic types (59), 36 samples | `EditType` 25: `0`/`1`/`2`; `ChoiceMode` 31; `CheckUnique` 34; `DataLockControlMode` 36; `CodeAllowedLength` 49; `CreateOnInput` 51: `1`/`2`; `PredefinedDataUpdate` 53: `0`/`1`/`2`; `DefaultPresentation` 24 and `CodeSeries` 35 hold one value on all 36 |
+| calculation register (33), 5 samples | `ActionPeriod` 17: `0` on ERP УХ `Удержания` and the extension's; `BasePeriod` 18: `0` on the extension's; `DataLockControlMode` 26 |
+
+A property that holds one value everywhere is placed by the model's layout, which
+reproduces the stored row of every object on record; only a value the samples
+do not hold could show a mistake there. The recalculation is the same: both on
+record (БСП) are Managed, and its lock mode is the last slot of the owner record
+with the collection count after it.
+
+The offline empty-database cycles (`scripts/empty-load/ve.sh`: every row a load
+into an empty infobase would write, exported from those rows alone and diffed
+against the native export) do not move: БСП 8.3.27 12197 files unchanged, БСП 8.5
+12336 and ERP УХ 8.3.27 140708, each with `ConfigDumpInfo.xml` as the one
+different file, as before. In all three the registers and charts compile to
+their stored rows exactly: 2, 2 and 5 accounting registers (the two ERP УХ
+registers with a period adjustment among them), 1, 1 and 3 charts of accounts,
+1, 1 and 2 charts of calculation types, 5, 5 and 25 charts of characteristic
+types, 1, 1 and 2 calculation registers.
+
+`src/metadata_model/slot_evidence_tests.rs` compiles the extension's register
+and four charts (`tests/fixtures/native-evidence/extension-register-slots/`,
+the native XML next to the stored rows) to their stored rows byte for byte,
+reads every scalar property back, and edits one property of each at a time,
+requiring that exactly the slot above moves; the typed compiler has one such
+test per family (`business_object.rs`). The tests fail on the previous layouts.
 
 ### Forms
 
