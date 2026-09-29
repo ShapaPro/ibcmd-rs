@@ -190,6 +190,10 @@ pub struct ScriptInputs {
     pub replaced: Fingerprint,
     pub special_config: Fingerprint,
     pub special_params: Fingerprint,
+    /// Delete the `Params` marker too. The native apply collects the service
+    /// information (`.si`) and clears that marker only when the stage carries a
+    /// descriptor row; a stage of body rows alone leaves it (measured, S5).
+    pub clear_params_marker: bool,
     /// Dynamic generations to fold into the ordinary rows, oldest first.
     pub generations: Vec<Uuid>,
     /// `_ConfigChngR` exists: reset the change registrations of the staged
@@ -413,20 +417,28 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
             "a dynamic alias row is left after the fold",
         );
     }
-    if input.special_config.rows > 0 || input.special_params.rows > 0 {
+    let clear_params = input.clear_params_marker && input.special_params.rows > 0;
+    if input.special_config.rows > 0 || clear_params {
         writeln!(
             sql,
             "DELETE FROM dbo.Config WHERE FileName = N'DynamicallyUpdated';"
         )
         .unwrap();
-        writeln!(
-            sql,
-            "DELETE FROM dbo.Params WHERE FileName = N'DynamicallyUpdated';"
-        )
-        .unwrap();
+        let mut left =
+            "EXISTS (SELECT 1 FROM dbo.Config WHERE FileName = N'DynamicallyUpdated')".to_owned();
+        if clear_params {
+            writeln!(
+                sql,
+                "DELETE FROM dbo.Params WHERE FileName = N'DynamicallyUpdated';"
+            )
+            .unwrap();
+            left.push_str(
+                " OR EXISTS (SELECT 1 FROM dbo.Params WHERE FileName = N'DynamicallyUpdated')",
+            );
+        }
         throw(
             &mut sql,
-            "EXISTS (SELECT 1 FROM dbo.Config WHERE FileName = N'DynamicallyUpdated') OR EXISTS (SELECT 1 FROM dbo.Params WHERE FileName = N'DynamicallyUpdated')",
+            &left,
             code::MARKER_CLEANUP,
             "DynamicallyUpdated is left after the cleanup",
         );
@@ -769,6 +781,7 @@ mod tests {
             },
             special_config: Fingerprint::default(),
             special_params: Fingerprint::default(),
+            clear_params_marker: true,
             generations: Vec::new(),
             reset_change_registrations: true,
             files_rewrites: Vec::new(),
@@ -842,6 +855,26 @@ mod tests {
         let mv = sql.find("INSERT dbo.Config").unwrap();
         assert!(first < second && second < mv);
         assert!(sql.contains("DELETE FROM dbo.Config WHERE FileName = N'versions_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e';"));
+        assert!(sql.contains("DELETE FROM dbo.Params WHERE FileName = N'DynamicallyUpdated';"));
+    }
+
+    #[test]
+    fn a_stage_of_body_rows_alone_leaves_the_params_marker() {
+        let mut input = inputs();
+        input.special_config = Fingerprint {
+            rows: 1,
+            bytes: 1,
+            h1: 1,
+            h2: 1,
+            h3: 1,
+        };
+        input.special_params = input.special_config;
+        input.clear_params_marker = false;
+        let sql = render_apply_script(&input).unwrap();
+        assert!(sql.contains("DELETE FROM dbo.Config WHERE FileName = N'DynamicallyUpdated';"));
+        assert!(!sql.contains("DELETE FROM dbo.Params WHERE FileName = N'DynamicallyUpdated';"));
+        input.clear_params_marker = true;
+        let sql = render_apply_script(&input).unwrap();
         assert!(sql.contains("DELETE FROM dbo.Params WHERE FileName = N'DynamicallyUpdated';"));
     }
 

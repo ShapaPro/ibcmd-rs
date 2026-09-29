@@ -112,7 +112,15 @@ among them -- **without** their descriptors, and stayed on the short path; S3 st
 catalog and a document and took the long one. This apply does not care: it never renumbers ids and writes
 the same end state for both paths (S3 on the long path, S4 on the short one, both equal).
 
-### What a new form or template adds (measured: S1, S4)
+A **third path** was seen for a stage of `versions` and one body row (S5C, a module added to a data
+processor, 25 s): no «Сбор служебной информации», no help-index build, `Params.DynamicallyUpdated` and the
+`.si` rows left alone; `.ui` (3 rows), `MobileVersions.dat`, `Config` (with the fold of the dynamic
+overlay) and the change registrations are written. This apply reproduces it by writing `.si` only for new
+objects and the `Params` marker deletion only for stages with a descriptor row. The same paths, by owner
+kind, in S5: a data processor's or a form's descriptor (short path), a catalog's (S5B: the long path, the
+register rebuilt).
+
+### What a new form or template adds (measured: S1, S4, S5)
 
 Besides the staged rows themselves (the two descriptors, their `.0` bodies and the
 owner's descriptor, which lists the new uuid in its forms or templates group with
@@ -194,7 +202,8 @@ One serializable transaction, data moves inside the server only:
    marker (row count, byte total and three sums of SHA-256 slices, computed by
    the server) equal what the read-only planning saw;
 4. the dynamic generations are folded oldest first (see step 9 above), then
-   both `DynamicallyUpdated` rows are deleted;
+   the `Config` `DynamicallyUpdated` row is deleted, and the `Params` one too when the
+   stage carries a descriptor row (native leaves it after a stage of body rows alone, S5C);
 5. every `Config` row named by a staged row is deleted (all parts) and the staged
    rows are inserted as they are;
 6. `_ConfigChngR._MessageNo := NULL` for every object that owns a staged row, all
@@ -256,6 +265,30 @@ the platform does not mind (S2, S3, S4, and the probe below):
 - **Help index, ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and
   scratch of the native apply, see the table above.
 - **`Creation`/`Modified` of `Files.MobileVersions.dat`** and the random head guid differ.
+
+### Which per-apply writes are required
+
+The trace track's list of what every native apply writes (`docs/apply/native-apply-trace.md`
+sections 3.2 and 7) against what this apply does, with the verdict the evidence supports.
+The verdicts come from applying with the minimal set at once (S2, S3, S4, the probe) and
+opening the result with the platform's own tools; a single omitted group was not dropped
+alone from a full native set, because nothing in the results asks for it:
+
+| Native write | This apply | Verdict and evidence |
+|---|---|---|
+| `Config` rows: `.new` copy, `commit` marker, promotion row by row outside a transaction | one `INSERT ... SELECT` in one transaction; `commit`, `dbStruFinal`, `dynamicCommit` are never written | **required**: the rows (identical to native in S2, S3, S4). The markers exist to resume an interrupted promotion; a transaction has nothing to resume. |
+| Fold of dynamic overlays (`X_dynupdate_G` over `X`, `versions_dynupdate_G`, `DynamicallyUpdated`) | written, oldest generation first | **required** when the base has an overlay (S1-S4 all had one); rows identical. |
+| `_ConfigChngR._MessageNo := NULL` | written for every owner of a staged row | **required** (it is what the exchange plans read); identical in S2-S4. |
+| New objects: rows in `_ConfigChngR`, `_ConfigChngR_ExtProps` | written | **required**; identical to native but for the ids. |
+| `_ConfigChngR` and `_ExtProps` rebuilt through `..NG` tables with new ids (long path) | not written | **not required**: the platform runs on the old ids (check, apply afterwards, cold server); the short path does not renumber. |
+| 16 `.si` rows and `siVersions` rewritten | only the main `.si` row and its version, when a new form or template adds records | **required for new objects** (the row lists them; text identical to native in S4); **not required otherwise** (content unchanged, S2-S4). |
+| `Files.MobileVersions.dat` (ring of 1 000 guids) | written, one new guid in front | kept: it is what mobile clients compare, and it is cheap. Not shown to be needed by anything measured here. |
+| `Files.extd_props_cached/gc.mrk`, `CAS_GC_Info`, ConfigCAS garbage collection | not written | **not required**: bookkeeping of the extension content store, independent of the change (first apply of a lineage only for the collection). |
+| Help index `userDocs_ru`, `userVocabulary_ru`, `userPostings_ru` | not written | **not required to open the database** (not a session or export input); a stale index only affects searching help. Rebuilding it needs the platform's indexer. |
+| `DBNames*.New` passes, `DBNames`, `DBNamesVersion-DBNames` | not written | **not required**: unchanged for every stage measured (no table is added or renamed by a module, form or template). |
+| `DBSchema` and `SchemaStorage` walk 100 -> 200 -> 400 -> 500 -> 100 (long path) | not written; a state other than 100 is refused | **not required** while no table changes: the bytes are identical before and after. |
+| `_ExtensionsRestructNGS` clean-up | not written | scratch; identical rows in every native apply. |
+| `Params` `.ui` (3 rows) | not written | licensing records (track ui): see known differences. |
 
 ## Safety
 
@@ -368,6 +401,29 @@ differences. Native `config check` succeeds on the own result, `generation-id` e
 twin's (`206601e511d02f4f844aa29ae70f045300000000`), the native `config apply` afterwards
 says "Обновление конфигурации базы данных не требуется".
 
+S5, the other shapes of new objects, each applied natively and by the own apply to twins of one stage
+(`tools\verify_new.py`; a first attempt that cloned a data processor's form into a catalog was refused by
+the native metadata check, «Ошибка формата потока», before it wrote anything -- the clone source matters,
+not the apply):
+
+- **S5A** (15 rows): a form with a help page (`.0` and `.1`) appended to a data processor that has forms
+  and commands; the **first template** of a data processor that has a form and commands (its record goes
+  between them); the **first form** of a data processor that has only attributes; the first template of
+  a data processor **with no children at all**; a **help page added to an existing form** (`.1`).
+  `Config` 9 851 rows, `_ConfigChngR` 20 697 rows, `_ConfigChngR_ExtProps` of 16 355 objects and all 16 `.si`
+  rows (text) identical to the native result.
+- **S5B** (4 rows): a **form of a catalog** (cloned from a form of that catalog) on an owner that is
+  registered for five nodes: identical; the form is registered for the same three ordinary nodes as
+  any other new object, and the native apply took the long path (a catalog's descriptor), so its `_IDRRef` differ.
+- **S5C** (2 rows): an **object module added to a data processor** (a container row `.0` next to its
+  existing `.1`): `Config`, `_ConfigChngR` and `_ConfigChngR_ExtProps` identical (the new file appended
+  behind the existing one, as predicted), `.si` untouched by both; the native apply took the third path
+  above and left `Params.DynamicallyUpdated`, which this apply now leaves too for such a stage.
+
+Exclusivity with a real 1C process: an `ibsrv` (standalone server) started on a staged twin holds 23
+connections; the apply refuses with the sessions listed, and a second apply started meanwhile is
+refused by the in-transaction check (`THROW 57302`) -- both leave the database unchanged.
+
 Session probe (`ibcmd_rs_04_apply_bsp8327_probe_20260929`, a clean БСП clone with a full-tree
 stage of 9 517 rows -- the 227 S2 edits and a marker added to `ПоддерживаемыеВерсииПрограммногоИнтерфейса`
 in `СтандартныеПодсистемыСервер`): a standalone server (`ibsrv`, integrated SQL login, `tools\srv.ps1`)
@@ -397,6 +453,8 @@ the snapshot row, every saved file hashes to its manifest entry).
   new process reading the tables, and it sees the applied module (probe above). A **warm**
   server does not notice an external apply within minutes (ui track), which is why the
   apply demands exclusive access.
+- **Dynamic-update overlays in `Params`** (a `.si` row under a `_dynupdate_` name, left by a native
+  dynamic apply) are refused: this apply folds only `Config` overlays.
 - **8.5** is refused: the apply is measured on 8.3.27 only.
 - The help index and the extension CAS garbage are left as they are; they are caches.
 - A working process that keeps a pooled connection makes the SQL exclusivity check refuse; the

@@ -432,6 +432,21 @@ pub fn plan_with_gate(
             "{left_over} row(s) of an unfinished operation (commit / dynamicCommit / dbStruFinal / convertPhase / erase_save / deleted / *.new) are recorded in Config or ConfigSave; run the native `ibcmd infobase config repair` first"
         );
     }
+    // An overlay of a dynamic update in Params (a `.si` row under an alias name)
+    // is folded by the native apply's `.si` promotion; this apply only folds
+    // `Config`, so it leaves such a database to the native one.
+    let params_overlays = scalar_i64(
+        client,
+        &format!(
+            "SELECT COUNT_BIG(*) FROM {db}.dbo.Params WHERE FileName LIKE {}",
+            sqlgen::ALIAS_PATTERN
+        ),
+    )?;
+    if params_overlays != 0 {
+        bail!(
+            "Params holds {params_overlays} dynamic-update overlay row(s) (names with _dynupdate_): run the native `ibcmd infobase config apply`"
+        );
+    }
     // The schema storage of a settled infobase is at Status 100; the native apply
     // walks it through 200, 400 and 500 and back, so any other value is an
     // interrupted operation.
@@ -756,6 +771,10 @@ pub fn plan_with_gate(
         replaced: replaced_fp,
         special_config: special_config_fp,
         special_params: special_params_fp,
+        clear_params_marker: report
+            .stage
+            .as_ref()
+            .is_some_and(|stage| stage.descriptors > 0),
         generations: history.generations.clone(),
         reset_change_registrations: has_change_registrations,
         files_rewrites,
