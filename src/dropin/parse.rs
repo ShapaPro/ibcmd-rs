@@ -418,6 +418,9 @@ pub struct Common {
 pub struct ExportRequest {
     pub common: Common,
     pub threads: Option<usize>,
+    /// The extension to export (`--extension`, `-e`); the configuration
+    /// itself without it.
+    pub extension: Option<String>,
     /// The directory as given.
     pub path: OsString,
 }
@@ -683,13 +686,7 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
         }
     }
     let unsupported_options: &[Opt] = match node.kind {
-        NodeKind::Export => &[
-            Opt::Base,
-            Opt::File,
-            Opt::Extension,
-            Opt::Sync,
-            Opt::Archive,
-        ],
+        NodeKind::Export => &[Opt::Base, Opt::File, Opt::Sync, Opt::Archive],
         _ => &[Opt::Out, Opt::Extension],
     };
     for opt in unsupported_options {
@@ -717,6 +714,16 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
     Ok(match node.kind {
         NodeKind::Export => Invocation::Export(ExportRequest {
             common,
+            extension: match scan.value(Opt::Extension) {
+                None => None,
+                Some(value) if value.trim().is_empty() => {
+                    return Err(Refusal::InvalidValue {
+                        option: "--extension".to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                Some(value) => Some(value.to_string()),
+            },
             threads: match scan.value(Opt::Threads) {
                 None => None,
                 Some(value) => Some(
@@ -1283,20 +1290,45 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_export_names_the_extension() {
+        for spelled in [
+            vec!["--extension=Расширение"],
+            vec!["--extension", "Расширение"],
+            vec!["-e", "Расширение"],
+        ] {
+            let mut list = vec!["config", "export", "--db-name=b"];
+            list.extend(spelled);
+            list.push("out");
+            assert_eq!(
+                export(&list).extension.as_deref(),
+                Some("Расширение"),
+                "{list:?}"
+            );
+        }
+        let request = export(&["config", "export", "--db-name=b", "out"]);
+        assert_eq!(request.extension, None);
+        assert_eq!(
+            parse(&["config", "export", "--db-name=b", "--extension=", "out"]),
+            Err(Refusal::InvalidValue {
+                option: "--extension".to_string(),
+                value: String::new(),
+            })
+        );
+    }
+
+    #[test]
     fn unsupported_options_of_served_commands_are_named() {
         for option in [
             "--base=dump.xml",
             "-b",
             "--file=a.cf",
-            "--extension=E",
-            "-e",
             "--sync",
             "--archive",
             "-A",
         ] {
             let mut list = vec!["config", "export", "--db-name=b"];
             list.push(option);
-            if matches!(option, "-b" | "-e") {
+            if option == "-b" {
                 list.push("value");
             }
             list.push("out");

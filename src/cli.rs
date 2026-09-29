@@ -728,6 +728,9 @@ pub struct InfobaseConfigExportArgs {
     pub sqlcmd: Option<PathBuf>,
     /// Clear a non-empty output directory first (the research round trip).
     /// The drop-in export refuses one, as the platform's own export does.
+    /// Export this configuration extension instead of the configuration
+    /// (`--extension` of the platform's `config export`).
+    pub extension: Option<String>,
     pub overwrite: bool,
     /// Count the exported files for the report (walks the whole tree).
     pub count_files: bool,

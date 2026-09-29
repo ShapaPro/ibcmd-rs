@@ -180,7 +180,6 @@ fn unsupported_options_and_malformed_lines_are_refused() {
         ("--archive", UNSUPPORTED, "Параметр `--archive`"),
         ("--base=info.xml", UNSUPPORTED, "Параметр `--base`"),
         ("--file=a.cf", UNSUPPORTED, "Параметр `--file`"),
-        ("--extension=E", UNSUPPORTED, "Параметр `--extension`"),
         ("--remote=http://h:1545", UNSUPPORTED, "Параметр `--remote`"),
         ("--pid=1", UNSUPPORTED, "Параметр `--pid`"),
         ("--bogus", MALFORMED, "Ошибка разбора параметра: --bogus"),
@@ -325,6 +324,33 @@ fn export_refuses_a_non_empty_directory_as_the_platform_does() {
 }
 
 #[test]
+fn an_extension_export_is_served_and_refuses_a_non_empty_directory_as_well() {
+    // `--extension` is served: the line is not refused as unsupported, and the
+    // directory is checked before any database is read
+    let out = TempDir::new("extension-not-empty");
+    fs::write(out.path().join("x.txt"), b"x").unwrap();
+    for option in [vec!["--extension=E"], vec!["-e", "E"]] {
+        let mut args = vec![
+            "infobase",
+            "config",
+            "export",
+            "--dbms=MSSQLServer",
+            "--db-server=localhost",
+            "--db-name=ibcmd_rs_dropin_test",
+        ];
+        args.extend(option);
+        args.push(out.arg());
+        let output = assert_exit(&args, FAILED, "не пуст");
+        assert!(
+            !text(&output.stderr).contains("не поддерживается"),
+            "{args:?}: {}",
+            text(&output.stderr)
+        );
+        assert!(out.path().join("x.txt").is_file());
+    }
+}
+
+#[test]
 fn import_reports_a_missing_tree_in_the_platforms_words() {
     let out = TempDir::new("missing-tree");
     let missing = out.path().join("no-such-tree");
@@ -410,6 +436,12 @@ fn help_and_version() {
             "{args:?}"
         );
         assert!(help.contains("--db-server"), "{args:?}");
+        // served, and no longer named among what is not
+        assert!(help.contains("--extension=<name> | -e <name>"), "{args:?}");
+        assert!(
+            !help.contains("export --base, --file, --extension"),
+            "{args:?}"
+        );
     }
     let output = run(&["help"]);
     assert_eq!(output.status.code(), Some(0));

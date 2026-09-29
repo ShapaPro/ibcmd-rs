@@ -105,6 +105,11 @@ pub fn infobase_help(program: &str) -> String {
             export
                 Экспорт конфигурации в XML
 
+                --extension=<name> | -e <name>
+                    Экспортировать расширение конфигурации с этим именем, а не
+                    конфигурацию. Выгружается то состояние расширения, которое
+                    выгружает ibcmd: подготовленное к применению, если оно есть
+
                 --threads=<n> | -T <n>
                     Количество потоков, используемых при экспорте
 
@@ -198,7 +203,7 @@ pub fn infobase_help(program: &str) -> String {
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
 {unsupported}
-        параметры export --base, --file, --extension, --sync, --archive
+        параметры export --base, --file, --sync, --archive
         параметры import --out, --extension
         параметры apply --extension, --dynamic=force, --sqlcmd
         общие параметры --pid, --remote

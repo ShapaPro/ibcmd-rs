@@ -144,6 +144,7 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 ^
 
 | Параметр | Что задаёт |
 |---|---|
+| `--extension=<имя>`, `-e <имя>` | Выгрузить расширение конфигурации с этим именем, а не конфигурацию. Дерево такое же, как у штатного `ibcmd`: выгружается подготовленное к применению состояние расширения, если оно есть, иначе применённое. Неизвестное имя и расширение, которое не удаётся записать точно, дают ошибку. Как и конфигурация, расширение пишется только в пустой каталог. Проверено на четырёх расширениях БСП 8.3.27 и расширениях БСП 8.5 (см. [extensions/parity.md](extensions/parity.md)). |
 | `--threads=<n>`, `-T <n>` | Число потоков выгрузки: по умолчанию — число ядер, но не больше 16; явно — до 64. |
 | `--force` | Принимается. Непустой каталог, как и у штатного `ibcmd`, не перезаписывается. |
 | `--ignore-unresolved-refs` | Принимается для совместимости. |
@@ -174,9 +175,9 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 ^
   `support`, `data-separation`, `extension`, `generation-id`, `sign`;
 - `infobase config export info|status|objects|all-extensions`,
   `infobase config import files|all-extensions`;
-- параметры выгрузки `--base`, `--file`, `--extension`, `--sync`,
-  `--archive`; загрузки `--out`, `--extension`; применения `--extension`,
-  `--dynamic=force`, `--sqlcmd`; общие `--pid`, `--remote`;
+- параметры выгрузки `--base`, `--file`, `--sync`, `--archive`; загрузки
+  `--out`, `--extension`; применения `--extension`, `--dynamic=force`,
+  `--sqlcmd`; общие `--pid`, `--remote`;
 - файловые базы (`--db-path`) и СУБД кроме `MSSQLServer`.
 
 ### Вывод и коды возврата
