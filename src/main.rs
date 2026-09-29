@@ -684,6 +684,9 @@ fn run() -> Result<()> {
         Commands::ApplyCheckTrees(args) => {
             std::process::exit(ibcmd_rs::apply_check::cli::run_apply_check_trees(&args)?)
         }
+        Commands::MssqlConfigApply(args) => {
+            ibcmd_rs::mssql_config_apply::run_command(&args)?;
+        }
         Commands::MssqlApplySourceChange(mut args) => {
             ibcmd_rs::settings::commands::prepare_apply_source_change(&mut args, subcommand)?;
             if args.watch {

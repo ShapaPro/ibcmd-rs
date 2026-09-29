@@ -167,6 +167,15 @@ pub enum Commands {
     MssqlApplyCheck(crate::apply_check::cli::MssqlApplyCheckArgs),
     /// Tell whether the change from one XML tree to another needs the platform's own apply.
     ApplyCheckTrees(crate::apply_check::cli::ApplyCheckTreesArgs),
+    /// Apply the staged main configuration (ConfigSave to Config) without the
+    /// platform, as an exclusive native `config apply` does for a
+    /// configuration that needs no restructuring: changed modules, forms,
+    /// templates, pictures and help pages of any object, and new forms and
+    /// templates of existing objects. Anything else is refused with the list
+    /// of the rows that need the native apply. Takes the stage of this
+    /// program's `infobase config import` only; a stage with a `deleted` row
+    /// (removals, and every stage of the platform's own import) is refused.
+    MssqlConfigApply(MssqlConfigApplyArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
     /// Restructure the tables of a catalog that got new attributes in the staged
@@ -2013,6 +2022,75 @@ pub struct MssqlActivateStagedMainArgs {
     pub infobase_user: Option<String>,
     #[arg(long)]
     pub infobase_pwd: Option<String>,
+}
+
+/// How `mssql-config-apply` establishes that nobody else is connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyExclusivityArg {
+    /// No other user session on the database as SQL Server sees it.
+    Sql,
+    /// The operator has proved it (for instance with `rac session list`).
+    Assumed,
+}
+
+/// Which overwritten rows the recovery artifact keeps the bytes of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyRecoveryArg {
+    /// The rows the apply changes.
+    Changed,
+    /// Only a manifest of hashes.
+    None,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MssqlConfigApplyArgs {
+    /// Exact native MSSQL platform layout.
+    #[arg(long)]
+    pub platform_profile: MssqlNativePlatformProfile,
+    #[arg(long, default_value = "localhost")]
+    pub server: String,
+    /// SQL Server login; integrated authentication is used when omitted.
+    #[arg(long)]
+    pub sql_user: Option<String>,
+    /// SQL Server password. Prefer --sql-pwd-env.
+    #[arg(long)]
+    pub sql_pwd: Option<String>,
+    #[arg(long, default_value = "IBCMD_DB_PSW")]
+    pub sql_pwd_env: String,
+    /// Target MSSQL database.
+    #[arg(long)]
+    pub database: String,
+    /// Plan and check the staged configuration and render the transaction,
+    /// without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Run the whole transaction and roll it back: proves the SQL and its
+    /// postconditions on this database without changing it.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub rehearse: bool,
+    /// Required acknowledgement for a database write.
+    #[arg(long)]
+    pub allow_non_lab: bool,
+    /// How exclusive access is established.
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyExclusivityArg::Sql)]
+    pub exclusivity: MssqlConfigApplyExclusivityArg,
+    /// Directory for the recovery artifact (default: a folder in the
+    /// temporary directory named after the database and the plan).
+    #[arg(long)]
+    pub recovery_dir: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyRecoveryArg::Changed)]
+    pub recovery_blobs: MssqlConfigApplyRecoveryArg,
+    /// Pass changed body rows of command-interface, rights, package and
+    /// similar roles without proving their text unchanged: for a stage made
+    /// by `infobase config import` of a tree exported from this database.
+    #[arg(long)]
+    pub admit_unverified_roles: bool,
+    /// Write the rendered SQL transaction here.
+    #[arg(long)]
+    pub script_output: Option<PathBuf>,
+    /// Write the JSON report here as well as to stdout.
+    #[arg(long)]
+    pub report: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
