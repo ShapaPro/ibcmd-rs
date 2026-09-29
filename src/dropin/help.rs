@@ -127,6 +127,34 @@ pub fn infobase_help(program: &str) -> String {
                 <path>
                     путь к каталогу с файлами конфигурации
 
+            apply
+                Обновление конфигурации базы данных: переносит конфигурацию,
+                сохраненную командой import (таблица ConfigSave), в действующую
+                (таблица Config) в монопольном режиме, одной транзакцией.
+                Если для этого нужна реструктуризация базы (или изменение,
+                которое ibcmd-rs не выполняет), ничего не меняет и отвечает
+                \"требуется штатный config apply: <причины>\", код возврата 1.
+                Если к базе подключены другие сеансы, отказывает словами ibcmd
+                об исключительной блокировке, код возврата -1
+
+                --force | -F
+                    Подтверждение выполнения операции в случае наличия
+                    предупреждений. Принимается: предупреждений, которые нужно
+                    подтверждать, это применение не выдает
+
+                --dynamic=<auto|disable|prompt|force>
+                    Использование динамического обновления. Применение всегда
+                    монопольное: auto (по умолчанию), disable и prompt
+                    выполняются как disable, force не поддерживается
+
+                --session-terminate=<disable|prompt|force>
+                    Завершение активных сеансов. disable (по умолчанию);
+                    prompt и force принимаются, пока к базе никто не подключен,
+                    ibcmd-rs сеансы не завершает
+
+                --session-terminate-message=<message>
+                    Принимается и не используется
+
 Параметры ibcmd-rs (у ibcmd их нет):
 
     --report=<file>
@@ -152,11 +180,17 @@ pub fn infobase_help(program: &str) -> String {
     --base-free
         (import) Собрать каждую строку из дерева, не читая конфигурацию базы
 
+    --exclusivity=<sql|assumed>
+        (apply) Как убедиться, что с базой никто не работает: sql (по
+        умолчанию) - по сеансам, которые видит SQL Server (нужно право VIEW
+        SERVER STATE), assumed - вы ручаетесь за это сами, сеансы не проверяются
+
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
 {unsupported}
         параметры export --base, --file, --extension, --sync, --archive
         параметры import --out, --extension
+        параметры apply --extension, --dynamic=force, --sqlcmd
         общие параметры --pid, --remote
         режимы {modes}
 
@@ -184,7 +218,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config import
+{infobase:<23}{summary}: config export, config import, config apply
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -211,7 +245,7 @@ mod tests {
         let help = infobase_help("ibcmd");
         for command in [
             "ibcmd infobase create",
-            "ibcmd infobase config apply",
+            "ibcmd infobase config check",
             "ibcmd infobase config export info",
             "ibcmd infobase config import files",
             "ibcmd infobase config support",
@@ -221,6 +255,17 @@ mod tests {
         }
         // children of a refused command are covered by it
         assert!(!help.contains("config support disable"));
+        // apply is served: described with its words, not listed as refused
+        assert!(!help.contains("ibcmd infobase config apply"));
+        for word in [
+            "--dynamic=<auto|disable|prompt|force>",
+            "--session-terminate=<disable|prompt|force>",
+            "--session-terminate-message=<message>",
+            "требуется штатный config apply: <причины>",
+            "--exclusivity=<sql|assumed>",
+        ] {
+            assert!(help.contains(word), "{word}");
+        }
         assert!(help.contains("--db-server"));
         assert!(help.contains("--request-db-pwd"));
         // the release audit forbids the platform's executable names

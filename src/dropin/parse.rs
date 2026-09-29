@@ -64,6 +64,10 @@ pub enum Opt {
     IgnoreUnresolvedRefs,
     // `config import`
     Out,
+    // `config apply`
+    Dynamic,
+    SessionTerminate,
+    SessionTerminateMessage,
     // ibcmd-rs's own (no native spelling)
     Report,
     Platform,
@@ -72,6 +76,7 @@ pub enum Opt {
     SourceVersion,
     DbPwdEnv,
     BaseFree,
+    Exclusivity,
 }
 
 /// How an option is spelled and whether it takes a value.
@@ -169,6 +174,19 @@ const IMPORT_OPTIONS: &[OptSpec] = &[
     flag(Opt::BaseFree, &["base-free"], None),
 ];
 
+const APPLY_OPTIONS: &[OptSpec] = &[
+    valued(Opt::Extension, &["extension"], Some('e')),
+    flag(Opt::Force, &["force"], Some('F')),
+    valued(Opt::Dynamic, &["dynamic"], None),
+    valued(Opt::SessionTerminate, &["session-terminate"], None),
+    valued(
+        Opt::SessionTerminateMessage,
+        &["session-terminate-message"],
+        None,
+    ),
+    valued(Opt::Exclusivity, &["exclusivity"], None),
+];
+
 /// What a command word leads to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -178,6 +196,8 @@ pub enum NodeKind {
     Export,
     /// `infobase config import`.
     Import,
+    /// `infobase config apply`.
+    Apply,
     /// A native command ibcmd-rs does not implement yet.
     Unsupported,
 }
@@ -224,7 +244,13 @@ pub static INFOBASE: Node = Node {
                 unsupported("load", "Загрузка конфигурации"),
                 unsupported("save", "Выгрузка конфигурации"),
                 unsupported("check", "Проверка конфигурации"),
-                unsupported("apply", "Обновление конфигурации базы данных"),
+                Node {
+                    name: "apply",
+                    summary: "Обновление конфигурации базы данных",
+                    kind: NodeKind::Apply,
+                    options: APPLY_OPTIONS,
+                    children: &[],
+                },
                 unsupported("reset", "Возврат к конфигурации базы данных"),
                 unsupported(
                     "repair",
@@ -349,8 +375,13 @@ pub enum Refusal {
     ImportArchive(PathBuf),
     /// A value of the wrong shape.
     InvalidValue { option: String, value: String },
+    /// An option of a fixed set of words given another one (or none), as the
+    /// platform words it: `Некорректное значение параметра: dynamic`.
+    BadValue(String),
     /// Two options that exclude each other.
     Conflict { first: String, second: String },
+    /// A line ibcmd-rs will not run, with the reason in its own words.
+    Unsupported(String),
 }
 
 /// The connection and the other options every served command shares.
@@ -395,12 +426,75 @@ pub struct ImportRequest {
     pub path: OsString,
 }
 
+/// `--dynamic`: whether the platform may update the running infobase
+/// dynamically. The default is `auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicMode {
+    Auto,
+    Disable,
+    Prompt,
+    Force,
+}
+
+impl DynamicMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Disable => "disable",
+            Self::Prompt => "prompt",
+            Self::Force => "force",
+        }
+    }
+}
+
+/// `--session-terminate`: what to do with the sessions that keep the
+/// exclusive lock from being taken. The default is `disable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTerminate {
+    Disable,
+    Prompt,
+    Force,
+}
+
+impl SessionTerminate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Prompt => "prompt",
+            Self::Force => "force",
+        }
+    }
+}
+
+/// `--exclusivity` (ibcmd-rs's own): how the apply learns that nobody else
+/// works with the infobase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusivityMode {
+    /// Other sessions on the database as SQL Server sees them (the default).
+    Sql,
+    /// The caller guarantees it; nothing is looked at.
+    Assumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyRequest {
+    pub common: Common,
+    /// `--force`/`-F`: confirm the warnings.
+    pub force: bool,
+    pub dynamic: DynamicMode,
+    pub session_terminate: SessionTerminate,
+    /// `--session-terminate-message`: the text a terminated session shows.
+    pub session_terminate_message: Option<String>,
+    pub exclusivity: ExclusivityMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     Help,
     Version,
     Export(ExportRequest),
     Import(ImportRequest),
+    Apply(ApplyRequest),
 }
 
 /// The tokens of one command line, resolved against the tree.
@@ -516,7 +610,13 @@ fn scan(args: &[OsString]) -> Scan {
                 }
             } else {
                 if attached.is_some() {
-                    scan.error.get_or_insert(Refusal::Parse(text.to_string()));
+                    // measured on 8.3.27.2214 (`export --force=yes`, `apply --force=yes`):
+                    // the option's name without the dashes
+                    let name = spec
+                        .long
+                        .first()
+                        .map_or_else(|| text.to_string(), |name| name.to_string());
+                    scan.error.get_or_insert(Refusal::Parse(name));
                     continue;
                 }
                 None
@@ -561,7 +661,10 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
                 path: scan.path.iter().map(|node| node.name).collect(),
             });
         }
-        NodeKind::Export | NodeKind::Import => {}
+        NodeKind::Export | NodeKind::Import | NodeKind::Apply => {}
+    }
+    if node.kind == NodeKind::Apply {
+        return parse_apply(&scan);
     }
     if let Some(error) = scan.error.clone() {
         return Err(error);
@@ -634,6 +737,78 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
             })
         }
     })
+}
+
+/// `infobase config apply`, parsed as the platform's (8.3.27.2214) is: a
+/// stray argument is ignored, a value outside the option's words is
+/// `Некорректное значение параметра: <name>` (exit 2) whether it is wrong or
+/// missing, and the words are case-sensitive.
+fn parse_apply(scan: &Scan) -> Result<Invocation, Refusal> {
+    let command = scan.command();
+    if let Some(error) = scan.error.clone() {
+        return Err(match error {
+            Refusal::MissingValue(name) if name == "dynamic" || name == "session-terminate" => {
+                Refusal::BadValue(name)
+            }
+            other => other,
+        });
+    }
+    let dynamic = match scan.value(Opt::Dynamic) {
+        None => DynamicMode::Auto,
+        Some("auto") => DynamicMode::Auto,
+        Some("disable") => DynamicMode::Disable,
+        Some("prompt") => DynamicMode::Prompt,
+        Some("force") => DynamicMode::Force,
+        Some(_) => return Err(Refusal::BadValue("dynamic".to_string())),
+    };
+    let session_terminate = match scan.value(Opt::SessionTerminate) {
+        None => SessionTerminate::Disable,
+        Some("disable") => SessionTerminate::Disable,
+        Some("prompt") => SessionTerminate::Prompt,
+        Some("force") => SessionTerminate::Force,
+        Some(_) => return Err(Refusal::BadValue("session-terminate".to_string())),
+    };
+    let exclusivity = match scan.value(Opt::Exclusivity) {
+        None | Some("sql") => ExclusivityMode::Sql,
+        Some("assumed") => ExclusivityMode::Assumed,
+        Some(other) => {
+            return Err(Refusal::InvalidValue {
+                option: "--exclusivity".to_string(),
+                value: other.to_string(),
+            });
+        }
+    };
+    for opt in [Opt::Pid, Opt::Remote] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedServer(spelled.to_string()));
+        }
+    }
+    if let Some(spelled) = scan.spelled(Opt::Extension) {
+        return Err(Refusal::UnsupportedOption {
+            option: spelled.to_string(),
+            command,
+        });
+    }
+    if scan.has(Opt::Sqlcmd) {
+        return Err(Refusal::Unsupported(format!(
+            "Параметр `--sqlcmd` команды `{command}` не поддерживается: применение конфигурации работает только через встроенный клиент SQL Server"
+        )));
+    }
+    let common = common(scan)?;
+    if dynamic == DynamicMode::Force {
+        return Err(Refusal::UnsupportedOption {
+            option: "--dynamic=force".to_string(),
+            command,
+        });
+    }
+    Ok(Invocation::Apply(ApplyRequest {
+        common,
+        force: scan.has(Opt::Force),
+        dynamic,
+        session_terminate,
+        session_terminate_message: scan.value(Opt::SessionTerminateMessage).map(str::to_string),
+        exclusivity,
+    }))
 }
 
 /// The DBMS the platform knows: MSSQLServer is served, the rest refused.
@@ -1017,9 +1192,10 @@ mod tests {
             parse(&["config", "export", "-T4", "--db-name=b", "o"]),
             Err(Refusal::Parse("-T4".to_string()))
         );
+        // a flag given a value: the platform names the option without dashes
         assert_eq!(
             parse(&["config", "export", "--force=yes", "--db-name=b", "o"]),
-            Err(Refusal::Parse("--force=yes".to_string()))
+            Err(Refusal::Parse("force".to_string()))
         );
         assert_eq!(
             parse(&["config", "export", "--db-name=b", "o", "--db-server"]),
@@ -1163,6 +1339,11 @@ mod tests {
                     matches!(result, Err(Refusal::MissingValue(_))),
                     "{path:?}: {result:?}"
                 ),
+                // served, and needs nothing but the connection
+                NodeKind::Apply => assert!(
+                    matches!(result, Ok(Invocation::Apply(_))),
+                    "{path:?}: {result:?}"
+                ),
             }
         }
         let names = paths
@@ -1209,16 +1390,15 @@ mod tests {
         assert_eq!(
             parse(&[
                 "config",
-                "apply",
+                "check",
                 "--dbms=MSSQLServer",
                 "--db-server=localhost",
                 "--db-name=b",
                 "--force",
-                "--dynamic=disable",
-                "--session-terminate=force",
+                "--extension=E",
             ]),
             Err(Refusal::UnsupportedCommand(
-                "infobase config apply".to_string()
+                "infobase config check".to_string()
             ))
         );
         assert_eq!(
@@ -1317,5 +1497,205 @@ mod tests {
         let request = import(&["config", "import", "--settings=s.json", "--base-free", "t"]);
         assert!(request.base_free);
         assert_eq!(request.common.db_name, None);
+    }
+
+    fn apply(list: &[&str]) -> ApplyRequest {
+        match parse(list) {
+            Ok(Invocation::Apply(request)) => request,
+            other => panic!("{list:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_native_apply_line_of_the_lab_scripts_parses() {
+        // the lab README: `infobase config apply <common> --force --dynamic=disable`
+        let request = apply(&[
+            "config",
+            "apply",
+            "--dbms=MSSQLServer",
+            "--db-server=localhost",
+            "--db-name=ibcmd_rs_04_x",
+            r"--data=F:\lab\ibdata\x",
+            "--user=Администратор",
+            "--force",
+            "--dynamic=disable",
+            "--session-terminate=disable",
+        ]);
+        assert_eq!(request.common.dbms.as_deref(), Some("MSSQLServer"));
+        assert_eq!(request.common.db_name.as_deref(), Some("ibcmd_rs_04_x"));
+        assert_eq!(request.common.data, Some(PathBuf::from(r"F:\lab\ibdata\x")));
+        assert_eq!(request.common.user.as_deref(), Some("Администратор"));
+        assert!(request.force);
+        assert_eq!(request.dynamic, DynamicMode::Disable);
+        assert_eq!(request.session_terminate, SessionTerminate::Disable);
+    }
+
+    #[test]
+    fn apply_defaults_are_the_platforms_and_every_word_is_read() {
+        // the help of 8.3.27.2214: `--dynamic` auto, `--session-terminate` disable
+        let request = apply(&["config", "apply", "--db-name=b"]);
+        assert!(!request.force);
+        assert_eq!(request.dynamic, DynamicMode::Auto);
+        assert_eq!(request.session_terminate, SessionTerminate::Disable);
+        assert_eq!(request.session_terminate_message, None);
+        assert_eq!(request.exclusivity, ExclusivityMode::Sql);
+        for (word, mode) in [
+            ("auto", DynamicMode::Auto),
+            ("disable", DynamicMode::Disable),
+            ("prompt", DynamicMode::Prompt),
+        ] {
+            let request = apply(&["config", "apply", &format!("--dynamic={word}")]);
+            assert_eq!(request.dynamic, mode, "{word}");
+            assert_eq!(request.dynamic.as_str(), word);
+        }
+        for (word, mode) in [
+            ("disable", SessionTerminate::Disable),
+            ("prompt", SessionTerminate::Prompt),
+            ("force", SessionTerminate::Force),
+        ] {
+            let request = apply(&["config", "apply", "--session-terminate", word]);
+            assert_eq!(request.session_terminate, mode, "{word}");
+            assert_eq!(request.session_terminate.as_str(), word);
+        }
+        let request = apply(&[
+            "config",
+            "apply",
+            "-F",
+            "--session-terminate-message=Обновление конфигурации",
+            "--exclusivity=assumed",
+            "-u",
+            "Админ",
+            "-P",
+            "",
+            "--db-name=b",
+        ]);
+        assert!(request.force);
+        assert_eq!(
+            request.session_terminate_message.as_deref(),
+            Some("Обновление конфигурации")
+        );
+        assert_eq!(request.exclusivity, ExclusivityMode::Assumed);
+        assert_eq!(request.common.user.as_deref(), Some("Админ"));
+        // the mode's options go anywhere after the mode; apply's after `apply`
+        let request = apply(&["--db-name=b", "config", "apply", "--force"]);
+        assert!(request.force);
+        assert_eq!(
+            parse(&["config", "--force", "apply", "--db-name=b"]),
+            Err(Refusal::Parse("--force".to_string()))
+        );
+    }
+
+    #[test]
+    fn apply_errors_are_worded_as_the_platform_does() {
+        // measured on 8.3.27.2214, exit 2 each: the words are case-sensitive
+        // and a missing word is a wrong one
+        for list in [
+            vec!["config", "apply", "--dynamic=bogus"],
+            vec!["config", "apply", "--dynamic=AUTO"],
+            vec!["config", "apply", "--dynamic="],
+            vec!["config", "apply", "-F", "--dynamic=bogus"],
+            vec!["config", "apply", "--db-name=b", "--dynamic"],
+        ] {
+            assert_eq!(
+                parse(&list),
+                Err(Refusal::BadValue("dynamic".to_string())),
+                "{list:?}"
+            );
+        }
+        for list in [
+            vec!["config", "apply", "--session-terminate=bogus"],
+            vec!["config", "apply", "--session-terminate"],
+        ] {
+            assert_eq!(
+                parse(&list),
+                Err(Refusal::BadValue("session-terminate".to_string())),
+                "{list:?}"
+            );
+        }
+        assert_eq!(
+            parse(&["config", "apply", "--force=yes"]),
+            Err(Refusal::Parse("force".to_string()))
+        );
+        assert_eq!(
+            parse(&["config", "apply", "--bogus"]),
+            Err(Refusal::Parse("--bogus".to_string()))
+        );
+        // an option of another command is unknown here
+        assert_eq!(
+            parse(&["config", "apply", "--threads=4"]),
+            Err(Refusal::Parse("--threads=4".to_string()))
+        );
+        // a stray argument is ignored, as the platform ignores it
+        let request = apply(&["config", "apply", "--db-name=b", "stray"]);
+        assert_eq!(request.common.db_name.as_deref(), Some("b"));
+        assert_eq!(
+            parse(&["config", "apply", "--exclusivity=maybe"]),
+            Err(Refusal::InvalidValue {
+                option: "--exclusivity".to_string(),
+                value: "maybe".to_string()
+            })
+        );
+        // the connection is checked as for export and import
+        assert_eq!(
+            parse(&["config", "apply", "--dbms=Foo"]),
+            Err(Refusal::UnknownDbms("Foo".to_string()))
+        );
+        assert_eq!(
+            parse(&["config", "apply", "--dbms=PostgreSQL"]),
+            Err(Refusal::UnsupportedDbms("PostgreSQL".to_string()))
+        );
+        assert_eq!(
+            parse(&["config", "apply", "--db-path=C:\\ib"]),
+            Err(Refusal::FileInfobase)
+        );
+    }
+
+    #[test]
+    fn what_apply_does_not_serve_is_named() {
+        let command = "infobase config apply".to_string();
+        // the dynamic update is the platform's, the apply here is exclusive
+        assert_eq!(
+            parse(&["config", "apply", "--dynamic=force"]),
+            Err(Refusal::UnsupportedOption {
+                option: "--dynamic=force".to_string(),
+                command: command.clone()
+            })
+        );
+        for list in [
+            vec!["config", "apply", "--extension=E"],
+            vec!["config", "apply", "--extension", "E"],
+        ] {
+            assert_eq!(
+                parse(&list),
+                Err(Refusal::UnsupportedOption {
+                    option: "--extension".to_string(),
+                    command: command.clone()
+                }),
+                "{list:?}"
+            );
+        }
+        assert_eq!(
+            parse(&["config", "apply", "-e", "E"]),
+            Err(Refusal::UnsupportedOption {
+                option: "-e".to_string(),
+                command: command.clone()
+            })
+        );
+        for option in ["--pid=12", "--remote=http://host:1545"] {
+            assert!(
+                matches!(
+                    parse(&["config", "apply", option]),
+                    Err(Refusal::UnsupportedServer(_))
+                ),
+                "{option}"
+            );
+        }
+        match parse(&["config", "apply", "--sqlcmd=C:\\sql\\SQLCMD.EXE"]) {
+            Err(Refusal::Unsupported(message)) => {
+                assert!(message.contains("`--sqlcmd`"), "{message}");
+                assert!(message.contains("встроенный клиент"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
