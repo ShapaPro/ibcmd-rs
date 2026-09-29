@@ -39,6 +39,7 @@ pub mod probe;
 #[cfg(feature = "platform-oracle")]
 pub mod profile;
 pub mod profile_registry;
+pub mod restructure;
 pub(crate) mod runtime_evidence_schema;
 pub mod settings;
 pub mod source;

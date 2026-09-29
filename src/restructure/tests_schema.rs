@@ -1,0 +1,194 @@
+//! Tests of the schema model against the native evidence of case a2 (fixtures in
+//! `tests/fixtures/native-evidence/restructure`, the statement trace in `docs/apply/evidence`).
+
+use crate::restructure::schema::*;
+
+const STAGED: &[u8] = include_bytes!(
+    "../../tests/fixtures/native-evidence/restructure/dbschema-a2-staged-excerpt.txt"
+);
+const NATIVE: &[u8] = include_bytes!(
+    "../../tests/fixtures/native-evidence/restructure/dbschema-a2-native-excerpt.txt"
+);
+/// The statements of the native apply of case a2, verbatim.
+const STATEMENTS: &str =
+    include_str!("../../docs/apply/evidence/restructuring/a2-structure-statements.sql");
+
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn names(schema: &DbSchema) -> Vec<String> {
+    schema
+        .tables()
+        .iter()
+        .map(|table| TableView::new(table).unwrap().name().to_owned())
+        .collect()
+}
+
+#[test]
+fn schema_texts_round_trip_byte_for_byte() {
+    for text in [STAGED, NATIVE] {
+        let schema = DbSchema::parse(text).unwrap();
+        assert_eq!(schema.len(), 4);
+        assert_eq!(schema.to_text(), text);
+    }
+    assert_eq!(
+        names(&DbSchema::parse(NATIVE).unwrap()),
+        ["Reference20", "DbCopiesUpdates", "DbCopies", "ConfigChngR"]
+    );
+}
+
+#[test]
+fn a_header_count_that_disagrees_is_refused() {
+    let text = String::from_utf8(STAGED.to_vec())
+        .unwrap()
+        .replacen("{4,", "{5,", 1);
+    assert!(DbSchema::parse(text.as_bytes()).is_err());
+}
+
+#[test]
+fn the_create_table_statements_are_what_the_platform_ran() {
+    let native = DbSchema::parse(NATIVE).unwrap();
+    let statements = lf(STATEMENTS);
+    let mut checked = 0;
+    for name in ["Reference20", "DbCopiesUpdates", "DbCopies", "ConfigChngR"] {
+        let view = native.named(name).unwrap();
+        for table in physical_tables(&view).unwrap() {
+            let sql = create_table_sql(&table, "NG");
+            assert!(statements.contains(&sql), "not in the native trace:\n{sql}");
+            checked += 1;
+        }
+    }
+    // Reference20 with two sub-tables, the two upgraded system tables, ConfigChngR with its extension table.
+    assert_eq!(checked, 7);
+}
+
+#[test]
+fn the_index_statements_come_in_the_order_the_platform_created_them() {
+    let native = DbSchema::parse(NATIVE).unwrap();
+    let object = native.named("Reference20").unwrap();
+    let mut generated = Vec::new();
+    for table in physical_tables(&object).unwrap() {
+        for index in &table.indexes {
+            generated.push(create_index_sql(&table.name, index, "NG"));
+        }
+    }
+    // The first occurrences, in trace order, of the CREATE INDEX statements on Reference20.
+    let mut traced: Vec<String> = Vec::new();
+    for line in lf(STATEMENTS).lines() {
+        if line.starts_with("CREATE ")
+            && line.contains("_Reference20")
+            && !traced.iter().any(|seen| seen == line)
+        {
+            traced.push(line.to_owned());
+        }
+    }
+    assert_eq!(generated, traced);
+    assert_eq!(generated.len(), 10);
+}
+
+#[test]
+fn the_staged_entry_with_the_new_field_is_the_platforms_new_entry() {
+    let staged = DbSchema::parse(STAGED).unwrap();
+    let native = DbSchema::parse(NATIVE).unwrap();
+    let mut entry = staged.tables()[staged.position("Reference20").unwrap()].clone();
+    let field = FieldEntry::new(
+        "Fld11034",
+        true,
+        vec![TypeEntry::new("S", 0x8000_0000 | 50, 0, "", 0)],
+    );
+    // After Fld6357, before the data separator Fld2683.
+    insert_field(&mut entry, 14, &field).unwrap();
+    assert_eq!(
+        entry,
+        native.tables()[native.position("Reference20").unwrap()]
+    );
+    assert!(insert_field(&mut entry, 99, &field).is_err());
+}
+
+#[test]
+fn a_rebuilt_table_moves_before_the_change_registration_table() {
+    let staged = DbSchema::parse(STAGED).unwrap();
+    let mut moved = staged.clone();
+    let entry = moved.remove("Reference20").unwrap();
+    moved.insert_before("ConfigChngR", entry);
+    assert_eq!(
+        names(&moved),
+        ["DbCopiesUpdates", "DbCopies", "Reference20", "ConfigChngR"]
+    );
+    assert_eq!(moved.len(), staged.len());
+}
+
+#[test]
+fn column_names_follow_the_type_entries() {
+    let composite = FieldEntry::new(
+        "Fld158",
+        false,
+        vec![
+            TypeEntry::new("E", 0, 0, "", 0),
+            TypeEntry::new("L", 0, 0, "", 0),
+            TypeEntry::new("N", 17, 5, "", 0),
+            TypeEntry::new("T", 0, 0, "", 0),
+            TypeEntry::new("S", 0x8000_0400, 0, "", 0),
+            TypeEntry::new("R", 0, 0, "", 4),
+        ],
+    );
+    let columns: Vec<_> = field_columns(&composite)
+        .unwrap()
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            "_Fld158_TYPE",
+            "_Fld158_L",
+            "_Fld158_N",
+            "_Fld158_T",
+            "_Fld158_S",
+            "_Fld158_RTRef",
+            "_Fld158_RRRef"
+        ]
+    );
+    let typed = FieldEntry::new(
+        "Fld1",
+        false,
+        vec![TypeEntry::new("R", 0, 0, "Reference20", 3)],
+    );
+    assert_eq!(field_columns(&typed).unwrap()[0].name, "_Fld1RRef");
+    let untyped = FieldEntry::new("Fld1", true, vec![TypeEntry::new("R", 0, 0, "", 4)]);
+    let columns = field_columns(&untyped).unwrap();
+    assert_eq!(
+        columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["_Fld1TRef", "_Fld1RRef"]
+    );
+    assert!(columns.iter().all(|column| column.nullable));
+    let unknown = FieldEntry::new("Fld1", false, vec![TypeEntry::new("Q", 0, 0, "", 0)]);
+    assert!(field_columns(&unknown).is_err());
+}
+
+#[test]
+fn sql_types_follow_the_entry_tags() {
+    let t = |tag: &str, a: u64, b: u64| sql_type(&TypeEntry::new(tag, a, b, "", 0)).unwrap();
+    assert_eq!(t("B", 16, 0), SqlType::Binary(16));
+    assert_eq!(t("B", 0x8000_0000, 0), SqlType::VarBinaryMax);
+    assert_eq!(t("B", 0x8000_0010, 0), SqlType::VarBinary(16));
+    assert_eq!(t("L", 0, 0), SqlType::Binary(1));
+    assert_eq!(t("N", 15, 2), SqlType::Numeric(15, 2));
+    assert_eq!(t("T", 0, 0), SqlType::DateTime2);
+    assert_eq!(t("S", 0x8000_0032, 0), SqlType::NVarChar(50));
+    assert_eq!(t("S", 0x8000_0000, 0), SqlType::NVarCharMax);
+    assert_eq!(t("S", 20, 0), SqlType::NChar(20));
+    assert_eq!(t("V", 0, 0), SqlType::Timestamp);
+    let integer = TypeEntry {
+        six: Some(1),
+        ..TypeEntry::new("N", 9, 0, "", 0)
+    };
+    assert_eq!(sql_type(&integer).unwrap(), SqlType::Int);
+    let wide = TypeEntry {
+        six: Some(1),
+        ..TypeEntry::new("N", 15, 0, "", 0)
+    };
+    assert_eq!(sql_type(&wide).unwrap(), SqlType::BigInt);
+    assert_eq!(SqlType::Numeric(7, 0).ddl(), "numeric(7, 0)");
+}

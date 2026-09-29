@@ -165,6 +165,10 @@ pub enum Commands {
     MssqlActivateStagedMain(MssqlActivateStagedMainArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
+    /// Restructure the tables of a catalog that got new attributes in the staged
+    /// configuration, in one transaction (research prototype of the own config
+    /// apply, issue #341; lab databases only).
+    MssqlRestructure(crate::restructure::command::MssqlRestructureArgs),
     /// Dry-run source load parity and bootstrap base-blob readiness without writing ConfigSave.
     MssqlAuditSourceParity(MssqlAuditSourceParityArgs),
     /// Clone a SQL Server database with backup/restore.
