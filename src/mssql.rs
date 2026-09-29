@@ -92,6 +92,7 @@ use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 mod empty_stage;
+mod patch_refusal;
 mod stage_guard;
 mod stage_timing;
 
@@ -3408,22 +3409,45 @@ pub fn stage_source_objects(
         })?;
         let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), rows));
     }
+    // Every object that cannot be built is collected, so that one refusal
+    // names them all (see `patch_refusal`).
+    let mut failures = Vec::new();
     let metadata_objects = parallel::install(|| {
         metadata_xmls
             .par_iter()
             .map(|xml| {
                 prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
+                    .map_err(|error| patch_refusal::ObjectFailure {
+                        xml: xml.clone(),
+                        error,
+                    })
             })
-            .collect::<Result<Vec<_>>>()
-    })??;
+            .collect::<Vec<_>>()
+    })?
+    .into_iter()
+    .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+    .collect::<Vec<_>>();
     let metadata_object_count = metadata_objects.len();
     let common_modules = parallel::install(|| {
         common_module_xmls
             .par_iter()
-            .map(|xml| prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None))
-            .collect::<Result<Vec<_>>>()
-    })??;
+            .map(|xml| {
+                prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None).map_err(
+                    |error| patch_refusal::ObjectFailure {
+                        xml: xml.clone(),
+                        error,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    })?
+    .into_iter()
+    .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+    .collect::<Vec<_>>();
     let common_module_count = common_modules.len();
+    if !failures.is_empty() {
+        return Err(patch_refusal::refusal(&args.source_root, failures));
+    }
     ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
 
     let changes = source_stage_change_ids(&metadata_objects, &common_modules);
