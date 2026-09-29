@@ -28,6 +28,8 @@ param(
     # native-apply-trace.md section 6.4); 3 rows + 2 per edited module.  0 = the bare variant.
     [ValidateRange(0, 12)][int]$Pad = 5,
     [string]$Database = 'ibcmd_rs_04_trace_uh_mod',
+    # the clone exists already (restored by hand with restore-clone.ps1 -Corpus uha8327) and its ConfigSave is empty
+    [switch]$SkipRestore,
     [string]$Platform = '8.3.27.2214',
     [int]$MinFreeGB = 40
 )
@@ -49,7 +51,11 @@ function Unlock($name) { & pwsh -NoProfile -File $lockScript release trace -Name
 # 0 guards
 $free = (Get-PSDrive F).Free / 1GB
 if ($free -lt $MinFreeGB) { throw ("F: has {0:N1} GB free, the plan needs {1}: tell the coordinator" -f $free, $MinFreeGB) }
-if ((& sqlcmd -S localhost -E -C -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name = N'$Database'" | Out-String).Trim() -ne '0') { throw "$Database exists already" }
+$exists = (& sqlcmd -S localhost -E -C -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE name = N'$Database'" | Out-String).Trim()
+if ($SkipRestore) {
+    if ($exists -ne '1') { throw "-SkipRestore: $Database does not exist" }
+    if ((Sql 'SELECT COUNT(*) FROM ConfigSave') -ne '0') { throw "-SkipRestore: ConfigSave of $Database is not empty" }
+} elseif ($exists -ne '0') { throw "$Database exists already" }
 
 # the edits: the same kind as the БСП case 1 (a comment line appended, BOM and CRLF kept)
 $edits = @(
@@ -72,9 +78,11 @@ foreach ($n in ($padNames | Select-Object -First $Pad)) {
 }
 
 # 1 clone
-Log "restore $Database from the uha8327 corpus (free $([Math]::Round($free, 1)) GB)"
-& pwsh -NoProfile -File 'F:\ibcmd\lab\04\tools\restore-clone.ps1' -Corpus uha8327 -Name $Database -Track trace -Purpose "trace phase 3: ERP УХ 8.3.27 case 1 ($Variant), native exclusive apply traced"
-if ($LASTEXITCODE -ne 0) { throw 'restore failed' }
+if ($SkipRestore) { Log "clone $Database exists (free $([Math]::Round($free, 1)) GB)" } else {
+    Log "restore $Database from the uha8327 corpus (free $([Math]::Round($free, 1)) GB)"
+    & pwsh -NoProfile -File 'F:\ibcmd\lab\04\tools\restore-clone.ps1' -Corpus uha8327 -Name $Database -Track trace -Purpose "trace phase 3: ERP УХ 8.3.27 case 1 ($Variant), native exclusive apply traced"
+    if ($LASTEXITCODE -ne 0) { throw 'restore failed' }
+}
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
 # 2 sparse base directory (only the edited files)
