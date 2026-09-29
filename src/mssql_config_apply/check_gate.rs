@@ -118,6 +118,7 @@ mod tests {
             file_name: file_name.to_owned(),
             property: "Properties/X".to_owned(),
             change: change.to_owned(),
+            ..Reason::default()
         }
     }
 
