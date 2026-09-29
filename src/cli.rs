@@ -624,6 +624,11 @@ pub struct CfBootstrapArgs {
     /// Native CF reserved header word.
     #[arg(long, default_value_t = 0)]
     pub reserved: u32,
+    /// Compile the tree with the base-free stage an empty infobase is loaded
+    /// from (every row of the tree, no base) instead of the bootstrap
+    /// compiler.
+    #[arg(long)]
+    pub base_free: bool,
 }
 
 /// Raw arguments of one of the platform ibcmd's modes (`infobase`, `server`,

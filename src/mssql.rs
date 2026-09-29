@@ -91,6 +91,7 @@ use crate::source_audit::{
 use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
+pub mod base_free_cf;
 mod empty_stage;
 mod offline_compile;
 mod stage_timing;

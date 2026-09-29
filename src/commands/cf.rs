@@ -693,6 +693,20 @@ fn bootstrap(args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
             format!("target profile `{profile_id}` was not found"),
         )
     })?;
+    if args.base_free {
+        let Some(storage_profile) = target
+            .storage_profile
+            .as_ref()
+            .map(|coordinate| coordinate.value.clone())
+        else {
+            return Err(bootstrap_failure(
+                &args,
+                "invalid_target_profile",
+                format!("target profile `{profile_id}` names no storage profile"),
+            ));
+        };
+        return bootstrap_base_free(args, storage_profile);
+    }
     let tree = ibcmd_xml::source_tree::read_source_tree(&args.source_dir).map_err(|source| {
         bootstrap_failure(
             &args,
@@ -757,6 +771,62 @@ fn bootstrap(args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
         metadata_files,
         asset_files,
         non_source_files,
+        storage_entries,
+        publication: Some(CfBootstrapPublicationReport {
+            bytes_written: publication.write.bytes_written,
+            entries_written: publication.write.entries_written,
+            entries_validated: publication.validation.entries_validated,
+        }),
+        errors: Vec::new(),
+    }))
+}
+
+/// `cf bootstrap --base-free`: the tree's rows from the base-free stage, as
+/// they are, in a new container (Untru/ibcmd-rs#351).
+fn bootstrap_base_free(
+    args: CfBootstrapArgs,
+    storage_profile: StorageProfileId,
+) -> Result<CfCommandReport, CfCommandError> {
+    let (patch, retained) = crate::mssql::base_free_cf::base_free_patch(&args.source_dir, args.source_version)
+        .map_err(|source| {
+            bootstrap_failure(&args, "base_free_compile_failed", format!("{source:#}"))
+        })?;
+    let storage_entries = patch.len();
+    let limits = limits_for_len(retained)
+        .map_err(|message| bootstrap_failure(&args, "source_tree_invalid", message))?;
+    let revision = match args.revision {
+        CfRevision::Format15 => Revision::Format15,
+        CfRevision::Format16 => Revision::Format16,
+    };
+    let mut cf_profile = BootstrapCfProfile::new(revision, args.storage_version, storage_profile)
+        .with_reserved(args.reserved);
+    if let Some(page_size) = args.page_size {
+        cf_profile = cf_profile.with_page_size(page_size);
+    }
+    let publication = publish_bootstrap_patch_new(patch, cf_profile, &args.output, limits)
+        .map_err(|source| {
+            bootstrap_failure(
+                &args,
+                "bootstrap_publish_failed",
+                format!("failed to publish bootstrap CF: {source}"),
+            )
+        })?;
+    Ok(CfCommandReport::Bootstrap(CfBootstrapReport {
+        schema_version: REPORT_SCHEMA_VERSION,
+        command: "bootstrap",
+        ok: true,
+        source_dir: display_path(&args.source_dir),
+        output: display_path(&args.output),
+        source_version: args.source_version.as_str(),
+        target_profile: args.target_profile,
+        revision: revision_name(revision),
+        storage_version: args.storage_version,
+        page_size: args.page_size,
+        reserved: args.reserved,
+        source_files: 0,
+        metadata_files: 0,
+        asset_files: 0,
+        non_source_files: 0,
         storage_entries,
         publication: Some(CfBootstrapPublicationReport {
             bytes_written: publication.write.bytes_written,
