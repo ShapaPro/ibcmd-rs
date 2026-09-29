@@ -33,8 +33,14 @@ const ELEMENTS: &[(&str, &str)] = &[
     ("bf9cc511-eb2a-48b6-a666-7afb78b83f36", "CodeAllowedLength"),
     ("60643a07-120a-4a63-9dba-67369c0f0145", "NumberType"),
     ("490eb6bd-24c4-4943-82aa-d0c4b666861b", "NumberLength"),
-    ("c6c9689d-2978-42e8-863f-0280c6a85b56", "NumberAllowedLength"),
-    ("13134205-f60b-11d5-a3c7-0050bae0a776", "InformationRegisterPeriodicity"),
+    (
+        "c6c9689d-2978-42e8-863f-0280c6a85b56",
+        "NumberAllowedLength",
+    ),
+    (
+        "13134205-f60b-11d5-a3c7-0050bae0a776",
+        "InformationRegisterPeriodicity",
+    ),
     ("09c412e0-0f30-11d6-a3c7-0050bae0a776", "WriteMode"),
     ("bd533460-4001-11d6-a3c7-0050bae0a776", "RegisterType"),
     ("1ab4ba03-e4e6-4bf0-93e9-fcc28cc67567", "Type"),
@@ -50,10 +56,16 @@ const ELEMENTS: &[(&str, &str)] = &[
     // list, not from this uuid).
     ("e1e8ea40-0906-11d6-a3c7-0050bae0a776", "Content"),
     ("7dbb2bc7-6bae-4b81-91cb-681317272a0b", "Global"),
-    ("74ce8a02-abd2-46a6-8544-8cfbb4e8c6e0", "ClientManagedApplication"),
+    (
+        "74ce8a02-abd2-46a6-8544-8cfbb4e8c6e0",
+        "ClientManagedApplication",
+    ),
     ("6275a02e-96f0-4347-975a-2d661e6a0675", "Server"),
     ("d12660a6-7298-4ae2-a332-b95a6459a280", "ExternalConnection"),
-    ("436af77a-e846-4084-818b-740a3378518e", "ClientOrdinaryApplication"),
+    (
+        "436af77a-e846-4084-818b-740a3378518e",
+        "ClientOrdinaryApplication",
+    ),
     ("c474bab9-d13a-4fbd-bfb0-9214d6dc2fde", "ServerCall"),
     ("07ddee68-6fc0-4b88-9616-7792446d12b8", "ReturnValuesReuse"),
     ("e3331ed0-3854-478d-b6b5-4f14acdd6edb", "FormType"),
@@ -111,7 +123,8 @@ fn known(uuid: &str) -> bool {
 /// its own register; fixture `adopted/document_children`).
 /// A subsystem's `<Content>` likewise: the extension's objects in it,
 /// `<Content/>` when none (fixture `adopted/props_b0`).
-const ALWAYS_PRINTED: [(&str, &str); 2] = [("Document", "RegisterRecords"), ("Subsystem", "Content")];
+const ALWAYS_PRINTED: [(&str, &str); 2] =
+    [("Document", "RegisterRecords"), ("Subsystem", "Content")];
 
 /// The `<Properties>` members at `prefix` (the member indentation plus `<`):
 /// `(element name, lines)`.
@@ -186,12 +199,16 @@ fn widened_type_xml(member: &str, indent: &str, checked: &str) -> Result<String>
             "{indent}\t<xr:CheckValue xsi:type=\"v8:TypeDescription\">\r\n{checked}{indent}\t</xr:CheckValue>\r\n"
         ));
     }
-    out.push_str(&format!("{indent}\t<xr:ExtendValue xsi:type=\"v8:TypeDescription\">\r\n"));
+    out.push_str(&format!(
+        "{indent}\t<xr:ExtendValue xsi:type=\"v8:TypeDescription\">\r\n"
+    ));
     for line in lines.split_inclusive('\n') {
         out.push('\t');
         out.push_str(line);
     }
-    out.push_str(&format!("{indent}\t</xr:ExtendValue>\r\n{indent}</Type>\r\n"));
+    out.push_str(&format!(
+        "{indent}\t</xr:ExtendValue>\r\n{indent}</Type>\r\n"
+    ));
     Ok(out)
 }
 
@@ -256,7 +273,12 @@ fn rewrite_element(
     let open = xml.find(&open_tag).context("no <Properties>")? + open_tag.len();
     let close = open + xml[open..].find(&close_tag).context("no </Properties>")?;
     let members = members(&xml[open..close], &format!("{indent}\t\t<"));
-    let member = |name: &str| members.iter().find(|(tag, _)| *tag == name).map(|(_, text)| *text);
+    let member = |name: &str| {
+        members
+            .iter()
+            .find(|(tag, _)| *tag == name)
+            .map(|(_, text)| *text)
+    };
     let always = ALWAYS_PRINTED
         .iter()
         .filter(|(owner, _)| *owner == kind)
@@ -408,9 +430,14 @@ pub fn rewrite_children(
             continue;
         };
         let close = format!("{indent}</{tag}>");
-        let end = start + out[start..].find(&close).context("unterminated child element")? + close.len();
-        let (rewritten, child_unknown) = rewrite_element(&out[start..end], &indent, &adoption, checked)
-            .with_context(|| format!("adopted {tag} {uuid}"))?;
+        let end = start
+            + out[start..]
+                .find(&close)
+                .context("unterminated child element")?
+            + close.len();
+        let (rewritten, child_unknown) =
+            rewrite_element(&out[start..end], &indent, &adoption, checked)
+                .with_context(|| format!("adopted {tag} {uuid}"))?;
         out.replace_range(start..end, &rewritten);
         unknown.extend(child_unknown.0);
     }
@@ -510,7 +537,10 @@ mod tests {
     #[test]
     fn splits_properties_at_depth_three() {
         let block = "\t\t\t<Name>Х</Name>\r\n\t\t\t<Synonym>\r\n\t\t\t\t<v8:item/>\r\n\t\t\t</Synonym>\r\n\t\t\t<Comment/>\r\n";
-        let names = members(block, "			<").into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        let names = members(block, "			<")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
         assert_eq!(names, vec!["Name", "Synonym", "Comment"]);
     }
 }

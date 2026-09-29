@@ -228,7 +228,9 @@ pub(super) fn upgrade_header_blocks(text: &str) -> Option<String> {
         }
         let at = at - 2;
         if let Some(edit) = header_block_at(text, at)
-            && edits.last().is_none_or(|(last, _)| last.end <= edit.0.start)
+            && edits
+                .last()
+                .is_none_or(|(last, _)| last.end <= edit.0.start)
         {
             from = edit.0.end;
             edits.push(edit);
@@ -271,7 +273,8 @@ pub(super) fn upgrade_root_section_identities(text: &str, uuid: &str) -> Option<
         let at = from + found;
         from = at + OLD.len();
         let id_end = from + 36;
-        if text.get(from..id_end).is_some_and(is_uuid) && text.as_bytes().get(id_end) == Some(&b'}') {
+        if text.get(from..id_end).is_some_and(is_uuid) && text.as_bytes().get(id_end) == Some(&b'}')
+        {
             out.push_str(&text[done..at]);
             out.push_str("{1,0,");
             done = from;
@@ -509,11 +512,16 @@ mod tests {
 
     #[test]
     fn a_3_common_picture_gains_its_two_flags() {
-        let old = format!("{{1,\r\n{{3,\r\n{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}}\r\n}},0}}");
-        let new = format!("{{1,\r\n{{4,\r\n{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}}\r\n,0,0}},0}}");
+        let old = format!(
+            "{{1,\r\n{{3,\r\n{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}}\r\n}},0}}"
+        );
+        let new = format!(
+            "{{1,\r\n{{4,\r\n{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}}\r\n,0,0}},0}}"
+        );
         assert_eq!(upgrade_metadata_record("CommonPicture", &old).unwrap(), new);
         // A current picture, and a style of the same shape, are left alone.
-        let current = format!("{{1,{{4,{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}},1,0}},0}}");
+        let current =
+            format!("{{1,{{4,{{3,{{1,0,{U}}},\"К\",{{0}},\"\",0,0,{NIL_UUID},0}},1,0}},0}}");
         assert_eq!(upgrade_metadata_record("CommonPicture", &current), None);
         assert_eq!(upgrade_metadata_record("Style", &old), None);
     }
@@ -528,7 +536,11 @@ mod tests {
         );
         assert_eq!(upgrade_record_by_shape(&old, U).unwrap(), new);
         let common = old.replace("{1,\r\n{0,\r\n{12,", "{1,\r\n{4,\r\n{12,");
-        assert!(upgrade_record_by_shape(&common, U).unwrap().starts_with("{1,\r\n{4,\r\n{13,"));
+        assert!(
+            upgrade_record_by_shape(&common, U)
+                .unwrap()
+                .starts_with("{1,\r\n{4,\r\n{13,")
+        );
         // Another wrapper, or a count that is no form's, keeps its tag.
         let other = old.replace("{1,\r\n{0,\r\n{12,", "{1,\r\n{7,\r\n{12,");
         assert!(upgrade_record_by_shape(&other, U).unwrap().contains("{12,"));
@@ -541,15 +553,33 @@ mod tests {
             upgrade_metadata_record("Subsystem", old).unwrap(),
             "{1,\r\n{21,{h},1,\r\n{0,0},1,{p},{e},{c}},\r\n{a},0}"
         );
-        assert_eq!(upgrade_metadata_record("Subsystem", &old.replace("{20,", "{21,")), None);
-        assert_eq!(upgrade_metadata_record("Subsystem", &old.replace(",{c}}", "}")), None);
+        assert_eq!(
+            upgrade_metadata_record("Subsystem", &old.replace("{20,", "{21,")),
+            None
+        );
+        assert_eq!(
+            upgrade_metadata_record("Subsystem", &old.replace(",{c}}", "}")),
+            None
+        );
     }
 
     #[test]
     fn other_versions_and_kinds_are_left_as_stored() {
-        assert_eq!(upgrade_metadata_record("ExchangePlan", &plan("36", 50)), None);
-        assert_eq!(upgrade_metadata_record("ExchangePlan", &plan("37", 51)), None);
-        assert_eq!(upgrade_metadata_record("ExchangePlan", &plan("35", 48)), None);
-        assert_eq!(upgrade_metadata_record("ChartOfCalculationTypes", &plan("35", 49)), None);
+        assert_eq!(
+            upgrade_metadata_record("ExchangePlan", &plan("36", 50)),
+            None
+        );
+        assert_eq!(
+            upgrade_metadata_record("ExchangePlan", &plan("37", 51)),
+            None
+        );
+        assert_eq!(
+            upgrade_metadata_record("ExchangePlan", &plan("35", 48)),
+            None
+        );
+        assert_eq!(
+            upgrade_metadata_record("ChartOfCalculationTypes", &plan("35", 49)),
+            None
+        );
     }
 }

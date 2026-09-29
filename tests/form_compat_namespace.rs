@@ -11,7 +11,11 @@ fn exported_form(case: &str, input: &str, form: &str) -> (Vec<u8>, Vec<u8>) {
     let dir = common::fixture("compat_forms").join(case);
     let out = common::temp_dir(&format!("compat-{case}"));
     let run = common::export(&dir.join(input), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let path = format!("CommonForms/{form}/Ext/Form.xml");
     (
         fs::read(dir.join("Form.xml")).unwrap(),

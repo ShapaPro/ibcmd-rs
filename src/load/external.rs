@@ -100,8 +100,8 @@ pub(crate) fn load_external(
     ] {
         for path in paths {
             let target = map(path).expect("mapped above");
-            let bytes = fs::read(edited.join(path))
-                .with_context(|| format!("failed to read {path}"))?;
+            let bytes =
+                fs::read(edited.join(path)).with_context(|| format!("failed to read {path}"))?;
             let bytes = if *path == root {
                 let base_xml = fs::read_to_string(scratch.0.join(&target))
                     .with_context(|| format!("the base export has no {target}"))?;
@@ -125,11 +125,7 @@ pub(crate) fn load_external(
         internal.removed.push(target);
     }
 
-    let base_rows = adapted
-        .entries
-        .iter()
-        .cloned()
-        .collect::<HashMap<_, _>>();
+    let base_rows = adapted.entries.iter().cloned().collect::<HashMap<_, _>>();
     let edit = compiled::compile_edit(&scratch.0, base_rows, &internal, &keys)?;
     // The object's row goes back into the main row, under the main entry.
     let original_main = entries_text(&archive, &main.main_uuid)?;
@@ -149,7 +145,12 @@ pub(crate) fn load_external(
     }
     compiled::write_edit(&archive, rows, &edit.dropped, output, limits)?;
     report.compiled_objects = edit.prefixes.into_iter().collect();
-    report.removed_objects = edit.removed.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+    report.removed_objects = edit
+        .removed
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     report.applied = compiled::applied_paths(diff);
     Ok(Some(()))
 }
@@ -207,8 +208,7 @@ fn write_foreign_stubs(
              \t\t\t<Comment/>\r\n\t\t</Properties>\r\n\t</{kind}>\r\n</MetaDataObject>",
             source_version.as_str()
         );
-        fs::create_dir_all(path.parent().expect("under the root"))
-            .context("stub directory")?;
+        fs::create_dir_all(path.parent().expect("under the root")).context("stub directory")?;
         fs::write(&path, xml).with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(())
@@ -237,7 +237,10 @@ fn merged_root(base: &str, edited: &str, main: &header::ExternalMain) -> Result<
     let base_properties = properties(base).context("the base root XML has no <Properties>")?;
     let edited_properties =
         properties(&edited).context("the edited root XML has no <Properties>")?;
-    let edited_by_name = edited_properties.iter().cloned().collect::<BTreeMap<_, _>>();
+    let edited_by_name = edited_properties
+        .iter()
+        .cloned()
+        .collect::<BTreeMap<_, _>>();
     let mut merged = String::new();
     for (tag, element) in &base_properties {
         if INTERNAL_ONLY.contains(&tag.as_str()) {
@@ -254,14 +257,17 @@ fn merged_root(base: &str, edited: &str, main: &header::ExternalMain) -> Result<
         .iter()
         .map(|(tag, _)| tag.as_str())
         .collect::<BTreeSet<_>>();
-    if let Some((tag, _)) = edited_properties.iter().find(|(tag, _)| !known.contains(tag.as_str()))
+    if let Some((tag, _)) = edited_properties
+        .iter()
+        .find(|(tag, _)| !known.contains(tag.as_str()))
     {
         anyhow::bail!("the edited root XML has a property <{tag}> the object has not");
     }
     let (open, close) = properties_span(base).expect("found above");
     let mut out = format!("{}{merged}{}", &base[..open], &base[close..]);
     // Child objects: the edited ones.
-    let base_children = child_objects_span(&out).context("the base root XML has no child objects")?;
+    let base_children =
+        child_objects_span(&out).context("the base root XML has no child objects")?;
     let edited_children =
         child_objects_span(&edited).context("the edited root XML has no child objects")?;
     out.replace_range(

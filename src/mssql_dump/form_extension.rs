@@ -94,7 +94,11 @@ pub(super) struct EventCallTypes {
 
 impl EventCallTypes {
     fn insert(&mut self, event: String, handler: String, call_type: &'static str) {
-        fn merge<K: Ord>(map: &mut BTreeMap<K, Option<&'static str>>, key: K, call_type: &'static str) {
+        fn merge<K: Ord>(
+            map: &mut BTreeMap<K, Option<&'static str>>,
+            key: K,
+            call_type: &'static str,
+        ) {
             map.entry(key)
                 .and_modify(|known| {
                     if *known != Some(call_type) {
@@ -142,9 +146,13 @@ pub(super) fn form_event_call_types(text: &str) -> EventCallTypes {
         };
         for binding in bindings {
             let identifier = binding.event.trim().trim_matches('"').to_owned();
-            let event = form_event_name_from_identifier(&identifier)
-                .map_or(identifier, str::to_owned);
-            found.insert(event, binding.handler, CALL_TYPES[usize::from(binding.code)]);
+            let event =
+                form_event_name_from_identifier(&identifier).map_or(identifier, str::to_owned);
+            found.insert(
+                event,
+                binding.handler,
+                CALL_TYPES[usize::from(binding.code)],
+            );
         }
     }
     found
@@ -241,9 +249,15 @@ pub(super) fn with_adopted_form_parts(
     let mut out = String::with_capacity(xml.len() + inner.len() + 64);
     out.push_str(&xml[..close]);
     if inner.is_empty() {
-        out.push_str(&format!("\t<BaseForm version=\"{}\"/>\r\n", source_version.as_str()));
+        out.push_str(&format!(
+            "\t<BaseForm version=\"{}\"/>\r\n",
+            source_version.as_str()
+        ));
     } else {
-        out.push_str(&format!("\t<BaseForm version=\"{}\">\r\n", source_version.as_str()));
+        out.push_str(&format!(
+            "\t<BaseForm version=\"{}\">\r\n",
+            source_version.as_str()
+        ));
         for line in inner.split_inclusive("\r\n") {
             out.push('\t');
             out.push_str(line);
@@ -284,7 +298,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             spelled,
-            vec![("Перед", "Before"), ("Вместо", "Override"), ("После", "After")]
+            vec![
+                ("Перед", "Before"),
+                ("Вместо", "Override"),
+                ("После", "After")
+            ]
         );
         assert_eq!(bindings[2].event, "9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b");
     }
@@ -301,7 +319,10 @@ mod tests {
     fn writes_the_call_type_of_a_known_handler() {
         let map = EventCallTypes::handler("Перед", "Before");
         assert_eq!(
-            with_event_call_types("<Event name=\"OnOpen\">Перед</Event><Event name=\"x\">y</Event>", &map),
+            with_event_call_types(
+                "<Event name=\"OnOpen\">Перед</Event><Event name=\"x\">y</Event>",
+                &map
+            ),
             "<Event name=\"OnOpen\" callType=\"Before\">Перед</Event><Event name=\"x\">y</Event>"
         );
     }

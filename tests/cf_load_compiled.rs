@@ -26,7 +26,11 @@ fn exported(fixture: &str, input: &str, tag: &str) -> (PathBuf, PathBuf) {
     let base = common::fixture(fixture).join(input);
     let tree = common::temp_dir(tag);
     let run = common::export(&base, &tree);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     (base, tree)
 }
 
@@ -70,7 +74,11 @@ fn load_back(
     );
     let back = common::temp_dir(&format!("{tag}-back"));
     let exported = common::export(&out, &back);
-    assert!(exported.status.success(), "{}", String::from_utf8_lossy(&exported.stderr));
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
     if objects_changed {
         let _ = fs::remove_file(tree.join("ConfigDumpInfo.xml"));
     }
@@ -132,7 +140,10 @@ fn a_form_xml_edit_of_a_configuration_loads() {
         "2025-02-03T04:05:06",
     );
     let report = assert_loads_back(&tree, &base, "compiled-form", "cf");
-    assert_eq!(report["compiled_objects"], serde_json::json!(["CommonForms/ФормаДаты"]));
+    assert_eq!(
+        report["compiled_objects"],
+        serde_json::json!(["CommonForms/ФормаДаты"])
+    );
 }
 
 #[test]
@@ -153,7 +164,9 @@ fn packed_entries(path: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
         ibcmd_core::artifact::StorageProfileId::parse("storage:cf-cli").unwrap(),
     )
     .unwrap();
-    ibcmd_rs::external::export::entries_of(&archive).into_iter().collect()
+    ibcmd_rs::external::export::entries_of(&archive)
+        .into_iter()
+        .collect()
 }
 
 #[test]
@@ -161,7 +174,11 @@ fn an_object_s_unchanged_bodies_stay_byte_for_byte() {
     // Only the form's metadata changes: its body entry is the base's, not a
     // recompiled one (a recompile may lose what the compiler cannot read).
     let (base, tree) = exported("choice_list_dates", "input.cf", "compiled-kept");
-    edit(&tree.join("CommonForms/ФормаДаты.xml"), "<Comment/>", "<Comment>x</Comment>");
+    edit(
+        &tree.join("CommonForms/ФормаДаты.xml"),
+        "<Comment/>",
+        "<Comment>x</Comment>",
+    );
     assert_loads_back(&tree, &base, "compiled-kept", "cf");
     let out = common::temp_dir("compiled-kept-out").with_extension("cf");
     let (before, after) = (packed_entries(&base), packed_entries(&out));
@@ -181,7 +198,10 @@ fn an_added_common_module_of_a_configuration_loads() {
     )
     .unwrap();
     let module = template
-        .replace("554f39c6-e029-4ee0-8535-8c15291a6a3f", "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d")
+        .replace(
+            "554f39c6-e029-4ee0-8535-8c15291a6a3f",
+            "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+        )
         .replace("ТестРасширение_Модуль", "НовыйМодуль");
     fs::create_dir_all(tree.join("CommonModules/НовыйМодуль/Ext")).unwrap();
     fs::write(tree.join("CommonModules/НовыйМодуль.xml"), module).unwrap();
@@ -196,7 +216,10 @@ fn an_added_common_module_of_a_configuration_loads() {
         "\t\t\t<CommonModule>НовыйМодуль</CommonModule>\r\n\t\t\t<CommonForm>ФормаДаты</CommonForm>",
     );
     let (report, dump_info) = assert_loads_back_objects(&tree, &base, "compiled-added", "cf");
-    assert!(dump_info.contains("id=\"0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d.0\""), "{dump_info}");
+    assert!(
+        dump_info.contains("id=\"0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d.0\""),
+        "{dump_info}"
+    );
     assert_eq!(
         report["compiled_objects"],
         serde_json::json!(["CommonModules/НовыйМодуль", "Configuration.xml"])
@@ -208,10 +231,17 @@ fn a_removed_common_form_of_a_configuration_loads() {
     let (base, tree) = exported("choice_list_dates", "input.cf", "compiled-removed");
     fs::remove_file(tree.join("CommonForms/ФормаДаты.xml")).unwrap();
     fs::remove_dir_all(tree.join("CommonForms")).unwrap();
-    edit(&tree.join("Configuration.xml"), "\r\n\t\t\t<CommonForm>ФормаДаты</CommonForm>", "");
+    edit(
+        &tree.join("Configuration.xml"),
+        "\r\n\t\t\t<CommonForm>ФормаДаты</CommonForm>",
+        "",
+    );
     let (report, dump_info) = assert_loads_back_objects(&tree, &base, "compiled-removed", "cf");
     assert!(!dump_info.contains("5b6f3a52"), "{dump_info}");
-    assert_eq!(report["removed_objects"], serde_json::json!(["CommonForms/ФормаДаты"]));
+    assert_eq!(
+        report["removed_objects"],
+        serde_json::json!(["CommonForms/ФормаДаты"])
+    );
     let out = common::temp_dir("compiled-removed-out").with_extension("cf");
     assert!(
         !packed_entries(&out)
@@ -224,7 +254,10 @@ fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -246,10 +279,20 @@ fn configinfo_digests(
         .read_to_string(&mut text)
         .unwrap();
     let block = &text[text.rfind("\n{").unwrap() + 2..];
-    let fields = block.trim_end().trim_end_matches('}').split(',').skip(1).collect::<Vec<_>>();
+    let fields = block
+        .trim_end()
+        .trim_end_matches('}')
+        .split(',')
+        .skip(1)
+        .collect::<Vec<_>>();
     fields
         .chunks(2)
-        .map(|pair| (pair[0].trim().trim_matches('"').to_owned(), pair[1].trim().to_owned()))
+        .map(|pair| {
+            (
+                pair[0].trim().trim_matches('"').to_owned(),
+                pair[1].trim().to_owned(),
+            )
+        })
         .collect()
 }
 
@@ -280,7 +323,10 @@ fn an_added_common_module_of_an_extension_is_listed_in_configinfo() {
     let (base, tree) = exported("test_extension", "input.cfe", "compiled-ext-added");
     let module = fs::read_to_string(tree.join("CommonModules/ТестРасширение_Модуль.xml"))
         .unwrap()
-        .replace("554f39c6-e029-4ee0-8535-8c15291a6a3f", "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d")
+        .replace(
+            "554f39c6-e029-4ee0-8535-8c15291a6a3f",
+            "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        )
         .replace("ТестРасширение_Модуль", "ТестРасширение_Второй");
     fs::create_dir_all(tree.join("CommonModules/ТестРасширение_Второй/Ext")).unwrap();
     fs::write(tree.join("CommonModules/ТестРасширение_Второй.xml"), module).unwrap();
@@ -298,7 +344,10 @@ fn an_added_common_module_of_an_extension_is_listed_in_configinfo() {
     let out = common::temp_dir("compiled-ext-added-out").with_extension("cfe");
     let entries = packed_entries(&out);
     let digests = configinfo_digests(&entries);
-    for key in ["1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d.0"] {
+    for key in [
+        "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d.0",
+    ] {
         assert_eq!(digests.get(key), Some(&sha1_base64(&entries[key])), "{key}");
     }
     assert_eq!(digests.len(), entries.len() - 1);
@@ -323,7 +372,10 @@ fn an_own_attribute_added_to_an_adopted_document_loads() {
     let base = common::fixture("adopted/document_children").join("input.cfe");
     let tree = platform_edited_tree("ext_own_attribute", "compiled-own-attr");
     let (report, _) = assert_loads_back_objects(&tree, &base, "compiled-own-attr", "cfe");
-    assert_eq!(report["compiled_objects"], serde_json::json!(["Documents/Документ"]));
+    assert_eq!(
+        report["compiled_objects"],
+        serde_json::json!(["Documents/Документ"])
+    );
 }
 
 #[test]
@@ -342,7 +394,11 @@ fn an_own_attribute_added_to_an_adopted_document_is_refused_by_name() {
 #[test]
 fn a_root_property_edit_of_an_external_data_processor_loads() {
     let (base, tree) = exported("test_processor", "input.epf", "compiled-epf-root");
-    edit(&tree.join("ТестОбработка.xml"), "<Comment/>", "<Comment>правка</Comment>");
+    edit(
+        &tree.join("ТестОбработка.xml"),
+        "<Comment/>",
+        "<Comment>правка</Comment>",
+    );
     let report = assert_loads_back(&tree, &base, "compiled-epf-root", "epf");
     assert_eq!(report["applied"], serde_json::json!(["ТестОбработка.xml"]));
 }
@@ -361,7 +417,11 @@ fn a_form_xml_edit_of_an_external_data_processor_loads() {
 #[test]
 fn a_root_property_edit_of_an_external_report_loads() {
     let (base, tree) = exported("test_report", "input.erf", "compiled-erf-root");
-    edit(&tree.join("ТестОтчет.xml"), "<Comment/>", "<Comment>правка</Comment>");
+    edit(
+        &tree.join("ТестОтчет.xml"),
+        "<Comment/>",
+        "<Comment>правка</Comment>",
+    );
     assert_loads_back(&tree, &base, "compiled-erf-root", "erf");
 }
 

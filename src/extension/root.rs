@@ -29,12 +29,24 @@ const COMPATIBILITY_MODE: &str = "161bc4c0-4cc0-4382-a045-f58f25e24783";
 /// Root modules and command interfaces an extension extends, in the order
 /// the platform writes their `<xr:PropertyState>`.
 const EXTENDED: [(&str, &str); 6] = [
-    ("d22e852a-cf8a-4f77-8ccb-3548e7792bea", "ManagedApplicationModule"),
+    (
+        "d22e852a-cf8a-4f77-8ccb-3548e7792bea",
+        "ManagedApplicationModule",
+    ),
     ("9b7bbbae-9771-46f2-9e4d-2489e0ffc702", "SessionModule"),
-    ("a4a9c1e2-1e54-4c7f-af06-4ca341198fac", "ExternalConnectionModule"),
-    ("a78d9ce3-4e0c-48d5-9863-ae7342eedf94", "OrdinaryApplicationModule"),
+    (
+        "a4a9c1e2-1e54-4c7f-af06-4ca341198fac",
+        "ExternalConnectionModule",
+    ),
+    (
+        "a78d9ce3-4e0c-48d5-9863-ae7342eedf94",
+        "OrdinaryApplicationModule",
+    ),
     ("7f676314-716a-4d54-8335-a71a3857b21c", "CommandInterface"),
-    ("9dfcabbf-6a7a-48aa-8721-df5e78b367c6", "MainSectionCommandInterface"),
+    (
+        "9dfcabbf-6a7a-48aa-8721-df5e78b367c6",
+        "MainSectionCommandInterface",
+    ),
 ];
 
 const STATE_EXTENDED: u8 = 3;
@@ -118,7 +130,10 @@ fn localized(xml: &mut String, name: &str, field: &str) -> Result<()> {
             // The platform never writes the start/end pair (ИТК: `<v8:lang/>`).
             xml.push_str("\t\t\t\t\t<v8:lang/>\r\n");
         } else {
-            xml.push_str(&format!("\t\t\t\t\t<v8:lang>{}</v8:lang>\r\n", escape(&lang)));
+            xml.push_str(&format!(
+                "\t\t\t\t\t<v8:lang>{}</v8:lang>\r\n",
+                escape(&lang)
+            ));
         }
         xml.push_str(&format!(
             "\t\t\t\t\t<v8:content>{}</v8:content>\r\n",
@@ -193,7 +208,8 @@ fn default_roles(
     }
     xml.push_str("\t\t\t<DefaultRoles>\r\n");
     for role in roles {
-        let (reference, _) = brace::fields(role, 0).ok_or_else(|| anyhow!("DefaultRoles `{role}`"))?;
+        let (reference, _) =
+            brace::fields(role, 0).ok_or_else(|| anyhow!("DefaultRoles `{role}`"))?;
         let (target, _) = reference
             .get(2)
             .and_then(|target| brace::fields(target, 0))
@@ -332,7 +348,11 @@ fn properties(
     }
     if controlled(COMPATIBILITY_MODE) {
         // Tuple member 26, the configuration's own compatibility mode.
-        simple(&mut out, "CompatibilityMode", &compatibility_mode(tuple[26])?);
+        simple(
+            &mut out,
+            "CompatibilityMode",
+            &compatibility_mode(tuple[26])?,
+        );
     }
     Ok(out)
 }
@@ -407,7 +427,10 @@ fn full_root_tuple(row: &str) -> Result<Vec<&str>> {
 /// The members of the root's `{68,…}` tuple (or of the 8.5 `{76,…}` one).
 fn root_tuple(row: &str) -> Result<Vec<&str>> {
     let mut tuple = full_root_tuple(row)?;
-    let version = tuple.first().and_then(|member| member.parse::<u32>().ok()).unwrap_or(0);
+    let version = tuple
+        .first()
+        .and_then(|member| member.parse::<u32>().ok())
+        .unwrap_or(0);
     // 8.3.27 writes 61 members, 8.5 77 (the 61 plus 16 appended); an older
     // tuple is a prefix of the 61 (ИР 7.77: `{66,…}` of 59). The writer reads
     // members up to OLDEST_MEMBERS - 1.
@@ -448,7 +471,10 @@ pub fn rewrite(
     }
     check_known(&header)?;
 
-    let open = xml.find("\t\t<Properties>\r\n").context("no <Properties>")? + "\t\t<Properties>\r\n".len();
+    let open = xml
+        .find("\t\t<Properties>\r\n")
+        .context("no <Properties>")?
+        + "\t\t<Properties>\r\n".len();
     let close = xml.find("\t\t</Properties>").context("no </Properties>")?;
     let mut out = String::with_capacity(xml.len() + 1024);
     out.push_str(&xml[..open]);

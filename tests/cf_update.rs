@@ -11,7 +11,10 @@ use std::{
 };
 
 fn run(args: &[&std::ffi::OsStr]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ibcmd-rs")).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_ibcmd-rs"))
+        .args(args)
+        .output()
+        .unwrap()
 }
 
 fn export_indexed(input: &Path, tree: &Path) {
@@ -23,19 +26,44 @@ fn export_indexed(input: &Path, tree: &Path) {
         "--overwrite".as_ref(),
         "--index".as_ref(),
     ]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn update(input: &Path, tree: &Path) -> serde_json::Value {
-    let out = run(&["cf".as_ref(), "export".as_ref(), input.as_os_str(), tree.as_os_str(), "--update".as_ref()]);
-    let body = if out.stdout.is_empty() { &out.stderr } else { &out.stdout };
+    let out = run(&[
+        "cf".as_ref(),
+        "export".as_ref(),
+        input.as_os_str(),
+        tree.as_os_str(),
+        "--update".as_ref(),
+    ]);
+    let body = if out.stdout.is_empty() {
+        &out.stderr
+    } else {
+        &out.stdout
+    };
     serde_json::from_slice(body).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(body)))
 }
 
 fn update_status(input: &Path, tree: &Path) -> (bool, serde_json::Value) {
-    let out = run(&["cf".as_ref(), "export".as_ref(), input.as_os_str(), tree.as_os_str(), "--update".as_ref()]);
-    let body = if out.stdout.is_empty() { &out.stderr } else { &out.stdout };
-    let report = serde_json::from_slice(body).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(body)));
+    let out = run(&[
+        "cf".as_ref(),
+        "export".as_ref(),
+        input.as_os_str(),
+        tree.as_os_str(),
+        "--update".as_ref(),
+    ]);
+    let body = if out.stdout.is_empty() {
+        &out.stderr
+    } else {
+        &out.stdout
+    };
+    let report = serde_json::from_slice(body)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(body)));
     (out.status.success(), report)
 }
 
@@ -48,7 +76,11 @@ fn load(tree: &Path, output: &Path, base: &Path) {
         "--base".as_ref(),
         base.as_os_str(),
     ]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A newer version of `base`: `edit` applied to an export of it, loaded.
@@ -73,8 +105,14 @@ fn assert_like_full_export(tree: &Path, input: &Path, tag: &str) {
         .keys()
         .filter(|path| ours.get(*path) != expected.get(*path))
         .collect::<Vec<_>>();
-    let extra = ours.keys().filter(|path| !expected.contains_key(*path)).collect::<Vec<_>>();
-    assert!(differ.is_empty() && extra.is_empty(), "{tag}: differ {differ:?} extra {extra:?}");
+    let extra = ours
+        .keys()
+        .filter(|path| !expected.contains_key(*path))
+        .collect::<Vec<_>>();
+    assert!(
+        differ.is_empty() && extra.is_empty(),
+        "{tag}: differ {differ:?} extra {extra:?}"
+    );
 }
 
 #[test]
@@ -91,7 +129,10 @@ fn an_extension_module_changed_is_rewritten_alone() {
     assert_eq!(report["update"]["mode"], "incremental", "{report}");
     assert_eq!(
         report["update"]["rewritten"],
-        serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl", "ConfigDumpInfo.xml"])
+        serde_json::json!([
+            "CommonModules/ТестРасширение_Модуль/Ext/Module.bsl",
+            "ConfigDumpInfo.xml"
+        ])
     );
     assert_like_full_export(&tree, &newer, "update-cfe");
     // The index now names the newer file: a load onto it takes the index.
@@ -106,7 +147,11 @@ fn a_configuration_form_body_changed_is_rewritten_alone() {
     let newer = newer(&base, "update-cf", |tree| {
         let module = tree.join("CommonForms/ФормаДаты/Ext/Form/Module.bsl");
         fs::create_dir_all(module.parent().unwrap()).unwrap();
-        fs::write(&module, "\u{feff}&НаКлиенте\r\nПроцедура Проверка()\r\nКонецПроцедуры\r\n").unwrap();
+        fs::write(
+            &module,
+            "\u{feff}&НаКлиенте\r\nПроцедура Проверка()\r\nКонецПроцедуры\r\n",
+        )
+        .unwrap();
     });
     let tree = common::temp_dir("update-cf-tree");
     export_indexed(&base, &tree);
@@ -161,7 +206,9 @@ fn a_tree_with_local_edits_is_refused_and_left_alone() {
     let (status, report) = update_status(&newer, &tree);
     assert!(!status, "{report}");
     assert!(
-        report.to_string().contains("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"),
+        report
+            .to_string()
+            .contains("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"),
         "{report}"
     );
     assert_eq!(common::files(&tree), before);
@@ -176,7 +223,11 @@ fn a_full_update_keeps_the_trees_own_files() {
         let form = tree.join("CommonForms/ФормаДаты.xml");
         let text = fs::read_to_string(&form).unwrap();
         assert!(text.contains("<Comment/>"), "{text}");
-        fs::write(&form, text.replacen("<Comment/>", "<Comment>правка</Comment>", 1)).unwrap();
+        fs::write(
+            &form,
+            text.replacen("<Comment/>", "<Comment>правка</Comment>", 1),
+        )
+        .unwrap();
     });
     let tree = common::temp_dir("update-full-tree");
     export_indexed(&base, &tree);
@@ -185,7 +236,10 @@ fn a_full_update_keeps_the_trees_own_files() {
     let report = update(&newer, &tree);
     assert_eq!(report["update"]["mode"], "full", "{report}");
     assert_eq!(report["ok"], true, "{report}");
-    assert_eq!(fs::read_to_string(tree.join(".git/config")).unwrap(), "[core]");
+    assert_eq!(
+        fs::read_to_string(tree.join(".git/config")).unwrap(),
+        "[core]"
+    );
     // The comparison walks every file; the `.git` has been checked above.
     fs::remove_dir_all(tree.join(".git")).unwrap();
     assert_like_full_export(&tree, &newer, "update-full");
@@ -225,7 +279,11 @@ fn a_tree_without_config_dump_info_updates_from_the_index_versions() {
         serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"])
     );
     assert!(!tree.join("ConfigDumpInfo.xml").exists());
-    assert!(fs::read_to_string(tree.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl")).unwrap().contains("\"3.0\""));
+    assert!(
+        fs::read_to_string(tree.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"))
+            .unwrap()
+            .contains("\"3.0\"")
+    );
 }
 
 #[test]

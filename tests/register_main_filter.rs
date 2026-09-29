@@ -10,7 +10,11 @@ fn assert_case(case: &str, input: &str) {
     let dir = common::fixture("main_filter").join(case);
     let out = common::temp_dir(&format!("main-filter-{case}"));
     let run = common::export(&dir.join(input), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let mut compared = 0;
     for (rel, expected) in common::files(&dir) {
         if rel.starts_with("input.") {

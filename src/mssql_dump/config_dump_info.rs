@@ -322,9 +322,18 @@ pub fn stored_config_versions(entries: &[(String, Vec<u8>)]) -> Option<BTreeMap<
         return None;
     };
     let (_, blob) = entries.iter().find(|(entry, _)| entry == name)?;
-    let file_names = entries.iter().map(|(entry, _)| entry.clone()).collect::<BTreeSet<_>>();
-    let versions = without_unstored_nil_versions(parse_versions_blob(blob, origin).ok()?, &file_names);
-    Some(versions.into_iter().map(|entry| (entry.id, entry.version)).collect())
+    let file_names = entries
+        .iter()
+        .map(|(entry, _)| entry.clone())
+        .collect::<BTreeSet<_>>();
+    let versions =
+        without_unstored_nil_versions(parse_versions_blob(blob, origin).ok()?, &file_names);
+    Some(
+        versions
+            .into_iter()
+            .map(|entry| (entry.id, entry.version))
+            .collect(),
+    )
 }
 
 fn parse_versions_blob(blob: &[u8], origin: VersionsBlobOrigin) -> Result<Vec<ConfigVersionEntry>> {
@@ -429,7 +438,10 @@ fn parse_extension_config_info(text: &str) -> Result<Vec<ConfigVersionEntry>> {
         let hash = crate::module_blob::decode_base64_mime(pair[1].trim())
             .filter(|hash| hash.len() == 20)
             .ok_or_else(|| anyhow!("configinfo entry {name:?} has no SHA-1"))?;
-        let version = hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let version = hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         if named.insert(name.clone(), version).is_some() {
             bail!("configinfo lists {name} twice");
         }

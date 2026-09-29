@@ -36,7 +36,9 @@ fn is_reference(value: &str, internal: &str, name: &str) -> bool {
             .and_then(|rest| rest.strip_prefix(variant))
             .and_then(|rest| rest.strip_prefix('.'))
             .and_then(|rest| rest.strip_prefix(name))
-            .is_some_and(|rest| rest.is_empty() || (rest.starts_with('.') && !rest.contains(char::is_whitespace)))
+            .is_some_and(|rest| {
+                rest.is_empty() || (rest.starts_with('.') && !rest.contains(char::is_whitespace))
+            })
     })
 }
 
@@ -61,7 +63,10 @@ fn in_reference_places(text: &str, rename: impl Fn(&str) -> Option<String>) -> S
         };
         let tag = &text[at..=at + len];
         out.push_str(&in_attribute_values(tag, &rename));
-        let tag_name = tag[1..].split(|c: char| c.is_whitespace() || c == '>' || c == '/').next().unwrap_or("");
+        let tag_name = tag[1..]
+            .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .next()
+            .unwrap_or("");
         open = !tag.starts_with("</")
             && !tag.starts_with("<?")
             && !tag.starts_with("<!")
@@ -181,7 +186,11 @@ fn rename_back_all(text: &str, kind: ExternalKind, name: &str) -> String {
             let whole = before.is_none_or(|c| !is_ident(c) && c != '.')
                 && after.is_none_or(|c| !is_ident(c));
             result.push_str(&rest[..at]);
-            result.push_str(if whole { &needle["External".len()..] } else { &needle });
+            result.push_str(if whole {
+                &needle["External".len()..]
+            } else {
+                &needle
+            });
             rest = &rest[at + needle.len()..];
         }
         result.push_str(rest);
@@ -204,7 +213,10 @@ mod tests {
         let t = format!("{XML}<v8:content>DataProcessor.X</v8:content>");
         let external = to_external_references(&t, ExternalKind::DataProcessor, "X");
         assert_ne!(external, t);
-        assert_eq!(to_internal_references(&external, ExternalKind::DataProcessor, "X"), t);
+        assert_eq!(
+            to_internal_references(&external, ExternalKind::DataProcessor, "X"),
+            t
+        );
     }
 
     #[test]
@@ -243,7 +255,8 @@ mod tests {
             "<p>DataProcessor.X</p><a href=\"ExternalDataProcessor.X.Form.Ф/Help\">форма</a>"
         );
         // The way back leaves the same text alone.
-        let external = xml.replacen("<Form>DataProcessor", "<Form>ExternalDataProcessor", 1)
+        let external = xml
+            .replacen("<Form>DataProcessor", "<Form>ExternalDataProcessor", 1)
             .replace("ВЫБРАТЬ \"DataProcessor", "ВЫБРАТЬ \"ExternalDataProcessor");
         assert_eq!(
             to_internal_references(&external, ExternalKind::DataProcessor, "X"),

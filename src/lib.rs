@@ -35,7 +35,6 @@ pub mod mssql_source_change;
 pub mod mssql_worker_switch;
 pub mod mxl_line_provenance;
 pub mod parallel;
-pub mod update;
 pub mod plan;
 pub mod platform;
 #[cfg(feature = "platform-oracle")]
@@ -53,4 +52,5 @@ pub mod sql;
 pub mod storage_map;
 pub mod templates;
 pub mod trace;
+pub mod update;
 pub(crate) mod v8_container;

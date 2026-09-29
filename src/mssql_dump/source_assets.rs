@@ -2531,8 +2531,8 @@ fn write_source_asset_inner(
                     // (ИТК `_open`, saved by 8.5 and dumped by 8.3.27.2214:
                     // no `ShowCommandBar`, `ButtonImportance`, and
                     // `WindowOpeningMode LockOwnerWindow`; fixture `v85_form`).
-                    let xml_2_21_pass_off =
-                        xml_2_21_pass_off || context.source_version == InfobaseConfigSourceVersion::V2_20;
+                    let xml_2_21_pass_off = xml_2_21_pass_off
+                        || context.source_version == InfobaseConfigSourceVersion::V2_20;
                     let (xml, item_assets_8_5_1) = match &facts_8_5_1 {
                         _ if xml_2_21_pass_off => (xml, Vec::new()),
                         Some(facts) => super::form::xml_2_21_writer::apply_form_facts_8_5_1(
@@ -3091,14 +3091,17 @@ fn write_source_asset_inner(
                     asset.primary_path.display()
                 )
             })?;
-            let extension =
-                parse_exchange_plan_content_extension(bytes, context.object_refs, context.type_index)
-                    .with_context(|| {
-                        format!(
-                            "failed to extract the extension's exchange plan content from source asset {}",
-                            asset.primary_path.display()
-                        )
-                    })?;
+            let extension = parse_exchange_plan_content_extension(
+                bytes,
+                context.object_refs,
+                context.type_index,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to extract the extension's exchange plan content from source asset {}",
+                    asset.primary_path.display()
+                )
+            })?;
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 context

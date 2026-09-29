@@ -12,7 +12,11 @@ fn table_events_without_an_8_3_27_name_keep_their_identifier() {
     let dir = common::fixture("form_events");
     let out = common::temp_dir("form-events");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Form.xml")).unwrap();
     let actual =
         fs::read(out.join("CommonForms/ТестРасширение_ФормаСобытий/Ext/Form.xml")).unwrap();
@@ -33,7 +37,11 @@ fn an_8_5_form_body_reads_as_8_3_27_reads_it() {
     let dir = common::fixture("v85_form");
     let out = common::temp_dir("v85-form");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Form.xml")).unwrap();
     let actual = fs::read(out.join("CommonForms/ТестРасширение_Форма85/Ext/Form.xml")).unwrap();
     assert!(
@@ -51,7 +59,11 @@ fn an_8_5_report_record_reads_as_8_3_27_reads_it() {
     let dir = common::fixture("v85_form");
     let out = common::temp_dir("v85-report");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Report.xml")).unwrap();
     let actual = fs::read(out.join("Reports/ТестРасширение_Отчет.xml")).unwrap();
     assert!(
@@ -71,7 +83,11 @@ fn any_ib_ref_is_any_ref_below_compatibility_8_3_23() {
     let dir = common::fixture("form_events_8_3_22");
     let out = common::temp_dir("form-events-8-3-22");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Form.xml")).unwrap();
     let actual =
         fs::read(out.join("CommonForms/ТестРасширение_ФормаСобытий/Ext/Form.xml")).unwrap();

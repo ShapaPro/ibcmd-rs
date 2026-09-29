@@ -103,7 +103,11 @@ fn extension_module_edit_round_trips() {
     fs::write(&module, text.replace("\"1.0\"", "\"2.0\"")).unwrap();
     let out = fresh_output("load-cfe-out", "cfe");
     let run = load(&tree, &out, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let back = common::temp_dir("load-cfe-back");
     assert!(common::export(&out, &back).status.success());
     // ConfigDumpInfo.xml is derived: the edited module's configVersion is the
@@ -118,7 +122,12 @@ fn extension_module_edit_round_trips() {
         .filter(|(a, b)| a != b)
         .collect::<Vec<_>>();
     assert_eq!(moved.len(), 1, "{moved:?}");
-    assert!(moved[0].0.contains("554f39c6-e029-4ee0-8535-8c15291a6a3f.0"), "{moved:?}");
+    assert!(
+        moved[0]
+            .0
+            .contains("554f39c6-e029-4ee0-8535-8c15291a6a3f.0"),
+        "{moved:?}"
+    );
     fs::remove_file(tree.join("ConfigDumpInfo.xml")).unwrap();
     fs::remove_file(back.join("ConfigDumpInfo.xml")).unwrap();
     common::assert_tree_eq(&tree, &back);
@@ -141,7 +150,10 @@ fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -183,11 +195,18 @@ fn extension_load_refreshes_the_configinfo_digest_of_the_edited_entry() {
     fs::write(&module, text.replace("\"1.0\"", "\"2.0\"")).unwrap();
     let out = fresh_output("load-cfe-digest-out", "cfe");
     let run = load(&tree, &out, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 
     let (before, after) = (packed_entries(&base), packed_entries(&out));
     let edited = "554f39c6-e029-4ee0-8535-8c15291a6a3f.0";
-    assert_ne!(before[edited], after[edited], "the module entry was rewritten");
+    assert_ne!(
+        before[edited], after[edited],
+        "the module entry was rewritten"
+    );
     for (name, packed) in &after {
         if name != "configinfo" {
             assert_eq!(
@@ -211,14 +230,24 @@ fn a_loaded_file_takes_the_next_edit_of_the_same_tree() {
     fs::write(&module, text.replace("\"1.0\"", "\"2.0\"")).unwrap();
     let first = fresh_output("load-cfe-chain-1", "cfe");
     let run = load(&tree, &first, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     fs::write(&module, text.replace("\"1.0\"", "\"3.0\"")).unwrap();
     let second = fresh_output("load-cfe-chain-2", "cfe");
     let run = load(&tree, &second, &first);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let back = common::temp_dir("load-cfe-chain-back");
     assert!(common::export(&second, &back).status.success());
-    let module_back = fs::read_to_string(back.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl")).unwrap();
+    let module_back =
+        fs::read_to_string(back.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"))
+            .unwrap();
     assert!(module_back.contains("\"3.0\""), "{module_back}");
 }
 
@@ -276,7 +305,11 @@ fn a_tree_of_another_dialect_is_refused_with_a_hint() {
         .args(["--platform", "8.5.1", "--overwrite"])
         .output()
         .unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let out = fresh_output("load-dialect-out", "epf");
     let run = load(&tree, &out, &base);
     assert!(!run.status.success());
@@ -293,7 +326,11 @@ fn the_report_names_the_applied_files() {
     fs::write(&module, text.replace("\"1.0\"", "\"2.0\"")).unwrap();
     let out = fresh_output("load-applied-out", "cfe");
     let run = load(&tree, &out, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(
         report["applied"],
@@ -320,10 +357,17 @@ fn a_base_changed_since_the_export_is_named_in_a_warning() {
     fs::write(&module, text.replace("\"1.0\"", "\"2.0\"")).unwrap();
     let out = fresh_output("load-drift-out", "cfe");
     let run = load(&tree, &out, &changed);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     let warnings = report["warnings"].to_string();
-    assert!(warnings.contains("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"), "{warnings}");
+    assert!(
+        warnings.contains("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"),
+        "{warnings}"
+    );
 }
 
 #[test]
@@ -341,7 +385,11 @@ fn a_module_added_to_a_form_that_had_none_is_loaded() {
     .unwrap();
     let out = fresh_output("load-new-form-module-out", "cf");
     let run = load(&tree, &out, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let back = common::temp_dir("load-new-form-module-back");
     assert!(common::export(&out, &back).status.success());
     for tree in [&tree, &back] {
@@ -358,7 +406,11 @@ fn export_with_index(base: &Path, tree: &Path) {
         .args(["--source-version", "2.20", "--overwrite", "--index"])
         .output()
         .unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 #[test]
@@ -378,7 +430,11 @@ fn an_indexed_tree_loads_without_exporting_the_base_again() {
 
     let fast = fresh_output("load-index-fast", "cfe");
     let run = load(&tree, &fast, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(report["base_export"], "index", "{report}");
 
@@ -397,13 +453,22 @@ fn an_indexed_tree_loads_without_exporting_the_base_again() {
     fs::write(&module, text.replace("\"1.0\"", "\"3.0\"")).unwrap();
     let next = fresh_output("load-index-next", "cfe");
     let run = load(&tree, &next, &fast);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(report["base_export"], "index", "{report}");
-    assert_eq!(report["applied"], serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"]));
+    assert_eq!(
+        report["applied"],
+        serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"])
+    );
     let back = common::temp_dir("load-index-back");
     assert!(common::export(&next, &back).status.success());
-    let module_back = fs::read_to_string(back.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl")).unwrap();
+    let module_back =
+        fs::read_to_string(back.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"))
+            .unwrap();
     assert!(module_back.contains("\"3.0\""));
 }
 
@@ -418,7 +483,11 @@ fn an_index_of_another_base_falls_back_to_the_full_path() {
     assert!(module.exists());
     let out = fresh_output("load-index-other-out", "cfe");
     let run = load(&tree, &out, &base);
-    let text = format!("{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert!(!text.contains("\"base_export\": \"index\""), "{text}");
 }
 
@@ -442,9 +511,16 @@ fn an_edit_carrying_an_older_modification_time_still_loads() {
 
     let out = fresh_output("load-old-mtime-out", "cfe");
     let run = load(&tree, &out, &base);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
-    assert_eq!(report["applied"], serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"]));
+    assert_eq!(
+        report["applied"],
+        serde_json::json!(["CommonModules/ТестРасширение_Модуль/Ext/Module.bsl"])
+    );
 }
 
 #[test]
@@ -461,7 +537,11 @@ fn a_tree_left_by_an_interrupted_update_is_refused() {
     let out = fresh_output("load-interrupted-out", "cfe");
     let run = load(&tree, &out, &base);
     assert!(!run.status.success());
-    let text = format!("{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert!(text.contains("interrupted"), "{text}");
     assert!(!out.exists());
 }

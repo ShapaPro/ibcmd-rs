@@ -62247,7 +62247,11 @@ fn document_data_paths_are_owner_checked_with_cpl_only_structural_fallback() {
     .unwrap()
     .1
     .unwrap();
-    assert!(foreign.data_path.contains(unknown_uuid), "{}", foreign.data_path);
+    assert!(
+        foreign.data_path.contains(unknown_uuid),
+        "{}",
+        foreign.data_path
+    );
     assert!(parse_document_link_by_type("{3,1,{-8},1}", "Invoice", &object_refs, &proof).is_none());
 
     let nested_cpl = format!("{{5006,1,\"Filter\",2,{{0,{tabular_uuid}}},{{0,{nested_uuid}}},1}}");

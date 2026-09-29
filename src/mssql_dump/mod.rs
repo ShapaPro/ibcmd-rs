@@ -969,12 +969,12 @@ mod dcs;
 mod dynamic_generation;
 pub(crate) mod extension_types;
 mod fetch;
-#[cfg(test)]
-mod revision_mix_tests;
 mod form;
 mod form_body;
 mod form_extension;
 mod form_ref_index;
+#[cfg(test)]
+mod revision_mix_tests;
 pub(crate) use form::load_8_5_1::{
     compile_native_form_body_8_5_1, compile_xml_2_21_form_body_in_layout_8_3,
     down_convert_xml_2_21_form, is_xml_2_21_form, up_convert_chart_records_8_5_1,
@@ -1066,8 +1066,8 @@ pub(crate) use command_interface::{
     COMMAND_INTERFACE_PLACEMENTS, HOME_PAGE_WORK_AREA_TEMPLATES,
     client_application_panel_def_is_standard, command_interface_standard_command_for_code,
 };
-use config_dump_info::*;
 pub use config_dump_info::stored_config_versions;
+use config_dump_info::*;
 use config_rows::*;
 pub(crate) use dcs::*;
 use fetch::*;
@@ -2560,7 +2560,10 @@ pub fn export_packed_cf_archive_to_source(
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<StorageImageSourceExportReport> {
     let (_, source_profile, entries) = archive.into_parts();
-    let entries = entries.into_iter().map(|entry| entry.into_parts()).collect();
+    let entries = entries
+        .into_iter()
+        .map(|entry| entry.into_parts())
+        .collect();
     export_packed_entries_to_source(
         source_profile.as_str(),
         entries,
@@ -2762,20 +2765,26 @@ fn export_entry_notes(
         if entry.emitted_path.is_some() {
             continue;
         }
-        let reason = entry.reason.map_or("unknown", MetadataExtractionMissReason::as_str);
+        let reason = entry
+            .reason
+            .map_or("unknown", MetadataExtractionMissReason::as_str);
         let detail = entry
             .diagnostic
             .as_ref()
             .map(|diagnostic| {
                 // The signature, and the collection and item it names, say
                 // which member stopped the reader.
-                let mut detail = format!(", {}: {}", diagnostic.code, diagnostic.structural_signature);
+                let mut detail =
+                    format!(", {}: {}", diagnostic.code, diagnostic.structural_signature);
                 if let Some(role) = &diagnostic.collection_role {
                     detail.push_str(&format!(", {role}"));
                 }
                 for (what, index) in [
                     ("field", diagnostic.field_index),
-                    ("item", diagnostic.collection_index.or(diagnostic.item_index)),
+                    (
+                        "item",
+                        diagnostic.collection_index.or(diagnostic.item_index),
+                    ),
                 ] {
                     if let Some(index) = index {
                         detail.push_str(&format!(" {what} {index}"));
@@ -3567,7 +3576,8 @@ fn dump_table_rows_with_options_mode(
     // An extension keeps only the root modules it extends; its configuration
     // row names the header they hang off (see `module_body_paths_from_texts`).
     configuration_module_groups.extend(
-        metadata_audit.rows
+        metadata_audit
+            .rows
             .iter()
             .filter_map(|row| parse_configuration_header_uuid(&row.text)),
     );
@@ -7942,7 +7952,10 @@ fn parse_exchange_plan_content_extension(
     // A count past the fields is not a readable body; the arithmetic below
     // never sees it.
     if count > fields.len() {
-        bail!("ExchangePlanContent declares {count} items but holds {} fields", fields.len());
+        bail!(
+            "ExchangePlanContent declares {count} items but holds {} fields",
+            fields.len()
+        );
     }
     let at = 2 + 2 * count;
     let Some(extension_count) = fields.get(at) else {
@@ -8520,7 +8533,10 @@ fn module_body_paths_from_texts_with_forms(
     // the header they hang off (ИТК: `<header>.6` alone).
     for row in metadata_texts {
         if let Some(header_uuid) = parse_configuration_header_uuid(&row.text) {
-            paths.extend(configuration_module_body_paths_of(&header_uuid, &file_names));
+            paths.extend(configuration_module_body_paths_of(
+                &header_uuid,
+                &file_names,
+            ));
         }
     }
 
@@ -11865,7 +11881,9 @@ fn merge_foreign_type_references(indexes: &mut MetadataTypeIndexes, foreign: &Fo
         if indexes.references.contains_key(&type_id) {
             continue;
         }
-        indexes.references.insert(type_id.clone(), reference.clone());
+        indexes
+            .references
+            .insert(type_id.clone(), reference.clone());
         // "TypeSet" names a platform type set the foreign context spells
         // differently from the built-in table (`AnyIBRef` → `AnyRef`).
         if category == "TypeSet" {
@@ -16544,7 +16562,11 @@ fn parse_exchange_plan_standard_attributes(value: &str) -> Option<Vec<RegisterSt
     // A plan in 8.3.21 mode and below keeps no ExchangeDate: seven entries
     // (every plan of five real configurations in 8.3.21 mode and below --
     // also once re-saved by 8.3.27; the platform dumps the seven).
-    let skip = match (payload.first()?.trim(), payload.get(1)?.trim(), payload.len()) {
+    let skip = match (
+        payload.first()?.trim(),
+        payload.get(1)?.trim(),
+        payload.len(),
+    ) {
         ("1", "8", 26) => 0,
         ("1", "7", 23) => 1,
         _ => return None,
@@ -27480,7 +27502,11 @@ fn parse_report_properties_from_text(
             template_refs,
         ),
         default_settings_form: parse_owner_form_ref(fields.get(6).copied(), form_refs, object_refs),
-        auxiliary_settings_form: parse_owner_form_ref(fields.get(17).copied(), form_refs, object_refs),
+        auxiliary_settings_form: parse_owner_form_ref(
+            fields.get(17).copied(),
+            form_refs,
+            object_refs,
+        ),
         default_variant_form: parse_owner_form_ref(fields.get(10).copied(), form_refs, object_refs),
         auxiliary_variant_form: record_8_5_1
             .then(|| parse_catalog_form_ref(fields.get(18).copied(), form_refs)),

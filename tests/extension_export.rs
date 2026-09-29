@@ -11,7 +11,11 @@ use std::{fs, path::Path};
 fn exported_configuration(input: &Path, tag: &str) -> Vec<u8> {
     let out = common::temp_dir(&format!("extension-{tag}"));
     let run = common::export(input, &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     fs::read(out.join("Configuration.xml")).unwrap()
 }
 
@@ -29,7 +33,11 @@ fn root_case(case: &str) {
     let dir = common::fixture("extension_roots").join(case);
     let out = common::temp_dir(&format!("extension-roots-case-{case}"));
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     for file in ["Configuration.xml", "ConfigDumpInfo.xml"] {
         let actual = fs::read(out.join(file)).unwrap_or_default();
         assert_same(&dir.join(file), &actual, &format!("{case} {file}"));
@@ -40,7 +48,11 @@ fn root_case(case: &str) {
 fn clean_room_extension_root_matches_the_platform() {
     let dir = common::fixture("test_extension");
     let actual = exported_configuration(&dir.join("input.cfe"), "test_extension");
-    assert_same(&dir.join("expected/Configuration.xml"), &actual, "test_extension");
+    assert_same(
+        &dir.join("expected/Configuration.xml"),
+        &actual,
+        "test_extension",
+    );
 }
 
 #[test]
@@ -82,9 +94,15 @@ fn unknown_root_property_degrades_only_the_root() {
     );
     assert_eq!(run.status.code(), Some(2), "{report}");
     assert!(!report.contains("\"export_failed\""), "{report}");
-    assert!(report.contains("ffffffff-0000-4000-8000-000000000001"), "{report}");
+    assert!(
+        report.contains("ffffffff-0000-4000-8000-000000000001"),
+        "{report}"
+    );
     assert!(out.join("Configuration.xml").exists());
-    assert!(out.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl").exists());
+    assert!(
+        out.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bsl")
+            .exists()
+    );
 }
 
 #[test]
@@ -120,7 +138,11 @@ fn extended_root_modules_export_their_text() {
     let input = common::fixture("extension_roots/modules/input.cfe");
     let out = common::temp_dir("extension-root-modules");
     let run = common::export(&input, &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     for module in [
         "ManagedApplicationModule",
         "SessionModule",
@@ -140,7 +162,11 @@ fn extension_config_dump_info_matches_the_platform() {
     let dir = common::fixture("test_extension");
     let out = common::temp_dir("extension-dump-info");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("expected/ConfigDumpInfo.xml")).unwrap();
     let actual = fs::read(out.join("ConfigDumpInfo.xml")).unwrap_or_default();
     assert!(

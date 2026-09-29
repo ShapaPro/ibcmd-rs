@@ -90,6 +90,10 @@ fn a_processor_named_like_the_export_layout_matches_native_dump() {
     // Fixtures: `_onecdec/make_named_external_fixtures.py`.
     for name in ["DataProcessors", "ConfigDumpInfo"] {
         let dir = fixture(&format!("named_{name}"));
-        assert_exports_to(&dir.join("input.epf"), &dir.join("expected"), &format!("named-{name}"));
+        assert_exports_to(
+            &dir.join("input.epf"),
+            &dir.join("expected"),
+            &format!("named-{name}"),
+        );
     }
 }

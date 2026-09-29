@@ -225,8 +225,7 @@ fn finish(
         fs::remove_dir_all(&parked)
             .with_context(|| format!("failed to clear {}", parked.display()))?;
     }
-    fs::rename(&folder, &parked)
-        .with_context(|| format!("failed to move {}", folder.display()))?;
+    fs::rename(&folder, &parked).with_context(|| format!("failed to move {}", folder.display()))?;
     let (from_dir, to_dir) = (parked.join(name), output_dir.join(name));
     let from_xml = parked.join(format!("{name}.xml"));
     let to_xml = output_dir.join(format!("{name}.xml"));
@@ -404,16 +403,27 @@ mod tests {
                 vec![
                     entry(&main.object_id, 99, &["DataProcessors/Ввод.xml"], None),
                     entry("versions", 77, &[], None),
-                    entry("root", 10, &[], Some("DataProcessors/Ввод/Forms/Ф/Ext/Form.xml withheld (x)")),
+                    entry(
+                        "root",
+                        10,
+                        &[],
+                        Some("DataProcessors/Ввод/Forms/Ф/Ext/Form.xml withheld (x)"),
+                    ),
                 ],
             ),
         };
         rewrite_report(&mut report, &main, &entries);
         let storage = &report.storage;
         assert_eq!(storage.physical_entries, 3);
-        assert!(storage.entries.iter().all(|e| e.logical_name != "copyinfo"), "no copyinfo stored");
+        assert!(
+            storage.entries.iter().all(|e| e.logical_name != "copyinfo"),
+            "no copyinfo stored"
+        );
         let main_entry = &storage.entries[0];
-        assert_eq!((main_entry.logical_name.as_str(), main_entry.packed_bytes), (main.main_uuid.as_str(), 40));
+        assert_eq!(
+            (main_entry.logical_name.as_str(), main_entry.packed_bytes),
+            (main.main_uuid.as_str(), 40)
+        );
         assert_eq!(main_entry.outputs, vec!["Ввод.xml".to_owned()]);
         assert_eq!(storage.entries[1].packed_bytes, 30);
         assert_eq!(

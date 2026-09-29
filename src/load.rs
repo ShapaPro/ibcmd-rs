@@ -389,7 +389,11 @@ fn verify_loaded(
     let in_scope = |path: &str| {
         path != CONFIG_DUMP_INFO
             && (external
-                || diff.changed.iter().chain(&diff.added).any(|edited| edited == path)
+                || diff
+                    .changed
+                    .iter()
+                    .chain(&diff.added)
+                    .any(|edited| edited == path)
                 || report.compiled_objects.iter().any(|prefix| {
                     if prefix == "Configuration.xml" {
                         path == prefix || path.starts_with("Ext/")
@@ -471,8 +475,16 @@ fn tree_dialect(tree: &Path) -> Option<String> {
     roots.sort();
     let root = roots
         .iter()
-        .find(|path| path.file_name().is_some_and(|name| name == "Configuration.xml"))
-        .or_else(|| roots.iter().find(|path| path.file_name().is_some_and(|name| name != "ConfigDumpInfo.xml")))?;
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "Configuration.xml")
+        })
+        .or_else(|| {
+            roots.iter().find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name != "ConfigDumpInfo.xml")
+            })
+        })?;
     let head = fs::read(root).ok()?;
     let head = String::from_utf8_lossy(&head[..head.len().min(4096)]).into_owned();
     let at = head.find("<MetaDataObject ")?;
@@ -539,7 +551,15 @@ pub fn load_onto_base(
     let mut compiled_keys = None;
     let compiled_load = !plan.unsupported.is_empty();
     if !compiled_load {
-        load_plan(edited, base, output, source_version, plan, &base_versions, &mut report)?;
+        load_plan(
+            edited,
+            base,
+            output,
+            source_version,
+            plan,
+            &base_versions,
+            &mut report,
+        )?;
     } else {
         let external =
             external::load_external(edited, base, output, source_version, &diff, &mut report)?
@@ -590,10 +610,8 @@ fn export_and_diff(
     base: &Path,
     edited: &Path,
     source_version: InfobaseConfigSourceVersion,
-) -> std::result::Result<
-    (TreeDiff, BTreeMap<String, String>, BTreeMap<String, String>),
-    LoadError,
-> {
+) -> std::result::Result<(TreeDiff, BTreeMap<String, String>, BTreeMap<String, String>), LoadError>
+{
     let scratch = Scratch(std::env::temp_dir().join(format!(
         "ibcmd-load-{}-{}",
         std::process::id(),
@@ -734,7 +752,11 @@ fn load_plan(
     // and 8.3.27.2214 updating an installed extension keeps each entry whose
     // digest did not change -- an edit under the old digest never reaches the
     // infobase. The edited entries are packed first, then their digests.
-    let changed = texts.keys().chain(codec.forms.keys()).cloned().collect::<Vec<_>>();
+    let changed = texts
+        .keys()
+        .chain(codec.forms.keys())
+        .cloned()
+        .collect::<Vec<_>>();
     let staged = staging_path(output);
     let result = publish(&archive, &patch, &mut codec, &staged, limits)
         .and_then(|()| refresh_configinfo(&staged, output, &changed, &axes, edited));

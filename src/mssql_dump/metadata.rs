@@ -180,7 +180,9 @@ pub(super) fn without_adoption_headers(text: &str) -> std::borrow::Cow<'_, str> 
     const NIL: &str = "00000000-0000-0000-0000-000000000000";
     // The configuration root keeps its own: its readers take the adopted
     // header, and it holds no children's headers.
-    if text.trim_start().starts_with("{2,") && text.contains("{9cd510cd-abfc-11d4-9434-004095e12fc7,") {
+    if text.trim_start().starts_with("{2,")
+        && text.contains("{9cd510cd-abfc-11d4-9434-004095e12fc7,")
+    {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut edits = Vec::new();
@@ -358,7 +360,9 @@ pub(super) fn metadata_source_for_text(
 pub(super) fn metadata_text_names_identifiers_behind_header(text: &str, uuid: &str) -> bool {
     metadata_object_fields(text).is_some_and(|fields| {
         metadata_header_field_index(&fields, uuid) == Some(1)
-            && fields.get(2).is_some_and(|field| is_uuid_text(field.trim()))
+            && fields
+                .get(2)
+                .is_some_and(|field| is_uuid_text(field.trim()))
     })
 }
 

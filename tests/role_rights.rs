@@ -10,7 +10,11 @@ fn rights_case(case: &str) {
     let dir = common::fixture("role_rights").join(case);
     let out = common::temp_dir(&format!("role-rights-{case}"));
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{case}: {}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{case}: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Rights.xml")).unwrap();
     let actual = fs::read(out.join("Roles/РольПроверка/Ext/Rights.xml")).unwrap_or_default();
     assert!(

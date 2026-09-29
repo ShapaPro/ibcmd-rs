@@ -125,7 +125,10 @@ mod tests {
             "{3,{1,0,00000000-0000-0000-0000-000000000015},\"Р\",{0},\"\",1,0,\
              00000000-0000-0000-0000-000000000001,%s}",
         ] {
-            assert!(parse(&header.replace("%s", "18446744073709551615")).is_none(), "{header}");
+            assert!(
+                parse(&header.replace("%s", "18446744073709551615")).is_none(),
+                "{header}"
+            );
         }
     }
 
@@ -143,8 +146,14 @@ mod tests {
                 ("4b2a2bcf-a845-41ba-a03d-05b09a2c6c11".to_owned(), 3)
             ]
         );
-        assert_eq!(adoption.extended_object, "00000000-0000-0000-0000-000000000001");
-        assert_eq!(adoption.state("4b2a2bcf-a845-41ba-a03d-05b09a2c6c11"), Some(3));
+        assert_eq!(
+            adoption.extended_object,
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert_eq!(
+            adoption.state("4b2a2bcf-a845-41ba-a03d-05b09a2c6c11"),
+            Some(3)
+        );
     }
 
     #[test]
@@ -166,12 +175,18 @@ mod tests {
                       {\"#\",f5c65050-3bbb-11d5-b988-0050bae0a95d,\r\n{\"Pattern\",\r\n\
                       {\"#\",d4000010-0000-4000-8000-000000000003}\r\n}\r\n}\r\n},\r\n{\"Pattern\"}";
         let adoption = parse(header).unwrap();
-        assert_eq!(adoption.extended_object, "b4000000-0000-4000-8000-000000000003");
+        assert_eq!(
+            adoption.extended_object,
+            "b4000000-0000-4000-8000-000000000003"
+        );
         assert_eq!(adoption.widened.len(), 1);
         let (property, state, value) = &adoption.widened[0];
         assert_eq!(property, "b1053250-abe6-11d4-9434-004095e12fc7");
         assert_eq!(*state, 3);
-        assert!(value.starts_with("{\"#\",f5c65050-") && value.ends_with('}'), "{value}");
+        assert!(
+            value.starts_with("{\"#\",f5c65050-") && value.ends_with('}'),
+            "{value}"
+        );
         let row = format!("{{1,{{0,x,y,\r\n{header}\r\n}},0}}");
         assert_eq!(
             field_after_header(&row, "e4000000-0000-4000-8000-000000000003"),
@@ -188,7 +203,10 @@ mod tests {
         assert!(header.starts_with("{2,{1,0,abc}"));
         let adoption = parse(header).unwrap();
         assert!(adoption.adopted);
-        assert_eq!(adoption.extended_object, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(
+            adoption.extended_object,
+            "00000000-0000-0000-0000-000000000001"
+        );
         assert!(adoption.widened.is_empty());
         // A long header cut short is no header.
         assert_eq!(parse("{3,{1,0,abc},\"Имя\",{0},\"\",0,0,x}"), None);
@@ -197,6 +215,10 @@ mod tests {
     #[test]
     fn finds_the_header_list_of_a_row() {
         let text = "{1,\r\n{0,\r\n{3,\r\n{1,0,abc},\"Имя\",{0},\"\",0,0,x,0},\"ru\"},0}";
-        assert!(header_of(text, "abc").unwrap().starts_with("{3,\r\n{1,0,abc}"));
+        assert!(
+            header_of(text, "abc")
+                .unwrap()
+                .starts_with("{3,\r\n{1,0,abc}")
+        );
     }
 }

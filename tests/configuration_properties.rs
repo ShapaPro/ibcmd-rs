@@ -14,7 +14,11 @@ fn default_search_form_is_written_from_field_37() {
     let dir = common::fixture("search_form");
     let out = common::temp_dir("search-form");
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Configuration.xml")).unwrap();
     let actual = fs::read(out.join("Configuration.xml")).unwrap_or_default();
     assert!(
@@ -29,7 +33,11 @@ fn config_case(case: &str) {
     let dir = common::fixture("config_compat").join(case);
     let out = common::temp_dir(&format!("config-compat-{case}"));
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Configuration.xml")).unwrap();
     let actual = fs::read(out.join("Configuration.xml")).unwrap_or_default();
     assert!(

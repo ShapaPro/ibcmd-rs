@@ -95,11 +95,11 @@ mod empty_stage;
 mod offline_compile;
 mod stage_timing;
 
-pub use offline_compile::{
-    CompiledContainerRows, compile_source_rows_offline, pack_module_text, skipped_bodies,
-};
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
+};
+pub use offline_compile::{
+    CompiledContainerRows, compile_source_rows_offline, pack_module_text, skipped_bodies,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -5724,7 +5724,10 @@ fn prepare_form_body_row(
                 )
                 .inspect_err(|error| {
                     if std::env::var_os("IBCMD_RS_NATIVE_FORM_DEBUG").is_some() {
-                        eprintln!("native form writer refused {}: {error:#}", form_path.display());
+                        eprintln!(
+                            "native form writer refused {}: {error:#}",
+                            form_path.display()
+                        );
                     }
                 })
                 .ok()
@@ -7261,8 +7264,7 @@ static OFFLINE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// the files the tree edited: a body it cannot compile is noted and kept
 /// from the base there. Every other stage (`--script-only` too) still fails
 /// on it.
-static CF_LOAD_COMPILE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static CF_LOAD_COMPILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn ensure_online(action: &str) -> Result<()> {
     if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {

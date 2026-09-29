@@ -4,8 +4,8 @@
 
 use crate::cli::{
     AuditEmptyStageArgs, AuditInterfaceWriterArgs, AuditMetadataCompilerArgs,
-    AuditMetadataExportArgs, AuditNameIndexArgs, CfBootstrapArgs, CfExportArgs, CfLoadArgs, CfOverlayArgs,
-    MssqlApplySourceChangeArgs, MssqlAuditSourceParityArgs, MssqlDumpConfigArgs,
+    AuditMetadataExportArgs, AuditNameIndexArgs, CfBootstrapArgs, CfExportArgs, CfLoadArgs,
+    CfOverlayArgs, MssqlApplySourceChangeArgs, MssqlAuditSourceParityArgs, MssqlDumpConfigArgs,
     MssqlDumpExtensionArgs, MssqlLoadExtensionArgs, MssqlStageSourceObjectsArgs,
 };
 

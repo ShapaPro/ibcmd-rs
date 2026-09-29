@@ -33,7 +33,10 @@ pub fn states(text: &str) -> Result<BTreeMap<String, &'static str>> {
         let state = match offset {
             None => "AdoptedCheck",
             Some(offset) => {
-                let count: usize = fields.get(2).and_then(|count| count.parse().ok()).unwrap_or(0);
+                let count: usize = fields
+                    .get(2)
+                    .and_then(|count| count.parse().ok())
+                    .unwrap_or(0);
                 let value = (offset < count).then(|| fields.get(3 + offset)).flatten();
                 match value.map(|value| value.split_whitespace().collect::<String>()) {
                     Some(value) if value == "{\"N\",0}" => "Native",
@@ -110,15 +113,13 @@ pub fn rewrite(xml: &str, states: &BTreeMap<String, &'static str>) -> Result<Str
             let id = rest.split('"').next().unwrap_or_default();
             open.push((indent.to_owned(), states.get(id).copied()));
         } else if trimmed.starts_with("<ChildItems>") || trimmed.starts_with("</Item>") {
-            let own = open
-                .last()
-                .is_some_and(|(item_indent, _)| {
-                    if trimmed.starts_with("</Item>") {
-                        item_indent == indent
-                    } else {
-                        indent.len() == item_indent.len() + 1
-                    }
-                });
+            let own = open.last().is_some_and(|(item_indent, _)| {
+                if trimmed.starts_with("</Item>") {
+                    item_indent == indent
+                } else {
+                    indent.len() == item_indent.len() + 1
+                }
+            });
             if own && let Some((item_indent, state)) = open.last_mut() {
                 if let Some(state) = state.take() {
                     out.push_str(&format!(
@@ -144,7 +145,10 @@ mod tests {
 
     #[test]
     fn a_count_beyond_the_fields_is_no_state_column() {
-        assert_eq!(state_offset("{2,18446744073709551615,1,2,{1,1,x},-1,2}"), None);
+        assert_eq!(
+            state_offset("{2,18446744073709551615,1,2,{1,1,x},-1,2}"),
+            None
+        );
     }
 
     #[test]
@@ -164,9 +168,15 @@ mod tests {
             NIL = super::super::adoption::NIL_UUID,
         );
         let states = states(&with).unwrap();
-        assert_eq!(states["ba000000-0000-4000-8000-000000000002"], "AdoptedCheck");
+        assert_eq!(
+            states["ba000000-0000-4000-8000-000000000002"],
+            "AdoptedCheck"
+        );
         assert_eq!(states["ea000000-0000-4000-8000-000000000003"], "Native");
-        let without = with.replace("{2,7,0,0,1,1,2,2,3,3,4,4,5,5,6,6,", "{2,6,0,0,1,1,2,2,3,3,4,4,5,5,");
+        let without = with.replace(
+            "{2,7,0,0,1,1,2,2,3,3,4,4,5,5,6,6,",
+            "{2,6,0,0,1,1,2,2,3,3,4,4,5,5,",
+        );
         let states = super::states(&without).unwrap();
         assert!(states.values().all(|state| *state == "AdoptedCheck"));
     }

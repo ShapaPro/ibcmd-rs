@@ -296,7 +296,10 @@ mod tests {
     fn a_name_that_is_not_an_identifier_is_refused() {
         for name in ["..", "a\\\\..\\\\..", "x/y", "", "1abc", "a.b"] {
             let text = MAIN_DP.replace("},\"Тест\",", &format!("}},\"{name}\","));
-            assert!(parse_main("aaaaaaaa-0000-0000-0000-000000000001", &text).is_err(), "{name:?}");
+            assert!(
+                parse_main("aaaaaaaa-0000-0000-0000-000000000001", &text).is_err(),
+                "{name:?}"
+            );
         }
         for name in ["Тест", "_x1", "ОбработкаА2"] {
             assert!(is_object_name(name), "{name}");

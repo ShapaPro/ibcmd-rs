@@ -12,7 +12,11 @@ fn assert_case(case: &str) {
     let dir = common::fixture("adopted").join(case);
     let out = common::temp_dir(&format!("adopted-{case}"));
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(!stdout.contains("are not known"), "{case}: {stdout}");
     let mut compared = 0;

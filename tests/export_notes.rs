@@ -36,7 +36,10 @@ fn a_metadata_object_not_written_is_named_with_its_reason() {
         "5b6f3a52-0c0e-4d0b-9d49-3f7f2f8e1a12",
     );
     assert_eq!(disposition, "opaque");
-    assert!(message.contains("CommonForm 5b6f3a52-0c0e-4d0b-9d49-3f7f2f8e1a12 not written (header"), "{message}");
+    assert!(
+        message.contains("CommonForm 5b6f3a52-0c0e-4d0b-9d49-3f7f2f8e1a12 not written (header"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -46,7 +49,11 @@ fn an_unreadable_object_keeps_the_kind_its_configuration_gives_it() {
     // body was written as CommonPictures/ФормаСправа/Ext/Picture.xml.
     let out = common::temp_dir("notes-kind");
     let run = common::export(&common::fixture("export_notes").join("wrong_kind.cf"), &out);
-    assert!(run.status.code().is_some(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.code().is_some(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert!(!out.join("CommonPictures").exists());
 }
 
@@ -78,5 +85,8 @@ fn an_unresolved_default_form_withholds_configuration_xml_and_says_so() {
     );
     let report = String::from_utf8_lossy(&run.stdout).into_owned();
     assert!(!out.join("Configuration.xml").exists(), "{report}");
-    assert!(report.contains("Configuration.xml not written ("), "{report}");
+    assert!(
+        report.contains("Configuration.xml not written ("),
+        "{report}"
+    );
 }

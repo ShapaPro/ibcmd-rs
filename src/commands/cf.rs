@@ -454,7 +454,9 @@ fn load(args: CfLoadArgs) -> Result<CfCommandReport, CfCommandError> {
             Ok(CfCommandReport::Load(report))
         }
         Err(error) => {
-            report.errors.push(diagnostic(error.code(), error.to_string()));
+            report
+                .errors
+                .push(diagnostic(error.code(), error.to_string()));
             Err(CfCommandError {
                 report: Box::new(CfCommandReport::Load(report)),
             })
@@ -859,7 +861,8 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
         ));
     }
     if args.update
-        && let Some(summary) = crate::update::already_current(&args.output_dir, &args.input, args.source_version)
+        && let Some(summary) =
+            crate::update::already_current(&args.output_dir, &args.input, args.source_version)
     {
         return Ok(CfCommandReport::Export(CfExportReport {
             schema_version: REPORT_SCHEMA_VERSION,
@@ -894,7 +897,11 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
         let entries = crate::external::export::entries_of(&archive);
         let planned = if fresh {
             Err("the directory holds no tree yet".to_owned())
-        } else if crate::external::export::detect_in_archive(&archive).ok().flatten().is_some() {
+        } else if crate::external::export::detect_in_archive(&archive)
+            .ok()
+            .flatten()
+            .is_some()
+        {
             Err("an external object keeps no versions".to_owned())
         } else {
             crate::update::plan(&args.output_dir, &entries, args.source_version)
@@ -1003,7 +1010,8 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
     if let Some(aside) = &aside {
         let replaced = replace_from_aside(&args.output_dir, aside, &export);
         let _ = std::fs::remove_dir_all(aside);
-        replaced.map_err(|message| export_failure(&args, profile.clone(), "update_failed", message))?;
+        replaced
+            .map_err(|message| export_failure(&args, profile.clone(), "update_failed", message))?;
         export.output_dir = args.output_dir.clone();
     }
     if write_index
@@ -1025,7 +1033,12 @@ fn export(args: CfExportArgs) -> Result<CfCommandReport, CfCommandError> {
     if aside.is_some()
         && let Err(source) = crate::load::index::finish_update(&args.output_dir)
     {
-        return Err(export_failure(&args, profile.clone(), "update_failed", format!("{source:#}")));
+        return Err(export_failure(
+            &args,
+            profile.clone(),
+            "update_failed",
+            format!("{source:#}"),
+        ));
     }
     let failed = export.storage.failed;
     let mut report = CfExportReport {

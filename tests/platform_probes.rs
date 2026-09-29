@@ -23,7 +23,11 @@ fn assert_every_mode_matches(probe: &str) {
         let mode = dir.file_name().unwrap().to_string_lossy().into_owned();
         let out = common::temp_dir(&format!("{probe}-{mode}"));
         let run = common::export(&dir.join("input.cf"), &out);
-        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let expected = fs::read(dir.join("Form.xml")).unwrap();
         let actual = fs::read(out.join("CommonForms/Форма/Ext/Form.xml")).unwrap();
         let _ = fs::remove_dir_all(&out);
@@ -50,7 +54,11 @@ fn an_extension_form_writes_usual_group_behavior_under_an_old_extension_mode() {
     let dir = common::fixture("group_behavior_extension").join("Version8_3_14");
     let out = common::temp_dir("group-behavior-extension");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let expected = fs::read(dir.join("Form.xml")).unwrap();
     let actual = fs::read(out.join("CommonForms/ТестРасширение_Форма/Ext/Form.xml")).unwrap();
     let _ = fs::remove_dir_all(&out);
@@ -72,7 +80,11 @@ fn no_main_table_default_picture_is_marked_from_compatibility_8_3_19() {
         let dir = root.join(mode);
         let out = common::temp_dir(&format!("default-picture-{mode}"));
         let run = common::export(&dir.join("input.cf"), &out);
-        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let lines = |text: String| {
             text.lines()
                 .filter(|line| line.contains("DefaultPicture"))
@@ -97,7 +109,11 @@ fn unnumbered_table_additions_are_numbered_past_the_greatest_id() {
     let dir = common::fixture("unnumbered_additions").join("Version8_3_18");
     let out = common::temp_dir("unnumbered-additions");
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let lines = |text: String| {
         text.lines()
             .filter(|line| line.contains(" id=\""))
@@ -107,7 +123,11 @@ fn unnumbered_table_additions_are_numbered_past_the_greatest_id() {
     let expected = lines(fs::read_to_string(dir.join("Form.xml")).unwrap());
     let actual = lines(fs::read_to_string(out.join("CommonForms/Форма/Ext/Form.xml")).unwrap());
     let _ = fs::remove_dir_all(&out);
-    assert!(expected.iter().any(|line| line.contains("SearchStringAddition")));
+    assert!(
+        expected
+            .iter()
+            .any(|line| line.contains("SearchStringAddition"))
+    );
     assert_eq!(actual, expected);
 }
 
@@ -120,7 +140,11 @@ fn spreadsheet_page_breaks_are_written() {
         let dir = common::fixture("page_breaks").join(case);
         let out = common::temp_dir(&format!("page-breaks-{case}"));
         let run = common::export(&dir.join("input.cf"), &out);
-        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let expected = fs::read(dir.join("Template.xml")).unwrap();
         let actual = fs::read(out.join("CommonTemplates/Макет/Ext/Template.xml")).unwrap();
         let _ = fs::remove_dir_all(&out);

@@ -14,7 +14,11 @@ fn an_empty_root_command_interface_is_named_but_not_written() {
     let dir = common::fixture("empty_root_interface");
     let out = common::temp_dir("empty-root-interface");
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let mut ext = fs::read_dir(out.join("Ext"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

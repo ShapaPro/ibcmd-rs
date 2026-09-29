@@ -4981,13 +4981,12 @@ fn native_root_property_bag(
     // `<UseForFoldersAndItems>` is a catalog's (or a characteristic type
     // chart's) form property: an adopted form spells it though its main
     // attribute is the base configuration's form's, not its own.
-    let main_attribute_class = if main_attribute_class.is_empty()
-        && properties.use_for_folders_and_items.is_some()
-    {
-        "cfg:CatalogObject"
-    } else {
-        main_attribute_class
-    };
+    let main_attribute_class =
+        if main_attribute_class.is_empty() && properties.use_for_folders_and_items.is_some() {
+            "cfg:CatalogObject"
+        } else {
+            main_attribute_class
+        };
     match main_attribute_class {
         "cfg:DynamicList" => {
             bag.push((
@@ -5337,7 +5336,9 @@ fn native_table_property_bag(
     // bound to a list the base configuration's form declares, which the
     // extension's Form.xml does not (the export prints them for dynamic
     // lists alone).
-    let dynamic_list = items.get(&item.name).is_some_and(|target| target.dynamic_list)
+    let dynamic_list = items
+        .get(&item.name)
+        .is_some_and(|target| target.dynamic_list)
         || item.auto_refresh_period.is_some()
         || ["AutoRefresh", "UpdateOnDataChange", "AllowRootChoice"]
             .iter()

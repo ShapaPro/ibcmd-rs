@@ -887,7 +887,10 @@ fn home_page_work_area_model(
     // A one-column page keeps its items in the left column and an empty
     // right one (fixtures `home_page/one_column*`).
     let (left_column, right_column) = if template == "0" {
-        (home_page_work_area_column(children.required("Column")?, resolver)?, Vec::new())
+        (
+            home_page_work_area_column(children.required("Column")?, resolver)?,
+            Vec::new(),
+        )
     } else {
         (
             home_page_work_area_column(children.required("LeftColumn")?, resolver)?,

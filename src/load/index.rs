@@ -104,7 +104,8 @@ pub fn begin_update(tree: &Path) -> Result<()> {
 
 /// Clears the mark of `begin_update`, once the index names the new file.
 pub fn finish_update(tree: &Path) -> Result<()> {
-    fs::remove_file(tree.join(INDEX_DIR).join(UPDATE_MARK)).context("failed to clear the update mark")
+    fs::remove_file(tree.join(INDEX_DIR).join(UPDATE_MARK))
+        .context("failed to clear the update mark")
 }
 
 pub fn index_path(tree: &Path) -> PathBuf {
@@ -113,7 +114,8 @@ pub fn index_path(tree: &Path) -> PathBuf {
 
 /// SHA-256 of a file, streamed (a configuration runs to gigabytes).
 pub fn file_sha256(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     loop {
@@ -139,7 +141,8 @@ fn now_ns() -> u128 {
 
 /// `(<size>.<mtime ns>, mtime ns)` of a file.
 fn stamp(path: &Path) -> Result<(String, u128)> {
-    let metadata = fs::metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mtime = metadata
         .modified()
         .ok()
@@ -278,7 +281,15 @@ pub fn update_tree_index(
             keys.insert(path.clone(), key.clone());
         }
     }
-    write_index_text(tree, &file_sha256(base)?, &index.dialect, written, versions, &digests, &keys)
+    write_index_text(
+        tree,
+        &file_sha256(base)?,
+        &index.dialect,
+        written,
+        versions,
+        &digests,
+        &keys,
+    )
 }
 
 fn write_index_text(
@@ -290,7 +301,8 @@ fn write_index_text(
     digests: &BTreeMap<String, (String, String)>,
     keys: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut text = format!("{HEADER}\nbase\t{base_sha256}\ndialect\t{dialect}\nwritten\t{written}\n");
+    let mut text =
+        format!("{HEADER}\nbase\t{base_sha256}\ndialect\t{dialect}\nwritten\t{written}\n");
     for (entry, version) in versions {
         text.push_str(&format!("version\t{entry}\t{version}\n"));
     }
@@ -331,7 +343,8 @@ pub fn read_tree_index(tree: &Path) -> Option<TreeIndex> {
             continue;
         }
         let mut parts = line.splitn(4, '\t');
-        let (digest, key, stamp, path) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        let (digest, key, stamp, path) =
+            (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
         let key = (key != "-").then(|| key.to_owned());
         files.insert(
             path.to_owned(),

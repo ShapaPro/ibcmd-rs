@@ -395,7 +395,8 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     );
     let started = Instant::now();
     let numbered_layout = with_unidentified_form_items_numbered(&body.layout);
-    let form_fields = split_1c_braced_fields(numbered_layout.as_deref().unwrap_or(&body.layout), 0)?;
+    let form_fields =
+        split_1c_braced_fields(numbered_layout.as_deref().unwrap_or(&body.layout), 0)?;
     if let Some(timings) = timings.as_deref_mut() {
         timings.source_asset_form_split_cpu_ms += elapsed_ms(started);
     }
@@ -823,7 +824,10 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
             return Some(DetailedFormBodyExtraction::Rejected { diagnostics, error });
         }
     };
-    let xml = if context.form_compatibility.no_main_table_default_picture_marked {
+    let xml = if context
+        .form_compatibility
+        .no_main_table_default_picture_marked
+    {
         xml
     } else {
         with_no_main_table_default_picture_unmarked(xml, &attributes)
@@ -894,9 +898,9 @@ pub(super) fn with_unidentified_form_items_numbered(layout: &str) -> Option<Stri
         let scalars = rest[..quote].trim_end().strip_suffix(',')?;
         let scalars = scalars.split(',').map(str::trim).collect::<Vec<_>>();
         (scalars.len() == 4
-            && scalars
-                .iter()
-                .all(|scalar| !scalar.is_empty() && scalar.bytes().all(|byte| byte.is_ascii_digit())))
+            && scalars.iter().all(|scalar| {
+                !scalar.is_empty() && scalar.bytes().all(|byte| byte.is_ascii_digit())
+            }))
         .then(|| (wrapper_start, wrapper, scalars[3]))
     };
     // The form's hidden navigator group (`22` of kind `7`, stored without an

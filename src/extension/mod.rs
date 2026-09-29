@@ -130,7 +130,9 @@ fn finish_adopted(
     // Report entries by key, found once per adopted row.
     let mut report_index = std::collections::HashMap::with_capacity(report.storage.entries.len());
     for (index, entry) in report.storage.entries.iter().enumerate() {
-        report_index.entry(entry.logical_key.to_ascii_lowercase()).or_insert(index);
+        report_index
+            .entry(entry.logical_key.to_ascii_lowercase())
+            .or_insert(index);
     }
     for (name, _) in entries {
         if name.len() != 36 || name.contains('.') || Some(name) == root.as_ref() {
@@ -283,10 +285,12 @@ pub fn finish(
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<()> {
     let rows = Rows::new(entries);
-    let (uuid, text) = rows.root().context("the extension has no configuration row")?;
+    let (uuid, text) = rows
+        .root()
+        .context("the extension has no configuration row")?;
     let path = output_dir.join("Configuration.xml");
-    let xml = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let xml =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let rewritten = root::rewrite(&xml, &text, &|object| rows.name(object), source_version)
         .with_context(|| format!("extension root `{uuid}`"))?;
     fs::write(&path, rewritten).with_context(|| format!("failed to write {}", path.display()))
@@ -329,7 +333,9 @@ impl<'a> Rows<'a> {
             let own = format!("{{{name}}}");
             if body.starts_with("{2,")
                 && body.contains("{9cd510cd-abfc-11d4-9434-004095e12fc7,")
-                && head.windows(own.len()).any(|window| window == own.as_bytes())
+                && head
+                    .windows(own.len())
+                    .any(|window| window == own.as_bytes())
             {
                 return Ok((name.clone(), body.to_owned()));
             }
@@ -371,16 +377,28 @@ mod tests {
         // A long Cyrillic name puts byte 200 inside a two-byte letter; the
         // root search only looks at the head of each row.
         // Not the root: its header names another uuid.
-        let mut head = format!("{{2,{{cccccccc-cccc-4ccc-8ccc-cccccccccccc}},1,{{9cd510cd-abfc-11d4-9434-004095e12fc7,\"");
+        let mut head = format!(
+            "{{2,{{cccccccc-cccc-4ccc-8ccc-cccccccccccc}},1,{{9cd510cd-abfc-11d4-9434-004095e12fc7,\""
+        );
         if (200 - head.len()) % 2 == 0 {
             head.push('x');
         }
         let other = format!("{head}{}\"}}}}", "Я".repeat(200));
-        assert!(!other.is_char_boundary(200), "the fixture must split a letter at 200");
-        let root = format!("{{2,{{{GOOD}}},1,{{9cd510cd-abfc-11d4-9434-004095e12fc7,\"Корень\"}}}}");
+        assert!(
+            !other.is_char_boundary(200),
+            "the fixture must split a letter at 200"
+        );
+        let root =
+            format!("{{2,{{{GOOD}}},1,{{9cd510cd-abfc-11d4-9434-004095e12fc7,\"Корень\"}}}}");
         let entries = vec![
-            (BAD.to_owned(), crate::module_blob::deflate_raw(other.as_bytes()).unwrap()),
-            (GOOD.to_owned(), crate::module_blob::deflate_raw(root.as_bytes()).unwrap()),
+            (
+                BAD.to_owned(),
+                crate::module_blob::deflate_raw(other.as_bytes()).unwrap(),
+            ),
+            (
+                GOOD.to_owned(),
+                crate::module_blob::deflate_raw(root.as_bytes()).unwrap(),
+            ),
         ];
         let rows = Rows::new(&entries);
         let (uuid, _) = rows.root().unwrap();
@@ -389,13 +407,17 @@ mod tests {
 
     #[test]
     fn an_adopted_object_the_writer_cannot_read_fails_alone() {
-        let dir = std::env::temp_dir().join(format!("ibcmd-adopted-degrade-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ibcmd-adopted-degrade-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("Catalogs")).unwrap();
         let good = "<MetaDataObject>\r\n\t<Catalog uuid=\"x\">\r\n\t\t<Properties>\r\n\t\t\t<Name>Имя</Name>\r\n\t\t\t<Comment/>\r\n\t\t</Properties>\r\n\t</Catalog>\r\n</MetaDataObject>";
         fs::write(dir.join("Catalogs/Хорошо.xml"), good).unwrap();
         fs::write(dir.join("Catalogs/Плохо.xml"), "<MetaDataObject/>").unwrap();
-        let entries = vec![(GOOD.to_owned(), adopted_row(GOOD)), (BAD.to_owned(), adopted_row(BAD))];
+        let entries = vec![
+            (GOOD.to_owned(), adopted_row(GOOD)),
+            (BAD.to_owned(), adopted_row(BAD)),
+        ];
         let mut report = StorageImageSourceExportReport {
             output_dir: dir.clone(),
             source_version: "2.20".to_owned(),
@@ -404,7 +426,10 @@ mod tests {
                 None,
                 2,
                 2,
-                vec![entry(GOOD, "Catalogs/Хорошо.xml"), entry(BAD, "Catalogs/Плохо.xml")],
+                vec![
+                    entry(GOOD, "Catalogs/Хорошо.xml"),
+                    entry(BAD, "Catalogs/Плохо.xml"),
+                ],
             ),
         };
 
@@ -412,11 +437,22 @@ mod tests {
 
         let bad = &report.storage.entries[1];
         assert_eq!(bad.disposition, StorageExportDisposition::Failed);
-        assert!(bad.message.as_deref().unwrap_or_default().contains("no <Properties>"));
+        assert!(
+            bad.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no <Properties>")
+        );
         assert_eq!(report.storage.failed, 1);
-        assert_eq!(report.storage.entries[0].disposition, StorageExportDisposition::Supported);
+        assert_eq!(
+            report.storage.entries[0].disposition,
+            StorageExportDisposition::Supported
+        );
         let rewritten = fs::read_to_string(dir.join("Catalogs/Хорошо.xml")).unwrap();
-        assert!(rewritten.contains("<ObjectBelonging>Adopted</ObjectBelonging>"), "{rewritten}");
+        assert!(
+            rewritten.contains("<ObjectBelonging>Adopted</ObjectBelonging>"),
+            "{rewritten}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

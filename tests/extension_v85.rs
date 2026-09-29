@@ -18,11 +18,21 @@ fn assert_case(case: &str, input: &str) {
         .args(["--source-version", "2.21", "--overwrite"])
         .output()
         .expect("run ibcmd-rs");
-    assert!(run.status.success(), "{case}: {}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{case}: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let (native, ours) = (common::files(&expected), common::files(Path::new(&out)));
     assert!(!native.is_empty(), "{case}: no native tree");
-    let missing: Vec<_> = native.keys().filter(|rel| !ours.contains_key(*rel)).collect();
-    let extra: Vec<_> = ours.keys().filter(|rel| !native.contains_key(*rel)).collect();
+    let missing: Vec<_> = native
+        .keys()
+        .filter(|rel| !ours.contains_key(*rel))
+        .collect();
+    let extra: Vec<_> = ours
+        .keys()
+        .filter(|rel| !native.contains_key(*rel))
+        .collect();
     let differ: Vec<_> = native
         .iter()
         .filter(|(rel, bytes)| ours.get(*rel).is_some_and(|actual| actual != *bytes))
@@ -74,7 +84,10 @@ fn root_saved_by_8_5() {
 #[test]
 fn root_captions_saved_by_8_5() {
     // Saved by 8.5 itself with both captions set: members 64/65 of `{76,…}`.
-    assert_case("roots_captions_v85", "v85_extension_inputs/roots_captions_v85/input.cfe");
+    assert_case(
+        "roots_captions_v85",
+        "v85_extension_inputs/roots_captions_v85/input.cfe",
+    );
 }
 
 #[test]
@@ -95,23 +108,38 @@ fn template_fonts() {
 #[test]
 fn adopted_common_modules() {
     for case in ["module_all", "module_b0", "module_b1", "module_b2"] {
-        assert_case(&format!("adopted_{case}"), &format!("adopted/{case}/input.cfe"));
+        assert_case(
+            &format!("adopted_{case}"),
+            &format!("adopted/{case}/input.cfe"),
+        );
     }
 }
 
 #[test]
 fn adopted_catalogs_with_extended_modules() {
-    assert_case("adopted_catalog_modules", "adopted/catalog_modules/input.cfe");
-    assert_case("adopted_catalog_object_module", "adopted/catalog_object_module/input.cfe");
+    assert_case(
+        "adopted_catalog_modules",
+        "adopted/catalog_modules/input.cfe",
+    );
+    assert_case(
+        "adopted_catalog_object_module",
+        "adopted/catalog_object_module/input.cfe",
+    );
 }
 
 #[test]
 fn adopted_form_interceptors() {
     assert_case("adopted_form_events", "adopted/form_events/input.cfe");
-    assert_case("adopted_form_events_shared", "adopted/form_events_shared/input.cfe");
+    assert_case(
+        "adopted_form_events_shared",
+        "adopted/form_events_shared/input.cfe",
+    );
 }
 
 #[test]
 fn adopted_document_with_adopted_children() {
-    assert_case("adopted_document_children", "adopted/document_children/input.cfe");
+    assert_case(
+        "adopted_document_children",
+        "adopted/document_children/input.cfe",
+    );
 }

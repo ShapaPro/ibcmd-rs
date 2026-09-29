@@ -404,7 +404,8 @@ pub fn apply_overlay<C: OverlayCodec>(
     codec: &mut C,
     limits: ResourceLimits,
 ) -> Result<(StorageImage, OverlayReport), OverlayError> {
-    let plan = preflight(base, patch, codec.requires_versions()).map_err(OverlayError::Preflight)?;
+    let plan =
+        preflight(base, patch, codec.requires_versions()).map_err(OverlayError::Preflight)?;
     let mut entries = base.entries().to_vec();
     let mut changes = Vec::with_capacity(patch.len().saturating_add(1));
 

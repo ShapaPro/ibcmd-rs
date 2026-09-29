@@ -1398,7 +1398,9 @@ fn default_button_importance(
     item: &FormItemFactsV8_5_1,
 ) -> Result<()> {
     let own_importance = item.tail.get(5).and_then(Node::as_leaf);
-    if edits.elements[button].tag != "Button" || item.revision != "34" || own_importance != Some("1")
+    if edits.elements[button].tag != "Button"
+        || item.revision != "34"
+        || own_importance != Some("1")
     {
         return Ok(());
     }

@@ -318,12 +318,21 @@ mod tests {
         let record = &plain[record_start..record_end];
         assert!(record.ends_with(",0"), "{record}");
         let short = &record[..record.len() - 2];
-        let short_12 = format!("{}{}{}", &plain[..record_start], short, &plain[record_end..]);
+        let short_12 = format!(
+            "{}{}{}",
+            &plain[..record_start],
+            short,
+            &plain[record_end..]
+        );
         assert!(decode_inflated_compatible_mxl(short_12.as_bytes()).is_err());
         for revision in ["8", "9"] {
             let short = short_12.replacen("{8,1,12,", &format!("{{8,1,{revision},"), 1);
             let decoded = decode_inflated_compatible_mxl(short.as_bytes()).unwrap();
-            assert!(decoded.native_body_text().starts_with(&format!("{{8,1,{revision},")));
+            assert!(
+                decoded
+                    .native_body_text()
+                    .starts_with(&format!("{{8,1,{revision},"))
+            );
         }
     }
 

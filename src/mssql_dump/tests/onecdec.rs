@@ -42,9 +42,10 @@ fn owner_form_ref_falls_back_to_a_foreign_common_form() {
 fn foreign_types_never_override_storage_ids_but_may_respell_a_type_set() {
     const ANY_IB_REF: &str = "280f5f0e-9c8a-49cc-bf6d-4d296cc17a63";
     let mut indexes = MetadataTypeIndexes::default();
-    indexes
-        .references
-        .insert("aaaaaaaa-0000-0000-0000-000000000001".into(), "cfg:CatalogRef.Own".into());
+    indexes.references.insert(
+        "aaaaaaaa-0000-0000-0000-000000000001".into(),
+        "cfg:CatalogRef.Own".into(),
+    );
     indexes.dcs.insert(
         ANY_IB_REF.into(),
         DcsTypeResolution::TypeSet {
@@ -95,7 +96,13 @@ fn forms_declare_the_dcs_schema_namespace_from_compatibility_8_3_19() {
     for mode in ["Version8_3_19", "Version8_3_27", "Version8_5_1"] {
         assert!(forms_declare_dcs_schema_namespace(Some(mode)), "{mode}");
     }
-    for mode in ["Version8_3_18", "Version8_3_10", "Version8_3_8", "Version8_2_16", "Version8_1"] {
+    for mode in [
+        "Version8_3_18",
+        "Version8_3_10",
+        "Version8_3_8",
+        "Version8_2_16",
+        "Version8_1",
+    ] {
         assert!(!forms_declare_dcs_schema_namespace(Some(mode)), "{mode}");
     }
     // Nothing read (an external object, an unknown spelling): the platform's
@@ -109,7 +116,12 @@ fn forms_write_explicit_usual_group_behavior_from_compatibility_8_3_20() {
     for mode in ["Version8_3_20", "Version8_3_21", "Version8_5_1"] {
         assert!(forms_write_usual_group_behavior(Some(mode)), "{mode}");
     }
-    for mode in ["Version8_3_19", "Version8_3_17", "Version8_3_14", "Version8_2_16"] {
+    for mode in [
+        "Version8_3_19",
+        "Version8_3_17",
+        "Version8_3_14",
+        "Version8_2_16",
+    ] {
         assert!(!forms_write_usual_group_behavior(Some(mode)), "{mode}");
     }
     assert!(forms_write_usual_group_behavior(None));
@@ -139,7 +151,10 @@ fn a_button_of_revision_30_at_the_canonical_length_is_read_unpadded() {
     assert_eq!(item.tag, "Button");
     assert_eq!(item.command_uniqueness, None);
     let xml = format_form_child_items_xml(&[item], 1);
-    assert!(xml.contains("<ToolTipRepresentation>None</ToolTipRepresentation>"), "{xml}");
+    assert!(
+        xml.contains("<ToolTipRepresentation>None</ToolTipRepresentation>"),
+        "{xml}"
+    );
     assert!(!xml.contains("<CommandUniqueness>"), "{xml}");
 }
 
@@ -153,12 +168,18 @@ fn unidentified_items_are_numbered_but_the_navigator_is_not() {
                   {55,{9,02023637-7868-4a5f-8576-835a76e0c9ba},0,1,0,\"Список\",\
                   {5,\r\n{0},0,0,0,0,\"СписокСтрокаПоиска\",{22,{0},0,0,0,8,\"Меню\"}}}}";
     let numbered = with_unidentified_form_items_numbered(layout).expect("numbered");
-    assert!(numbered.contains("{22,{0},0,0,0,7,\"Navigator\",{12,{0},"), "{numbered}");
+    assert!(
+        numbered.contains("{22,{0},0,0,0,7,\"Navigator\",{12,{0},"),
+        "{numbered}"
+    );
     assert!(
         numbered.contains("{5,\r\n{10,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,0,\"СписокСтрокаПоиска\",{22,{11,02023637-7868-4a5f-8576-835a76e0c9ba},"),
         "{numbered}"
     );
-    assert_eq!(with_unidentified_form_items_numbered("{1,{0},0,0,0,0,x}"), None);
+    assert_eq!(
+        with_unidentified_form_items_numbered("{1,{0},0,0,0,0,x}"),
+        None
+    );
 }
 
 #[test]
@@ -169,7 +190,10 @@ fn enum_values_under_the_older_header_spelling_are_read() {
     let text = "\u{feff}{1,\r\n{20,dee62b97-84de-42d8-a934-d6f60c35d806,\r\n{0,\r\n{1,\r\n{0,0,aaaaaaaa-0000-4000-8000-000000000001},\"Перечисление\",\r\n{1,\"ru\",\"Перечисление\"},\"\",0,0}\r\n},0},4,\r\n{bee0a08c-07eb-40c0-8544-5c364c171465,2,\r\n{\r\n{0,\r\n{1,\r\n{0,0,aaaaaaaa-0000-4000-8000-000000000002},\"Первое\",\r\n{1,\"ru\",\"Первое\"},\"\",0,0}\r\n},0},\r\n{\r\n{0,\r\n{1,\r\n{0,0,aaaaaaaa-0000-4000-8000-000000000003},\"Второе\",\r\n{1,\"ru\",\"Второе значение\"},\"\",0,0}\r\n},0}\r\n}\r\n}";
     let values = parse_enum_values_from_text(text);
     assert_eq!(
-        values.iter().map(|value| value.name.as_str()).collect::<Vec<_>>(),
+        values
+            .iter()
+            .map(|value| value.name.as_str())
+            .collect::<Vec<_>>(),
         ["Первое", "Второе"]
     );
     assert_eq!(values[1].uuid, "aaaaaaaa-0000-4000-8000-000000000003");
@@ -194,7 +218,8 @@ fn an_orphan_form_descriptor_owns_no_integration_service_body() {
     ]
     .into_iter()
     .map(|audit| match audit {
-        MetadataTextRowAudit::Extracted(row) | MetadataTextRowAudit::ExtractedWithWarning(row, _) => row,
+        MetadataTextRowAudit::Extracted(row)
+        | MetadataTextRowAudit::ExtractedWithWarning(row, _) => row,
         MetadataTextRowAudit::Miss(_) => panic!("row not extracted"),
     })
     .collect::<Vec<_>>();
@@ -210,7 +235,10 @@ fn a_help_link_to_an_html_template_names_the_template_document() {
     let template = "aaaaaaaa-0000-4000-8000-000000000020";
     let catalog = "aaaaaaaa-0000-4000-8000-000000000021";
     let refs = BTreeMap::from([
-        (template.to_string(), "Catalog.База.Template.Раздел".to_string()),
+        (
+            template.to_string(),
+            "Catalog.База.Template.Раздел".to_string(),
+        ),
         (catalog.to_string(), "Catalog.База".to_string()),
     ]);
     let stored = format!(
@@ -264,7 +292,10 @@ fn a_drawing_writes_no_empty_detail_parameter() {
     drawing.members.detail_parameter = Some("Расшифровка".to_string());
     let mut xml = String::new();
     push_moxel_drawing_xml(&mut xml, &drawing, &BTreeMap::new());
-    assert!(xml.contains("<detailParameter>Расшифровка</detailParameter>"), "{xml}");
+    assert!(
+        xml.contains("<detailParameter>Расшифровка</detailParameter>"),
+        "{xml}"
+    );
 }
 
 #[test]
@@ -319,12 +350,27 @@ fn names_the_standard_pictures_of_the_query_wizard_forms() {
     // ИТК (8.3.27.2214 dumps of three extensions): every occurrence of these
     // identities is spelled with one name.
     for (uuid, name) in [
-        ("a119150f-6c0c-4a94-97b0-5f08d7ebd6f5", "StdPicture.HierarchicalView"),
-        ("18bca3d7-a7a5-41df-a180-4dff9c217f43", "StdPicture.QueryWizardCreateNestedQuery"),
-        ("7604cff7-5cc6-4f88-8d16-504f01b92a3c", "StdPicture.QueryWizardCreateTempTableDescription"),
-        ("270de5f0-f2df-4845-9fde-30b1ec486217", "StdPicture.QueryWizardShowChangesTables"),
+        (
+            "a119150f-6c0c-4a94-97b0-5f08d7ebd6f5",
+            "StdPicture.HierarchicalView",
+        ),
+        (
+            "18bca3d7-a7a5-41df-a180-4dff9c217f43",
+            "StdPicture.QueryWizardCreateNestedQuery",
+        ),
+        (
+            "7604cff7-5cc6-4f88-8d16-504f01b92a3c",
+            "StdPicture.QueryWizardCreateTempTableDescription",
+        ),
+        (
+            "270de5f0-f2df-4845-9fde-30b1ec486217",
+            "StdPicture.QueryWizardShowChangesTables",
+        ),
         ("c8a269ff-5b6d-4f42-9fa6-369d7b492aa7", "StdPicture.Rename"),
-        ("fafe4c1f-c265-4220-a0e1-8f82af26b72e", "StdPicture.SortList"),
+        (
+            "fafe4c1f-c265-4220-a0e1-8f82af26b72e",
+            "StdPicture.SortList",
+        ),
     ] {
         assert_eq!(standard_picture_name(uuid), Some(name), "{uuid}");
     }
@@ -362,8 +408,16 @@ fn a_single_row_table_has_no_select_all() {
         ..single.clone()
     };
     let select_all = "51c99108-107c-43e1-8918-e48835bf2495";
-    assert!(!form_table_owns_button_standard_command("SelectAll", select_all, &single));
-    assert!(form_table_owns_button_standard_command("SelectAll", select_all, &multi));
+    assert!(!form_table_owns_button_standard_command(
+        "SelectAll",
+        select_all,
+        &single
+    ));
+    assert!(form_table_owns_button_standard_command(
+        "SelectAll",
+        select_all,
+        &multi
+    ));
     assert!(form_table_owns_button_standard_command(
         "CopyToClipboard",
         "00000000-0000-0000-0000-000000000001",

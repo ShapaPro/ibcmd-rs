@@ -41,7 +41,10 @@ fn remove_root_property(xml: &str, tag: &str) -> Result<String> {
         };
         out.replace_range(at..end, "");
     }
-    if out.contains(&format!("{start}>")) || out.contains(&format!("{start}/>")) || out.contains(&format!("{start} ")) {
+    if out.contains(&format!("{start}>"))
+        || out.contains(&format!("{start}/>"))
+        || out.contains(&format!("{start} "))
+    {
         bail!("<{tag}> is still in the root XML");
     }
     Ok(out)
@@ -135,6 +138,8 @@ mod tests {
             remove_root_property(&without, "IncludeHelpInContents").unwrap(),
             "\t\t<Properties>\r\n\t\t\t<Name>X</Name>\r\n\t\t</Properties>"
         );
-        assert!(remove_root_property("\r\n\t\t\t<Explanation>unterminated", "Explanation").is_err());
+        assert!(
+            remove_root_property("\r\n\t\t\t<Explanation>unterminated", "Explanation").is_err()
+        );
     }
 }

@@ -13,7 +13,11 @@ fn assert_case(case: &str) {
     let dir = common::fixture("adopted").join(case);
     let out = common::temp_dir(&format!("adopted-{case}"));
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let mut compared = 0;
     for (rel, expected) in common::files(&dir) {
         if rel == "input.cfe" {
@@ -72,7 +76,11 @@ fn adopted_language_of_the_clean_room_extension() {
     let dir = common::fixture("test_extension");
     let out = common::temp_dir("adopted-language");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("expected/Languages/Русский.xml")).unwrap();
     let actual = fs::read(out.join("Languages/Русский.xml")).unwrap();
     assert!(

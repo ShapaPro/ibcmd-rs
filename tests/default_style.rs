@@ -13,7 +13,11 @@ fn the_default_style_is_printed() {
     let dir = common::fixture("default_style");
     let out = common::temp_dir("default-style");
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Configuration.xml")).unwrap();
     let actual = fs::read(out.join("Configuration.xml")).unwrap_or_default();
     assert!(

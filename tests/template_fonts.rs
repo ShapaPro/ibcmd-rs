@@ -13,9 +13,14 @@ fn style_fonts_keep_their_code_in_the_2_20_dialect() {
     let dir = common::fixture("template_fonts");
     let out = common::temp_dir("template-fonts");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Template.xml")).unwrap();
-    let actual = fs::read(out.join("CommonTemplates/ТестРасширение_Макет/Ext/Template.xml")).unwrap();
+    let actual =
+        fs::read(out.join("CommonTemplates/ТестРасширение_Макет/Ext/Template.xml")).unwrap();
     assert!(
         expected == actual,
         "--- native\n{}\n--- ours\n{}",

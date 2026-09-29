@@ -141,9 +141,9 @@ pub(crate) fn compile_edit(
     let module_bases = modules
         .iter()
         .filter_map(|edit| match edit {
-            super::Edit::FormBody { key, .. } => {
-                base_rows.get(key).map(|packed| (key.clone(), packed.clone()))
-            }
+            super::Edit::FormBody { key, .. } => base_rows
+                .get(key)
+                .map(|packed| (key.clone(), packed.clone())),
             super::Edit::Module { .. } => None,
         })
         .collect::<BTreeMap<_, _>>();
@@ -207,7 +207,9 @@ pub(crate) fn compile_edit(
         .iter()
         .any(|parent| parent == "Configuration.xml");
     let root_key = keys.get("Configuration.xml").cloned();
-    let base_root = root_key.as_ref().and_then(|key| base_rows.get(key).cloned());
+    let base_root = root_key
+        .as_ref()
+        .and_then(|key| base_rows.get(key).cloned());
     let compiled = if prefixes.is_empty() {
         crate::mssql::CompiledContainerRows::default()
     } else {
@@ -487,7 +489,8 @@ fn tree_root_children(edited: &Path) -> Result<BTreeMap<String, Vec<String>>> {
             anyhow::bail!("Configuration.xml names a child kind `{kind}` no family holds");
         };
         let path = edited.join(folder).join(format!("{name}.xml"));
-        let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
         let uuid = crate::module_blob::parse_simple_metadata_xml_properties(&bytes)?.uuid;
         children.entry(kind.to_owned()).or_default().push(uuid);
     }
@@ -564,13 +567,18 @@ fn with_configinfo(
     digests: &BTreeMap<String, String>,
     gone: impl Fn(&str) -> bool,
 ) -> Result<String> {
-    let start = text.rfind("\n{").context("configinfo has no digest block")? + 1;
+    let start = text
+        .rfind("\n{")
+        .context("configinfo has no digest block")?
+        + 1;
     let block = text[start..].trim_end();
     let inner = block
         .strip_prefix('{')
         .and_then(|rest| rest.strip_suffix('}'))
         .context("configinfo digest block is not braced")?;
-    let (_, pairs) = inner.split_once(',').context("configinfo digest block has no count")?;
+    let (_, pairs) = inner
+        .split_once(',')
+        .context("configinfo digest block has no count")?;
     let fields = pairs.split(',').collect::<Vec<_>>();
     if fields.len() % 2 != 0 {
         anyhow::bail!("configinfo digests are not entry/digest pairs");

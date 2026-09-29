@@ -3815,7 +3815,9 @@ pub(super) fn extract_configuration_source_xml(
     let mut xml = format_configuration_source_xml(&header, &properties, source_version);
     if source_version == InfobaseConfigSourceVersion::V2_21 {
         match configuration_properties_8_5_1(text, object_refs) {
-            Some(properties_8_5_1) => insert_configuration_properties_8_5_1_xml(&mut xml, &properties_8_5_1)?,
+            Some(properties_8_5_1) => {
+                insert_configuration_properties_8_5_1_xml(&mut xml, &properties_8_5_1)?
+            }
             // An extension's root properties are rewritten whole by the
             // extension writer (`crate::extension::root`), which spells the
             // members 8.5 adds to an extension; only this file's frame counts.
@@ -3918,8 +3920,7 @@ pub(super) fn parse_configuration_properties_from_text(
         fields
             .get(43)
             .and_then(|field| configuration_compatibility_mode_xml_under(field.trim(), ceiling))
-    } else if source_version
-        == InfobaseConfigSourceVersion::V2_21
+    } else if source_version == InfobaseConfigSourceVersion::V2_21
         && !tuple_8_5_1
         && (is_native_68_shape || is_normalized_67_shape)
     {
@@ -4240,7 +4241,10 @@ fn normalize_short_configuration_root_property_fields(fields: Vec<&str>) -> Opti
     // equal but the root header and two tables the reader does not compare,
     // members 53..60 exactly the reference's. 1cv8_en.cf and БСП 3.1 are
     // `{67,…}` of 60.
-    let Some(version) = fields.first().and_then(|field| field.trim().parse::<u32>().ok()) else {
+    let Some(version) = fields
+        .first()
+        .and_then(|field| field.trim().parse::<u32>().ok())
+    else {
         return Some(fields);
     };
     if !(OLDEST_READ_ROOT_TUPLE_VERSION..68).contains(&version)
@@ -4456,12 +4460,14 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
                 && tail.len() == 1
                 && trailing_field.trim() == "0" =>
         {
-            functionalities.extend(CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES[n..].iter().map(
-                |(_, name)| ConfigurationMobileApplicationFunctionality {
-                    name,
-                    use_functionality: false,
-                },
-            ));
+            functionalities.extend(
+                CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES[n..]
+                    .iter()
+                    .map(|(_, name)| ConfigurationMobileApplicationFunctionality {
+                        name,
+                        use_functionality: false,
+                    }),
+            );
         }
         _ => return None,
     }
@@ -4873,7 +4879,10 @@ fn parse_configuration_root_layout(text: &str, uuid: &str) -> Option<Configurati
     {
         return None;
     }
-    for class_id in CONFIGURATION_CONTAINED_OBJECT_CLASSES.get(stored.len()..).unwrap_or_default() {
+    for class_id in CONFIGURATION_CONTAINED_OBJECT_CLASSES
+        .get(stored.len()..)
+        .unwrap_or_default()
+    {
         contained_objects.push(ConfigurationContainedObject {
             class_id: (*class_id).to_owned(),
             object_id: derived_uuid(&format!("{uuid}/{class_id}")),
@@ -5325,7 +5334,10 @@ impl FormCompatibility {
 
 /// `Version8_3_21` -> (8, 3, 21).
 fn compatibility_version(mode: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = mode.strip_prefix("Version")?.split('_').map(str::parse::<u32>);
+    let mut parts = mode
+        .strip_prefix("Version")?
+        .split('_')
+        .map(str::parse::<u32>);
     let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
         return None;
     };

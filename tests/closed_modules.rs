@@ -13,9 +13,17 @@ fn a_closed_module_of_storage_revision_0_is_written_as_bin() {
     let dir = common::fixture("closed_module");
     let out = common::temp_dir("closed-module");
     let run = common::export(&dir.join("input.cfe"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Module.bin")).unwrap();
     let actual = fs::read(out.join("CommonModules/ТестРасширение_Модуль/Ext/Module.bin"))
         .unwrap_or_default();
-    assert!(expected == actual, "Module.bin differs ({} bytes)", actual.len());
+    assert!(
+        expected == actual,
+        "Module.bin differs ({} bytes)",
+        actual.len()
+    );
 }

@@ -61,9 +61,12 @@ fn external_corpus_does_not_regress() {
     );
     assert!(failed.is_empty(), "exports failed: {failed:?}");
     // A file the platform does not write is as wrong as a differing one.
-    assert!(extra.is_empty(), "files the platform does not write: {extra:?}");
-    let baseline_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/external/corpus-baseline.txt");
+    assert!(
+        extra.is_empty(),
+        "files the platform does not write: {extra:?}"
+    );
+    let baseline_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external/corpus-baseline.txt");
     if std::env::var_os("IBCMD_UPDATE_BASELINE").is_some() {
         let lines: Vec<_> = identical.iter().cloned().collect();
         fs::write(&baseline_path, lines.join("\n") + "\n").unwrap();

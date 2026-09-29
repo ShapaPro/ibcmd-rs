@@ -63,7 +63,8 @@ pub fn preflight(tree: &Path) -> std::result::Result<bool, String> {
     if !tree.exists() {
         return Ok(true);
     }
-    let mut entries = fs::read_dir(tree).map_err(|source| format!("failed to read {}: {source}", tree.display()))?;
+    let mut entries = fs::read_dir(tree)
+        .map_err(|source| format!("failed to read {}: {source}", tree.display()))?;
     if entries.next().is_none() {
         return Ok(true);
     }
@@ -83,8 +84,17 @@ pub fn preflight(tree: &Path) -> std::result::Result<bool, String> {
         return Ok(false);
     }
     edits.sort();
-    let shown = edits.iter().take(10).cloned().collect::<Vec<_>>().join(", ");
-    let more = if edits.len() > 10 { format!(" and {} more", edits.len() - 10) } else { String::new() };
+    let shown = edits
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if edits.len() > 10 {
+        format!(" and {} more", edits.len() - 10)
+    } else {
+        String::new()
+    };
     Err(format!(
         "the tree has edits not loaded yet ({shown}{more}): load them with `cf load`, or export \
          again with --overwrite to drop them"
@@ -110,9 +120,11 @@ pub fn replace_tree(tree: &Path, scratch: &Path, index: &index::TreeIndex) -> Re
     for path in load::relative_files(scratch)? {
         let target = tree.join(&path);
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::copy(scratch.join(&path), &target).with_context(|| format!("failed to write {}", target.display()))?;
+        fs::copy(scratch.join(&path), &target)
+            .with_context(|| format!("failed to write {}", target.display()))?;
     }
     prune_empty_dirs(tree);
     Ok(())
@@ -152,8 +164,8 @@ pub fn already_current(
     source_version: InfobaseConfigSourceVersion,
 ) -> Option<UpdateSummary> {
     let index = index::read_tree_index(tree)?;
-    let current = index.dialect == source_version.as_str()
-        && index::file_sha256(input).ok()? == index.base;
+    let current =
+        index.dialect == source_version.as_str() && index::file_sha256(input).ok()? == index.base;
     current.then(|| UpdateSummary {
         mode: "unchanged",
         ..UpdateSummary::default()
@@ -167,7 +179,8 @@ pub fn plan(
     entries: &[(String, Vec<u8>)],
     source_version: InfobaseConfigSourceVersion,
 ) -> std::result::Result<BTreeSet<String>, String> {
-    let index = index::read_tree_index(tree).ok_or("the tree has no index (export it with --index)")?;
+    let index =
+        index::read_tree_index(tree).ok_or("the tree has no index (export it with --index)")?;
     if index.dialect != source_version.as_str() {
         return Err(format!("the tree is of dialect {}", index.dialect));
     }
@@ -207,7 +220,11 @@ pub fn update_incrementally(
     let old_versions = indexed_versions(tree, &index);
     let new_versions = stored_config_versions(&entries).context("the file records no versions")?;
     let mut summary = UpdateSummary {
-        mode: if changed.is_empty() { "unchanged" } else { "incremental" },
+        mode: if changed.is_empty() {
+            "unchanged"
+        } else {
+            "incremental"
+        },
         changed_entries: changed.iter().cloned().collect(),
         ..UpdateSummary::default()
     };
@@ -221,7 +238,8 @@ pub fn update_incrementally(
         .into_iter()
         .filter(|(name, _)| !name.contains('.') || changed.contains(name))
         .collect::<Vec<_>>();
-    let report = crate::extension::export_entries_to_source(profile, subset, scratch, true, source_version)?;
+    let report =
+        crate::extension::export_entries_to_source(profile, subset, scratch, true, source_version)?;
     // Nothing is written until every changed entry is exported: a failed
     // one would leave its old files removed and the index moved on. (The
     // partial export's own `versions` fails, lacking most entries; the
@@ -238,7 +256,11 @@ pub fn update_incrementally(
             format!(
                 "{}{}",
                 entry.logical_key,
-                entry.message.as_deref().map(|message| format!(" ({message})")).unwrap_or_default()
+                entry
+                    .message
+                    .as_deref()
+                    .map(|message| format!(" ({message})"))
+                    .unwrap_or_default()
             )
         })
         .collect::<Vec<_>>();
@@ -267,7 +289,10 @@ pub fn update_incrementally(
             rewritten.push((output, entry.logical_key.clone()));
         }
     }
-    let written = rewritten.iter().map(|(path, _)| path.as_str()).collect::<BTreeSet<_>>();
+    let written = rewritten
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<BTreeSet<_>>();
     let mut removed = Vec::new();
     for (path, key) in index.keys() {
         if changed.contains(&key) && !written.contains(path.as_str()) {
@@ -309,7 +334,8 @@ fn rewrite_config_versions(
     old: &BTreeMap<String, String>,
     new: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let id = line

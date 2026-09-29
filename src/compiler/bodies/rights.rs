@@ -336,10 +336,11 @@ fn validate_native(root: &NativeValue) -> Result<RoleRightsSummary, RightsCodecE
     let set_for_new_objects = parse_root_bool(&fields[3], "setForNewObjects")?;
     // An extension's adopted role stores `2` (fixture `adopted/role`;
     // 8.3.27.2214 dumps `false`).
-    let set_for_attributes_by_default = match required_token(&fields[4], "setForAttributesByDefault")? {
-        "2" => false,
-        _ => parse_root_bool(&fields[4], "setForAttributesByDefault")?,
-    };
+    let set_for_attributes_by_default =
+        match required_token(&fields[4], "setForAttributesByDefault")? {
+            "2" => false,
+            _ => parse_root_bool(&fields[4], "setForAttributesByDefault")?,
+        };
     let independent_rights_of_child_objects =
         parse_root_bool(&fields[5], "independentRightsOfChildObjects")?;
     exact_token(&fields[6], "4294967295", "Role Rights trailing marker")?;

@@ -136,26 +136,14 @@ pub fn compile_source_rows_offline(
         metadata_xmls
             .par_iter()
             .map(|xml| {
-                prepare_metadata_object_stage(
-                    sql,
-                    OFFLINE_DATABASE,
-                    xml.clone(),
-                    Some(&source),
-                )
+                prepare_metadata_object_stage(sql, OFFLINE_DATABASE, xml.clone(), Some(&source))
             })
             .collect::<Result<Vec<_>>>()
     })??;
     let common_modules = parallel::install(|| {
         common_module_xmls
             .par_iter()
-            .map(|xml| {
-                prepare_common_module_object_stage(
-                    sql,
-                    OFFLINE_DATABASE,
-                    xml.clone(),
-                    None,
-                )
-            })
+            .map(|xml| prepare_common_module_object_stage(sql, OFFLINE_DATABASE, xml.clone(), None))
             .collect::<Result<Vec<_>>>()
     })??;
     ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
@@ -234,7 +222,10 @@ pub(super) fn note_skipped(what: String) {
 
 /// The bodies the offline compile of this process skipped.
 pub fn skipped_bodies() -> Vec<String> {
-    SKIPPED.lock().map(|skipped| skipped.clone()).unwrap_or_default()
+    SKIPPED
+        .lock()
+        .map(|skipped| skipped.clone())
+        .unwrap_or_default()
 }
 
 /// A module body entry (`<owner>.<n>`) packed from its text, as a stage
@@ -251,7 +242,9 @@ pub fn pack_module_text(key: &str, text: &[u8]) -> Result<Vec<u8>> {
         StoragePatchOutcome::NeedsBase { required, reason } => {
             bail!("module body {key} requires base row {required}: {reason}")
         }
-        StoragePatchOutcome::Unsupported { reason } => bail!("unsupported module body {key}: {reason}"),
+        StoragePatchOutcome::Unsupported { reason } => {
+            bail!("unsupported module body {key}: {reason}")
+        }
     }
 }
 
@@ -287,7 +280,10 @@ pub(super) fn adopted_form_body(
     let base_plain = String::from_utf8(crate::module_blob::inflate_raw(base_body)?)
         .context("the base form body is not UTF-8")?;
     let parsed = crate::module_blob::parse_form_body_plain(&base_plain)?;
-    let base_form = match (parsed.trailing.get(5).map(|f| f.trim()), parsed.trailing.get(6)) {
+    let base_form = match (
+        parsed.trailing.get(5).map(|f| f.trim()),
+        parsed.trailing.get(6),
+    ) {
         (Some("1"), Some(base)) if base.trim().starts_with('{') => base.trim().to_owned(),
         _ => bail!("the base form body is not an adopted form's"),
     };
@@ -309,9 +305,7 @@ type Bindings = Vec<(String, String)>;
 
 /// The form XML without `<BaseForm>`, each event's interceptor lines folded
 /// into one line under a stand-in handler, and the stand-ins' bindings.
-fn without_adoption(
-    xml: &str,
-) -> Result<(String, std::collections::BTreeMap<String, Bindings>)> {
+fn without_adoption(xml: &str) -> Result<(String, std::collections::BTreeMap<String, Bindings>)> {
     let mut own = xml.to_owned();
     if let Some(start) = own.find("\t<BaseForm") {
         let line_end = start + own[start..].find('\n').context("<BaseForm> line")? + 1;
@@ -331,7 +325,10 @@ fn without_adoption(
     let mut rest = own.as_str();
     while let Some(open) = rest.find("<Events>") {
         let body_start = open + "<Events>".len();
-        let close = body_start + rest[body_start..].find("</Events>").context("<Events> is not closed")?;
+        let close = body_start
+            + rest[body_start..]
+                .find("</Events>")
+                .context("<Events> is not closed")?;
         out.push_str(&rest[..body_start]);
         out.push_str(&folded_events(&rest[body_start..close], &mut stand_ins)?);
         rest = &rest[close..];
@@ -368,7 +365,12 @@ fn folded_events(
             .split_once(" callType=\"")
             .map(|(_, value)| value.split('"').next().unwrap_or_default().to_owned());
         let handler = rest[open_end + 1..close].to_owned();
-        lines.push((name, call_type, handler, rest[at..close + "</Event>".len()].to_owned()));
+        lines.push((
+            name,
+            call_type,
+            handler,
+            rest[at..close + "</Event>".len()].to_owned(),
+        ));
         last_end = consumed + close + "</Event>".len();
         consumed += close + "</Event>".len();
         rest = &body[consumed..];
@@ -388,7 +390,10 @@ fn folded_events(
         if !groups.contains_key(&name) {
             order.push(name.clone());
         }
-        groups.entry(name).or_default().push((call_type, handler, line));
+        groups
+            .entry(name)
+            .or_default()
+            .push((call_type, handler, line));
     }
     let mut folded = Vec::new();
     for name in order {
@@ -403,7 +408,10 @@ fn folded_events(
             group
                 .iter()
                 .map(|(call_type, handler, _)| {
-                    (handler.clone(), call_type.clone().unwrap_or_else(|| "Before".to_owned()))
+                    (
+                        handler.clone(),
+                        call_type.clone().unwrap_or_else(|| "Before".to_owned()),
+                    )
                 })
                 .collect(),
         );
@@ -471,7 +479,8 @@ fn with_call_type_blocks(
             };
             let (first_handler, first_code, extras) = match bindings.first() {
                 Some((handler, call_type))
-                    if !handler.is_empty() && (call_type == "Before" || call_type == "Override") =>
+                    if !handler.is_empty()
+                        && (call_type == "Before" || call_type == "Override") =>
                 {
                     (handler.as_str(), code(call_type), &bindings[1..])
                 }
@@ -558,7 +567,9 @@ mod tests {
                     .unwrap();
             let plain =
                 String::from_utf8(crate::module_blob::inflate_raw(&packed.blob).unwrap()).unwrap();
-            crate::module_blob::parse_form_body_plain(&plain).unwrap().layout
+            crate::module_blob::parse_form_body_plain(&plain)
+                .unwrap()
+                .layout
         };
         let bare = layout(&without);
         assert!(bare.contains("{\"N\",60}"), "{bare}");
@@ -572,8 +583,13 @@ mod tests {
         let xml = "\t<Events>\r\n\t\t<Event name=\"OnOpen\" callType=\"Before\"></Event>\r\n\t</Events>\r\n";
         let (own, call_types) = super::without_adoption(xml).unwrap();
         let stand_in = format!("{}0", super::STAND_IN);
-        assert!(own.contains(&format!("<Event name=\"OnOpen\">{stand_in}</Event>")), "{own}");
-        let block = format!("{{1,3ccc650e-f631-4cae-8e33-3eaac610b5f9,\"{stand_in}\",1,0,3ccc650e-f631-4cae-8e33-3eaac610b5f9,0,1}}");
+        assert!(
+            own.contains(&format!("<Event name=\"OnOpen\">{stand_in}</Event>")),
+            "{own}"
+        );
+        let block = format!(
+            "{{1,3ccc650e-f631-4cae-8e33-3eaac610b5f9,\"{stand_in}\",1,0,3ccc650e-f631-4cae-8e33-3eaac610b5f9,0,1}}"
+        );
         assert_eq!(
             super::with_call_type_blocks(&block, &call_types),
             "{1,3ccc650e-f631-4cae-8e33-3eaac610b5f9,\"\",1,0,3ccc650e-f631-4cae-8e33-3eaac610b5f9,0,2,\"\",0}"
@@ -587,10 +603,15 @@ mod tests {
     fn an_event_s_lines_fold_into_one_stored_event() {
         let xml = "\t<Events>\r\n\t\t<Event name=\"OnCreateAtServer\" callType=\"Before\">Перед</Event>\r\n\t\t<Event name=\"OnCreateAtServer\" callType=\"Before\"></Event>\r\n\t\t<Event name=\"BeforeWriteAtServer\" callType=\"After\">После</Event>\r\n\t</Events>\r\n";
         let (own, stand_ins) = super::without_adoption(xml).unwrap();
-        let (first, second) = (format!("{}0", super::STAND_IN), format!("{}1", super::STAND_IN));
+        let (first, second) = (
+            format!("{}0", super::STAND_IN),
+            format!("{}1", super::STAND_IN),
+        );
         assert_eq!(
             own,
-            format!("\t<Events>\r\n\t\t<Event name=\"OnCreateAtServer\">{first}</Event>\r\n\t\t<Event name=\"BeforeWriteAtServer\">{second}</Event>\r\n\t</Events>\r\n")
+            format!(
+                "\t<Events>\r\n\t\t<Event name=\"OnCreateAtServer\">{first}</Event>\r\n\t\t<Event name=\"BeforeWriteAtServer\">{second}</Event>\r\n\t</Events>\r\n"
+            )
         );
         let block = format!("{{2,a,\"{first}\",b,\"{second}\",1,0,a,0,1,b,0,1}}");
         assert_eq!(
@@ -610,7 +631,10 @@ mod tests {
                 .unwrap();
         let plain =
             String::from_utf8(crate::module_blob::inflate_raw(&packed.blob).unwrap()).unwrap();
-        assert!(plain.contains("59ef2b80-c86b-11d5-a3c1-0050bae0a776"), "{plain}");
+        assert!(
+            plain.contains("59ef2b80-c86b-11d5-a3c1-0050bae0a776"),
+            "{plain}"
+        );
     }
 
     /// A type the export could not name is written as its raw
@@ -623,7 +647,10 @@ mod tests {
                 .unwrap();
         let plain =
             String::from_utf8(crate::module_blob::inflate_raw(&packed.blob).unwrap()).unwrap();
-        assert!(plain.contains("53fde52a-3d5f-4030-a5b4-365e4b1eee72"), "{plain}");
+        assert!(
+            plain.contains("53fde52a-3d5f-4030-a5b4-365e4b1eee72"),
+            "{plain}"
+        );
     }
 
     /// The export spells the any-reference type `cfg:AnyRef` under older
@@ -645,10 +672,17 @@ mod tests {
     #[test]
     fn a_command_representation_reaches_the_native_writer() {
         let packed =
-            crate::module_blob::pack_native_form_body_blob(FORM.as_bytes(), None, None, None).unwrap();
-        let plain = String::from_utf8(crate::module_blob::inflate_raw(&packed.blob).unwrap()).unwrap();
-        let at = plain.find("\"Включить\",2,").or_else(|| plain.find("\"Включить\",3,"));
-        eprintln!("{}", &plain[at.unwrap_or(0).saturating_sub(10)..(at.unwrap_or(0) + 40).min(plain.len())]);
+            crate::module_blob::pack_native_form_body_blob(FORM.as_bytes(), None, None, None)
+                .unwrap();
+        let plain =
+            String::from_utf8(crate::module_blob::inflate_raw(&packed.blob).unwrap()).unwrap();
+        let at = plain
+            .find("\"Включить\",2,")
+            .or_else(|| plain.find("\"Включить\",3,"));
+        eprintln!(
+            "{}",
+            &plain[at.unwrap_or(0).saturating_sub(10)..(at.unwrap_or(0) + 40).min(plain.len())]
+        );
         assert!(plain.contains("\"Включить\",2,"), "{plain}");
     }
 }

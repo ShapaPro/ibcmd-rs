@@ -14,7 +14,11 @@ fn a_choice_list_of_dates_is_written() {
     let dir = common::fixture("choice_list_dates");
     let out = common::temp_dir("choice-list-dates");
     let run = common::export(&dir.join("input.cf"), &out);
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(dir.join("Form.xml")).unwrap();
     let actual = fs::read(out.join("CommonForms/ФормаДаты/Ext/Form.xml")).unwrap_or_default();
     assert!(

@@ -26,11 +26,13 @@ impl ExtensionTypes {
         let rows = entries
             .iter()
             .filter(|(name, _)| name.len() == 36 && !name.contains('.'))
-            .filter_map(|(name, payload)| match metadata_text_row_audit_from_blob(name, payload) {
-                MetadataTextRowAudit::Extracted(row)
-                | MetadataTextRowAudit::ExtractedWithWarning(row, _) => Some(row),
-                MetadataTextRowAudit::Miss(_) => None,
-            })
+            .filter_map(
+                |(name, payload)| match metadata_text_row_audit_from_blob(name, payload) {
+                    MetadataTextRowAudit::Extracted(row)
+                    | MetadataTextRowAudit::ExtractedWithWarning(row, _) => Some(row),
+                    MetadataTextRowAudit::Miss(_) => None,
+                },
+            )
             .collect::<Vec<_>>();
         Self {
             index: build_metadata_type_index_from_texts(&rows),

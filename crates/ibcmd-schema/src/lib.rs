@@ -5888,8 +5888,8 @@ impl ConfigurationPropertiesEvidencedDefaultBlockPolicy {
     /// [`Self::tuple_fields_without_properties_output`]).
     pub fn unproven_tuple_fields(&self) -> &'static [usize] {
         &[
-            0, 9, 11, 17, 18, 19, 20, 21, 27, 34, 35, 42, 44, 45, 46, 47, 48, 49, 50, 52, 54,
-            55, 56, 57, 58, 60,
+            0, 9, 11, 17, 18, 19, 20, 21, 27, 34, 35, 42, 44, 45, 46, 47, 48, 49, 50, 52, 54, 55,
+            56, 57, 58, 60,
         ]
     }
 

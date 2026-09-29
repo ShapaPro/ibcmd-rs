@@ -12,8 +12,15 @@ use std::fs;
 
 fn same_file(case: &str, exported: &str, expected: &std::path::Path) {
     let out = common::temp_dir(&format!("old-root-{case}"));
-    let run = common::export(&common::fixture("old_roots").join(case).join("input.cf"), &out);
-    assert!(run.status.success(), "{case}: {}", String::from_utf8_lossy(&run.stdout));
+    let run = common::export(
+        &common::fixture("old_roots").join(case).join("input.cf"),
+        &out,
+    );
+    assert!(
+        run.status.success(),
+        "{case}: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(expected).unwrap();
     let actual = fs::read(out.join(exported)).unwrap_or_default();
     assert!(
@@ -69,8 +76,15 @@ fn an_extension_root_in_the_66_shape_is_written() {
     // writer looked for `{68,` or `{76,` only.
     let case = "ext_v66";
     let out = common::temp_dir(&format!("old-root-{case}"));
-    let run = common::export(&common::fixture("old_roots").join(case).join("input.cfe"), &out);
-    assert!(run.status.success(), "{case}: {}", String::from_utf8_lossy(&run.stdout));
+    let run = common::export(
+        &common::fixture("old_roots").join(case).join("input.cfe"),
+        &out,
+    );
+    assert!(
+        run.status.success(),
+        "{case}: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     let expected = fs::read(common::fixture("extension_roots/values/Configuration.xml")).unwrap();
     let actual = fs::read(out.join("Configuration.xml")).unwrap_or_default();
     assert!(
