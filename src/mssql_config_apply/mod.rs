@@ -23,7 +23,9 @@
 
 pub mod gate;
 pub mod model;
+pub mod objects;
 pub mod recovery;
+pub mod si;
 pub mod sqlgen;
 pub mod versions;
 
@@ -42,8 +44,9 @@ use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 use gate::{ConservativeGate, GateInput, GateVerdict, StructuralGate};
 use model::{RowMeta, hex_lower, quote_ident, quote_string};
 use sqlgen::{
-    FilesRewrite, Fingerprint, ScriptInputs, fingerprint_select, render_apply_script,
-    replaced_source, special_config_source, special_params_source, staged_source,
+    AppendedFile, FilesRewrite, Fingerprint, NewRegistration, NodeLiteral, ScriptInputs,
+    fingerprint_select, render_apply_script, replaced_source, special_config_source,
+    special_params_source, staged_source,
 };
 
 /// How the apply learns that nobody else is connected.
@@ -69,6 +72,34 @@ pub enum RecoveryBlobs {
     None,
 }
 
+/// What a provider of the `Params` `.ui` rows is told.
+///
+/// The native apply re-encrypts two `<uuid>.ui` rows on every apply; the 8.5
+/// platform needs them, 8.3.27 sessions do not. The ui-codec track plugs its
+/// writer in here (it owns the codec); until then the 8.5 profile is refused.
+pub struct UiRowsContext<'a> {
+    pub client: &'a dyn SqlClient,
+    pub database: &'a str,
+    /// The generation the staged `versions` row names.
+    pub new_generation: Uuid,
+    pub staged: &'a [RowMeta],
+}
+
+/// The hook for the `.ui` rows: the rows to write, guarded by the digest of
+/// the row they replace like every `Params` rewrite of the script.
+pub trait UiRowsProvider: Send + Sync {
+    fn ui_rows(&self, context: &UiRowsContext<'_>) -> Result<Vec<sqlgen::ParamsRewrite>>;
+}
+
+#[derive(Clone)]
+pub struct UiHook(pub std::sync::Arc<dyn UiRowsProvider>);
+
+impl std::fmt::Debug for UiHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("UiHook(..)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigApplyOptions {
     pub database: String,
@@ -85,6 +116,8 @@ pub struct ConfigApplyOptions {
     pub script_output: Option<PathBuf>,
     /// See [`ConservativeGate::admit_unverified_roles`].
     pub admit_unverified_roles: bool,
+    /// The `.ui` rows writer (track ui); required for the 8.5 profile.
+    pub ui_rows: Option<UiHook>,
 }
 
 impl ConfigApplyOptions {
@@ -105,6 +138,7 @@ impl ConfigApplyOptions {
             recovery_blobs: RecoveryBlobs::Changed,
             script_output: None,
             admit_unverified_roles: false,
+            ui_rows: None,
         }
     }
 }
@@ -141,6 +175,16 @@ pub struct DynamicSummary {
     pub alias_rows: usize,
 }
 
+/// What the staged new rows (forms, templates, body rows) add to the apply.
+#[derive(Debug, Clone, Serialize)]
+pub struct NewObjectsSummary {
+    pub objects: Vec<objects::NewObject>,
+    pub appended_bodies: Vec<objects::NewBody>,
+    /// Nodes each new object is registered for.
+    pub registration_nodes: usize,
+    pub search_info_records: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigApplyReport {
     pub schema_version: u32,
@@ -159,6 +203,7 @@ pub struct ConfigApplyReport {
     pub stage: Option<StageSummary>,
     pub dynamic: Option<DynamicSummary>,
     pub gate: Option<GateVerdict>,
+    pub new_objects: Option<NewObjectsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
     /// (or only in part): the honest gaps.
@@ -312,6 +357,7 @@ pub struct ConfigApplyPlan {
     staged: Vec<RowMeta>,
     replaced: Vec<RowMeta>,
     mobile_versions_before: Option<Vec<u8>>,
+    new: objects::NewObjects,
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
@@ -338,6 +384,13 @@ pub fn plan_with_gate(
         database,
     )?;
     timings.storage_check_ms = ms(started);
+    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150
+        && options.ui_rows.is_none()
+    {
+        bail!(
+            "the 8.5 platform needs the Params .ui rows an apply writes and no provider of them is plugged in (ConfigApplyOptions::ui_rows, track ui): run the native `ibcmd infobase config apply`"
+        );
+    }
 
     let started = Instant::now();
     let staged = read_row_metas(
@@ -359,6 +412,7 @@ pub fn plan_with_gate(
         stage: None,
         dynamic: None,
         gate: None,
+        new_objects: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
         warnings: Vec::new(),
@@ -380,6 +434,7 @@ pub fn plan_with_gate(
             staged,
             replaced: Vec::new(),
             mobile_versions_before: None,
+            new: objects::NewObjects::default(),
         });
     }
     let replaced = read_row_metas(
@@ -465,9 +520,14 @@ pub fn plan_with_gate(
     let staged_versions = read_blob(client, database, "ConfigSave", "versions")?
         .ok_or_else(|| anyhow!("ConfigSave holds no versions row: not a complete stage"))?;
     let staged_versions = versions::parse_versions(&staged_versions)?;
+    // A delta stage (the rows of a few objects and `versions`) is a stage too:
+    // the native apply takes it, keeps the active `root` and `version`, and
+    // leaves the schema storage and the change-registration ids alone.
     for service in ["root", "version"] {
         if !staged.iter().any(|row| row.name == service) {
-            bail!("ConfigSave holds no {service} row: not a complete stage");
+            report.warnings.push(format!(
+                "the stage has no {service} row: a delta stage, the active {service} stays"
+            ));
         }
     }
     let active_versions = read_blob(client, database, "Config", "versions")?
@@ -549,15 +609,39 @@ pub fn plan_with_gate(
     });
     report.stage = Some(stage);
 
-    // The structural gate.
+    // The change registrations exist with their file lists or not at all.
+    let has_change_registrations = scalar_i64(
+        client,
+        &format!(
+            "SELECT CASE WHEN OBJECT_ID(N'{db}.dbo._ConfigChngR', N'U') IS NULL OR OBJECT_ID(N'{db}.dbo._ConfigChngR_ExtProps', N'U') IS NULL THEN 0 ELSE 1 END"
+        ),
+    )? == 1;
+
+    // New rows: a form or template an existing object gains, or a body row.
     let started = Instant::now();
-    let verdict = structural_gate.check(&GateInput {
+    let analysis = objects::analyze(&objects::AnalysisInput {
         client,
         database,
         staged: &staged,
         active: &active,
+        has_change_registrations,
+    })?;
+    let new = analysis.new;
+
+    // The structural gate.
+    let mut verdict = structural_gate.check(&GateInput {
+        client,
+        database,
+        staged: &staged,
+        active: &active,
+        accepted_new_rows: &new.rows,
+        accepted_owner_descriptors: &new.owners,
+        new_object_kinds: &new.kinds,
     })?;
     timings.gate_ms = ms(started);
+    for blocker in analysis.blockers {
+        verdict.block(&blocker.row, blocker.reason);
+    }
     if verdict.restructuring_required {
         report.gate = Some(verdict.clone());
         timings.total_ms = ms(total);
@@ -577,12 +661,6 @@ pub fn plan_with_gate(
         bail!("ConfigSave changed while the plan was being made");
     }
 
-    let has_change_registrations = scalar_i64(
-        client,
-        &format!(
-            "SELECT CASE WHEN OBJECT_ID(N'{db}.dbo._ConfigChngR', N'U') IS NULL THEN 0 ELSE 1 END"
-        ),
-    )? == 1;
     let has_year_offset = scalar_i64(
         client,
         &format!(
@@ -623,24 +701,107 @@ pub fn plan_with_gate(
         _ => bail!("Files.MobileVersions.dat has several parts"),
     }
 
+    // The `Params` rows to rewrite: the search information of new objects and
+    // the `.ui` rows of the provider that is plugged in, if any.
+    let mut params_rewrites = new.search_info.clone();
+    if let Some(hook) = &options.ui_rows {
+        let rows = hook.0.ui_rows(&UiRowsContext {
+            client,
+            database,
+            new_generation: staged_versions.generation,
+            staged: &staged,
+        })?;
+        for row in rows {
+            if params_rewrites
+                .iter()
+                .any(|known| known.file_name.eq_ignore_ascii_case(&row.file_name))
+            {
+                bail!(
+                    "the .ui provider rewrites {}, which the search-information edit rewrites too",
+                    row.file_name
+                );
+            }
+            params_rewrites.push(row);
+        }
+    }
+
     let mut touched = vec!["Config", "ConfigSave"];
-    if config_marker.is_some() || params_marker.is_some() {
+    if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
         touched.push("Params");
     }
     if has_change_registrations {
         touched.push("_ConfigChngR");
+        if !new.is_empty() {
+            touched.push("_ConfigChngR_ExtProps");
+        }
     }
     if !files_rewrites.is_empty() {
         touched.push("Files");
     }
     report.tables_touched = touched.into_iter().map(str::to_owned).collect();
-    report.not_written = vec![
-        "Params .ui generation-selection rows (native re-encrypts two; the ui codec track owns them; 8.3.27 sessions do not need them)".to_owned(),
-        "Params .si service-information rows and siVersions (derived caches; unchanged content unless the object set changes)".to_owned(),
+    let nodes_seen = if new.is_empty() || !has_change_registrations {
+        0
+    } else {
+        scalar_i64(
+            client,
+            &format!(
+                "SELECT COUNT_BIG(*) FROM (SELECT DISTINCT _NodeTRef, _NodeRRef FROM {db}.dbo._ConfigChngR) d"
+            ),
+        )? as usize
+    };
+    report.new_objects = (!new.is_empty()).then(|| NewObjectsSummary {
+        objects: new.objects.clone(),
+        appended_bodies: new.bodies.clone(),
+        registration_nodes: new.nodes.len(),
+        search_info_records: new.search_info_records,
+    });
+    let object_hex = |uuid: &str| -> Result<String> {
+        Ok(model::hex_upper(
+            &Uuid::parse_str(uuid)
+                .with_context(|| format!("{uuid} is not a uuid"))?
+                .to_bytes_le(),
+        ))
+    };
+    let new_registrations = new
+        .objects
+        .iter()
+        .map(|object| {
+            Ok(NewRegistration {
+                object_hex: object_hex(&object.uuid)?,
+                files: object.bodies.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let appended_files = new
+        .bodies
+        .iter()
+        .map(|body| {
+            Ok(AppendedFile {
+                object_hex: object_hex(&body.object)?,
+                file_name: body.file_name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let nodes = new
+        .nodes
+        .iter()
+        .map(|node| NodeLiteral {
+            type_hex: node.type_ref.clone(),
+            reference_hex: node.reference.clone(),
+        })
+        .collect::<Vec<_>>();
+    report.not_written = Vec::new();
+    if options.ui_rows.is_none() {
+        report.not_written.push(
+            "Params .ui generation-selection rows (native re-encrypts two; the ui codec track owns them; 8.3.27 sessions do not need them)".to_owned(),
+        );
+    }
+    report.not_written.extend([
+        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
         "the extension CAS garbage collection (ConfigCAS, Files CAS_GC_Info, extd_props_cached/gc.mrk)".to_owned(),
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
-    ];
+    ]);
 
     let inputs = ScriptInputs {
         database: options.database.clone(),
@@ -654,7 +815,11 @@ pub fn plan_with_gate(
         generations: history.generations.clone(),
         reset_change_registrations: has_change_registrations,
         files_rewrites,
-        params_rewrites: Vec::new(),
+        params_rewrites,
+        new_registrations,
+        nodes,
+        nodes_seen,
+        appended_files,
     };
     let script = render_apply_script(&inputs)?;
     let script_sha = hex_lower(&Sha256::digest(script.as_bytes()));
@@ -669,6 +834,7 @@ pub fn plan_with_gate(
         staged,
         replaced,
         mobile_versions_before: mobile_before,
+        new,
     })
 }
 
@@ -756,6 +922,11 @@ pub fn apply_with_gate(
                 .inputs
                 .as_ref()
                 .is_some_and(|inputs| inputs.reset_change_registrations),
+            new_objects: &plan.new,
+            params_rewrites: plan
+                .inputs
+                .as_ref()
+                .map_or(&[][..], |inputs| inputs.params_rewrites.as_slice()),
         },
     )?;
     plan.report.recovery_dir = Some(dir);

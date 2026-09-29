@@ -46,6 +46,8 @@ pub struct GateStats {
     pub rows_identical: usize,
     pub descriptors_layout_only: usize,
     pub service_rows: usize,
+    /// New forms and templates the caller analysed and accepted.
+    pub new_objects: usize,
     /// Changed body rows by the role the registry gives them.
     pub bodies_by_role: BTreeMap<String, usize>,
 }
@@ -65,7 +67,7 @@ pub struct GateVerdict {
 const MAX_LISTED_BLOCKERS: usize = 200;
 
 impl GateVerdict {
-    fn block(&mut self, row: &str, reason: impl Into<String>) {
+    pub(super) fn block(&mut self, row: &str, reason: impl Into<String>) {
         self.restructuring_required = true;
         if self.blockers.len() < MAX_LISTED_BLOCKERS {
             self.blockers.push(GateBlocker {
@@ -87,6 +89,16 @@ pub struct GateInput<'a> {
     /// The `Config` rows that share a name with a staged row, by lower-cased
     /// (name, part).
     pub active: &'a HashMap<(String, i32), RowMeta>,
+    /// New rows the caller has analysed and accepted (lower-cased names): a
+    /// form or template of an existing object and its bodies, a body row an
+    /// existing object gains.
+    pub accepted_new_rows: &'a HashSet<String>,
+    /// Descriptors that differ from the active row only by the references to
+    /// accepted new objects (lower-cased names).
+    pub accepted_owner_descriptors: &'a HashSet<String>,
+    /// The kind of every accepted new object, by uuid, for the role check of
+    /// its bodies.
+    pub new_object_kinds: &'a HashMap<String, &'static str>,
 }
 
 pub trait StructuralGate {
@@ -131,9 +143,12 @@ impl StructuralGate for ConservativeGate {
                 _ if identical => verdict.stats.rows_identical += 1,
                 RowName::Descriptor(_) => match active {
                     Some(_) => descriptors_to_compare += 1,
+                    None if input.accepted_new_rows.contains(&row.name.to_ascii_lowercase()) => {
+                        verdict.stats.new_objects += 1;
+                    }
                     None => verdict.block(
                         &row.name,
-                        "a new object: the own apply does not create objects yet",
+                        "a new object the own apply cannot create (only a new form or template of an existing object)",
                     ),
                 },
                 RowName::Body { owner, suffix } => {
@@ -178,6 +193,14 @@ fn compare_descriptors(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Resu
         let name = row.take_text(0)?;
         let staged = row.take_binary(1)?;
         let active = row.take_binary(2)?;
+        // The caller has proved that this one differs by references to new
+        // objects and nothing else.
+        if input
+            .accepted_owner_descriptors
+            .contains(&name.to_ascii_lowercase())
+        {
+            return Ok(());
+        }
         match (inflate_row(&staged), inflate_row(&active)) {
             (Ok(staged), Ok(active)) if staged == active => {
                 verdict.stats.descriptors_layout_only += 1;
@@ -247,13 +270,13 @@ fn read_kinds(input: &GateInput<'_>) -> Result<KindMap> {
         let Ok(text) = String::from_utf8(strip_bom(&plain).to_vec()) else {
             return Ok(());
         };
-        if name == config_uuid {
-            if let Ok(tree) = parse_row(&plain) {
-                top_level = Some(root_kinds(&tree));
-                // The configuration object has an id of its own; its modules
-                // and pages are the body rows of that id.
-                configuration_object = own_header(&tree).map(|(uuid, _)| uuid);
-            }
+        if name == config_uuid
+            && let Ok(tree) = parse_row(&plain)
+        {
+            top_level = Some(root_kinds(&tree));
+            // The configuration object has an id of its own; its modules
+            // and pages are the body rows of that id.
+            configuration_object = own_header(&tree).map(|(uuid, _)| uuid);
         }
         descriptors.push((name, text));
         Ok(())
@@ -269,12 +292,11 @@ fn read_kinds(input: &GateInput<'_>) -> Result<KindMap> {
     }
     let mut owned = Vec::new();
     for (name, text) in &descriptors {
-        if kinds.by_uuid.contains_key(name) && may_own_objects(text) {
-            if let Ok(tree) = parse_row(text.as_bytes()) {
-                for (kind, uuid) in owned_objects(&tree) {
-                    owned.push((kind, uuid));
-                }
-            }
+        if kinds.by_uuid.contains_key(name)
+            && may_own_objects(text)
+            && let Ok(tree) = parse_row(text.as_bytes())
+        {
+            owned.extend(owned_objects(&tree));
         }
     }
     for (kind, uuid) in owned {
@@ -368,7 +390,11 @@ fn classify_bodies(
     let mut to_compare: Vec<(&RowMeta, String, Comparator)> = Vec::new();
     for (row, owner, suffix) in changed {
         let owner_key = owner.to_ascii_lowercase();
-        let kind = match kinds.by_uuid.get(&owner_key) {
+        let kind = match kinds
+            .by_uuid
+            .get(&owner_key)
+            .or_else(|| input.new_object_kinds.get(&owner_key))
+        {
             Some(kind) => *kind,
             None if kinds.nested.contains(&owner_key) => "Command",
             None => {

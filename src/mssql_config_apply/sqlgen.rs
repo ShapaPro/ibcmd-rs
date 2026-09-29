@@ -31,6 +31,9 @@ pub mod code {
     pub const FILES_WRITE: u32 = 57314;
     pub const PARAMS_WRITE: u32 = 57315;
     pub const UNFINISHED_SCHEMA: u32 = 57316;
+    pub const ALREADY_REGISTERED: u32 = 57317;
+    pub const NODES_DRIFTED: u32 = 57318;
+    pub const NEW_REGISTRATION: u32 = 57319;
 }
 
 /// Names whose presence means an earlier operation did not finish
@@ -136,13 +139,42 @@ pub struct FilesRewrite {
     pub new_bytes: Vec<u8>,
 }
 
-/// A `Params` row the script rewrites (the `.ui` hook).
+/// A `Params` row the script rewrites (the search information, and the `.ui`
+/// hook).
 #[derive(Debug, Clone)]
 pub struct ParamsRewrite {
     pub file_name: String,
     pub old_data_size: i64,
     pub old_sha256_hex: String,
     pub new_bytes: Vec<u8>,
+    /// The platform writes the search-information rows anew (`Creation` moves
+    /// too); `siVersions` and the `.ui` rows only change `Modified`.
+    pub set_creation: bool,
+}
+
+/// A new object to register for every node, with the files it owns in the
+/// order they are listed.
+#[derive(Debug, Clone)]
+pub struct NewRegistration {
+    /// `_MDObjID`: the uuid in the platform's byte order, 32 hex digits.
+    pub object_hex: String,
+    pub files: Vec<String>,
+}
+
+/// A file an existing, registered object gains.
+#[derive(Debug, Clone)]
+pub struct AppendedFile {
+    pub object_hex: String,
+    pub file_name: String,
+}
+
+/// An exchange-plan node new objects are registered for.
+#[derive(Debug, Clone)]
+pub struct NodeLiteral {
+    /// `_NodeTRef`, 8 hex digits.
+    pub type_hex: String,
+    /// `_NodeRRef`, 32 hex digits.
+    pub reference_hex: String,
 }
 
 /// Everything the script is rendered from.
@@ -166,6 +198,24 @@ pub struct ScriptInputs {
     pub reset_change_registrations: bool,
     pub files_rewrites: Vec<FilesRewrite>,
     pub params_rewrites: Vec<ParamsRewrite>,
+    /// New objects to register (needs `reset_change_registrations`).
+    pub new_registrations: Vec<NewRegistration>,
+    /// The nodes new objects are registered for.
+    pub nodes: Vec<NodeLiteral>,
+    /// How many distinct nodes `_ConfigChngR` holds now (the plan's view of
+    /// the nodes, asserted again under the lock).
+    pub nodes_seen: usize,
+    pub appended_files: Vec<AppendedFile>,
+}
+
+/// The `_ConfigChngR` rows (alias `r`) of every object that owns a staged
+/// row: the object whose uuid a staged name starts with, and the object whose
+/// file list names a staged row. `prefix` qualifies the tables (`dbo.` inside
+/// the script, `[db].dbo.` outside it).
+pub fn staged_objects_predicate(prefix: &str) -> String {
+    format!(
+        "(r._MDObjID IN (SELECT CAST(TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) AS binary(16)) FROM {prefix}ConfigSave s WHERE s.PartNo = 0 AND TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) IS NOT NULL AND (LEN(s.FileName) = 36 OR SUBSTRING(s.FileName, 37, 1) = N'.'))          OR EXISTS (SELECT 1 FROM {prefix}_ConfigChngR_ExtProps e JOIN {prefix}ConfigSave s ON s.FileName = e._FileName WHERE e._ConfigChngR_IDRRef = r._IDRRef))"
+    )
 }
 
 fn throw(out: &mut String, condition: &str, code: u32, message: &str) {
@@ -401,20 +451,24 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         "the number of rows moved into Config differs from the staged count",
     );
 
-    // Change registrations: every staged descriptor's object is changed for
-    // every node again.
+    // Change registrations: every object that owns a staged row is changed for
+    // every node again, and new objects are registered.
     if input.reset_change_registrations {
+        let predicate = staged_objects_predicate("dbo.");
         writeln!(
             sql,
-            "UPDATE dbo._ConfigChngR SET _MessageNo = NULL WHERE _MessageNo IS NOT NULL AND _MDObjID IN (SELECT CAST(TRY_CAST(FileName AS uniqueidentifier) AS binary(16)) FROM dbo.ConfigSave WHERE PartNo = 0 AND LEN(FileName) = 36 AND TRY_CAST(FileName AS uniqueidentifier) IS NOT NULL);"
+            "UPDATE r SET _MessageNo = NULL FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate};"
         )
         .unwrap();
         throw(
             &mut sql,
-            "EXISTS (SELECT 1 FROM dbo._ConfigChngR WHERE _MessageNo IS NOT NULL AND _MDObjID IN (SELECT CAST(TRY_CAST(FileName AS uniqueidentifier) AS binary(16)) FROM dbo.ConfigSave WHERE PartNo = 0 AND LEN(FileName) = 36 AND TRY_CAST(FileName AS uniqueidentifier) IS NOT NULL))",
+            &format!(
+                "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate})"
+            ),
             code::CHANGE_REGISTRATION,
             "a change registration of a staged object was not reset",
         );
+        render_new_registrations(&mut sql, input);
     }
 
     for rewrite in &input.files_rewrites {
@@ -469,9 +523,14 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
             "DELETE FROM dbo.Params WHERE FileName = N'{name}' AND PartNo <> 0;"
         )
         .unwrap();
+        let creation = if rewrite.set_creation {
+            "Creation = @now, "
+        } else {
+            ""
+        };
         writeln!(
             sql,
-            "UPDATE dbo.Params SET Modified = @now, DataSize = {}, BinaryData = 0x{} WHERE FileName = N'{name}' AND PartNo = 0;",
+            "UPDATE dbo.Params SET {creation}Modified = @now, DataSize = {}, BinaryData = 0x{} WHERE FileName = N'{name}' AND PartNo = 0;",
             rewrite.new_bytes.len(),
             hex_upper(&rewrite.new_bytes)
         )
@@ -525,6 +584,132 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     writeln!(sql, "THROW;").unwrap();
     writeln!(sql, "END CATCH;").unwrap();
     Ok(sql)
+}
+
+/// New objects registered for every node, their files listed, and files an
+/// existing object gains appended to its list.
+fn render_new_registrations(sql: &mut String, input: &ScriptInputs) {
+    if input.new_registrations.is_empty() && input.appended_files.is_empty() {
+        return;
+    }
+    throw(
+        sql,
+        &format!(
+            "(SELECT COUNT_BIG(*) FROM (SELECT DISTINCT _NodeTRef, _NodeRRef FROM dbo._ConfigChngR) d) <> {}",
+            input.nodes_seen
+        ),
+        code::NODES_DRIFTED,
+        "the exchange-plan nodes changed since the plan was made",
+    );
+    if !input.new_registrations.is_empty() && !input.nodes.is_empty() {
+        let objects = input
+            .new_registrations
+            .iter()
+            .map(|object| format!("0x{}", object.object_hex))
+            .collect::<Vec<_>>()
+            .join(", ");
+        throw(
+            sql,
+            &format!("EXISTS (SELECT 1 FROM dbo._ConfigChngR WHERE _MDObjID IN ({objects}))"),
+            code::ALREADY_REGISTERED,
+            "a new object has change registrations already",
+        );
+        // Ids continue the sequence of the table: the greatest one plus one.
+        writeln!(
+            sql,
+            "DECLARE @max binary(16) = (SELECT MAX(_IDRRef) FROM dbo._ConfigChngR);"
+        )
+        .unwrap();
+        writeln!(
+            sql,
+            "DECLARE @head binary(8) = SUBSTRING(@max, 1, 8), @tail bigint = CAST(SUBSTRING(@max, 9, 8) AS bigint);"
+        )
+        .unwrap();
+        throw(
+            sql,
+            "@max IS NULL OR @tail > 9000000000000000000",
+            code::NEW_REGISTRATION,
+            "no room for new change-registration ids",
+        );
+        let mut values = Vec::new();
+        let mut sequence = 0usize;
+        for node in &input.nodes {
+            for object in &input.new_registrations {
+                sequence += 1;
+                values.push(format!(
+                    "(0x{}, 0x{}, 0x{}, {sequence})",
+                    node.type_hex, node.reference_hex, object.object_hex
+                ));
+            }
+        }
+        writeln!(
+            sql,
+            "INSERT dbo._ConfigChngR (_NodeTRef, _NodeRRef, _MessageNo, _MDObjID, _IDRRef) SELECT CAST(v.t AS binary(4)), CAST(v.n AS binary(16)), NULL, CAST(v.o AS binary(16)), CAST(@head + CAST(@tail + v.k AS binary(8)) AS binary(16)) FROM (VALUES {}) AS v(t, n, o, k);",
+            values.join(", ")
+        )
+        .unwrap();
+        throw(
+            sql,
+            &format!("@@ROWCOUNT <> {sequence}"),
+            code::NEW_REGISTRATION,
+            "the new objects were not registered for every node",
+        );
+        let mut files = Vec::new();
+        for object in &input.new_registrations {
+            for (index, file) in object.files.iter().enumerate() {
+                files.push(format!(
+                    "(0x{}, {index}, N'{}')",
+                    object.object_hex,
+                    quote_string(file)
+                ));
+            }
+        }
+        if !files.is_empty() {
+            writeln!(
+                sql,
+                "INSERT dbo._ConfigChngR_ExtProps (_ConfigChngR_IDRRef, _KeyField, _FileName) SELECT r._IDRRef, CAST(v.k AS binary(4)), v.f FROM (VALUES {}) AS v(o, k, f) JOIN dbo._ConfigChngR r ON r._MDObjID = CAST(v.o AS binary(16));",
+                files.join(", ")
+            )
+            .unwrap();
+            throw(
+                sql,
+                &format!("@@ROWCOUNT <> {}", files.len() * input.nodes.len()),
+                code::NEW_REGISTRATION,
+                "the files of the new objects were not listed for every node",
+            );
+        }
+    }
+    if !input.appended_files.is_empty() {
+        let values = input
+            .appended_files
+            .iter()
+            .map(|file| {
+                format!(
+                    "(0x{}, N'{}')",
+                    file.object_hex,
+                    quote_string(&file.file_name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            sql,
+            "INSERT dbo._ConfigChngR_ExtProps (_ConfigChngR_IDRRef, _KeyField, _FileName) SELECT r._IDRRef, CAST(ISNULL((SELECT MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef), -1) + 1 AS binary(4)), v.f FROM (VALUES {values}) AS v(o, f) JOIN dbo._ConfigChngR r ON r._MDObjID = CAST(v.o AS binary(16)) WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps x WHERE x._ConfigChngR_IDRRef = r._IDRRef AND x._FileName = v.f);"
+        )
+        .unwrap();
+        for file in &input.appended_files {
+            throw(
+                sql,
+                &format!(
+                    "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MDObjID = 0x{} AND NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef AND e._FileName = N'{}'))",
+                    file.object_hex,
+                    quote_string(&file.file_name)
+                ),
+                code::NEW_REGISTRATION,
+                &format!("{} is not listed for every node", file.file_name),
+            );
+        }
+    }
 }
 
 fn staged_source_local() -> String {
@@ -589,6 +774,10 @@ mod tests {
             reset_change_registrations: true,
             files_rewrites: Vec::new(),
             params_rewrites: Vec::new(),
+            new_registrations: Vec::new(),
+            nodes: Vec::new(),
+            nodes_seen: 0,
+            appended_files: Vec::new(),
         }
     }
 
@@ -604,7 +793,13 @@ mod tests {
         assert!(sql.contains("THROW 57302"), "exclusive access is asserted");
         assert!(sql.contains("ISNULL(host_process_id, -1) <> 4242"));
         assert!(sql.contains("@n <> 3 OR @b <> 300 OR @h1 <> 1 OR @h2 <> 2 OR @h3 <> 3"));
-        assert!(sql.contains("UPDATE dbo._ConfigChngR SET _MessageNo = NULL"));
+        assert!(sql.contains("UPDATE r SET _MessageNo = NULL FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND (r._MDObjID IN"));
+        assert!(
+            sql.contains(
+                "_ConfigChngR_ExtProps e JOIN dbo.ConfigSave s ON s.FileName = e._FileName"
+            ),
+            "a staged file resets the object that lists it"
+        );
         assert!(
             !sql.contains("DECLARE @alias"),
             "no dynamic history, no fold"
@@ -663,6 +858,104 @@ mod tests {
         let sql = render_apply_script(&input).unwrap();
         assert!(sql.contains("FileName = N'MobileVersions.dat' AND PartNo = 0 AND CONVERT(bigint, DataSize) = 10 AND HASHBYTES('SHA2_256', BinaryData) = 0xAB"));
         assert!(sql.contains("DataSize = 3, BinaryData = 0x010203"));
+    }
+
+    #[test]
+    fn a_params_rewrite_moves_creation_only_when_asked_to() {
+        let mut input = inputs();
+        input.params_rewrites.push(ParamsRewrite {
+            file_name: "1a621f0f-5568-4183-bd9f-f6ef670e7090.si".to_owned(),
+            old_data_size: 7,
+            old_sha256_hex: "CD".to_owned(),
+            new_bytes: vec![9, 9],
+            set_creation: true,
+        });
+        input.params_rewrites.push(ParamsRewrite {
+            file_name: "siVersions".to_owned(),
+            old_data_size: 5,
+            old_sha256_hex: "EF".to_owned(),
+            new_bytes: vec![8],
+            set_creation: false,
+        });
+        let sql = render_apply_script(&input).unwrap();
+        assert!(sql.contains("UPDATE dbo.Params SET Creation = @now, Modified = @now, DataSize = 2, BinaryData = 0x0909 WHERE FileName = N'1a621f0f-5568-4183-bd9f-f6ef670e7090.si'"));
+        assert!(sql.contains("UPDATE dbo.Params SET Modified = @now, DataSize = 1, BinaryData = 0x08 WHERE FileName = N'siVersions'"));
+    }
+
+    #[test]
+    fn new_objects_are_registered_for_every_node_with_their_files() {
+        let mut input = inputs();
+        input.nodes_seen = 5;
+        input.nodes = vec![
+            NodeLiteral {
+                type_hex: "000003DD".to_owned(),
+                reference_hex: "AA".repeat(16),
+            },
+            NodeLiteral {
+                type_hex: "000003DD".to_owned(),
+                reference_hex: "BB".repeat(16),
+            },
+        ];
+        input.new_registrations = vec![
+            NewRegistration {
+                object_hex: "11".repeat(16),
+                files: vec!["one.0".to_owned(), "one.1".to_owned()],
+            },
+            NewRegistration {
+                object_hex: "22".repeat(16),
+                files: vec!["two.0".to_owned()],
+            },
+        ];
+        let sql = render_apply_script(&input).unwrap();
+        let reset = sql.find("UPDATE r SET _MessageNo = NULL").unwrap();
+        let insert = sql.find("INSERT dbo._ConfigChngR (").unwrap();
+        let listing = sql.find("INSERT dbo._ConfigChngR_ExtProps").unwrap();
+        assert!(reset < insert && insert < listing);
+        // the ids continue the table's sequence
+        assert!(sql.contains("CAST(@head + CAST(@tail + v.k AS binary(8)) AS binary(16))"));
+        // two nodes x two objects, numbered 1..4, nodes outermost
+        assert!(sql.contains(&format!(
+            "(0x000003DD, 0x{}, 0x{}, 1), (0x000003DD, 0x{}, 0x{}, 2), (0x000003DD, 0x{}, 0x{}, 3), (0x000003DD, 0x{}, 0x{}, 4)",
+            "AA".repeat(16),
+            "11".repeat(16),
+            "AA".repeat(16),
+            "22".repeat(16),
+            "BB".repeat(16),
+            "11".repeat(16),
+            "BB".repeat(16),
+            "22".repeat(16)
+        )));
+        assert!(sql.contains("@@ROWCOUNT <> 4"));
+        // three files, each listed for both nodes
+        assert!(sql.contains(&format!(
+            "(0x{}, 0, N'one.0'), (0x{}, 1, N'one.1'), (0x{}, 0, N'two.0')",
+            "11".repeat(16),
+            "11".repeat(16),
+            "22".repeat(16)
+        )));
+        assert!(sql.contains("@@ROWCOUNT <> 6"));
+        assert!(sql.contains("<> 5"), "the node count is asserted");
+        assert!(
+            sql.contains("THROW 57317"),
+            "an already registered object is refused"
+        );
+    }
+
+    #[test]
+    fn a_file_an_object_gains_is_appended_after_its_last_key() {
+        let mut input = inputs();
+        input.nodes_seen = 3;
+        input.appended_files = vec![AppendedFile {
+            object_hex: "33".repeat(16),
+            file_name: "three.1".to_owned(),
+        }];
+        let sql = render_apply_script(&input).unwrap();
+        assert!(sql.contains("MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef), -1) + 1 AS binary(4))"));
+        assert!(sql.contains(&format!("(0x{}, N'three.1')", "33".repeat(16))));
+        assert!(
+            !sql.contains("INSERT dbo._ConfigChngR ("),
+            "no new object, no new registration row"
+        );
     }
 
     #[test]

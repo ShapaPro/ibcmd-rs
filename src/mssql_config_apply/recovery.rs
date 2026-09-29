@@ -12,6 +12,9 @@
 //!   rows the apply folds away;
 //! - `files_before.tsv` and `change_registrations_before.tsv`: the
 //!   `MobileVersions.dat` head and the `_MessageNo` values it resets;
+//! - `params_replaced.tsv` and their bytes: the search-information rows a new
+//!   form or template makes the apply rewrite;
+//! - `new_registrations.tsv`: the objects it registers and the files it lists;
 //! - `manifest.json` and `README.txt`.
 //!
 //! Taking an apply back is: put the kept rows back into `Config` (delete the
@@ -29,6 +32,8 @@ use crate::sql::{SqlClient, SqlValue};
 
 use super::RecoveryBlobs;
 use super::model::{RowMeta, quote_ident, quote_string};
+use super::objects::NewObjects;
+use super::sqlgen::{ParamsRewrite, staged_objects_predicate};
 
 pub struct RecoveryRequest<'a> {
     pub database: &'a str,
@@ -39,6 +44,11 @@ pub struct RecoveryRequest<'a> {
     pub replaced: &'a [RowMeta],
     pub mobile_versions_before: Option<&'a [u8]>,
     pub reset_change_registrations: bool,
+    /// The new objects and body rows the apply registers, and the `Params`
+    /// rows it rewrites for them.
+    pub new_objects: &'a NewObjects,
+    /// Every `Params` row the script rewrites.
+    pub params_rewrites: &'a [ParamsRewrite],
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +63,9 @@ struct Manifest<'a> {
     saved_bytes: u64,
     special_rows: usize,
     change_registrations_reset: usize,
+    params_rows_saved: usize,
+    new_objects: usize,
+    appended_files: usize,
     blobs: &'a str,
 }
 
@@ -169,9 +182,9 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
                 .context("change_registrations_before.tsv")?,
         );
         writeln!(file, "node_type_ref\tnode_ref\tobject_id\tmessage_no")?;
+        let predicate = staged_objects_predicate(&format!("{db}.dbo."));
         let query = format!(
-            "SELECT CONVERT(varchar(16), _NodeTRef, 2), CONVERT(varchar(64), _NodeRRef, 2), CONVERT(varchar(64), _MDObjID, 2), CONVERT(bigint, _MessageNo) FROM {db}.dbo._ConfigChngR \
-             WHERE _MessageNo IS NOT NULL AND _MDObjID IN (SELECT CAST(TRY_CAST(FileName AS uniqueidentifier) AS binary(16)) FROM {db}.dbo.ConfigSave WHERE PartNo = 0 AND LEN(FileName) = 36 AND TRY_CAST(FileName AS uniqueidentifier) IS NOT NULL) ORDER BY 1, 2, 3"
+            "SELECT CONVERT(varchar(16), r._NodeTRef, 2), CONVERT(varchar(64), r._NodeRRef, 2), CONVERT(varchar(64), r._MDObjID, 2), CONVERT(bigint, r._MessageNo) FROM {db}.dbo._ConfigChngR r              WHERE r._MessageNo IS NOT NULL AND {predicate} ORDER BY 1, 2, 3"
         );
         client.read_rows(&query, &[], &mut |row| {
             reset_count += 1;
@@ -192,6 +205,79 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         file.flush()?;
     }
 
+    // The Params rows the apply rewrites for new objects (the search
+    // information): the bytes they had.
+    let mut params_saved = 0usize;
+    if !request.params_rewrites.is_empty() {
+        let mut file = BufWriter::new(
+            fs::File::create(request.dir.join("params_replaced.tsv"))
+                .context("params_replaced.tsv")?,
+        );
+        writeln!(file, "name\tpart\tattributes\tcreation\tmodified\tfile")?;
+        for rewrite in request.params_rewrites {
+            client.read_rows(
+                &format!(
+                    "SELECT PartNo, CONVERT(int, Attributes), CONVERT(varchar(27), Creation, 121), CONVERT(varchar(27), Modified, 121), BinaryData FROM {db}.dbo.Params WHERE FileName = @P1 ORDER BY PartNo"
+                ),
+                &[crate::sql::SqlParam::Text(&rewrite.file_name)],
+                &mut |mut row| {
+                    let part = row.i64(0)?;
+                    let attributes = row.i64(1)?;
+                    let creation = row.text(2)?.to_owned();
+                    let modified = row.text(3)?.to_owned();
+                    let bytes = row.take_binary(4)?;
+                    sequence += 1;
+                    let stored = format!("rows/{sequence:06}.bin");
+                    fs::write(request.dir.join(&stored), &bytes)?;
+                    saved_bytes += bytes.len() as u64;
+                    params_saved += 1;
+                    writeln!(
+                        file,
+                        "{}\t{part}\t{attributes}\t{creation}\t{modified}\t{stored}",
+                        tsv(&rewrite.file_name)
+                    )?;
+                    Ok(())
+                },
+            )?;
+        }
+        file.flush()?;
+    }
+
+    // What the apply registers for new objects and appends to existing ones.
+    let mut new_object_count = 0usize;
+    let mut appended_count = 0usize;
+    if !request.new_objects.is_empty() {
+        let mut file = BufWriter::new(
+            fs::File::create(request.dir.join("new_registrations.tsv"))
+                .context("new_registrations.tsv")?,
+        );
+        writeln!(file, "what\tobject\tvalue")?;
+        for node in &request.new_objects.nodes {
+            writeln!(file, "node\t{}\t{}", node.type_ref, node.reference)?;
+        }
+        for object in &request.new_objects.objects {
+            new_object_count += 1;
+            writeln!(
+                file,
+                "new {}\t{}\t{}",
+                object.kind, object.uuid, object.owner
+            )?;
+            for body in &object.bodies {
+                writeln!(file, "file\t{}\t{}", object.uuid, tsv(body))?;
+            }
+        }
+        for body in &request.new_objects.bodies {
+            appended_count += 1;
+            writeln!(
+                file,
+                "appended file\t{}\t{}",
+                body.object,
+                tsv(&body.file_name)
+            )?;
+        }
+        file.flush()?;
+    }
+
     let manifest = Manifest {
         schema_version: 1,
         database: request.database,
@@ -205,6 +291,9 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         saved_bytes,
         special_rows: special_count,
         change_registrations_reset: reset_count,
+        params_rows_saved: params_saved,
+        new_objects: new_object_count,
+        appended_files: appended_count,
         blobs: match request.blobs {
             RecoveryBlobs::Changed => "changed",
             RecoveryBlobs::None => "none",
@@ -224,11 +313,14 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              config_replaced.tsv   every Config row (all parts) the staged rows replaced; `file` is its saved bytes\n\
              special_rows.tsv      the DynamicallyUpdated markers and _dynupdate_ alias rows that were folded away\n\
              MobileVersions.dat.before   Files.MobileVersions.dat before the new head GUID\n\
-             change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\n\
+             change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\
+             params_replaced.tsv   the search-information rows of Params (and siVersions) rewritten for new forms/templates, with their old bytes\n\
+             new_registrations.tsv the new objects registered in _ConfigChngR (per node) and the files listed for them\n\n\
              To take the apply back: stage the saved rows in ConfigSave (name, part, sizes, attributes,\n\
              creation, modified, bytes), then run `ibcmd-rs mssql-config-apply` (or the native apply)\n\
-             on the stopped database; restore special_rows.tsv, MobileVersions.dat and the message\n\
-             numbers with plain INSERT/UPDATE statements. The `sha256` column proves each row.\n\
+             on the stopped database; restore special_rows.tsv, MobileVersions.dat, the Params rows and\n\
+             the message numbers with plain INSERT/UPDATE statements, and delete the rows of\n\
+             new_registrations.tsv from _ConfigChngR and _ConfigChngR_ExtProps. The `sha256` column proves each row.\n\
              Names are quoted: {quoted}\n",
             db = request.database,
             token = request.token,

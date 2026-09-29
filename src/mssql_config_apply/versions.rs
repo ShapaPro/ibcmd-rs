@@ -22,6 +22,20 @@ pub fn inflate_row(blob: &[u8]) -> Result<Vec<u8>> {
     Ok(plain)
 }
 
+/// The storage form of a row: raw deflate (the inverse of [`inflate_row`]).
+pub fn deflate_row(plain: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(plain)
+        .map_err(|error| anyhow!("raw deflate failed: {error}"))?;
+    encoder
+        .finish()
+        .map_err(|error| anyhow!("raw deflate failed: {error}"))
+}
+
 pub fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes)
 }
