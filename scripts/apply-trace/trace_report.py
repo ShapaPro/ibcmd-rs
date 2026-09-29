@@ -25,7 +25,10 @@ import os
 import re
 import sys
 import calendar
+import gzip
 import hashlib
+import shutil
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from apply_trace_common import (  # noqa: E402
@@ -33,6 +36,8 @@ from apply_trace_common import (  # noqa: E402
     tsv_escape,
 )
 
+WRITE_OPS = ("INSERT", "INSERT BULK", "UPDATE", "DELETE", "MERGE", "SELECT INTO")
+SUMMARY_SHAPE_ROWS = 120
 MAX_TIMELINE_RUNS = 400
 MAX_GROUPS_IN_MD = 200
 MAX_SERVICE_WRITE_LINES = 200000
@@ -113,6 +118,104 @@ def load_events(path):
         events.append(e)
     events.sort(key=lambda e: (e.seq if e.seq is not None else 1 << 62, e.idx))
     return events
+
+
+EVENT_COLUMNS = ["seq", "ts", "ev", "spid", "xid", "dur_us", "cpu_us", "reads", "writes", "rows", "result", "tstate", "ttype", "tid",
+                 "app", "dbname", "err_no", "err_sev", "err_msg", "stmt_chars", "stmt"]
+_BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+RECORD_SEPARATOR = "\x1e"
+
+
+def _xe_records(path):
+    """Records of events.xml.gz: `<timestamp_utc><TAB><event xml>` separated by U+001E."""
+    with gzip.open(path, "rt", encoding="utf-8", newline="") as fh:
+        buf = ""
+        while True:
+            chunk = fh.read(1 << 22)
+            if not chunk:
+                break
+            buf += chunk
+            parts = buf.split(RECORD_SEPARATOR)
+            buf = parts.pop()
+            for part in parts:
+                yield part
+        if buf.strip():
+            yield buf
+
+
+def _event_row(ts, xml_text):
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        root = ET.fromstring(_BAD_XML.sub("?", xml_text))
+    data = {d.get("name"): d for d in root.findall("data")}
+    act = {a.get("name"): a for a in root.findall("action")}
+
+    def val(el):
+        if el is None:
+            return ""
+        v = el.find("value")
+        return (v.text or "") if v is not None else ""
+
+    def txt(el):
+        if el is None:
+            return ""
+        t = el.find("text")
+        return (t.text or "") if t is not None else ""
+
+    stmt = val(data.get("statement")) or val(data.get("batch_text")) or val(act.get("sql_text"))
+    return {
+        "seq": val(act.get("event_sequence")), "ts": ts, "ev": root.get("name", ""), "spid": val(act.get("session_id")),
+        "xid": val(act.get("transaction_id")), "dur_us": val(data.get("duration")), "cpu_us": val(data.get("cpu_time")),
+        "reads": val(data.get("logical_reads")), "writes": val(data.get("writes")), "rows": val(data.get("row_count")),
+        "result": txt(data.get("result")), "tstate": txt(data.get("transaction_state")), "ttype": txt(data.get("transaction_type")),
+        "tid": val(data.get("transaction_id")), "app": val(act.get("client_app_name")), "dbname": val(act.get("database_name")),
+        "err_no": val(data.get("error_number")), "err_sev": val(data.get("severity")), "err_msg": val(data.get("message"))[:2000],
+        "stmt_chars": str(len(stmt)), "stmt": stmt,
+    }
+
+
+def convert_xml_to_tsv(xml_gz, tsv_path, max_stmt_chars):
+    """events.xml.gz (raw XE events written by trace.ps1) -> events.tsv; returns the number of events."""
+    n = 0
+    bad = 0
+    with open(tsv_path, "w", encoding="utf-8", newline="\n") as out:
+        out.write("\t".join(EVENT_COLUMNS) + "\n")
+        for rec in _xe_records(xml_gz):
+            ts, _, xml_text = rec.partition("\t")
+            try:
+                row = _event_row(ts, xml_text)
+            except ET.ParseError:
+                bad += 1
+                continue
+            if len(row["stmt"]) > max_stmt_chars:
+                row["stmt"] = row["stmt"][:max_stmt_chars]
+            out.write("\t".join(tsv_escape(row[c]) for c in EVENT_COLUMNS) + "\n")
+            n += 1
+    if bad:
+        print(f"warning: {bad} events could not be parsed", file=sys.stderr)
+    return n
+
+
+def focus_events(events, database):
+    """Keep only the sessions that touched `database` (their database context or their text).
+
+    For traces taken without the database filter (trace.ps1 -AllDatabases): a session is
+    kept as a whole when any of its statements ran in the database or names it.
+    Returns (events, number of sessions dropped).
+    """
+    if not database:
+        return events, 0
+    name = database.lower()
+    keep = set()
+    seen = set()
+    for e in events:
+        if e.spid is None:
+            continue
+        seen.add(e.spid)
+        if e.dbname.lower() == name or (e.kind in ("rpc", "batch", "stmt") and name in e.stmt.lower()):
+            keep.add(e.spid)
+    return [e for e in events if e.spid in keep], len(seen - keep)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +398,12 @@ def split_statements(sql):
                 starts_new = False
             if first == "BEGIN" and re.match(r"^\s*SET\b", joined, re.I):
                 starts_new = False
+            # UPDATE t <newline> SET a = b: the SET belongs to the UPDATE
+            if first == "SET" and re.match(r"^\s*UPDATE\b", joined, re.I) and not re.search(r"\bSET\b", joined, re.I):
+                starts_new = False
+            # a WITH that is a table hint (FROM t <newline> WITH (NOLOCK)) is not a CTE
+            if first == "WITH" and not re.match(r"^\s*WITH\s+[\w\[\]]+\s*(\(|AS\b)", line, re.I):
+                starts_new = False
         if starts_new:
             stmts.append(" ".join(cur))
             cur = []
@@ -328,11 +437,21 @@ def statement_facts(sql):
         if re.match(r"^\s*(?:EXEC|EXECUTE)\s+(?:dbo\.)?sp_rename\b", s, re.I) or _RE_SPRENAME.search(s[:60]):
             ops.append(("RENAME", "", s))
             continue
+        mb = re.match(r"^\s*insert\s+bulk\s+" + _TBL, s, re.I)
+        if mb:
+            ops.append(("INSERT BULK", clean_table(mb.group(1)), s))
+            continue
         for verb, rx in (("INSERT", _RE_INSERT), ("UPDATE", _RE_UPDATE), ("DELETE", _RE_DELETE), ("MERGE", _RE_MERGE)):
             if re.match(r"^\s*(?:SET\s+[^;]*?\s+)?" + verb + r"\b", s, re.I) or re.match(r"^\s*" + verb + r"\b", s, re.I):
                 m = rx.search(s)
                 if m:
-                    ops.append((verb, clean_table(m.group(1)), s))
+                    target = m.group(1)
+                    # UPDATE T2 SET ... FROM dbo._ConfigChngR T2: the target is an alias
+                    if verb in ("UPDATE", "DELETE") and "." not in target and not target.startswith("#"):
+                        am = re.search(r"\b(?:FROM|JOIN)\s+" + _TBL + r"\s+(?:AS\s+)?" + re.escape(target) + r"\b", s, re.I)
+                        if am:
+                            target = am.group(1)
+                    ops.append((verb, clean_table(target), s))
                     break
         else:
             if re.match(r"^\s*(?:SET\s+[^;]*?\s+)?BEGIN\s+TRAN", s, re.I):
@@ -358,7 +477,7 @@ def verb_of(ops):
     def r(v):
         if v.split()[0] in ("CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME"):
             return rank["DDL"]
-        if v in ("INSERT", "UPDATE", "DELETE", "MERGE", "SELECT INTO"):
+        if v in WRITE_OPS:
             return rank["W"]
         if v == "SELECT":
             return rank["S"]
@@ -631,7 +750,7 @@ def collect_writes(stmts, t0_us):
     for s in stmts:
         e = s.ev
         for op, table, stext in s.ops:
-            if op not in ("INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "SELECT INTO"):
+            if op not in WRITE_OPS and op != "TRUNCATE":
                 continue
             r = {"seq": e.seq, "t": (e.start_us - t0_us) / 1e6, "spid": e.spid, "xid": (s.tx.tid if s.tx else 0),
                  "op": op, "table": table, "rows": e.rows if len(s.ops) == 1 else None, "dur": e.dur,
@@ -695,27 +814,47 @@ def write_groups(out, groups, t0):
 
 
 def coarsen(runs, limit):
-    """Merge the cheapest adjacent runs until at most `limit` remain."""
-    while len(runs) > limit:
-        best = None
-        for i in range(len(runs) - 1):
-            a, b = runs[i], runs[i + 1]
-            if a["marker"] or b["marker"]:
-                continue
-            cost = a["count"] + b["count"]
-            if best is None or cost < best[0]:
-                best = (cost, i)
-        if best is None:
-            break
-        i = best[1]
-        a, b = runs[i], runs[i + 1]
-        merged = {"marker": None, "count": a["count"] + b["count"], "dur": a["dur"] + b["dur"], "rows": a["rows"] + b["rows"],
-                  "start": a["start"], "end": b["end"], "spid": a["spid"] if a["spid"] == b["spid"] else "*",
-                  "groups": collections.Counter(), "first_seq": a["first_seq"], "mixed": True}
-        merged["groups"].update(a["groups"])
-        merged["groups"].update(b["groups"])
-        runs[i:i + 2] = [merged]
-    return runs
+    """Merge consecutive runs into blocks of about equal statement count so that about `limit` remain.
+
+    Transaction / error markers stay as separate lines while they are few (at most half of the
+    limit); beyond that they are folded into the blocks.  Linear time.
+    """
+    if len(runs) <= limit:
+        return runs
+    markers = sum(1 for r in runs if r["marker"])
+    keep_markers = markers <= limit // 2
+    total = sum(r["count"] for r in runs)
+    budget = max(1, limit - (markers if keep_markers else 0))
+    thresh = max(1, total // budget + 1)
+    out = []
+    acc = None
+
+    def flush():
+        nonlocal acc
+        if acc is not None:
+            out.append(acc)
+            acc = None
+
+    for r in runs:
+        if r["marker"]:
+            if keep_markers:
+                flush()
+                out.append(r)
+            continue
+        if acc is None:
+            acc = {"marker": None, "count": 0, "dur": 0, "rows": 0, "start": r["start"], "end": r["end"], "spid": r["spid"],
+                   "groups": collections.Counter(), "first_seq": r["first_seq"], "mixed": True}
+        acc["count"] += r["count"]
+        acc["dur"] += r["dur"]
+        acc["rows"] += r["rows"]
+        acc["end"] = r["end"]
+        if acc["spid"] != r["spid"]:
+            acc["spid"] = "*"
+        acc["groups"].update(r["groups"])
+        if acc["count"] >= thresh:
+            flush()
+    flush()
+    return out
 
 
 def write_timeline(out, stmts, txs, events, t0):
@@ -742,6 +881,7 @@ def write_timeline(out, stmts, txs, events, t0):
                 last["dur"] += e.dur
                 last["rows"] += e.rows or 0
                 last["end"] = e.us
+                last["groups"][s.group.id] += 1
             else:
                 runs.append({"marker": None, "group": s.group.id, "count": 1, "dur": e.dur, "rows": e.rows or 0,
                              "start": e.start_us, "end": e.us, "spid": e.spid, "groups": collections.Counter({s.group.id: 1}),
@@ -878,7 +1018,7 @@ def write_transactions(out, txs, t0):
             tabs = collections.Counter()
             for s in t.stmts:
                 for op, tab, _ in s.ops:
-                    if op in ("INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE"):
+                    if op in (WRITE_OPS + ("TRUNCATE",)):
                         wr += 1
                         if tab and not is_temp(tab) and is_service_table(tab):
                             tabs[tab] += 1
@@ -892,6 +1032,122 @@ def write_transactions(out, txs, t0):
                 f"{(t.dur or 0) / 1000:.1f}", len(t.stmts), wr, ",".join(f"{k}:{v}" for k, v in tabs.most_common()), t.savepoints, first]) + "\n")
 
 
+def write_phases(out, stmts, recs, txs, t0):
+    """write-phases.md: only what changes the database (DML on non-temporary tables, DDL), grouped
+    into blocks of consecutive writes to the same table, in the order they happened.
+
+    A block lists what was done to the table (operation and row-name shape with counts), how many
+    user transactions ran inside it and the first and last row name.  Reads, temporary-table
+    writes and transaction control statements are left out (see timeline.md)."""
+    items = []
+    for r in recs:
+        if r["temp"]:
+            continue
+        shape = ""
+        if r["table"] in FILE_TABLES and r["name"]:
+            n = r["name"]
+            shape = ("LIKE " + name_shape(n[5:])) if n.startswith("LIKE ") else name_shape(n)
+            if r["name2"]:
+                shape += " -> " + name_shape(r["name2"])
+            if r["src"]:
+                shape += " <- " + r["src"].split(":")[0]
+        items.append((r["seq"] or 0, 1, r["op"], r["table"], shape, r["spid"], r["rows"] or 0, r["name"] or "", r["dur"], r["stmt"].ev.start_us, r["stmt"].ev.us))
+    for s in stmts:
+        for op, table, stext in s.ops:
+            if op.split()[0] in ("CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME") and not is_temp(table):
+                shape = one_line(stext, 90) if op == "RENAME" or table == "" else ""
+                items.append((s.ev.seq or 0, 1, op, table, shape, s.ev.spid, 0, "", s.ev.dur, s.ev.start_us, s.ev.us))
+    tx_marks = []
+    for t in txs:
+        if t.begin_seq is not None:
+            tx_marks.append((t.begin_seq, "BEGIN", t.begin_us))
+        if t.end_seq is not None:
+            tx_marks.append((t.end_seq, t.state.upper(), t.end_us))
+    items.sort(key=lambda x: x[0])
+    tx_marks.sort()
+
+    blocks = []
+    gap_us = 5_000_000
+    for seq, _o, op, table, shape, spid, rows, name, dur, us0, us1 in items:
+        b = blocks[-1] if blocks else None
+        if b is None or b["table"] != table or us0 - b["end"] > gap_us:
+            b = {"table": table, "first_seq": seq, "last_seq": seq, "start": us0, "end": us1, "spids": set(), "n": 0, "rows": 0, "dur": 0,
+                 "ops": collections.OrderedDict(), "first": name, "last": name, "tx": collections.Counter(), "mixed": False}
+            blocks.append(b)
+        b["last_seq"] = seq
+        b["end"] = max(b["end"], us1)
+        b["spids"].add(spid)
+        b["n"] += 1
+        b["rows"] += rows
+        b["dur"] += dur
+        o = b["ops"].setdefault((op, shape), [0, 0])
+        o[0] += 1
+        o[1] += rows
+        if name:
+            if not b["first"]:
+                b["first"] = name
+            b["last"] = name
+    # transaction boundaries per block (by event sequence)
+    if blocks:
+        starts = [b["first_seq"] for b in blocks]
+        import bisect
+        for seq, kind, _us in tx_marks:
+            i = bisect.bisect_right(starts, seq) - 1
+            if i >= 0 and seq <= blocks[i]["last_seq"] + 3:
+                blocks[i]["tx"][kind] += 1
+            elif i + 1 < len(blocks) and blocks[i + 1]["first_seq"] - seq <= 3:
+                blocks[i + 1]["tx"][kind] += 1
+    total_blocks = len(blocks)
+    limit = 400
+    thresh = 3
+    while len(blocks) > limit and thresh < 1 << 20:
+        merged = []
+        acc = None
+        for b in blocks:
+            if b["n"] < thresh:
+                if acc is None:
+                    acc = {"table": "(several)", "first_seq": b["first_seq"], "last_seq": b["last_seq"], "start": b["start"], "end": b["end"], "spids": set(),
+                           "n": 0, "rows": 0, "dur": 0, "ops": collections.OrderedDict(), "first": "", "last": "", "tx": collections.Counter(), "mixed": True, "tables": collections.Counter()}
+                acc["last_seq"] = b["last_seq"]
+                acc["end"] = max(acc["end"], b["end"])
+                acc["spids"] |= b["spids"]
+                acc["n"] += b["n"]
+                acc["rows"] += b["rows"]
+                acc["dur"] += b["dur"]
+                acc["tx"].update(b["tx"])
+                acc.setdefault("tables", collections.Counter())[b["table"]] += b["n"]
+            else:
+                if acc is not None:
+                    merged.append(acc)
+                    acc = None
+                merged.append(b)
+        if acc is not None:
+            merged.append(acc)
+        if len(merged) == len(blocks):
+            thresh *= 2
+        blocks = merged
+        thresh *= 2
+
+    L = ["# Write phases", "",
+         f"{len(items)} writes/DDL statements in {total_blocks} blocks" + (f" (small blocks merged to {len(blocks)})" if len(blocks) < total_blocks else "")
+         + ". A block is a run of consecutive writes to one table. Reads, temporary-table writes and transaction control statements are left out (see timeline.md).",
+         "", "| # | time | sessions | table | statements | rows | user tx | what (operation, row-name shape x statements) | first .. last row name |",
+         "|---|---|---|---|---|---|---|---|---|"]
+    for i, b in enumerate(blocks, 1):
+        sp = sorted(x for x in b["spids"] if x is not None)
+        sess = str(sp[0]) if len(sp) == 1 else f"{len(sp)} sess."
+        tx = ", ".join(f"{k.lower()} {v}" for k, v in sorted(b["tx"].items())) if b["tx"] else ""
+        if b["mixed"]:
+            what = "; ".join(f"{t} x{n}" for t, n in b.get("tables", {}).most_common(6))
+        else:
+            parts = [f"{op}{(' ' + shape) if shape else ''} x{cnt[0]}" for (op, shape), cnt in list(b["ops"].items())[:8]]
+            what = "; ".join(parts) + (f"; ... +{len(b['ops']) - 8} more" if len(b["ops"]) > 8 else "")
+        names = ""
+        if b["first"]:
+            names = f"`{one_line(b['first'], 50)}`" + (f" .. `{one_line(b['last'], 50)}`" if b["last"] != b["first"] else "")
+        L.append(f"| {i} | {rel(b['start'], t0)} .. {rel(b['end'], t0)} | {sess} | {b['table']} | {b['n']} | {b['rows']} | {tx} | {what.replace('|', chr(0x2502))} | {names} |")
+    with open(os.path.join(out, "write-phases.md"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(L) + "\n")
 def write_slowest(out, stmts, t0, top=60):
     ranked = sorted(stmts, key=lambda s: -s.ev.dur)[:top]
     with open(os.path.join(out, "slowest.tsv"), "w", encoding="utf-8", newline="\n") as fh:
@@ -926,7 +1182,8 @@ def write_summary(out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, 
     add(f"# Trace report: {meta.get('tag', '')}")
     add("")
     add(f"- database: `{meta.get('database', '?')}` on `{meta.get('server', '?')}`, {meta.get('sql_version', '')}")
-    add(f"- session: `{meta.get('session', '?')}`, predicate `{meta.get('predicate', '?')}`")
+    add(f"- session: `{meta.get('session', '?')}`, predicate `{meta.get('predicate', '?')}`"
+        + (f"; sessions kept only when they touched `{meta['focus_db']}` ({meta.get('sessions_dropped_by_focus', 0)} other sessions dropped)" if meta.get("focus_db") else ""))
     add(f"- command: `{one_line(str(meta.get('command', '')), 400)}`")
     add(f"- exit code {meta.get('exit_code', '?')}, command {meta.get('command_seconds', '?')} s; trace window {(t1 - t0) / 1e6:.1f} s "
         f"(first statement start to last statement end)")
@@ -968,8 +1225,10 @@ def write_summary(out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, 
         a["bytes"] += (r["size"] or 0)
     add("| first seq | table | op | name shape | statements | rows | declared bytes |")
     add("|---|---|---|---|---|---|---|")
-    for (t, op, sh), a in agg_sw.items():
+    for (t, op, sh), a in list(agg_sw.items())[:SUMMARY_SHAPE_ROWS]:
         add(f"| {a['first']} | {t} | {op} | `{sh}` | {a['n']} | {a['rows']} | {a['bytes']} |")
+    if len(agg_sw) > SUMMARY_SHAPE_ROWS:
+        add(f"| ... | | | {len(agg_sw) - SUMMARY_SHAPE_ROWS} more shapes, see write-phases.md and service-writes.tsv | | | |")
     add("")
     add(f"Every write in order: `service-writes.tsv` ({sw_lines} lines), decoded small payloads: `payloads.jsonl` ({payload_count}).")
     add("")
@@ -1012,7 +1271,7 @@ def write_summary(out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, 
         tabs = collections.Counter()
         for s in t.stmts:
             for op, tab, _ in s.ops:
-                if op in ("INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE") and tab and not is_temp(tab) and is_service_table(tab):
+                if op in (WRITE_OPS + ("TRUNCATE",)) and tab and not is_temp(tab) and is_service_table(tab):
                     tabs[tab] += 1
         add(f"| {t.tid} | {t.spid} | {rel(t.begin_us, t0)} | {fmt_dur(t.dur or 0)} | {t.state} | {len(t.stmts)} | "
             + ", ".join(f"{k} {v}" for k, v in tabs.most_common()) + " |")
@@ -1034,16 +1293,30 @@ def write_summary(out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--events", required=True)
+    ap.add_argument("--events", default="", help="events.tsv")
+    ap.add_argument("--xml", default="", help="events.xml.gz (raw XE events); converted to <out>/events.tsv first")
+    ap.add_argument("--max-statement-kb", type=int, default=1024)
     ap.add_argument("--out", required=True)
     ap.add_argument("--meta", default="")
+    ap.add_argument("--focus-db", default="", help="keep only the sessions that touched this database (traces taken with -AllDatabases)")
     args = ap.parse_args(argv)
     meta = {}
     if args.meta and os.path.isfile(args.meta):
         with open(args.meta, "r", encoding="utf-8-sig") as fh:
             meta = json.load(fh)
     os.makedirs(args.out, exist_ok=True)
-    events = load_events(args.events)
+    events_path = args.events
+    if args.xml:
+        events_path = os.path.join(args.out, "events.tsv")
+        count = convert_xml_to_tsv(args.xml, events_path, args.max_statement_kb * 1024)
+        print(f"{count} events converted from {os.path.basename(args.xml)}")
+    if not events_path:
+        raise SystemExit("give --events events.tsv or --xml events.xml.gz")
+    events = load_events(events_path)
+    events, dropped_sessions = focus_events(events, args.focus_db)
+    if args.focus_db:
+        meta["focus_db"] = args.focus_db
+        meta["sessions_dropped_by_focus"] = dropped_sessions
     stmts, groups = analyze(events)
     txs = build_transactions(events, stmts)
     if stmts:
@@ -1058,9 +1331,15 @@ def main(argv=None):
     agg = write_data_writes(args.out, recs)
     ddl_counts = write_ddl(args.out, stmts, t0)
     write_transactions(args.out, txs, t0)
+    write_phases(args.out, stmts, recs, txs, t0)
     write_slowest(args.out, stmts, t0)
     sessions = write_sessions(args.out, stmts)
     write_summary(args.out, meta, events, stmts, groups, txs, recs, agg, ddl_counts, sessions, t0, t1, payload_count, sw_lines)
+    if args.xml:
+        # the parsed events stay for later questions, compressed
+        with open(events_path, "rb") as src, gzip.open(events_path + ".gz", "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst)
+        os.remove(events_path)
     print(f"report: {len(events)} events, {len(stmts)} statements, {len(groups)} groups, {len(txs)} transactions -> {args.out}")
     return 0
 

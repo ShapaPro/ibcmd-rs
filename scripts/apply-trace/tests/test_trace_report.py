@@ -91,7 +91,15 @@ class Facts(unittest.TestCase):
 
     def test_update_from_alias(self):
         ops = tr.statement_facts("UPDATE T2 SET _MessageNo = CAST(NULL AS NUMERIC(38,8)) FROM dbo._ConfigChngR T2 WHERE T2._IDRRef IN (SELECT T3.RS_FIELD FROM #tt2 T3)")
-        self.assertEqual(ops[0][0], "UPDATE")
+        self.assertEqual([(v, t) for v, t, _ in ops], [("UPDATE", "_ConfigChngR")])
+
+    def test_update_with_set_on_the_next_line(self):
+        ops = tr.statement_facts("UPDATE IBVersion\nSET IBVersion = 7, PlatformVersionReq = 80313 ")
+        self.assertEqual([(v, t) for v, t, _ in ops], [("UPDATE", "IBVersion")])
+
+    def test_table_hint_line_is_not_a_new_statement(self):
+        ops = tr.statement_facts("SELECT TOP 1 ID FROM v8users\nWITH(NOLOCK)\nWHERE EAuth IS NULL")
+        self.assertEqual([(v, t) for v, t, _ in ops], [("SELECT", "v8users")])
 
 
 class Dml(unittest.TestCase):
@@ -208,8 +216,57 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(len(tx), 1)
             self.assertEqual(tx[0]["state"], "Commit")
             self.assertEqual(tx[0]["statements"], "4")   # begin batch, two writes, commit batch
-            ddl = open(os.path.join(out, "ddl.sql"), encoding="utf-8").read()
+            with open(os.path.join(out, "ddl.sql"), encoding="utf-8") as fh:
+                ddl = fh.read()
             self.assertIn("ALTER TABLE dbo._Reference12 ADD _Fld99 nvarchar(25) NULL", ddl)
+
+
+XE_BATCH = (
+    '<event name="sql_batch_completed" package="sqlserver" timestamp="2026-09-29T07:19:57.519Z"><data name="cpu_time"><value>0</value></data>'
+    '<data name="duration"><value>14741</value></data><data name="logical_reads"><value>179</value></data><data name="writes"><value>1</value></data>'
+    '<data name="row_count"><value>0</value></data><data name="result"><value>0</value><text><![CDATA[OK]]></text></data>'
+    '<data name="batch_text"><value><![CDATA[CREATE TABLE dbo.zz (a int)]]></value></data>'
+    '<action name="database_id" package="sqlserver"><value>149</value></action>'
+    '<action name="client_app_name" package="sqlserver"><value><![CDATA[xe_test]]></value></action>'
+    '<action name="transaction_id" package="sqlserver"><value>0</value></action>'
+    '<action name="session_id" package="sqlserver"><value>130</value></action>'
+    '<action name="event_sequence" package="package0"><value>4</value></action></event>')
+XE_TRAN = (
+    '<event name="sql_transaction" package="sqlserver" timestamp="2026-09-29T07:19:57.519Z"><data name="duration"><value>14209</value></data>'
+    '<data name="transaction_state"><value>1</value><text><![CDATA[Commit]]></text></data>'
+    '<data name="transaction_type"><value>1</value><text><![CDATA[User]]></text></data>'
+    '<data name="transaction_id"><value>3048973961</value></data>'
+    '<action name="transaction_id" package="sqlserver"><value>3048973961</value></action>'
+    '<action name="session_id" package="sqlserver"><value>130</value></action>'
+    '<action name="event_sequence" package="package0"><value>3</value></action></event>')
+
+
+class XmlConversion(unittest.TestCase):
+    def test_convert(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as d:
+            xml = os.path.join(d, "events.xml.gz")
+            with gzip.open(xml, "wt", encoding="utf-8", newline="") as fh:
+                fh.write("2026-09-29T07:19:57.5190000\t" + XE_TRAN + "\x1e" + "2026-09-29T07:19:57.5200000\t" + XE_BATCH + "\x1e")
+            out = os.path.join(d, "out")
+            self.assertEqual(tr.main(["--xml", xml, "--out", out]), 0)
+            rows = list(common.read_tsv(os.path.join(out, "events.tsv.gz")))
+            self.assertEqual(len(rows), 2)
+            tran, batch = rows
+            self.assertEqual((tran["ev"], tran["tstate"], tran["ttype"], tran["tid"], tran["spid"], tran["seq"]), ("sql_transaction", "Commit", "User", "3048973961", "130", "3"))
+            self.assertEqual((batch["ev"], batch["stmt"], batch["dur_us"], batch["app"], batch["result"]), ("sql_batch_completed", "CREATE TABLE dbo.zz (a int)", "14741", "xe_test", "OK"))
+            self.assertEqual(batch["ts"], "2026-09-29T07:19:57.5200000")
+            with open(os.path.join(out, "ddl.sql"), encoding="utf-8") as fh:
+                self.assertIn("CREATE TABLE dbo.zz (a int)", fh.read())
+
+    def test_focus(self):
+        ev = [tr.Ev() for _ in range(3)]
+        for i, e in enumerate(ev):
+            e.spid, e.kind, e.dbname, e.stmt = (10 + i), "batch", ("other" if i else "target_db"), ""
+        ev[2].dbname, ev[2].stmt = "master", "CREATE DATABASE [Target_DB]"
+        kept, dropped = tr.focus_events(ev, "target_db")
+        self.assertEqual([e.spid for e in kept], [10, 12])
+        self.assertEqual(dropped, 1)
 
 
 if __name__ == "__main__":

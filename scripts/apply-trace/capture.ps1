@@ -34,6 +34,7 @@ param(
     [switch]$AllDatabases,
     [string]$Predicate = '',
     [switch]$KeepXel,
+    [int]$TimeoutMinutes = 0,
     [int]$MaxStatementKB = 1024,
     [int]$ContentMaxKB = 512,
     [int]$ContentBudgetMB = 1024,
@@ -67,7 +68,7 @@ if ($BeforeSnapshot) {
 
 # 2. the command under trace
 $traceDir = Join-Path $dir 'trace'
-$traceArgs = @{ Database = $Database; Tag = $Tag; OutDir = $traceDir; Server = $Server; Track = $Track; MaxStatementKB = $MaxStatementKB; Note = $Note }
+$traceArgs = @{ Database = $Database; Tag = $Tag; OutDir = $traceDir; Server = $Server; Track = $Track; MaxStatementKB = $MaxStatementKB; Note = $Note; TimeoutMinutes = $TimeoutMinutes }
 if ($IncludeStatements) { $traceArgs['IncludeStatements'] = $true }
 if ($AllDatabases) { $traceArgs['AllDatabases'] = $true }
 if ($Predicate) { $traceArgs['Predicate'] = $Predicate }

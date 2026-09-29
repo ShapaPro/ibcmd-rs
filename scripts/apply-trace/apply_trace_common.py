@@ -59,8 +59,10 @@ def tsv_escape(value):
 
 
 def read_tsv(path):
-    """Yield one dict per data line of a kit TSV (first line = header)."""
-    with open(path, "r", encoding="utf-8", newline="") as fh:
+    """Yield one dict per data line of a kit TSV (first line = header); `.gz` files are read compressed."""
+    opener = (lambda: gzip.open(path, "rt", encoding="utf-8", newline="")) if str(path).endswith(".gz") \
+        else (lambda: open(path, "r", encoding="utf-8", newline=""))
+    with opener() as fh:
         header = None
         for raw in fh:
             line = raw.rstrip("\n")
@@ -190,6 +192,10 @@ def load_blob(store, sha):
 def name_shape(name):
     """`<guid>_dynupdate_<guid>.0` style shape of a Config/Params row name."""
     s = GUID_RE.sub("<guid>", name)
+    # ConfigCAS names are content hashes
+    s = re.sub(r"(?<![0-9A-Za-z])[0-9a-f]{64}(?![0-9A-Za-z])", "<sha256>", s)
+    s = re.sub(r"(?<![0-9A-Za-z])[0-9a-f]{40}(?![0-9A-Za-z])", "<sha1>", s)
+    s = re.sub(r"(?<![0-9A-Za-z])[0-9a-f]{32}(?![0-9A-Za-z])", "<md5>", s)
     s = re.sub(r"\.(\d+)(?=\.|$)", ".<n>", s)
     s = re.sub(r"(?<=-)(\d{2,})$", "<n>", s)
     return s
@@ -215,10 +221,18 @@ def v8_tokens(text):
     """
     out = []
     for t in _TOKEN_RE.findall(text):
-        if t[:1] not in ('"', "{", "}", ","):
+        c = t[:1]
+        if c == '"':
+            # a line break inside a string is CRLF in the platform's files and LF elsewhere
+            if "\r" in t:
+                t = t.replace("\r\n", "\n")
+        elif c not in ("{", "}", ","):
             t = t.strip()
             if not t:
                 continue
+            if t.startswith("#base64:"):
+                # base64 wrapped into lines by the platform, on one line by other writers
+                t = "#base64:" + "".join(t[8:].split())
         out.append(t)
     return out
 

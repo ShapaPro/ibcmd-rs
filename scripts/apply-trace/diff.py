@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from apply_trace_common import (  # noqa: E402
     FILE_TABLES, decode_payload, load_blob, name_shape, one_line, parse_v8_container, parse_versions,
-    read_tsv, sha256_hex, v8_lines,
+    read_tsv, sha256_hex, v8_lines, v8_tokens,
 )
 
 IGNORED_SETTINGS = {"option:name", "file:"}
@@ -221,6 +221,9 @@ def content_diff(name, table, sa, sb, max_lines):
                 for k in removed[:max_lines]:
                     lines.append(f"    - {k}: {ma[k]}")
                 return lines
+        if len(ta) <= 400 and len(tb) <= 400:
+            lines.append(f"value: {one_line(ta, 400)}  ->  {one_line(tb, 400)}")
+            return lines
         if ta.lstrip().startswith("{") and tb.lstrip().startswith("{"):
             la, lb = v8_lines(ta), v8_lines(tb)
             if max(len(la), len(lb)) > 300000:
@@ -233,6 +236,47 @@ def content_diff(name, table, sa, sb, max_lines):
         return lines
     lines.append(f"binary content: {da['decoded']} -> {db['decoded']} bytes")
     return lines
+
+
+def text_equal(a, b):
+    """Equal as text: same {...} tokens, or the same lines apart from CRLF and trailing blanks."""
+    if a == b:
+        return True
+    ta = a.decode("utf-8-sig", errors="replace")
+    tb = b.decode("utf-8-sig", errors="replace")
+    if ta.lstrip().startswith("{") and tb.lstrip().startswith("{"):
+        return v8_tokens(ta) == v8_tokens(tb)
+    return ta.replace("\r\n", "\n").rstrip() == tb.replace("\r\n", "\n").rstrip()
+
+
+def semantic_equal(sa, sb):
+    """The stored bytes differ; do they mean the same (container elements / tokens equal)?"""
+    da, db = decode_payload(sa), decode_payload(sb)
+    if da["kind"] == "container" and db["kind"] == "container":
+        ea, eb = parse_v8_container(da["data"]), parse_v8_container(db["data"])
+        if ea is None or eb is None:
+            return da["data"] == db["data"]
+        ma = collections.OrderedDict((n, body) for n, _h, body in ea)
+        mb = collections.OrderedDict((n, body) for n, _h, body in eb)
+        if list(ma) != list(mb):
+            return False
+        return all(ma[n] == mb[n] or text_equal(ma[n], mb[n]) for n in ma)
+    if da["kind"] in ("text", "v8text") and db["kind"] in ("text", "v8text"):
+        return text_equal(da["data"], db["data"])
+    return da["data"] == db["data"]
+
+
+def classify_update(o, r, blobs):
+    """recompressed | formatting | changed | unknown for a file row whose stored bytes changed."""
+    if o["decoded_sha256"] and o["decoded_sha256"] == r["decoded_sha256"]:
+        return "recompressed"
+    if o["blob"] != "Y" or r["blob"] != "Y":
+        return "unknown"
+    sa, sb = load_blob(blobs, o["sha256"]), load_blob(blobs, r["sha256"])
+    if sa is None or sb is None:
+        return "unknown"
+    return "formatting" if semantic_equal(sa, sb) else "changed"
+
 
 
 def file_rows_diff(table, ra, rb, blobs, max_lines, content_budget):
@@ -285,8 +329,9 @@ def main(argv=None):
     ap.add_argument("--after", required=True)
     ap.add_argument("--out", default="")
     ap.add_argument("--blobs", default="")
-    ap.add_argument("--max-list", type=int, default=200, help="rows listed per category and table")
-    ap.add_argument("--max-lines", type=int, default=40, help="diff lines per changed row")
+    ap.add_argument("--max-list", type=int, default=80, help="rows listed per category and table")
+    ap.add_argument("--max-lines", type=int, default=30, help="diff lines per changed row")
+    ap.add_argument("--max-diff-rows", type=int, default=25, help="changed rows per table that get a content diff")
     args = ap.parse_args(argv)
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.after)), "diff")
     os.makedirs(out, exist_ok=True)
@@ -373,24 +418,32 @@ def main(argv=None):
                     add(f"- ... {len(dele) - args.max_list} more")
                 add("")
             if upd:
-                add(f"**updated {len(upd)}**: {shape_counts([o for o, _ in upd])}")
-                shown = 0
+                # classify every updated row: only recompressed / only formatting / really changed / content not kept
+                cats = collections.OrderedDict((k, []) for k in ("recompressed", "formatting", "changed", "unknown"))
                 for o, r in upd:
-                    same_dec = o["decoded_sha256"] == r["decoded_sha256"]
-                    line = (f"- ~ `{r['FileName']}` size {o['size']} -> {r['size']} sha {o['sha256'][:12]} -> {r['sha256'][:12]}"
-                            + (" (same decoded content: only the compression differs)" if same_dec else ""))
+                    cats[classify_update(o, r, blobs)].append((o, r))
+                entry["update_categories"] = {k: [o["FileName"] for o, _ in v] for k, v in cats.items()}
+                add(f"**updated {len(upd)}**: {shape_counts([o for o, _ in upd])}")
+                add(f"- only the compression differs (same decoded bytes): {len(cats['recompressed'])}")
+                add(f"- only formatting differs (same tokens / container elements; line breaks, base64 wrapping): {len(cats['formatting'])}")
+                add(f"- content changed: {len(cats['changed'])}")
+                add(f"- content not kept, cannot tell: {len(cats['unknown'])}")
+                for cat in ("recompressed", "formatting", "unknown"):
+                    if cats[cat]:
+                        add(f"  - {cat}: {shape_counts([o for o, _ in cats[cat]])}; first: " + ", ".join(f"`{o['FileName']}`" for o, _ in cats[cat][:4]))
+                shown_diffs = 0
+                for o, r in cats["changed"][:args.max_list]:
+                    line = f"- ~ `{r['FileName']}` size {o['size']} -> {r['size']} sha {o['sha256'][:12]} -> {r['sha256'][:12]}"
                     if o["modified"] != r["modified"]:
                         line += f"; modified {o['modified'][:19]} -> {r['modified'][:19]}"
                     add(line)
-                    if shown < args.max_list and not same_dec:
-                        sa = load_blob(blobs, o["sha256"]) if o["blob"] == "Y" else None
-                        sb = load_blob(blobs, r["sha256"]) if r["blob"] == "Y" else None
-                        if sa is not None and sb is not None:
-                            for ln in content_diff(r["FileName"], t, sa, sb, args.max_lines):
-                                add("    " + ln)
-                        else:
-                            add(f"    (content not kept: before {'yes' if sa is not None else 'no'}, after {'yes' if sb is not None else 'no'})")
-                        shown += 1
+                    if shown_diffs < args.max_diff_rows:
+                        sa, sb = load_blob(blobs, o["sha256"]), load_blob(blobs, r["sha256"])
+                        for ln in content_diff(r["FileName"], t, sa, sb, args.max_lines):
+                            add("    " + ln)
+                        shown_diffs += 1
+                if len(cats["changed"]) > args.max_list:
+                    add(f"- ... {len(cats['changed']) - args.max_list} more changed rows in diff.json")
                 add("")
             if meta_only:
                 add(f"**same content, other metadata {len(meta_only)}**: {shape_counts([o for o, _ in meta_only])}")

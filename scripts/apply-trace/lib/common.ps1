@@ -483,16 +483,64 @@ function Get-TextPreview {
     return [ApplyTraceKit.Codec]::Preview($Bytes, $MaxChars)
 }
 
+# Exports the events of Extended Events files to a gzip file: one record per event,
+# "<timestamp_utc><TAB><event xml>", records separated by U+001E.  trace_report.py parses
+# the XML (XQuery inside SQL Server needed minutes for 100k+ events).  Returns the count.
+function Export-XelEvents {
+    param($Conn, [string]$Pattern, [string]$OutPath)
+    $cmd = $Conn.CreateCommand()
+    $cmd.CommandText = "SELECT CONVERT(varchar(33), timestamp_utc, 126) AS ts, event_data FROM sys.fn_xe_file_target_read_file(N'$($Pattern.Replace("'", "''"))', NULL, NULL, NULL) ORDER BY file_name, file_offset"
+    $cmd.CommandTimeout = 0
+    $reader = $cmd.ExecuteReader()
+    $fs = [System.IO.File]::Create($OutPath)
+    $gz = New-Object System.IO.Compression.GZipStream($fs, [System.IO.Compression.CompressionLevel]::Fastest)
+    $xw = New-Object System.IO.StreamWriter($gz, $script:Utf8NoBom)
+    $n = 0
+    try {
+        while ($reader.Read()) {
+            $xw.Write($reader.GetString(0))
+            $xw.Write("`t")
+            $xw.Write($reader.GetString(1))
+            $xw.Write([char]0x1E)
+            $n++
+        }
+    } finally { $reader.Close(); $xw.Dispose() }
+    return $n
+}
+
 # Runs "the command under observation": a script block, or an executable with
 # arguments.  Output goes to a log file.  The script block runs in the calling
 # scope chain: prefer names that trace.ps1/capture.ps1 do not use as parameters.
+#
+# -TimeoutMinutes N: a watchdog on its own thread kills every process that
+# descends from this PowerShell process N minutes after the start (exit code -9,
+# TimedOut = true), so a hung native tool cannot stall a capture for hours.
 function Invoke-Observed {
-    param([scriptblock]$Command, [string]$Exe, [string[]]$ArgumentList, [string]$LogPath)
+    param([scriptblock]$Command, [string]$Exe, [string[]]$ArgumentList, [string]$LogPath, [int]$TimeoutMinutes = 0)
     $global:LASTEXITCODE = 0
     $code = 0
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $sync = [hashtable]::Synchronized(@{ Stop = $false; Fired = $false })
+    $dog = $null
+    if ($TimeoutMinutes -gt 0) {
+        $dog = [powershell]::Create()
+        [void]$dog.AddScript({
+            param($ownPid, $deadline, $sync)
+            function Get-Descendant($p) {
+                Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessId; Get-Descendant $_.ProcessId }
+            }
+            while ((Get-Date) -lt $deadline) {
+                if ($sync.Stop) { return }
+                Start-Sleep -Milliseconds 500
+            }
+            if ($sync.Stop) { return }
+            $sync.Fired = $true
+            foreach ($d in @(Get-Descendant $ownPid)) { Stop-Process -Id $d -Force -ErrorAction SilentlyContinue }
+        }).AddArgument($PID).AddArgument((Get-Date).AddMinutes($TimeoutMinutes)).AddArgument($sync)
+        $dogHandle = $dog.BeginInvoke()
+    }
     try {
         if ($Command) {
             & $Command *>&1 | Out-File -Encoding utf8 -LiteralPath $LogPath
@@ -506,6 +554,9 @@ function Invoke-Observed {
     } finally {
         $ErrorActionPreference = $prevPref
         $sw.Stop()
+        $sync.Stop = $true
+        if ($dog) { try { [void]$dog.Stop() } catch { } ; $dog.Dispose() }
     }
-    return [pscustomobject]@{ ExitCode = $code; Seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 1) }
+    if ($sync.Fired) { $code = -9; Write-Log "the command was killed after $TimeoutMinutes minutes (-TimeoutMinutes)" }
+    return [pscustomobject]@{ ExitCode = $code; Seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 1); TimedOut = [bool]$sync.Fired }
 }

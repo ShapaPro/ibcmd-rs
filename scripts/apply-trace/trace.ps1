@@ -10,7 +10,7 @@
      event files under C:\temp\ibcmd_rs_04\<Track>\);
   2. runs the command (a script block, or -Exe with -ArgumentList) and saves
      its output to command.log;
-  3. stops and drops the session, exports the events to events.tsv;
+  3. stops and drops the session, exports the raw events to events.xml.gz;
   4. runs trace_report.py: statement groups (normalized, in order of first
      appearance, with counts), an ordered log of the writes to the service
      tables (Config, Params, Files, ...), the DDL verbatim, transaction
@@ -49,10 +49,14 @@ param(
     [switch]$AllDatabases,
     # a raw XE predicate that replaces the database filter
     [string]$Predicate = '',
-    # statements longer than this are cut in events.tsv (their length is kept)
+    # statements longer than this are cut in events.tsv.gz (their length is kept)
     [int]$MaxStatementKB = 1024,
     [switch]$KeepXel,
+    # keep events.xml.gz (the raw events) next to the parsed events.tsv.gz
+    [switch]$KeepRaw,
     [switch]$NoReport,
+    # kill the command (and its child processes) after this many minutes; 0 = no limit
+    [int]$TimeoutMinutes = 0,
     # drop sessions named ibcmd_rs_04_<Track>_* left behind by a killed run and exit
     [switch]$Cleanup,
     [string]$Note = ''
@@ -130,7 +134,7 @@ WITH (MAX_MEMORY = 128 MB, MAX_EVENT_SIZE = 128 MB, EVENT_RETENTION_MODE = ALLOW
         $startedUtc = [DateTime]::UtcNow
         Write-Log "trace $session started on '$Database' (id $dbId); running the command"
         $logPath = Join-Path $OutDir 'command.log'
-        $observed = Invoke-Observed -Command $Command -Exe $Exe -ArgumentList $ArgumentList -LogPath $logPath
+        $observed = Invoke-Observed -Command $Command -Exe $Exe -ArgumentList $ArgumentList -LogPath $logPath -TimeoutMinutes $TimeoutMinutes
         $endedUtc = [DateTime]::UtcNow
         Write-Log ("command finished: exit {0}, {1} s" -f $observed.ExitCode, $observed.Seconds)
         $ds = Invoke-SqlRows $master "SELECT dropped_event_count, dropped_buffer_count, largest_event_dropped_size, total_bytes_generated FROM sys.dm_xe_sessions WHERE name = N'$session'"
@@ -139,62 +143,10 @@ WITH (MAX_MEMORY = 128 MB, MAX_EVENT_SIZE = 128 MB, EVENT_RETENTION_MODE = ALLOW
         try { Invoke-SqlNonQuery $master "ALTER EVENT SESSION [$session] ON SERVER STATE = STOP" } catch { Write-Log "stop failed: $_" }
     }
 
-    # Export the events (events are in the files after STOP).
-    $eventsPath = Join-Path $OutDir 'events.tsv'
-    $maxChars = $MaxStatementKB * 1024
-    $readSql = @"
-SET QUOTED_IDENTIFIER ON;
-SET NOCOUNT ON;
-SELECT
-    e.x.value('(action[@name="event_sequence"]/value/text())[1]', 'bigint') AS seq,
-    CONVERT(varchar(33), r.timestamp_utc, 126) AS ts,
-    r.object_name AS ev,
-    e.x.value('(action[@name="session_id"]/value/text())[1]', 'int') AS spid,
-    e.x.value('(action[@name="transaction_id"]/value/text())[1]', 'bigint') AS xid,
-    e.x.value('(data[@name="duration"]/value/text())[1]', 'bigint') AS dur_us,
-    e.x.value('(data[@name="cpu_time"]/value/text())[1]', 'bigint') AS cpu_us,
-    e.x.value('(data[@name="logical_reads"]/value/text())[1]', 'bigint') AS reads,
-    e.x.value('(data[@name="writes"]/value/text())[1]', 'bigint') AS writes,
-    e.x.value('(data[@name="row_count"]/value/text())[1]', 'bigint') AS rows,
-    e.x.value('(data[@name="result"]/text/text())[1]', 'nvarchar(20)') AS result,
-    e.x.value('(data[@name="transaction_state"]/text/text())[1]', 'nvarchar(20)') AS tstate,
-    e.x.value('(data[@name="transaction_type"]/text/text())[1]', 'nvarchar(20)') AS ttype,
-    e.x.value('(data[@name="transaction_id"]/value/text())[1]', 'bigint') AS tid,
-    e.x.value('(action[@name="client_app_name"]/value/text())[1]', 'nvarchar(256)') AS app,
-    e.x.value('(action[@name="database_name"]/value/text())[1]', 'nvarchar(128)') AS dbname,
-    e.x.value('(data[@name="error_number"]/value/text())[1]', 'int') AS err_no,
-    e.x.value('(data[@name="severity"]/value/text())[1]', 'int') AS err_sev,
-    e.x.value('(data[@name="message"]/value/text())[1]', 'nvarchar(2000)') AS err_msg,
-    s.stmt AS stmt_full
-FROM sys.fn_xe_file_target_read_file(N'$($xelBase -replace '\.xel$','')*.xel', NULL, NULL, NULL) AS r
-CROSS APPLY (SELECT CAST(r.event_data AS xml) AS x0) AS c
-CROSS APPLY c.x0.nodes('event') AS e(x)
-CROSS APPLY (SELECT COALESCE(
-        e.x.value('(data[@name="statement"]/value/text())[1]', 'nvarchar(max)'),
-        e.x.value('(data[@name="batch_text"]/value/text())[1]', 'nvarchar(max)'),
-        e.x.value('(action[@name="sql_text"]/value/text())[1]', 'nvarchar(max)')) AS stmt) AS s
-ORDER BY r.file_name, r.file_offset
-"@
-    $cmd = $master.CreateCommand()
-    $cmd.CommandText = $readSql
-    $cmd.CommandTimeout = 0
-    $reader = $cmd.ExecuteReader()
-    $w = New-Utf8Writer $eventsPath
-    try {
-        Write-TsvLine $w @('seq', 'ts', 'ev', 'spid', 'xid', 'dur_us', 'cpu_us', 'reads', 'writes', 'rows', 'result', 'tstate', 'ttype', 'tid', 'app', 'dbname', 'err_no', 'err_sev', 'err_msg', 'stmt_chars', 'stmt')
-        $vals = New-Object object[] $reader.FieldCount
-        while ($reader.Read()) {
-            [void]$reader.GetValues($vals)
-            $f = New-Object object[] 21
-            for ($i = 0; $i -lt 19; $i++) { $f[$i] = if ($vals[$i] -is [System.DBNull]) { '' } else { $vals[$i] } }
-            $stmt = if ($vals[19] -is [System.DBNull]) { '' } else { [string]$vals[19] }
-            $f[19] = $stmt.Length
-            $f[20] = if ($stmt.Length -gt $maxChars) { $stmt.Substring(0, $maxChars) } else { $stmt }
-            Write-TsvLine $w $f
-            $eventCount++
-        }
-    } finally { $reader.Close(); $w.Dispose() }
-    Write-Log "$eventCount events exported to events.tsv"
+    # Export the raw events (they are in the files after STOP) to events.xml.gz.
+    $xmlPath = Join-Path $OutDir 'events.xml.gz'
+    $eventCount = Export-XelEvents -Conn $master -Pattern (($xelBase -replace '\.xel$', '') + '*.xel') -OutPath $xmlPath
+    Write-Log "$eventCount events exported to events.xml.gz"
 
     $xelFiles = @(Get-ChildItem -LiteralPath $xelDir -Filter "$session*.xel" -ErrorAction SilentlyContinue)
     $xelBytes = ($xelFiles | Measure-Object -Property Length -Sum).Sum
@@ -214,6 +166,7 @@ ORDER BY r.file_name, r.file_offset
         command          = if ($Command) { $Command.ToString().Trim() } else { ($Exe + ' ' + ($ArgumentList -join ' ')) }
         exit_code        = $observed.ExitCode
         command_seconds  = $observed.Seconds
+        timed_out        = $observed.TimedOut
         events           = $eventCount
         dropped_events   = if ($dropStats) { [int64]$dropStats['dropped_event_count'] } else { $null }
         dropped_buffers  = if ($dropStats) { [int64]$dropStats['dropped_buffer_count'] } else { $null }
@@ -243,9 +196,14 @@ ORDER BY r.file_name, r.file_offset
 
 if (-not $NoReport) {
     $py = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $py) { Write-Log 'python not found: events.tsv is written, the report is skipped'; return }
+    if (-not $py) { Write-Log 'python not found: events.xml.gz is written, the report is skipped'; return }
     $env:PYTHONIOENCODING = 'utf-8'
-    & $py.Source (Join-Path $PSScriptRoot 'trace_report.py') --events $eventsPath --meta (Join-Path $OutDir 'trace-meta.json') --out $OutDir
+    $reportArgs = @('--xml', $xmlPath, '--max-statement-kb', $MaxStatementKB, '--meta', (Join-Path $OutDir 'trace-meta.json'), '--out', $OutDir)
+    # without the database filter the trace holds every non-system session: keep those that touched the database
+    if ($AllDatabases -or $Predicate) { $reportArgs += @('--focus-db', $Database) }
+    & $py.Source (Join-Path $PSScriptRoot 'trace_report.py') @reportArgs
     if ($LASTEXITCODE -ne 0) { throw "trace_report.py failed ($LASTEXITCODE)" }
+    # events.tsv (parsed, statements cut at -MaxStatementKB) replaces the raw XML unless -KeepRaw
+    if (-not $KeepRaw) { Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue }
 }
 Write-Log "trace report: $OutDir"
