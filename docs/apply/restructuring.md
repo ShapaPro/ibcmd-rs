@@ -463,10 +463,11 @@ prototype of section 9 has done.
   catalog or document, widen a string** + W8 + W10/W11 for these: about **6-9 weeks** with the fail-closed
   classifier and the round-trip gate (refuse anything else, use native apply for it). Each step is
   independently verifiable on a twin. The prototype covers the first item of that list ("append an attribute
-  of a simple type to a catalog") in a few hours on top of checkpoint 1 -- the formats were the
-  work of checkpoint 1; what took the time were the twins, the classification and the caches.
+  of a simple type to a catalog") and took one working day of agent time on top of checkpoint 1 (about 5 000 lines
+  with the tests; a human engineer should count a week) -- the formats were the work of checkpoint 1; what took
+  the time were the twins, the classification and the caches.
 - **Full own restructuring** (W1-W11): the packages add up to 29-44 weeks; with a contingency for the
-  untraced areas (a third) **8-13 months** of one engineer, with a long tail; do not promise it for 0.4 or
+  untraced areas (a third; 29.5-44 weeks x 1.33 = 39-59 weeks) **9-13 months** of one engineer (checkpoint 1 said 7-11), with a long tail; do not promise it for 0.4 or
   0.5.
 - **Round-trip gate (recommended)**: before an object family is allowed to change, the generator must
   rebuild the *old* `DBSchema` entries of that family from the *old* `Config` rows and match the stored
@@ -725,8 +726,9 @@ dialect with `import files --partial`, 4 rows staged in 61 s, then a traced nati
 13. **A native `ibcmd` that asks for a password holds the lock and waits for ever** (a plain `Администратор` on the
     8.5 corpus held the native lock for 23 minutes until it was killed). The kit's `Invoke-NativeCommand`
     closes stdin, sets a timeout and caps the output.
-14. **`Params` holds a session-state row, `ecsreg_<id>`** (306 bytes in the БСП corpus): the first server start or native command removes it. A
-    comparison of `Params` between two databases must ignore it (it is why two snapshots taken before and after a session differ by one row).
+14. **`Params` holds a session-state row, `ecsreg_<id>`** (306 bytes in the БСП corpus): the first server start (a session) removes it; whether a
+    native `ibcmd` command does too was not tested. A comparison of `Params` between two databases must ignore it (it is why two snapshots
+    taken before and after a session differ by one row).
 15. **The platform builds derived state from the metadata on every apply that changes something**: `*.si` caches, the change registration
     `_ConfigChngR` (rebuilt with new keys, 782 more objects registered than in an own restructure) and `_ExtensionsRestruct*`. An own apply
     that skips them is right for the database (sessions accept it) and stale for XDTO, until the next native apply.
