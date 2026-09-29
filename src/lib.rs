@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod apply_check;
 pub mod cli;
 pub mod commands;
 pub mod compatibility;
