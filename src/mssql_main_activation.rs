@@ -1372,4 +1372,21 @@ mod tests {
             "IF @@ROWCOUNT <> 1 THROW 57216, 'Params.DynamicallyUpdated cleanup drifted'"
         ));
     }
+
+    #[test]
+    fn no_mode_touches_the_platform_licensing_rows_or_the_mobile_ring() {
+        // The `.ui` rows of `Params` are the platform's licensing records and `Files.MobileVersions.dat` is
+        // its mobile-client ring: no publication mode writes either (docs/apply/params-ui.md).
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Online,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let tail = (mode == MainActivationMode::Live).then_some(r"C:\tail.trn");
+            let script = render_main_activation_sql("lab", &fixture(mode), tail).unwrap();
+            assert!(!script.sql.contains(".ui"), "{mode:?}");
+            assert!(!script.sql.contains("MobileVersions"), "{mode:?}");
+        }
+    }
 }
