@@ -108,6 +108,8 @@ function Invoke-OursImport([string]$Db, [string]$Tree, [string]$Tag = 'x', [swit
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $o = & $Exe @args 2>&1
     $rc = $LASTEXITCODE
+    New-Item -ItemType Directory -Force "$($script:Lab)\logs" | Out-Null
+    $o | ForEach-Object { "$_" } | Set-Content "$($script:Lab)\logs\ours-import-$Tag.log" -Encoding UTF8
     $res = @{ Exit = $rc; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Tail = (($o | Select-Object -Last 4) -join ' | ') }
     $rep = "$($script:Lab)\out\import-$Tag.json"
     if (Test-Path $rep) {
