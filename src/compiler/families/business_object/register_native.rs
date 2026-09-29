@@ -239,6 +239,37 @@ const COT_SCHEMA: &[&str] = &[
     "ChildTemplates",
 ];
 
+// Enumerations as the stored rows spell them. The codes are the metadata
+// model's (`metadata_model::objects`), measured on the four corpora the lab
+// holds (ERP УХ 8.3.27, БСП 8.3.27 and 8.5, an extension).
+const DATA_LOCK_CONTROL_MODE: &[(&str, &str)] = &[("Automatic", "0"), ("Managed", "1")];
+const FULL_TEXT_SEARCH: &[(&str, &str)] = &[("DontUse", "0"), ("Use", "1")];
+const DATA_HISTORY: &[(&str, &str)] = &[("DontUse", "0"), ("Use", "1")];
+const EDIT_TYPE: &[(&str, &str)] = &[("InList", "0"), ("InDialog", "1"), ("BothWays", "2")];
+const CHOICE_MODE: &[(&str, &str)] = &[("FromForm", "0"), ("QuickChoice", "1"), ("BothWays", "2")];
+const DEFAULT_PRESENTATION: &[(&str, &str)] = &[("AsCode", "0"), ("AsDescription", "1")];
+const CREATE_ON_INPUT: &[(&str, &str)] = &[("Auto", "0"), ("DontUse", "1"), ("Use", "2")];
+const CHOICE_HISTORY_ON_INPUT: &[(&str, &str)] = &[("Auto", "0"), ("DontUse", "1")];
+const PREDEFINED_DATA_UPDATE: &[(&str, &str)] =
+    &[("Auto", "0"), ("AutoUpdate", "1"), ("DontAutoUpdate", "2")];
+const CODE_ALLOWED_LENGTH: &[(&str, &str)] = &[("Fixed", "0"), ("Variable", "1")];
+const CODE_TYPE: &[(&str, &str)] = &[("Number", "0"), ("String", "1")];
+const DEPENDENCE_ON_CALCULATION_TYPES: &[(&str, &str)] = &[
+    ("DontUse", "0"),
+    ("OnActionPeriod", "1"),
+    ("OnBasePeriod", "2"),
+];
+const CCT_CODE_SERIES: &[(&str, &str)] = &[
+    ("WholeCharacteristicKind", "0"),
+    ("WithinSubordination", "1"),
+];
+const COA_CODE_SERIES: &[(&str, &str)] =
+    &[("WholeChartOfAccounts", "0"), ("WithinSubordination", "1")];
+
+/// Owner-record slots of a `{22,22,...}` accounting register (one with a
+/// period adjustment): the generated pairs start one slot later.
+const ACCOUNTING_ADJUSTED_GENERATED_SLOTS: [usize; 7] = [2, 4, 6, 8, 10, 12, 14];
+
 pub(super) fn build_register_family(
     validated: &ValidatedConfiguration<'_>,
     object: &CanonicalObject,
@@ -555,32 +586,65 @@ fn build_accounting(
                 object: object.identity().uuid(),
                 reason: "AccountingRegister ChartOfAccounts is empty",
             })?;
-    let mut fields = vec![token("0"); 30];
-    fields[0] = token("21");
-    put_generated_pairs(&mut fields, &[1, 3, 5, 7, 9, 11, 13], &generated);
-    fields[15] = list(vec![token("0"), native_header(object)?]);
-    fields[16] = bool_token(object, "UseStandardCommands")?;
-    fields[17] = bool_token(object, "IncludeHelpInContents")?;
-    fields[18] = uuid_value(chart);
-    fields[19] = form_slot(object, "DefaultListForm", &forms, indexes)?;
-    fields[20] = bool_token(object, "Correspondence")?;
-    fields[21] = token(u32_property(object, "PeriodAdjustmentLength")?.to_string());
-    fields[22] = enum_code(
-        object,
-        "DataLockControlMode",
-        &[("Automatic", "0"), ("Managed", "1")],
-    )?;
-    fields[23] = bool_token(object, "EnableTotalsSplitting")?;
-    fields[24] = standard_attributes(&["-10", "-5", "-4", "-3", "-2"])?;
-    fields[25] = form_slot(object, "AuxiliaryListForm", &forms, indexes)?;
-    for (slot, name) in (26..=28).zip([
+    // `{21,<7 generated pairs>,{0,<header>},UseStandardCommands,
+    // IncludeHelpInContents,ChartOfAccounts,DefaultListForm,Correspondence,
+    // DataLockControlMode,FullTextSearch,EnableTotalsSplitting,
+    // <standard attributes>,AuxiliaryListForm,ListPresentation,
+    // ExtendedListPresentation,Explanation,PeriodAdjustmentLength}`, 30 slots.
+    //
+    // A register with a period adjustment stores version 22 with a second `22`
+    // before the generated types, so every later slot moves up by one (31
+    // slots; ERP УХ `Хозрасчетный` and `КорректировкиНалоговойБазы`, the only
+    // two registers on record with a length of 1). The property slots were
+    // measured on ten registers of the four corpora: DataLockControlMode is
+    // slot 21 (`0`/`1` follow Automatic/Managed), PeriodAdjustmentLength the
+    // last slot; FullTextSearch is `0` on all ten, so it is the slot left
+    // between them.
+    let period_adjustment = u32_property(object, "PeriodAdjustmentLength")?;
+    let shift = usize::from(period_adjustment > 0);
+    let mut fields = vec![token("0"); 30 + shift];
+    fields[0] = token(if shift == 1 { "22" } else { "21" });
+    if shift == 1 {
+        fields[1] = token("22");
+        put_generated_pairs(
+            &mut fields,
+            &ACCOUNTING_ADJUSTED_GENERATED_SLOTS,
+            &generated,
+        );
+    } else {
+        put_generated_pairs(&mut fields, &[1, 3, 5, 7, 9, 11, 13], &generated);
+    }
+    fields[15 + shift] = list(vec![token("0"), native_header(object)?]);
+    fields[16 + shift] = bool_token(object, "UseStandardCommands")?;
+    fields[17 + shift] = bool_token(object, "IncludeHelpInContents")?;
+    fields[18 + shift] = uuid_value(chart);
+    fields[19 + shift] = form_slot(object, "DefaultListForm", &forms, indexes)?;
+    fields[20 + shift] = bool_token(object, "Correspondence")?;
+    fields[21 + shift] = enum_code(object, "DataLockControlMode", DATA_LOCK_CONTROL_MODE)?;
+    fields[22 + shift] = enum_code(object, "FullTextSearch", FULL_TEXT_SEARCH)?;
+    fields[23 + shift] = bool_token(object, "EnableTotalsSplitting")?;
+    // The markers follow the register's own properties: a register without a
+    // correspondence adds `RecordType` (-9) after `Account` (-10); one with a
+    // period adjustment leads with `PeriodAdjustment` (-30).
+    let mut markers = Vec::with_capacity(7);
+    if shift == 1 {
+        markers.push("-30");
+    }
+    markers.push("-10");
+    if !bool_property(object, "Correspondence")? {
+        markers.push("-9");
+    }
+    markers.extend(["-5", "-4", "-3", "-2"]);
+    fields[24 + shift] = standard_attributes(&markers)?;
+    fields[25 + shift] = form_slot(object, "AuxiliaryListForm", &forms, indexes)?;
+    for (slot, name) in (26 + shift..=28 + shift).zip([
         "ListPresentation",
         "ExtendedListPresentation",
         "Explanation",
     ]) {
         fields[slot] = localized_value(object, name, "language")?;
     }
-    fields[29] = enum_code(object, "FullTextSearch", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[29 + shift] = token(period_adjustment.to_string());
     Ok(list(vec![
         token("1"),
         list(fields),
@@ -804,19 +868,21 @@ fn build_recalculation(
             token("0"),
         ]));
     }
+    // `{1,{4,<3 generated pairs>,{0,<header>},DataLockControlMode},1,
+    // <dimensions>}`: the owner record ends with the lock mode and the root
+    // counts its one collection, as every other register root does. Both
+    // recalculations on record (БСП 8.3.27 and 8.5) are Managed, so the data
+    // does not separate the two; an Automatic one would otherwise write the
+    // collection count as `0`.
     let mut fields = vec![token("0"); 9];
     fields[0] = token("4");
     put_generated_pairs(&mut fields, &[1, 3, 5], &generated);
     fields[7] = list(vec![token("0"), native_header(object)?]);
-    fields[8] = token("1");
+    fields[8] = enum_code(object, "DataLockControlMode", DATA_LOCK_CONTROL_MODE)?;
     Ok(list(vec![
         token("1"),
         list(fields),
-        enum_code(
-            object,
-            "DataLockControlMode",
-            &[("Automatic", "0"), ("Managed", "1")],
-        )?,
+        token("1"),
         native_collection(RECALCULATION_DIMENSION_COLLECTION_UUID, dimensions),
     ]))
 }
@@ -855,12 +921,16 @@ fn build_cct(
     fields[21] = token(u32_property(object, "CodeLength")?.to_string());
     fields[22] = bool_token(object, "Autonumbering")?;
     fields[23] = token(u32_property(object, "DescriptionLength")?.to_string());
-    fields[24] = enum_code(object, "CodeSeries", &[("WholeCharacteristicKind", "1")])?;
-    fields[25] = enum_code(
-        object,
-        "DefaultPresentation",
-        &[("AsCode", "0"), ("AsDescription", "1")],
-    )?;
+    // The property slots were measured on 36 plans of the four corpora
+    // (БСП 8.3.27 and 8.5, ERP УХ, an extension): EditType 25 (`0`/`1`/`2`),
+    // ChoiceMode 31, CheckUnique 34, DataLockControlMode 36, CreateOnInput 51
+    // (`1`/`2`), PredefinedDataUpdate 53. DefaultPresentation (24, `1` on
+    // every plan) and CodeSeries (35, `0` on every plan of the four corpora)
+    // are held by their constant values alone; slot 35 is `1` on the one plan
+    // of the wider stand that writes WithinSubordination
+    // (docs/evidence/erp-uh-metadata-object-slots-20260827.md).
+    fields[24] = enum_code(object, "DefaultPresentation", DEFAULT_PRESENTATION)?;
+    fields[25] = enum_code(object, "EditType", EDIT_TYPE)?;
     for (slot, name) in (26..=30).zip([
         "DefaultObjectForm",
         "DefaultFolderForm",
@@ -870,7 +940,7 @@ fn build_cct(
     ]) {
         fields[slot] = form_slot(object, name, &forms, indexes)?;
     }
-    fields[31] = enum_code(object, "EditType", &[("InList", "0"), ("InDialog", "2")])?;
+    fields[31] = enum_code(object, "ChoiceMode", CHOICE_MODE)?;
     fields[32] = bool_token(object, "QuickChoice")?;
     fields[33] = field_reference_collection(
         object,
@@ -879,13 +949,9 @@ fn build_cct(
         indexes,
     )?;
     fields[34] = bool_token(object, "CheckUnique")?;
-    fields[35] = enum_code(object, "CreateOnInput", &[("DontUse", "0")])?;
-    fields[36] = enum_code(
-        object,
-        "ChoiceMode",
-        &[("FromForm", "0"), ("QuickChoice", "1"), ("BothWays", "2")],
-    )?;
-    fields[37] = enum_code(object, "FullTextSearch", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[35] = enum_code(object, "CodeSeries", CCT_CODE_SERIES)?;
+    fields[36] = enum_code(object, "DataLockControlMode", DATA_LOCK_CONTROL_MODE)?;
+    fields[37] = enum_code(object, "FullTextSearch", FULL_TEXT_SEARCH)?;
     fields[38] = standard_attributes(&["-14", "-11", "-9", "-8", "-7", "-6", "-5", "-4", "-2"])?;
     for (slot, name) in (39..=43).zip([
         "AuxiliaryObjectForm",
@@ -905,30 +971,14 @@ fn build_cct(
     ]) {
         fields[slot] = localized_value(object, name, "language")?;
     }
-    fields[49] = enum_code(
-        object,
-        "CodeAllowedLength",
-        &[("Fixed", "0"), ("Variable", "1")],
-    )?;
+    fields[49] = enum_code(object, "CodeAllowedLength", CODE_ALLOWED_LENGTH)?;
     fields[50] = list(vec![token("0"), list(vec![token("0")])]);
-    fields[51] = enum_code(
-        object,
-        "DataLockControlMode",
-        &[("Automatic", "0"), ("Managed", "1")],
-    )?;
+    fields[51] = enum_code(object, "CreateOnInput", CREATE_ON_INPUT)?;
     fields[52] = list(vec![token("1"), list(vec![token("0"), token("0")])]);
-    fields[53] = enum_code(
-        object,
-        "PredefinedDataUpdate",
-        &[("Auto", "0"), ("DontAutoUpdate", "2")],
-    )?;
+    fields[53] = enum_code(object, "PredefinedDataUpdate", PREDEFINED_DATA_UPDATE)?;
     fields[54] = input_modes(object)?;
-    fields[55] = enum_code(
-        object,
-        "ChoiceHistoryOnInput",
-        &[("Auto", "0"), ("DontUse", "1")],
-    )?;
-    fields[56] = enum_code(object, "DataHistory", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[55] = enum_code(object, "ChoiceHistoryOnInput", CHOICE_HISTORY_ON_INPUT)?;
+    fields[56] = enum_code(object, "DataHistory", DATA_HISTORY)?;
     fields[57] = bool_token(object, "UpdateDataHistoryImmediatelyAfterWrite")?;
     fields[58] = bool_token(object, "ExecuteAfterWriteDataHistoryVersionProcessing")?;
     Ok(chart_root(
@@ -1026,19 +1076,22 @@ fn build_coa(
     fields[21] = text(text_property(object, "CodeMask")?);
     fields[22] = token(u32_property(object, "CodeLength")?.to_string());
     fields[23] = token(u32_property(object, "DescriptionLength")?.to_string());
-    fields[24] = enum_code(object, "CodeSeries", &[("WithinSubordination", "1")])?;
+    // The property slots were measured on six charts of the four corpora
+    // (БСП 8.3.27 and 8.5, ERP УХ, an extension): AutoOrderByCode is slot 24
+    // (`0` on the extension's chart, `1` on the other five), CheckUnique 34,
+    // CodeSeries 35 (`0` on four charts, `1` on the two БСП ones),
+    // DataLockControlMode 36. EditType (27, `1` InDialog), ChoiceMode (31, `2`
+    // BothWays) and CreateOnInput (49, `1` DontUse) are held by their
+    // constant values alone.
+    fields[24] = bool_token(object, "AutoOrderByCode")?;
     fields[25] = token(u32_property(object, "OrderLength")?.to_string());
-    fields[26] = enum_code(
-        object,
-        "DefaultPresentation",
-        &[("AsCode", "0"), ("AsDescription", "1")],
-    )?;
-    fields[27] = bool_token(object, "CheckUnique")?;
+    fields[26] = enum_code(object, "DefaultPresentation", DEFAULT_PRESENTATION)?;
+    fields[27] = enum_code(object, "EditType", EDIT_TYPE)?;
     for (slot, name) in (28..=30).zip(["DefaultObjectForm", "DefaultListForm", "DefaultChoiceForm"])
     {
         fields[slot] = form_slot(object, name, &forms, indexes)?;
     }
-    fields[31] = enum_code(object, "EditType", &[("InList", "0"), ("InDialog", "2")])?;
+    fields[31] = enum_code(object, "ChoiceMode", CHOICE_MODE)?;
     fields[32] = bool_token(object, "QuickChoice")?;
     fields[33] = field_reference_collection(
         object,
@@ -1046,14 +1099,10 @@ fn build_coa(
         BusinessObjectFamily::ChartOfAccounts,
         indexes,
     )?;
-    fields[34] = bool_token(object, "AutoOrderByCode")?;
-    fields[35] = enum_code(object, "CreateOnInput", &[("DontUse", "1")])?;
-    fields[36] = enum_code(
-        object,
-        "ChoiceMode",
-        &[("FromForm", "0"), ("QuickChoice", "1"), ("BothWays", "2")],
-    )?;
-    fields[37] = enum_code(object, "FullTextSearch", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[34] = bool_token(object, "CheckUnique")?;
+    fields[35] = enum_code(object, "CodeSeries", COA_CODE_SERIES)?;
+    fields[36] = enum_code(object, "DataLockControlMode", DATA_LOCK_CONTROL_MODE)?;
+    fields[37] = enum_code(object, "FullTextSearch", FULL_TEXT_SEARCH)?;
     fields[38] = standard_attributes(&[
         "-28", "-17", "-11", "-10", "-8", "-7", "-6", "-5", "-4", "-2",
     ])?;
@@ -1075,24 +1124,12 @@ fn build_coa(
         fields[slot] = localized_value(object, name, "language")?;
     }
     fields[48] = list(vec![token("0"), list(vec![token("0")])]);
-    fields[49] = enum_code(
-        object,
-        "DataLockControlMode",
-        &[("Automatic", "0"), ("Managed", "1")],
-    )?;
+    fields[49] = enum_code(object, "CreateOnInput", CREATE_ON_INPUT)?;
     fields[50] = list(vec![token("1"), list(vec![token("0"), token("0")])]);
-    fields[51] = enum_code(
-        object,
-        "PredefinedDataUpdate",
-        &[("Auto", "0"), ("DontAutoUpdate", "2")],
-    )?;
+    fields[51] = enum_code(object, "PredefinedDataUpdate", PREDEFINED_DATA_UPDATE)?;
     fields[52] = input_modes(object)?;
-    fields[53] = enum_code(
-        object,
-        "ChoiceHistoryOnInput",
-        &[("Auto", "0"), ("DontUse", "1")],
-    )?;
-    fields[54] = enum_code(object, "DataHistory", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[53] = enum_code(object, "ChoiceHistoryOnInput", CHOICE_HISTORY_ON_INPUT)?;
+    fields[54] = enum_code(object, "DataHistory", DATA_HISTORY)?;
     fields[55] = bool_token(object, "UpdateDataHistoryImmediatelyAfterWrite")?;
     fields[56] = bool_token(object, "ExecuteAfterWriteDataHistoryVersionProcessing")?;
     Ok(chart_root(
@@ -1168,11 +1205,19 @@ fn build_cot(
     );
     fields[24] = bool_token(object, "UseStandardCommands")?;
     fields[25] = token(u32_property(object, "CodeLength")?.to_string());
-    fields[26] = enum_code(object, "CodeType", &[("Number", "0"), ("String", "1")])?;
+    fields[26] = enum_code(object, "CodeType", CODE_TYPE)?;
+    // The property slots were measured on five charts of the four corpora
+    // (БСП 8.3.27 and 8.5, ERP УХ, an extension): DependenceOnCalculationTypes
+    // is slot 27 (`0` DontUse on the extension's chart, `1` OnActionPeriod on
+    // the other four), IncludeHelpInContents 37 (direct: `1` on the two ERP УХ
+    // charts), DataLockControlMode 41, CodeAllowedLength 53 (`0` on ERP УХ
+    // `Начисления`), ChoiceHistoryOnInput 59. EditType (35, `1` InDialog),
+    // ChoiceMode (38, `2` BothWays), QuickChoice (39, `0`) and CreateOnInput
+    // (55, `1` DontUse) are held by their constant values alone.
     fields[27] = enum_code(
         object,
-        "CodeAllowedLength",
-        &[("Fixed", "0"), ("Variable", "1")],
+        "DependenceOnCalculationTypes",
+        DEPENDENCE_ON_CALCULATION_TYPES,
     )?;
     fields[28] = list(vec![
         token("0"),
@@ -1185,40 +1230,24 @@ fn build_cot(
     ]);
     fields[29] = bool_token(object, "ActionPeriodUse")?;
     fields[30] = token(u32_property(object, "DescriptionLength")?.to_string());
-    fields[31] = enum_code(
-        object,
-        "DefaultPresentation",
-        &[("AsCode", "0"), ("AsDescription", "1")],
-    )?;
+    fields[31] = enum_code(object, "DefaultPresentation", DEFAULT_PRESENTATION)?;
     for (slot, name) in (32..=34).zip(["DefaultObjectForm", "DefaultListForm", "DefaultChoiceForm"])
     {
         fields[slot] = form_slot(object, name, &forms, indexes)?;
     }
-    fields[35] = enum_code(
-        object,
-        "DependenceOnCalculationTypes",
-        &[
-            ("DontUse", "0"),
-            ("OnActionPeriod", "1"),
-            ("OnBasePeriod", "2"),
-        ],
-    )?;
+    fields[35] = enum_code(object, "EditType", EDIT_TYPE)?;
     fields[36] = list(vec![token("0"), token("0")]);
-    fields[37] = bool_token(object, "QuickChoice")?;
-    fields[38] = enum_code(object, "EditType", &[("InList", "0"), ("InDialog", "2")])?;
-    fields[39] = enum_code(object, "CreateOnInput", &[("DontUse", "0")])?;
+    fields[37] = bool_token(object, "IncludeHelpInContents")?;
+    fields[38] = enum_code(object, "ChoiceMode", CHOICE_MODE)?;
+    fields[39] = bool_token(object, "QuickChoice")?;
     fields[40] = field_reference_collection(
         object,
         "InputByString",
         BusinessObjectFamily::ChartOfCalculationTypes,
         indexes,
     )?;
-    fields[41] = enum_code(
-        object,
-        "ChoiceMode",
-        &[("FromForm", "0"), ("QuickChoice", "1"), ("BothWays", "2")],
-    )?;
-    fields[42] = enum_code(object, "FullTextSearch", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[41] = enum_code(object, "DataLockControlMode", DATA_LOCK_CONTROL_MODE)?;
+    fields[42] = enum_code(object, "FullTextSearch", FULL_TEXT_SEARCH)?;
     fields[43] = standard_attributes(&["-11", "-8", "-6", "-5", "-4", "-3", "-2"])?;
     fields[44] = standard_tabular_many(&[
         ("-30", &["-102", "-101", "-100"]),
@@ -1241,30 +1270,14 @@ fn build_cot(
     ]) {
         fields[slot] = localized_value(object, name, "language")?;
     }
-    fields[53] = token(if bool_property(object, "IncludeHelpInContents")? {
-        "0"
-    } else {
-        "1"
-    });
+    fields[53] = enum_code(object, "CodeAllowedLength", CODE_ALLOWED_LENGTH)?;
     fields[54] = list(vec![token("0"), list(vec![token("0")])]);
-    fields[55] = enum_code(
-        object,
-        "DataLockControlMode",
-        &[("Automatic", "0"), ("Managed", "1")],
-    )?;
+    fields[55] = enum_code(object, "CreateOnInput", CREATE_ON_INPUT)?;
     fields[56] = list(vec![token("1"), list(vec![token("0"), token("0")])]);
-    fields[57] = enum_code(
-        object,
-        "PredefinedDataUpdate",
-        &[("Auto", "0"), ("DontAutoUpdate", "2")],
-    )?;
+    fields[57] = enum_code(object, "PredefinedDataUpdate", PREDEFINED_DATA_UPDATE)?;
     fields[58] = input_modes(object)?;
-    fields[59] = enum_code(
-        object,
-        "ChoiceHistoryOnInput",
-        &[("Auto", "0"), ("DontUse", "1")],
-    )?;
-    fields[60] = enum_code(object, "DataHistory", &[("DontUse", "0"), ("Use", "1")])?;
+    fields[59] = enum_code(object, "ChoiceHistoryOnInput", CHOICE_HISTORY_ON_INPUT)?;
+    fields[60] = enum_code(object, "DataHistory", DATA_HISTORY)?;
     fields[61] = bool_token(object, "UpdateDataHistoryImmediatelyAfterWrite")?;
     fields[62] = bool_token(object, "ExecuteAfterWriteDataHistoryVersionProcessing")?;
     Ok(chart_root(
@@ -1310,6 +1323,15 @@ pub(super) fn decode_register_family(
     if family == BusinessObjectFamily::Recalculation {
         return decode_recalculation(value);
     }
+    // An accounting register with a period adjustment is the 31-slot
+    // `{22,22,...}` record: everything after the second discriminator sits one
+    // slot later.
+    let adjusted = family == BusinessObjectFamily::AccountingRegister
+        && matches!(
+            value,
+            NativeValue::List(root)
+                if matches!(root.get(1), Some(NativeValue::List(fields)) if fields.len() == 31)
+        );
     let (
         root_len,
         collection_count,
@@ -1342,6 +1364,18 @@ pub(super) fn decode_register_family(
             13,
             &[1, 3, 5, 7, 9, 11][..],
             &ACCUMULATION_REGISTER_COLLECTION_UUIDS[..],
+            5,
+            None,
+            None,
+        ),
+        BusinessObjectFamily::AccountingRegister if adjusted => (
+            9,
+            "6",
+            31,
+            "22",
+            16,
+            &ACCOUNTING_ADJUSTED_GENERATED_SLOTS[..],
+            &ACCOUNTING_REGISTER_COLLECTION_UUIDS[..],
             5,
             None,
             None,
@@ -1413,6 +1447,9 @@ pub(super) fn decode_register_family(
     exact_token(&root[2], collection_count, "register collection count")?;
     let fields = exact_list(&root[1], field_len, "register owner fields")?;
     exact_token(&fields[0], code, "register owner discriminator")?;
+    if adjusted {
+        exact_token(&fields[1], "22", "adjusted register version discriminator")?;
+    }
     let wrapper = exact_list(&fields[header_slot], 2, "register owner header wrapper")?;
     exact_token(
         &wrapper[0],
@@ -1479,6 +1516,7 @@ fn decode_recalculation(
 ) -> Result<BusinessObjectNativeIr, BusinessObjectBuildError> {
     let root = exact_list(value, 4, "Recalculation root")?;
     exact_token(&root[0], "1", "Recalculation root discriminator")?;
+    exact_token(&root[2], "1", "Recalculation collection count")?;
     let fields = exact_list(&root[1], 9, "Recalculation owner fields")?;
     exact_token(&fields[0], "4", "Recalculation owner discriminator")?;
     let wrapper = exact_list(&fields[7], 2, "Recalculation owner header wrapper")?;
@@ -1487,7 +1525,9 @@ fn decode_recalculation(
         "0",
         "Recalculation header wrapper discriminator",
     )?;
-    exact_token(&fields[8], "1", "Recalculation owner tail")?;
+    if !matches!(&fields[8], NativeValue::Token(mode) if matches!(mode.as_str(), "0" | "1")) {
+        return native("Recalculation lock mode is not a known code");
+    }
     let uuid = parse_header_uuid(&wrapper[1])?;
     let generated_types = [1usize, 3, 5]
         .into_iter()
