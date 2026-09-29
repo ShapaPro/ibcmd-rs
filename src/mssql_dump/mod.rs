@@ -547,6 +547,11 @@ mod characteristics {
                 CharacteristicsReferenceKind::SourceUuid,
             ));
         }
+        // A characteristic that names no source stores a nil uuid and prints
+        // `from=""` (the БСП 8.5 extension catalog `_ДемоСегментыПартнеровРасширение`).
+        if information_register_uuid_matches(fields[1], "00000000-0000-0000-0000-000000000000") {
+            return Ok(CharacteristicReference::empty_source());
+        }
         let uuid = parse_information_register_non_zero_uuid(fields[1]).ok_or_else(|| {
             unresolved(
                 family,
@@ -10877,6 +10882,8 @@ struct StyleBodyItem {
     /// for it.
     uuid: Option<String>,
     value_xml: String,
+    /// Written after every other item (the 8.5 brand colour).
+    trailing: bool,
 }
 
 struct TypedMetadataProperties {
@@ -11112,6 +11119,13 @@ pub(super) enum ConstantValueType {
     },
     DateTime {
         date_fractions: &'static str,
+    },
+    /// `{"R"}` / `{"R",<length>,<allowed length>}`: `xs:base64Binary`, the 8.5
+    /// binary data type (БСП 8.5 extension ServiceDesk, `{"R"}` = length 0,
+    /// variable).
+    BinaryData {
+        length: u32,
+        allowed_length_flag: u8,
     },
     Reference {
         reference: String,
@@ -20883,6 +20897,19 @@ fn parse_information_register_type_pattern_element(
                 allowed_sign_flag,
             })
         }
+        (r#""R""#, 1) => Some(ConstantValueType::BinaryData {
+            length: 0,
+            allowed_length_flag: 1,
+        }),
+        (r#""R""#, 3) => Some(ConstantValueType::BinaryData {
+            length: fields.get(1)?.trim().parse().ok()?,
+            allowed_length_flag: fields
+                .get(2)?
+                .trim()
+                .parse()
+                .ok()
+                .filter(|flag| *flag <= 1)?,
+        }),
         (r#""D""#, 1) => Some(ConstantValueType::DateTime {
             date_fractions: "DateTime",
         }),
@@ -34428,6 +34455,8 @@ fn http_service_method_from_code(value: &str) -> Option<&'static str> {
     match value {
         "2" => Some("DELETE"),
         "3" => Some("GET"),
+        // Measured on the БСП 8.5 extension ServiceDesk (`сд_МобильноеAPI`).
+        "10" => Some("PATCH"),
         "11" => Some("POST"),
         "14" => Some("PUT"),
         _ => None,
@@ -35728,6 +35757,13 @@ const STYLE_BODY_TAG: &str = "1";
 const STYLE_BODY_COLOR_TAG: &str = "3";
 const STYLE_BODY_BORDER_TAG: &str = "3";
 const STYLE_BODY_FONT_TAG: &str = "7";
+/// Platform 8.5 writes the body one version up: tag `2`, colours `{4,<variant>,
+/// {<code>},0}`, fonts `{8,...}` (the БСП 8.5 extension `_ДемоРасширение`, the
+/// only style body on the 8.5 stand), and after the declared items one record
+/// `{1,{0,<colour>}}` that the export prints as the item `FirstBrand`.
+const STYLE_BODY_TAG_8_5_1: &str = "2";
+const STYLE_BODY_COLOR_TAG_8_5_1: &str = "4";
+const STYLE_BODY_FONT_TAG_8_5_1: &str = "8";
 /// The only font form a style body is evidenced to carry: a reference to a
 /// style item (`kind="StyleItem"`). `Absolute` and `WindowsFont` bodies would
 /// need their own member layout, and neither appears on the stand.
@@ -35770,9 +35806,13 @@ fn extract_style_body_xml(
                 .copied()
                 .unwrap_or(usize::MAX)
         };
-        left.standard_order
-            .unwrap_or(usize::MAX)
-            .cmp(&right.standard_order.unwrap_or(usize::MAX))
+        left.trailing
+            .cmp(&right.trailing)
+            .then_with(|| {
+                left.standard_order
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.standard_order.unwrap_or(usize::MAX))
+            })
             .then_with(|| configuration_order(left).cmp(&configuration_order(right)))
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
             .then_with(|| left.name.cmp(&right.name))
@@ -35785,24 +35825,36 @@ fn parse_style_body_items(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<StyleBodyItem>> {
     let fields = split_1c_braced_fields(text, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_TAG {
-        return None;
-    }
+    let layout_8_5_1 = match fields.first()?.trim() {
+        STYLE_BODY_TAG => false,
+        STYLE_BODY_TAG_8_5_1 => true,
+        _ => return None,
+    };
     let declared_count = fields.get(1)?.trim().parse::<usize>().ok()?;
-    if fields.len() != declared_count + 2 {
+    // An 8.5 body may close with the brand-colour record.
+    let brand = if layout_8_5_1 && fields.len() == declared_count + 3 {
+        fields.last()
+    } else {
+        None
+    };
+    if fields.len() != declared_count + 2 + usize::from(brand.is_some()) {
         return None;
     }
     let mut items = Vec::new();
-    for field in fields.iter().skip(2) {
+    for field in fields.iter().skip(2).take(declared_count) {
         let entry = split_1c_braced_fields(field, 0)?;
         let (name, standard_order, uuid) = style_body_item_name(entry.first()?, object_refs)?;
         let value = entry.get(2)?;
         let value_xml = match entry.get(1)?.trim() {
             "0" => format!(
                 "<Color>{}</Color>",
-                escape_xml_text(&parse_style_body_color_value(value, object_refs)?)
+                escape_xml_text(&parse_style_body_color_value(
+                    value,
+                    object_refs,
+                    layout_8_5_1
+                )?)
             ),
-            "1" => parse_style_body_font_xml(value, object_refs)?,
+            "1" => parse_style_body_font_xml(value, object_refs, layout_8_5_1)?,
             "2" => parse_style_body_border_xml(value, object_refs)?,
             _ => return None,
         };
@@ -35811,10 +35863,36 @@ fn parse_style_body_items(
             standard_order,
             uuid,
             value_xml,
+            trailing: false,
         });
     }
     if items.len() != declared_count {
         return None;
+    }
+    if let Some(brand) = brand {
+        // `{1,{0,<colour>}}`: one colour, item 0.
+        let record = split_1c_braced_fields(brand, 0)?;
+        let entry = split_1c_braced_fields(record.get(1)?, 0)?;
+        if record.len() != 2 || record.first()?.trim() != "1" || entry.len() != 2 {
+            return None;
+        }
+        if entry.first()?.trim() != "0" {
+            return None;
+        }
+        items.push(StyleBodyItem {
+            name: "FirstBrand".to_string(),
+            standard_order: None,
+            uuid: None,
+            value_xml: format!(
+                "<Color>{}</Color>",
+                escape_xml_text(&parse_style_body_color_value(
+                    entry.get(1)?,
+                    object_refs,
+                    true
+                )?)
+            ),
+            trailing: true,
+        });
     }
     Some(items)
 }
@@ -35918,9 +35996,18 @@ const STANDARD_STYLE_ITEM_CODES: &[i32] = &[
 fn parse_style_body_color_value(
     value: &str,
     object_refs: &BTreeMap<String, String>,
+    layout_8_5_1: bool,
 ) -> Option<String> {
     let fields = split_1c_braced_fields(value, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_COLOR_TAG {
+    if layout_8_5_1 {
+        // `{4,<variant>,{<code>},0}`.
+        if fields.first()?.trim() != STYLE_BODY_COLOR_TAG_8_5_1
+            || fields.len() != 4
+            || fields.get(3)?.trim() != "0"
+        {
+            return None;
+        }
+    } else if fields.first()?.trim() != STYLE_BODY_COLOR_TAG {
         return None;
     }
     let variant = fields.get(1)?.trim().parse::<i32>().ok()?;
@@ -35950,9 +36037,15 @@ fn parse_style_body_color_value(
 fn parse_style_body_font_xml(
     value: &str,
     object_refs: &BTreeMap<String, String>,
+    layout_8_5_1: bool,
 ) -> Option<String> {
     let fields = split_1c_braced_fields(value, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_FONT_TAG
+    let font_tag = if layout_8_5_1 {
+        STYLE_BODY_FONT_TAG_8_5_1
+    } else {
+        STYLE_BODY_FONT_TAG
+    };
+    if fields.first()?.trim() != font_tag
         || fields.get(1)?.trim() != STYLE_BODY_FONT_STYLE_ITEM_KIND
     {
         return None;
@@ -36530,6 +36623,19 @@ fn parse_metadata_type_pattern_element_with_builtin(
             digits: element.get(1)?.trim().parse().ok()?,
             fraction_digits: element.get(2)?.trim().parse().ok()?,
             allowed_sign_flag: element.get(3)?.trim().parse().ok()?,
+        }),
+        r#""R""# if element.len() == 1 => Some(ConstantValueType::BinaryData {
+            length: 0,
+            allowed_length_flag: 1,
+        }),
+        r#""R""# if element.len() == 3 => Some(ConstantValueType::BinaryData {
+            length: element.get(1)?.trim().parse().ok()?,
+            allowed_length_flag: element
+                .get(2)?
+                .trim()
+                .parse()
+                .ok()
+                .filter(|flag| *flag <= 1)?,
         }),
         r#""D""# => Some(ConstantValueType::DateTime {
             date_fractions: match element.get(1).map(|field| field.trim()) {
@@ -44907,6 +45013,7 @@ fn format_form_metadata_types_xml_with_indent(
 {nested}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, &nested);
 
     xml.push_str(&format!("{indent}</Type>\r\n"));
     xml
@@ -44982,6 +45089,7 @@ fn format_type_description_value_types_xml(
 {indent}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, indent);
     xml
 }
 
@@ -45054,9 +45162,33 @@ fn format_metadata_types_xml_with_indent(
 {nested}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, &nested);
 
     xml.push_str(&format!("{indent}</Type>\r\n"));
     xml
+}
+
+/// `<v8:BinaryDataQualifiers>` of a type block that names `xs:base64Binary`, at
+/// the indent of the qualifiers that precede it.
+fn push_binary_data_qualifiers_xml(
+    xml: &mut String,
+    value_types: &[ConstantValueType],
+    outer: &str,
+) {
+    if let Some((length, allowed_length_flag)) =
+        value_types.iter().find_map(|value_type| match value_type {
+            ConstantValueType::BinaryData {
+                length,
+                allowed_length_flag,
+            } => Some((*length, *allowed_length_flag)),
+            _ => None,
+        })
+    {
+        xml.push_str(&format!(
+            "{outer}<v8:BinaryDataQualifiers>\r\n{outer}\t<v8:Length>{length}</v8:Length>\r\n{outer}\t<v8:AllowedLength>{}</v8:AllowedLength>\r\n{outer}</v8:BinaryDataQualifiers>\r\n",
+            string_allowed_length_xml(allowed_length_flag)
+        ));
+    }
 }
 
 fn metadata_type_xml_tag(value_type: &ConstantValueType) -> &'static str {
@@ -45083,6 +45215,7 @@ fn metadata_type_xml_name(value_type: &ConstantValueType) -> String {
         ConstantValueType::String { .. } => "xs:string".to_string(),
         ConstantValueType::Number { .. } => "xs:decimal".to_string(),
         ConstantValueType::DateTime { .. } => "xs:dateTime".to_string(),
+        ConstantValueType::BinaryData { .. } => "xs:base64Binary".to_string(),
         ConstantValueType::Reference { reference, .. }
         | ConstantValueType::ReferenceTypeSet { reference, .. } => reference.clone(),
         ConstantValueType::TypeId { type_id } => type_id.clone(),
@@ -45240,6 +45373,13 @@ fn format_constant_type_member_xml(value_type: &ConstantValueType) -> String {
 \t\t\t\t\t<v8:AllowedSign>{}</v8:AllowedSign>\r\n\
 \t\t\t\t</v8:NumberQualifiers>\r\n",
             number_allowed_sign_xml(*allowed_sign_flag)
+        ),
+        ConstantValueType::BinaryData {
+            length,
+            allowed_length_flag,
+        } => format!(
+            "\t\t\t\t<v8:Type>xs:base64Binary</v8:Type>\r\n\t\t\t\t<v8:BinaryDataQualifiers>\r\n\t\t\t\t\t<v8:Length>{length}</v8:Length>\r\n\t\t\t\t\t<v8:AllowedLength>{}</v8:AllowedLength>\r\n\t\t\t\t</v8:BinaryDataQualifiers>\r\n",
+            string_allowed_length_xml(*allowed_length_flag)
         ),
         ConstantValueType::DateTime { date_fractions } => format!(
             "\t\t\t\t<v8:Type>xs:dateTime</v8:Type>\r\n\

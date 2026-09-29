@@ -14,6 +14,13 @@
 //! The platform prints a fixed set of them beside the header (the properties
 //! of an extension of its own) and, from the adopted header of the root, the
 //! properties the extension adopted from the extended configuration.
+//!
+//! Platform 8.5.1 stores an extension it has converted in the `{76,...}` tuple:
+//! the `{68,...}` members at the same positions, then the 16 members of the 8.5
+//! properties (61-68 the enumerations, the captions in 64 and 65, the eight
+//! auxiliary forms in 69-76). It prints `Caption` and `ShortCaption` after the
+//! version for every extension, converted or not (an old tuple has none: both
+//! empty), and spells the compatibility of `80501` as `Version8_5_1`.
 
 use std::collections::BTreeMap;
 
@@ -45,6 +52,7 @@ pub(crate) fn extension_root_xml(
     let mut adopted_names = Vec::<&'static str>::new();
     let mut states = Vec::<(&'static str, &'static str)>::new();
     let mut run_mode_members = 0usize;
+    let mut asset_members = 0usize;
     for (guid, state) in &adopted.properties {
         match meaning("Configuration", guid)? {
             Meaning::Property(name) => adopted_names.push(name),
@@ -54,9 +62,27 @@ pub(crate) fn extension_root_xml(
                 }
             }
             Meaning::Hidden(_) => {}
+            Meaning::Group("RootExtAssets") => {
+                // Each of the three is a changed block (state 3).
+                if *state != STATE_EXTENDED {
+                    return None;
+                }
+                asset_members += 1;
+            }
             Meaning::Group(_) => run_mode_members += 1,
             Meaning::Multi(_) | Meaning::ExtendedObject => return None,
         }
+    }
+    // The three ids of the asset group appear whole or not at all; whole, the
+    // platform prints their states after the module's, in this order.
+    match asset_members {
+        0 => {}
+        3 => states.extend([
+            ("HomePageWorkArea", "Extended"),
+            ("Logo", "Extended"),
+            ("Splash", "Extended"),
+        ]),
+        _ => return None,
     }
 
     // The three ids of the run-mode group appear whole or not at all.
@@ -86,7 +112,8 @@ pub(crate) fn extension_root_xml(
     );
     let name_prefix = parse_1c_quoted_string(field(42)?)?;
     push_optional_simple_property_xml(&mut insert, "NamePrefix", Some(&name_prefix));
-    let compatibility = refs::configuration_compatibility_mode_xml(field(43)?)?;
+    let compatibility = refs::configuration_compatibility_mode_xml_for(field(43)?, source_version)?;
+    let tuple_8_5_1 = source_version == InfobaseConfigSourceVersion::V2_21 && fields.len() == 77;
     if let Ok(packed_version) = field(43)?.parse::<u32>() {
         context.note_compatibility(packed_version);
     }
@@ -142,6 +169,15 @@ pub(crate) fn extension_root_xml(
         "Version",
         Some(&parse_1c_quoted_string(field(15)?)?),
     );
+    if source_version == InfobaseConfigSourceVersion::V2_21 {
+        let (caption, short_caption) = if tuple_8_5_1 {
+            (parse_1c_synonyms(field(64)?), parse_1c_synonyms(field(65)?))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        push_localized_property(&mut insert, "\t\t\t", "Caption", &caption);
+        push_localized_property(&mut insert, "\t\t\t", "ShortCaption", &short_caption);
+    }
     if adopted_names.contains(&"DefaultLanguage") {
         let language = object_refs.get(field(10)?)?;
         if !language.starts_with("Language.") {
@@ -166,10 +202,13 @@ pub(crate) fn extension_root_xml(
         );
     }
     if run_mode {
-        let interface = match field(38)? {
-            "0" => "Version8_2",
-            "2" => "TaxiEnableVersion8_2",
-            "3" => "Taxi",
+        // 8.5 spells the digit `3` of a converted tuple `Version8_5EnableTaxi`
+        // (with `6` in member 62: the one combination on record), 8.3.27 `Taxi`.
+        let interface = match (field(38)?, tuple_8_5_1) {
+            ("0", _) => "Version8_2",
+            ("2", _) => "TaxiEnableVersion8_2",
+            ("3", false) => "Taxi",
+            ("3", true) if field(62)? == "6" => "Version8_5EnableTaxi",
             _ => return None,
         };
         push_optional_simple_property_xml(

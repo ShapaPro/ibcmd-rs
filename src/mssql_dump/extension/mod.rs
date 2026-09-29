@@ -1023,4 +1023,124 @@ mod tests {
         let text = "{1,{3,{1,0,eb50ccde-ac43-46b8-a693-56b559ca323a},\"N\",{0},\"\",5,0,00000000-0000-0000-0000-000000000000,0}}";
         assert!(normalize_descriptor(text).is_err());
     }
+
+    /// The extension `_ДемоПустоеРасширение` of the БСП 8.3.27 and the БСП 8.5
+    /// demonstration bases: the same two rows in both, and the tree each
+    /// platform's own `config export --extension` wrote for them
+    /// (`tests/fixtures/native-evidence/extension-empty/`). 8.5 prints two
+    /// empty captions after the version; the tree is otherwise the same.
+    #[test]
+    fn the_empty_extension_exports_to_the_native_tree_of_both_platforms() {
+        use crate::mssql_dump::cas::{CasHash, CasStorageRow, resolve_cas_storage_image};
+        use crate::mssql_extension_stage::{
+            ConfigInfoIdentity, ExtensionStageRow, generate_configinfo_manifest,
+        };
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write as _;
+
+        // One export at a time: the extension context is process-wide.
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _guard = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        const ROOT: &str = "6a5f6dac-3040-4142-b853-482f745e1e4b";
+        const LANGUAGE: &str = "efc14f05-e4ab-4235-8c63-9082143c3ca9";
+        let rows: [(&str, &[u8]); 2] = [
+            (
+                ROOT,
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/rows/6a5f6dac-3040-4142-b853-482f745e1e4b.bin"
+                ),
+            ),
+            (
+                LANGUAGE,
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/rows/efc14f05-e4ab-4235-8c63-9082143c3ca9.bin"
+                ),
+            ),
+        ];
+        let identity = ConfigInfoIdentity {
+            storage_format: 80_324,
+            configuration_id: uuid::Uuid::parse_str(ROOT).unwrap(),
+            descriptor: Vec::new(),
+        };
+        let stage = rows
+            .iter()
+            .map(|(name, packed)| ExtensionStageRow::new(*name, packed.to_vec()))
+            .collect::<Vec<_>>();
+        let manifest = generate_configinfo_manifest(&identity, &stage).unwrap();
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&manifest).unwrap();
+        let packed_manifest = encoder.finish().unwrap();
+        let root_hash = CasHash::for_packed_bytes(&packed_manifest);
+        let mut cas = vec![CasStorageRow::new(root_hash, packed_manifest)];
+        cas.extend(rows.iter().map(|(_, packed)| {
+            CasStorageRow::new(CasHash::for_packed_bytes(packed), packed.to_vec())
+        }));
+        let image = resolve_cas_storage_image(root_hash, cas).unwrap();
+
+        let native_8_3_27: [(&str, &[u8]); 3] = [
+            (
+                "Configuration.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/Configuration.xml"
+                ),
+            ),
+            (
+                "ConfigDumpInfo.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/ConfigDumpInfo.xml"
+                ),
+            ),
+            (
+                "Languages/Русский.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.3.27/Language.xml"
+                ),
+            ),
+        ];
+        let native_8_5_1: [(&str, &[u8]); 3] = [
+            (
+                "Configuration.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/Configuration.xml"
+                ),
+            ),
+            (
+                "ConfigDumpInfo.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/ConfigDumpInfo.xml"
+                ),
+            ),
+            (
+                "Languages/Русский.xml",
+                include_bytes!(
+                    "../../../tests/fixtures/native-evidence/extension-empty/native-8.5.1/Language.xml"
+                ),
+            ),
+        ];
+        for (version, native) in [
+            (InfobaseConfigSourceVersion::V2_20, native_8_3_27),
+            (InfobaseConfigSourceVersion::V2_21, native_8_5_1),
+        ] {
+            let out = std::env::temp_dir().join(format!(
+                "ibcmd-extension-empty-{}-{}",
+                std::process::id(),
+                version.as_str()
+            ));
+            let _ = std::fs::remove_dir_all(&out);
+            let report = export_extension_image_to_source(&image, &out, version, None).unwrap();
+            assert_eq!((report.storage.failed, report.storage.opaque), (0, 0));
+            for (path, expected) in native {
+                let written = std::fs::read(out.join(path)).unwrap_or_default();
+                assert!(
+                    written == expected,
+                    "{path} of the {} tree differs from the native one",
+                    version.as_str()
+                );
+            }
+            let _ = std::fs::remove_dir_all(&out);
+        }
+    }
 }

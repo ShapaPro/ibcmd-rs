@@ -56,6 +56,8 @@ pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
         ("Catalog", "37f2fa9f-b276-11d4-9435-004095e12fc7") => Property("DescriptionLength"),
         ("Catalog", "bf9cc511-eb2a-48b6-a666-7afb78b83f36") => Property("CodeAllowedLength"),
         ("Command", "482411f7-457f-4889-a7c9-9adbfb1c7bd4") => Property("Group"),
+        // 8.5: an adopted command of a register lists it (state 2, printed empty).
+        ("Command", "7d14f63a-87e8-4188-a28b-02da93f6bcbd") => Multi("CommandParameterType"),
         ("CommonCommand", "7d14f63a-87e8-4188-a28b-02da93f6bcbd") => Multi("CommandParameterType"),
         ("CommonForm", "32e087ab-1491-49b6-aba7-43571b41ac2b") => Block("Form"),
         ("CommonForm", "e3331ed0-3854-478d-b6b5-4f14acdd6edb") => Property("FormType"),
@@ -94,6 +96,12 @@ pub(crate) fn meaning(element: &str, guid: &str) -> Option<Meaning> {
             Block("ManagedApplicationModule")
         }
         ("Configuration", "d22e852a-cf8a-4f77-8ccb-3548e7792bea") => Hidden("unknown block"),
+        // HomePageWorkArea, Logo and Splash: an 8.5 extension that changes them
+        // lists the three ids, each in state 3 (ServiceDesk, the only one on
+        // record). Which id is which is not on record, so they are a group.
+        ("Configuration", "d98a8e01-7219-41ce-9f23-dada0860b9bf")
+        | ("Configuration", "740eb5f6-e214-4e30-aefa-f15bab91c688")
+        | ("Configuration", "3035a9db-d6b2-450e-8b22-4430577f8dab") => Group("RootExtAssets"),
         // DefaultRunMode, UsePurposes and InterfaceCompatibilityMode: the three
         // ids always appear together (ServiceDesk, the only extension that
         // adopts them).
@@ -125,6 +133,34 @@ mod tests {
         assert_eq!(
             meaning("Language", "37f2fa9d-b276-11d4-9435-004095e12fc7"),
             None
+        );
+    }
+
+    /// HomePageWorkArea, Logo and Splash: the three ids of an 8.5 extension that
+    /// changes them appear together, and which is which is not on record.
+    #[test]
+    fn the_8_5_root_asset_ids_form_one_group() {
+        for guid in [
+            "d98a8e01-7219-41ce-9f23-dada0860b9bf",
+            "740eb5f6-e214-4e30-aefa-f15bab91c688",
+            "3035a9db-d6b2-450e-8b22-4430577f8dab",
+        ] {
+            assert_eq!(
+                meaning("Configuration", guid),
+                Some(Meaning::Group("RootExtAssets")),
+                "{guid}"
+            );
+            assert_eq!(meaning("Catalog", guid), None, "{guid} outside the root");
+        }
+    }
+
+    /// An adopted command lists the parameter types it may take (8.5 ServiceDesk
+    /// commands of registers).
+    #[test]
+    fn an_adopted_command_lists_its_parameter_types() {
+        assert_eq!(
+            meaning("Command", "7d14f63a-87e8-4188-a28b-02da93f6bcbd"),
+            Some(Meaning::Multi("CommandParameterType"))
         );
     }
 }
