@@ -167,9 +167,20 @@ pub struct AppendedFile {
     pub file_name: String,
 }
 
+/// An object a change register row is inserted for at the nodes that have none, with the list of the changed
+/// files the row gets (empty when only the object's descriptor is staged).
+#[derive(Debug, Clone)]
+pub struct ObjectRegistration {
+    /// `_MDObjID`, 32 hex digits.
+    pub object_hex: String,
+    pub files: Vec<String>,
+}
+
 /// An exchange-plan node new objects are registered for.
 #[derive(Debug, Clone)]
 pub struct NodeLiteral {
+    /// The exchange plan's number: `_Node<plan>` is its node table.
+    pub plan: i64,
     /// `_NodeTRef`, 8 hex digits.
     pub type_hex: String,
     /// `_NodeRRef`, 32 hex digits.
@@ -208,6 +219,17 @@ pub struct ScriptInputs {
     /// How many distinct nodes `_ConfigChngR` holds now (the plan's view of
     /// the nodes, asserted again under the lock).
     pub nodes_seen: usize,
+    /// Changed objects that miss a row at some of `nodes`: the rows are inserted, `_MessageNo` NULL, with
+    /// the changed files as their list (the native apply does this for a node with an initial image, which
+    /// has no rows). `nodes` must hold every node of the plans that register changes.
+    pub registration_additions: Vec<ObjectRegistration>,
+    /// How many `_ConfigChngR` rows and how many `_ConfigChngR_ExtProps` rows that inserts.
+    pub registration_rows_expected: i64,
+    pub registration_file_rows_expected: i64,
+    /// (plan number, nodes of it that are not the plan's own), asserted again under the lock.
+    pub plan_node_counts: Vec<(i64, i64)>,
+    /// Owners of the rows a `deleted` list names (`_MDObjID` hex): their rows are reset as well.
+    pub extra_changed_objects: Vec<String>,
     pub appended_files: Vec<AppendedFile>,
     /// Staged rows that are consumed, not moved (an empty or dynamic-only
     /// `deleted` list): their names, and how many `ConfigSave` rows they are.
@@ -257,8 +279,25 @@ fn and_not_consumed(input: &ScriptInputs, column: &str) -> String {
 /// file list names a staged row. `prefix` qualifies the tables (`dbo.` inside
 /// the script, `[db].dbo.` outside it).
 pub fn staged_objects_predicate(prefix: &str) -> String {
+    staged_objects_predicate_with(prefix, &[])
+}
+
+/// [`staged_objects_predicate`] and the objects a `deleted` list names rows of (`extra`, `_MDObjID` hex).
+pub fn staged_objects_predicate_with(prefix: &str, extra: &[String]) -> String {
+    let extra_clause = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " OR r._MDObjID IN ({})",
+            extra
+                .iter()
+                .map(|object| format!("0x{object}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
-        "(r._MDObjID IN (SELECT CAST(TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) AS binary(16)) FROM {prefix}ConfigSave s WHERE s.PartNo = 0 AND TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) IS NOT NULL AND (LEN(s.FileName) = 36 OR SUBSTRING(s.FileName, 37, 1) = N'.'))          OR EXISTS (SELECT 1 FROM {prefix}_ConfigChngR_ExtProps e JOIN {prefix}ConfigSave s ON s.FileName = e._FileName WHERE e._ConfigChngR_IDRRef = r._IDRRef))"
+        "(r._MDObjID IN (SELECT CAST(TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) AS binary(16)) FROM {prefix}ConfigSave s WHERE s.PartNo = 0 AND TRY_CAST(LEFT(s.FileName, 36) AS uniqueidentifier) IS NOT NULL AND (LEN(s.FileName) = 36 OR SUBSTRING(s.FileName, 37, 1) = N'.'))          OR EXISTS (SELECT 1 FROM {prefix}_ConfigChngR_ExtProps e JOIN {prefix}ConfigSave s ON s.FileName = e._FileName WHERE e._ConfigChngR_IDRRef = r._IDRRef){extra_clause})"
     )
 }
 
@@ -548,7 +587,7 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     // Change registrations: every object that owns a staged row is changed for
     // every node again, and new objects are registered.
     if input.reset_change_registrations {
-        let predicate = staged_objects_predicate("dbo.");
+        let predicate = staged_objects_predicate_with("dbo.", &input.extra_changed_objects);
         writeln!(
             sql,
             "UPDATE r SET _MessageNo = NULL FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate};"
@@ -562,7 +601,10 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
             code::CHANGE_REGISTRATION,
             "a change registration of a staged object was not reset",
         );
+        // New objects first: their check of the nodes counts the nodes the register holds, which the
+        // additions below change.
         render_new_registrations(&mut sql, input);
+        render_registration_additions(&mut sql, input);
     }
 
     for rewrite in &input.files_rewrites {
@@ -693,6 +735,135 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     writeln!(sql, "THROW;").unwrap();
     writeln!(sql, "END CATCH;").unwrap();
     Ok(sql)
+}
+
+/// The rows a node with no rows gets for the objects the stage changes: inserted with `_MessageNo` NULL,
+/// the changed files listed. The pairs are the plan's; the script asserts the nodes and that exactly the
+/// planned rows are missing before it inserts them.
+fn render_registration_additions(sql: &mut String, input: &ScriptInputs) {
+    if input.registration_additions.is_empty() || input.nodes.is_empty() {
+        return;
+    }
+    for (plan, count) in &input.plan_node_counts {
+        throw(
+            sql,
+            &format!(
+                "(SELECT COUNT_BIG(*) FROM dbo._Node{plan} WHERE _PredefinedID = 0x00000000000000000000000000000000) <> {count}"
+            ),
+            code::NODES_DRIFTED,
+            "the nodes of an exchange plan changed since the plan was made",
+        );
+    }
+    writeln!(
+        sql,
+        "CREATE TABLE #reg_nodes (t binary(4) NOT NULL, n binary(16) NOT NULL);"
+    )
+    .unwrap();
+    let nodes = input
+        .nodes
+        .iter()
+        .map(|node| format!("(0x{}, 0x{})", node.type_hex, node.reference_hex))
+        .collect::<Vec<_>>();
+    for chunk in nodes.chunks(500) {
+        writeln!(sql, "INSERT #reg_nodes (t, n) VALUES {};", chunk.join(", ")).unwrap();
+    }
+    writeln!(
+        sql,
+        "CREATE TABLE #reg_objs (o binary(16) NOT NULL PRIMARY KEY);"
+    )
+    .unwrap();
+    let objects = input
+        .registration_additions
+        .iter()
+        .map(|object| format!("(0x{})", object.object_hex))
+        .collect::<Vec<_>>();
+    for chunk in objects.chunks(500) {
+        writeln!(sql, "INSERT #reg_objs (o) VALUES {};", chunk.join(", ")).unwrap();
+    }
+    writeln!(
+        sql,
+        "CREATE TABLE #reg_files (o binary(16) NOT NULL, k int NOT NULL, f nvarchar(400) NOT NULL);"
+    )
+    .unwrap();
+    let mut files = Vec::new();
+    for object in &input.registration_additions {
+        for (index, file) in object.files.iter().enumerate() {
+            files.push(format!(
+                "(0x{}, {index}, N'{}')",
+                object.object_hex,
+                quote_string(file)
+            ));
+        }
+    }
+    for chunk in files.chunks(500) {
+        writeln!(
+            sql,
+            "INSERT #reg_files (o, k, f) VALUES {};",
+            chunk.join(", ")
+        )
+        .unwrap();
+    }
+    writeln!(
+        sql,
+        "CREATE TABLE #reg_add (t binary(4) NOT NULL, n binary(16) NOT NULL, o binary(16) NOT NULL, id binary(16) NOT NULL);"
+    )
+    .unwrap();
+    writeln!(
+        sql,
+        "DECLARE @reg_max binary(16) = (SELECT MAX(_IDRRef) FROM dbo._ConfigChngR);"
+    )
+    .unwrap();
+    writeln!(
+        sql,
+        "DECLARE @reg_head binary(8) = SUBSTRING(@reg_max, 1, 8), @reg_tail bigint = CAST(SUBSTRING(@reg_max, 9, 8) AS bigint);"
+    )
+    .unwrap();
+    throw(
+        sql,
+        "@reg_max IS NULL OR @reg_tail > 9000000000000000000",
+        code::NEW_REGISTRATION,
+        "no room for new change-registration ids",
+    );
+    writeln!(
+        sql,
+        "INSERT #reg_add (t, n, o, id) SELECT nd.t, nd.n, ob.o, CAST(@reg_head + CAST(@reg_tail + ROW_NUMBER() OVER (ORDER BY nd.n, ob.o) AS binary(8)) AS binary(16)) FROM #reg_nodes nd CROSS JOIN #reg_objs ob WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR x WHERE x._NodeTRef = nd.t AND x._NodeRRef = nd.n AND x._MDObjID = ob.o);"
+    )
+    .unwrap();
+    throw(
+        sql,
+        &format!("@@ROWCOUNT <> {}", input.registration_rows_expected),
+        code::NODES_DRIFTED,
+        "the change registrations that miss a row are not the ones the plan saw",
+    );
+    writeln!(
+        sql,
+        "INSERT dbo._ConfigChngR (_NodeTRef, _NodeRRef, _MessageNo, _MDObjID, _IDRRef) SELECT t, n, NULL, o, id FROM #reg_add;"
+    )
+    .unwrap();
+    throw(
+        sql,
+        &format!("@@ROWCOUNT <> {}", input.registration_rows_expected),
+        code::NEW_REGISTRATION,
+        "the changed objects were not registered at every node that had no row",
+    );
+    if input.registration_file_rows_expected > 0 {
+        writeln!(
+            sql,
+            "INSERT dbo._ConfigChngR_ExtProps (_ConfigChngR_IDRRef, _KeyField, _FileName) SELECT a.id, CAST(f.k AS binary(4)), f.f FROM #reg_add a JOIN #reg_files f ON f.o = a.o;"
+        )
+        .unwrap();
+        throw(
+            sql,
+            &format!("@@ROWCOUNT <> {}", input.registration_file_rows_expected),
+            code::NEW_REGISTRATION,
+            "the changed files were not listed for the new change registrations",
+        );
+    }
+    writeln!(
+        sql,
+        "DROP TABLE #reg_add; DROP TABLE #reg_files; DROP TABLE #reg_objs; DROP TABLE #reg_nodes;"
+    )
+    .unwrap();
 }
 
 /// New objects registered for every node, their files listed, and files an
@@ -887,6 +1058,11 @@ mod tests {
             new_registrations: Vec::new(),
             nodes: Vec::new(),
             nodes_seen: 0,
+            registration_additions: Vec::new(),
+            registration_rows_expected: 0,
+            registration_file_rows_expected: 0,
+            plan_node_counts: Vec::new(),
+            extra_changed_objects: Vec::new(),
             appended_files: Vec::new(),
             consumed_names: Vec::new(),
             consumed_row_count: 0,
@@ -1053,16 +1229,118 @@ mod tests {
         assert!(sql.contains("UPDATE dbo.Params SET Modified = @now, DataSize = 1, BinaryData = 0x08 WHERE FileName = N'siVersions'"));
     }
 
+    fn two_nodes() -> Vec<NodeLiteral> {
+        vec![
+            NodeLiteral {
+                plan: 989,
+                type_hex: "000003DD".to_owned(),
+                reference_hex: "AA".repeat(16),
+            },
+            NodeLiteral {
+                plan: 989,
+                type_hex: "000003DD".to_owned(),
+                reference_hex: "BB".repeat(16),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_node_with_no_rows_gets_a_row_for_each_changed_object_with_the_changed_files() {
+        let mut input = inputs();
+        input.nodes = two_nodes();
+        input.plan_node_counts = vec![(989, 2)];
+        input.registration_additions = vec![
+            ObjectRegistration {
+                object_hex: "11".repeat(16),
+                files: vec!["one.0".to_owned()],
+            },
+            // only the descriptor of this one is staged: its list stays empty
+            ObjectRegistration {
+                object_hex: "22".repeat(16),
+                files: Vec::new(),
+            },
+        ];
+        input.registration_rows_expected = 4;
+        input.registration_file_rows_expected = 2;
+        let sql = render_apply_script(&input).unwrap();
+        let reset = sql.find("UPDATE r SET _MessageNo = NULL").unwrap();
+        let nodes_check = sql.find("dbo._Node989 WHERE _PredefinedID = 0x").unwrap();
+        let temp = sql.find("CREATE TABLE #reg_add").unwrap();
+        let insert = sql.find("INSERT dbo._ConfigChngR (_NodeTRef").unwrap();
+        let listing = sql.find("INSERT dbo._ConfigChngR_ExtProps").unwrap();
+        let commit = sql.find("COMMIT TRANSACTION;").unwrap();
+        assert!(
+            reset < nodes_check
+                && nodes_check < temp
+                && temp < insert
+                && insert < listing
+                && listing < commit
+        );
+        // exactly the rows of the plan are missing, checked before they are inserted
+        assert!(sql.contains("WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR x WHERE x._NodeTRef = nd.t AND x._NodeRRef = nd.n AND x._MDObjID = ob.o)"));
+        assert!(sql.matches("@@ROWCOUNT <> 4").count() >= 2);
+        assert!(sql.contains("@@ROWCOUNT <> 2"));
+        // the rows come in with _MessageNo NULL and the files of the object
+        assert!(sql.contains("SELECT t, n, NULL, o, id FROM #reg_add"));
+        assert!(sql.contains(&format!("(0x{}, 0, N'one.0')", "11".repeat(16))));
+        assert!(sql.contains("(0x000003DD, 0x"));
+        // ids continue the table's sequence from its greatest id
+        assert!(sql.contains("MAX(_IDRRef) FROM dbo._ConfigChngR"));
+    }
+
+    #[test]
+    fn nothing_to_add_renders_nothing_and_a_new_object_is_registered_before_the_additions() {
+        let mut input = inputs();
+        input.nodes = two_nodes();
+        assert!(!render_apply_script(&input).unwrap().contains("#reg_add"));
+        input.nodes_seen = 5;
+        input.plan_node_counts = vec![(989, 2)];
+        input.new_registrations = vec![NewRegistration {
+            object_hex: "33".repeat(16),
+            files: vec!["three.0".to_owned()],
+        }];
+        input.registration_additions = vec![ObjectRegistration {
+            object_hex: "11".repeat(16),
+            files: vec!["one.0".to_owned()],
+        }];
+        input.registration_rows_expected = 2;
+        input.registration_file_rows_expected = 2;
+        let sql = render_apply_script(&input).unwrap();
+        // the new object's check of the nodes in the register comes first: the additions change that count
+        let drift = sql
+            .find("the exchange-plan nodes changed since the plan was made")
+            .unwrap();
+        let new_insert = sql.find("INSERT dbo._ConfigChngR (_NodeTRef, _NodeRRef, _MessageNo, _MDObjID, _IDRRef) SELECT CAST(v.t").unwrap();
+        let additions = sql.find("CREATE TABLE #reg_add").unwrap();
+        assert!(drift < new_insert && new_insert < additions);
+    }
+
+    #[test]
+    fn the_rows_of_the_owners_of_dropped_rows_are_reset_too() {
+        let mut input = inputs();
+        input.extra_changed_objects = vec!["AB".repeat(16)];
+        let sql = render_apply_script(&input).unwrap();
+        assert!(sql.contains(&format!("OR r._MDObjID IN (0x{})", "AB".repeat(16))));
+        // without them the predicate is what it was
+        assert!(
+            !render_apply_script(&inputs())
+                .unwrap()
+                .contains("OR r._MDObjID IN (0x")
+        );
+    }
+
     #[test]
     fn new_objects_are_registered_for_every_node_with_their_files() {
         let mut input = inputs();
         input.nodes_seen = 5;
         input.nodes = vec![
             NodeLiteral {
+                plan: 989,
                 type_hex: "000003DD".to_owned(),
                 reference_hex: "AA".repeat(16),
             },
             NodeLiteral {
+                plan: 989,
                 type_hex: "000003DD".to_owned(),
                 reference_hex: "BB".repeat(16),
             },

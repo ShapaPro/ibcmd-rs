@@ -671,6 +671,7 @@ mod tests {
             new_objects: None,
             structure: None,
             backup: None,
+            registrations: None,
             tables_touched: Vec::new(),
             not_written: Vec::new(),
             warnings: Vec::new(),

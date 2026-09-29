@@ -27,6 +27,7 @@ pub mod gate;
 pub mod model;
 pub mod objects;
 pub mod recovery;
+pub mod registrations;
 pub mod si;
 pub mod sqlgen;
 pub mod versions;
@@ -265,6 +266,22 @@ pub struct DynamicSummary {
     pub alias_rows: usize,
 }
 
+/// The change registrations of the exchange-plan nodes (docs/apply/own-apply.md, "Exchange plans").
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistrationSummary {
+    /// Nodes of the plans that register changes, without the plans' own nodes; a node with an initial
+    /// image has no rows until an apply registers a change for it.
+    pub nodes: usize,
+    /// Objects the stage changes that the register knows.
+    pub changed_objects: usize,
+    /// `_ConfigChngR` rows inserted for nodes that had none for a changed object, and the file rows
+    /// listed for them.
+    pub rows_added: i64,
+    pub file_rows_added: i64,
+    /// Objects a `deleted` list names rows of: their rows are reset as if their rows were staged.
+    pub objects_of_dropped_rows: usize,
+}
+
 /// What the staged new rows (forms, templates, body rows) add to the apply.
 #[derive(Debug, Clone, Serialize)]
 pub struct NewObjectsSummary {
@@ -297,6 +314,8 @@ pub struct ConfigApplyReport {
     pub structure: Option<StructurePhase>,
     /// The backup taken, or the operator's word that they have one.
     pub backup: Option<BackupRecord>,
+    /// The change registrations for the exchange-plan nodes.
+    pub registrations: Option<RegistrationSummary>,
     pub new_objects: Option<NewObjectsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
@@ -555,6 +574,7 @@ pub struct ConfigApplyPlan {
     replaced: Vec<RowMeta>,
     mobile_versions_before: Option<Vec<u8>>,
     new: objects::NewObjects,
+    registration: registrations::RegistrationPlan,
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
@@ -604,6 +624,7 @@ pub fn plan_with_gate(
         gate: None,
         structure: None,
         backup: None,
+        registrations: None,
         new_objects: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
@@ -627,6 +648,7 @@ pub fn plan_with_gate(
             replaced: Vec::new(),
             mobile_versions_before: None,
             new: objects::NewObjects::default(),
+            registration: registrations::RegistrationPlan::default(),
         });
     }
     let replaced = read_row_metas(
@@ -1052,13 +1074,24 @@ pub fn plan_with_gate(
         params_rewrites = merge_params_rewrites(params_rewrites, &phase.params_rewrites)?;
     }
 
+    // The change registrations of the nodes of distributed infobases: the rows a node with no rows gets
+    // for the objects this stage changes (docs/apply/own-apply.md, "Exchange plans").
+    let registration = if has_change_registrations {
+        registrations::plan(client, database, &staged, &dropped_rows)?
+    } else {
+        registrations::RegistrationPlan::default()
+    };
+
     let mut touched = vec!["Config", "ConfigSave"];
     if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
         touched.push("Params");
     }
     if has_change_registrations {
         touched.push("_ConfigChngR");
-        if !new.is_empty() {
+        if !new.is_empty()
+            || !registration.dropped_files.is_empty()
+            || registration.added_file_rows > 0
+        {
             touched.push("_ConfigChngR_ExtProps");
         }
     }
@@ -1072,7 +1105,9 @@ pub fn plan_with_gate(
             .extend(["SchemaStorage", "DBSchema"].map(str::to_owned));
         report.tables_touched.extend(phase.tables.iter().cloned());
     }
-    let nodes_seen = if new.is_empty() || !has_change_registrations {
+    let nodes_seen = if (new.is_empty() && registration.dropped_files.is_empty())
+        || !has_change_registrations
+    {
         0
     } else {
         scalar_i64(
@@ -1082,6 +1117,13 @@ pub fn plan_with_gate(
             ),
         )? as usize
     };
+    report.registrations = has_change_registrations.then(|| RegistrationSummary {
+        nodes: registration.nodes.len(),
+        changed_objects: registration.changed_objects,
+        rows_added: registration.added_rows,
+        file_rows_added: registration.added_file_rows,
+        objects_of_dropped_rows: registration.extra_objects.len(),
+    });
     report.new_objects = (!new.is_empty()).then(|| NewObjectsSummary {
         objects: new.objects.clone(),
         appended_bodies: new.bodies.clone(),
@@ -1105,7 +1147,7 @@ pub fn plan_with_gate(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let appended_files = new
+    let mut appended_files = new
         .bodies
         .iter()
         .map(|body| {
@@ -1115,10 +1157,25 @@ pub fn plan_with_gate(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let nodes = new
-        .nodes
+    // the bodies a `deleted` list names are listed for the objects, as the native apply does
+    for file in &registration.dropped_files {
+        if !appended_files
+            .iter()
+            .any(|known| known.object_hex == file.object_hex && known.file_name == file.file_name)
+        {
+            appended_files.push(file.clone());
+        }
+    }
+    // the nodes registrations are made for: the plans' nodes, the ones with no rows included
+    let node_source = if registration.nodes.is_empty() {
+        &new.nodes
+    } else {
+        &registration.nodes
+    };
+    let nodes = node_source
         .iter()
         .map(|node| NodeLiteral {
+            plan: node.plan,
             type_hex: node.type_ref.clone(),
             reference_hex: node.reference.clone(),
         })
@@ -1169,6 +1226,11 @@ pub fn plan_with_gate(
         new_registrations,
         nodes,
         nodes_seen,
+        registration_additions: registration.additions.clone(),
+        registration_rows_expected: registration.added_rows,
+        registration_file_rows_expected: registration.added_file_rows,
+        plan_node_counts: registration.node_counts.clone(),
+        extra_changed_objects: registration.extra_objects.clone(),
         appended_files,
         consumed_names,
         consumed_row_count,
@@ -1190,6 +1252,7 @@ pub fn plan_with_gate(
         replaced,
         mobile_versions_before: mobile_before,
         new,
+        registration,
     })
 }
 
@@ -1316,6 +1379,7 @@ pub fn apply_with_gate(
                 .as_ref()
                 .is_some_and(|inputs| inputs.reset_change_registrations),
             new_objects: &plan.new,
+            registration: &plan.registration,
             params_rewrites: plan
                 .inputs
                 .as_ref()
@@ -1380,14 +1444,29 @@ pub fn apply_with_gate(
     Ok(plan.report)
 }
 
+/// The disposable databases of the lab tracks: `ibcmd_rs_04_*` and `ibcmd_rs_05_*`.
+pub fn is_lab_database(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["ibcmd_rs_04_", "ibcmd_rs_05_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Whether a run of `ibcmd-rs mssql-config-apply` needs `--allow-non-lab`: a write to a database that is
+/// not one of the lab's. A dry run writes nothing. (The drop-in `ibcmd infobase config apply` goes through
+/// [`apply_staged_configuration`] and asks for no acknowledgement at all: it is the production entry.)
+pub fn write_needs_acknowledgement(database: &str, dry_run: bool) -> bool {
+    !dry_run && !is_lab_database(database)
+}
+
 /// `ibcmd-rs mssql-config-apply`: build the SQL handle, run, print the report.
 pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
     use crate::cli::{MssqlConfigApplyExclusivityArg, MssqlConfigApplyRecoveryArg};
     use crate::sql::SqlOptions;
 
-    if !args.dry_run && !args.allow_non_lab {
+    if write_needs_acknowledgement(&args.database, args.dry_run) && !args.allow_non_lab {
         bail!(
-            "--allow-non-lab acknowledgement is required for a database write (or use --dry-run)"
+            "--allow-non-lab acknowledgement is required for a database write outside the lab (a database named ibcmd_rs_04_* or ibcmd_rs_05_*) or use --dry-run"
         );
     }
     let password = args.sql_user.as_deref().and_then(|_| {
@@ -1626,6 +1705,46 @@ mod tests {
         // text that is no list
         assert_eq!(ask("{1,2}"), None);
         assert_eq!(ask("2,\"a\",0"), None);
+    }
+
+    #[test]
+    fn a_lab_database_is_written_without_an_acknowledgement_and_any_other_needs_one() {
+        for lab in [
+            "ibcmd_rs_04_apply_dibn_20260930",
+            "ibcmd_rs_05_x",
+            "IBCMD_RS_04_Upper",
+        ] {
+            assert!(is_lab_database(lab), "{lab}");
+            assert!(!write_needs_acknowledgement(lab, false), "{lab}");
+        }
+        for other in [
+            "prod_trade",
+            "ibcmd_rs_bsp_8327_native_20260919",
+            "ibcmd_rs_03_old",
+            "xibcmd_rs_04_a",
+            "",
+        ] {
+            assert!(!is_lab_database(other), "{other}");
+            assert!(write_needs_acknowledgement(other, false), "{other}");
+            // a dry run writes nothing
+            assert!(!write_needs_acknowledgement(other, true), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_dropin_entry_never_asks_for_a_lab_acknowledgement() {
+        // The drop-in reaches the apply through apply_staged_configuration, which knows nothing about the lab;
+        // only the developer command (run_command) checks the name. The drop-in source must not mention the flag.
+        let dropin = include_str!("../dropin/apply.rs");
+        assert!(
+            !dropin.contains(concat!("allow_", "non_lab")),
+            "the drop-in apply asks for an acknowledgement"
+        );
+        assert!(
+            !dropin.contains(concat!("allow-", "non-lab")),
+            "the drop-in apply asks for an acknowledgement"
+        );
+        assert!(!dropin.contains("write_needs_acknowledgement"));
     }
 
     #[test]
