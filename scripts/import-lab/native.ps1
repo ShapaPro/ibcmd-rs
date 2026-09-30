@@ -110,7 +110,7 @@ function Invoke-NativeExport([string]$Db, [string]$OutDir, [string]$Tag = 'x', [
 
 # ours: the drop-in `infobase config apply` (the own apply: it stops with "требуется штатный config apply: <reasons>"
 # and exit 1 when the stage needs the platform's); returns @{Exit; Seconds; Tail}
-function Invoke-OursApply([string]$Db, [string]$Tag = 'x', [string]$Exe = '', [string]$Platform = '8.3.27') {
+function Invoke-OursApply([string]$Db, [string]$Tag = 'x', [string]$Exe = '', [string]$Platform = '8.3.27', [string[]]$Extra = @()) {
     Assert-LabDb $Db
     if (-not $Exe) { $Exe = "$($script:Lab)\bin\ibcmd-rs-v0.exe" }
     $data = "$($script:Lab)\ibdata\$Db"
@@ -118,7 +118,7 @@ function Invoke-OursApply([string]$Db, [string]$Tag = 'x', [string]$Exe = '', [s
     $version = if ($Platform -eq '8.5') { '8.5.1' } else { $Platform }
     $args = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
               "--data=$data", '--force', '--dynamic=disable', '--exclusivity=assumed', "--platform=$version",
-              "--report=$($script:Lab)\out\apply-$Tag.json")
+              "--report=$($script:Lab)\out\apply-$Tag.json") + $Extra
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $o = & $Exe @args 2>&1
     $rc = $LASTEXITCODE

@@ -1,7 +1,7 @@
 # Acceptance of the patch stage that carries what the target's rows cannot (issue #388 step 2, #393 import side).
 #
 #   pwsh -NoProfile -File run_override_acceptance.ps1 -Exe F:\...\ibcmd-rs.exe -Database ibcmd_rs_04_import_bsp_add `
-#        -Tree F:\...\tree\add5 -Tag add1 [-SkipApply] [-Platform 8.5] [-ApplyWith ours]
+#        -Tree F:\...\tree\add5 -Tag add1 [-SkipApply] [-Platform 8.5] [-ApplyWith ours] [-ApplyArgs ...]
 #
 # A tree that differs from the clone's configuration goes through the drop-in `infobase config import` with its
 # default flags (a patch stage that builds what the target's rows cannot carry, and the guard on). What it left in
@@ -19,7 +19,8 @@ param(
     [switch]$SkipApply,
     [string]$Dynamic = 'disable',
     [ValidateSet('8.3.27', '8.5')][string]$Platform = '8.3.27',
-    [ValidateSet('native', 'ours')][string]$ApplyWith = 'native'
+    [ValidateSet('native', 'ours')][string]$ApplyWith = 'native',
+    [string[]]$ApplyArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -60,7 +61,7 @@ if ($summary.deleted) { "  deleted ($($summary.deleted.count)): " + (($summary.d
 if ($SkipApply) { $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8; exit 0 }
 
 # 2. apply (native, or ours), 3. native export, 4. the tree against the export
-$a = if ($ApplyWith -eq 'ours') { Invoke-OursApply -Db $Database -Tag $Tag -Exe $Exe -Platform $Platform }
+$a = if ($ApplyWith -eq 'ours') { Invoke-OursApply -Db $Database -Tag $Tag -Exe $Exe -Platform $Platform -Extra $ApplyArgs }
      else { Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag }
 $report.apply = $a
 "apply: exit=$($a.Exit) $($a.Seconds)s $($a.Tail)"
