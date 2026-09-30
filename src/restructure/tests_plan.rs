@@ -62,6 +62,7 @@ pub(super) fn inputs(old: &[u8], new: &[u8]) -> Inputs {
             new_descriptors: [(CATALOG.to_owned(), new.to_vec())].into(),
             deleted: Some(deflate("\u{feff}0".as_bytes()).unwrap()),
         },
+        objects: Default::default(),
         extensions: Default::default(),
     }
 }

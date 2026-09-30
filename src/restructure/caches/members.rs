@@ -51,6 +51,8 @@ pub struct Member {
     pub pattern: Brace,
     /// `Use` of a catalog attribute (0 `ForItem`, 1 `ForFolder`, 2 `ForFolderAndItem`).
     pub usage: Option<i64>,
+    /// `Indexing`: 0 `DontIndex`, 1 `Index`, 2 `IndexWithAdditionalOrder`.
+    pub indexing: Option<i64>,
 }
 
 /// A tabular section and its attributes.
@@ -145,7 +147,10 @@ fn find<'a>(node: &'a Brace, bodies: &mut Vec<&'a Brace>, headers: &mut Vec<&'a 
 }
 
 /// `{3,{1,0,<uuid>},"Name",{<n>,"ru","text",...},...}` -> (uuid, name, synonyms).
-fn header(node: &Brace) -> Result<(String, String, Vec<(String, String)>)> {
+/// `(language, text)` pairs.
+type Pairs = Vec<(String, String)>;
+
+fn header(node: &Brace) -> Result<(String, String, Pairs)> {
     let items = node.as_list().context("an md header is not a list")?;
     let uuid = items
         .get(1)
@@ -198,12 +203,17 @@ fn member(item: &Brace) -> Result<Member> {
         .get(3)
         .and_then(Brace::as_atom)
         .and_then(|value| value.parse().ok());
+    let indexing = record
+        .get(2)
+        .and_then(Brace::as_atom)
+        .and_then(|value| value.parse().ok());
     Ok(Member {
         uuid,
         name,
         synonyms,
         pattern,
         usage,
+        indexing,
     })
 }
 

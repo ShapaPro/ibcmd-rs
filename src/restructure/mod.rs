@@ -28,6 +28,9 @@
 pub mod caches;
 pub mod catalog;
 pub mod command;
+pub mod common;
+pub mod create;
+pub mod entry;
 pub mod exec;
 pub mod extensions;
 pub mod names;
@@ -44,6 +47,10 @@ pub mod xdto;
 
 #[cfg(test)]
 mod tests_corpus;
+#[cfg(test)]
+mod tests_create;
+#[cfg(test)]
+mod tests_entry;
 #[cfg(test)]
 mod tests_plan;
 #[cfg(test)]
