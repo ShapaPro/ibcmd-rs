@@ -3866,7 +3866,14 @@ fn form_root_event_extension_owns(identifier: &str, write_extension: Option<&str
             identifier,
             "9cc34712-da5f-4faa-a653-343d2085fbe8" | "bf0ac0e1-bcbb-4dfe-8fc4-0b1923b461a6"
         ),
-        Some(_) => true,
+        // The document pair is the document's alone: ERP WE 2.5
+        // `Catalogs/ПравилаРаспределенияРасходов/Forms/ФормаНастроекНаПартии`
+        // carries both pairs against the same handlers, and the platform names
+        // the catalog's own pair and writes `8a5894c9-…`/`8f42e083-…` out.
+        Some(_) => !matches!(
+            identifier,
+            "8a5894c9-d2ff-4c1d-b433-89cc352bbfbc" | "8f42e083-be92-4102-b1f0-fa58452c1a63"
+        ),
     }
 }
 
@@ -4681,6 +4688,7 @@ fn parse_form_attribute_with_dcs_type_index(
         matches!(fields.get(12).map(|value| value.trim()), Some("1")).then_some("ShowError");
     let save_fields = parse_form_attribute_save_fields(
         fields.get(9).copied(),
+        id,
         &name,
         exact_single_type_uuid.as_deref(),
     );
@@ -4954,6 +4962,7 @@ fn default_form_list_settings_filter() -> DcsFilter {
 
 pub(super) fn parse_form_attribute_save_fields(
     field: Option<&str>,
+    attribute_id: &str,
     attribute_name: &str,
     value_type_uuid: Option<&str>,
 ) -> Vec<String> {
@@ -4969,6 +4978,14 @@ pub(super) fn parse_form_attribute_save_fields(
                     value_type_uuid.and_then(|uuid| form_value_type_property_name(uuid, path))
                 {
                     parsed.push(format!("{attribute_name}.{property}"));
+                } else if value_type_uuid.is_none() {
+                    // A walk into a value whose type names no such member is
+                    // written physically, attribute id then the indexes: ERP
+                    // WE 2.5 `Documents/ВыработкаСотрудников/Forms/
+                    // ФормаСпискаДокументов` saves `{1,{0}}` on the string
+                    // attribute `15` and the platform writes `15/0`.
+                    let members = path.iter().map(i64::to_string).collect::<Vec<_>>();
+                    parsed.push(format!("{attribute_id}/{}", members.join("/")));
                 }
             }
             FormAttributeSaveEntry::Binding(_) => {}
@@ -14885,7 +14902,9 @@ fn parse_form_child_item_with_metadata_owners(
                 .as_ref()
                 .map(|options| options.format.clone())
                 .unwrap_or_default()
-        } else if tag == "Page" && page_schema.is_some() {
+        } else if tag == "Page" && (page_schema.is_some() || page_properties.is_some()) {
+            // The short revision keeps `Format` at option member 5 too (ERP
+            // WE 2.5 `Catalogs/ВидыТехнологическихОпераций/Forms/ФормаЭлемента`).
             show_title_options
                 .as_deref()
                 .and_then(|options| options.get(5))
@@ -20810,9 +20829,16 @@ pub(super) fn form_command_source_name(
     match item_id {
         "0" => Some("Form".to_string()),
         "-1" => Some("FormCommandPanelGlobalCommands".to_string()),
-        _ => item_name_by_id
-            .get(item_id)
-            .map(|name| format!("Item.{name}")),
+        // A source naming no item of the form is written physically: ERP WE
+        // 2.5 `Documents/ОтгрузкаТоваровСХранения/Forms/ФормаВыбораРаспоряжения`
+        // keeps a button group sourced from item `1`, which the form no
+        // longer has, and the platform writes `1:<item type uuid>`.
+        _ => Some(
+            item_name_by_id
+                .get(item_id)
+                .map(|name| format!("Item.{name}"))
+                .unwrap_or_else(|| format!("{item_id}:{FORM_ITEM_TYPE_UUID}")),
+        ),
     }
 }
 

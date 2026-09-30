@@ -1934,7 +1934,10 @@ impl<'a> FormCommandSchema<'a> {
             }
             FormPictureValueKind::Reference => match picture_reference {
                 [kind, uuid] => kind.trim() == "0" && !uuid.trim().is_empty(),
-                [code] => code.trim().parse::<i32>().ok().is_some_and(|code| code < 0),
+                // A reference naming nothing, `{0}`, is published as
+                // `<xr:Ref>0</xr:Ref>` (ERP WE 2.5 `CommonForms/
+                // ФормаНастроекОтчета`, commands `ВыбратьПериод1`/`2`).
+                [code] => code.trim().parse::<i32>().ok().is_some_and(|code| code <= 0),
                 _ => false,
             },
             _ => false,
@@ -6089,13 +6092,27 @@ impl FormChildItemShowTitleSchema {
         options: &[&str],
     ) -> Option<Self> {
         if item_tag == "Page" {
-            FormPageSchema::from_raw_layout(
+            // The short revision keeps `ShowTitle` and `BackColor` at the
+            // canonical option members too: ERP WE 2.5 pages publish
+            // `<BackColor>#FFFFFF</BackColor>` for member 9 `{3,0,{16777215}}`.
+            if FormPageSchema::from_raw_layout(
                 wrapper,
                 field_count,
                 item_tag,
                 direct_discriminator,
                 options,
-            )?;
+            )
+            .is_none()
+                && !FormPageSchema::is_short_revision(
+                    wrapper,
+                    field_count,
+                    item_tag,
+                    direct_discriminator,
+                    options,
+                )
+            {
+                return None;
+            }
             return Some(Self {
                 option_slot: 6,
                 back_color_option_slot: Some(9),

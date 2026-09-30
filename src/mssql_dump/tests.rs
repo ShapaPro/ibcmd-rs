@@ -27598,7 +27598,15 @@ fn omits_popup_item_source_without_an_exact_owner_or_type() {
     let nonzero_global =
         format!(r#"{{7,{{0}},{{68,{FORM_GLOBAL_COMMAND_SOURCE_TYPE_UUID}}},2,1,0,0,{{0}},{{0}}}}"#);
 
-    for source in [&unknown_owner, wrong_type, &nonzero_global] {
+    // An item source naming no item of the form is written physically, as
+    // the platform does (ERP WE 2.5 `ФормаВыбораРаспоряжения`).
+    let mut fields = vec!["0"; 21];
+    fields[20] = &unknown_owner;
+    assert_eq!(
+        parse_form_popup_command_source_with_items(&fields, &BTreeMap::new()),
+        Some(format!("68:{FORM_ITEM_TYPE_UUID}"))
+    );
+    for source in [wrong_type, &nonzero_global] {
         let mut fields = vec!["0"; 21];
         fields[20] = source;
         assert_eq!(
