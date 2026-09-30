@@ -439,7 +439,8 @@ the stored `Config`:
   NG copy is O(rows) with a log proportional to the table; a single transaction on a 100 GB table is
   impractical (the native path commits in steps).
 - **8.5**: formats are identical (section 4.2) and the protocol of case a is the same (section 9.7); 2.21 metadata
-  rows and new-in-8.5 objects may add families; the prototype was not run there.
+  rows and new-in-8.5 objects may add families; the prototype was not run there. The own apply's S1 (12) is proven on
+  the 8.5 БСП: `b1`, `c1`, `d1` of 12.6 against the native twins, `evidence/dropin-apply/s1-acceptance-85.md`.
 
 ## 8. Estimate
 
@@ -1058,8 +1059,7 @@ match of `S1Operation` and one more set in the agreement of the two decoders; `a
 appears). Each sub-issue starts with the corpus test of its case (`tests_corpus.rs`: the plan made offline from the staged
 snapshot against the native result), which is the quick loop; the twin run of 12.6 closes it.
 
-Not in S1 and not filed: 8.5 (the apply refuses it; the storage differs in `ALTER INDEX` lists and all sixteen `*.si`),
-types by reference and composite types (need the map from type ids to tables), predefined data, registers.
+Not in S1 and not filed: ERP УХ, types by reference and composite types (need the map from type ids to tables), predefined data, registers.
 
 ### 12.8 The first step: attributes of every primitive type on catalogs and documents
 
@@ -1137,8 +1137,10 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
 6. **Predefined data**: the platform rebuilds `RefSInf` with the catalog (14 of 75 catalogs of the БСП); refused.
 7. **Extensions** (S1-I): `SchemaStorage(1)`, `X1` tables, `_ExtensionsRestruct*`; an extension that adopts the changed
    object is not looked at yet -- the gate must refuse or prove it harmless.
-8. **8.5**: the apply refuses it. The protocol is the same (9.7) but the storage differs (`ALTER INDEX` lists, all sixteen
-   `*.si` rewritten, 2.21 records); a separate step after 8.3.27.
+8. **8.5**: served, measured on the БСП (s185: `b1`, `c1`, `d1`, checks 3, 4, 5, 7, 8 equal to native). The storage differs
+   from 8.3.27 in the `ALTER INDEX` lists (native only, not needed for the result), all sixteen `*.si` rows rewritten in
+   another order (the same up to order after an own apply), 2.21 records, and the `root` row whose payload the platform
+   re-stamps on every write (`apply_check::root_row`). ERP УХ 8.5 is not measured.
 9. **ERP УХ** (big tables, predefined data everywhere): needs the coordinator's OK; the size guard decides most of it.
 10. **The dynamic history**: the apply folds it; a restructure over an active dynamic update (`Status` not 100) is refused.
 11. **A running server across the restructure** (0.5): the guids of `siVersions` of a cache row that changed.
