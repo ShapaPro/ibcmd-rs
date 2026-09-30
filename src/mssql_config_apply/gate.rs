@@ -127,6 +127,10 @@ pub struct GateInput<'a> {
     /// (lower-cased names): the `deleted` list, when it is empty or names
     /// only the rows of a dynamic update. A gate does not judge them.
     pub consumed_rows: &'a HashSet<String>,
+    /// Names of the stage's `deleted` list (lower-cased) that the caller has executed itself: the rows of
+    /// the removed forms and templates. They are no staged rows. A gate that judges the list (the S1
+    /// gate, for the attributes it names) leaves them out.
+    pub removed_rows: &'a HashSet<String>,
 }
 
 /// What a gate that lets a restructuring through hands to the apply: the structure work as T-SQL for

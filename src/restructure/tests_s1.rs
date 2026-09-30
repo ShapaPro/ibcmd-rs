@@ -7,7 +7,8 @@ use super::tests_plan::{
 };
 use crate::apply_check::{ChangeOp, Reason, ReasonClass, RuleId, Seg, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
-use crate::restructure::s1::decide;
+use crate::restructure::s1::{decide, without_names};
+use std::collections::HashSet;
 
 fn seg(name: &str, label: Option<&str>) -> Seg {
     Seg {
@@ -492,4 +493,56 @@ fn an_attribute_of_a_catalog_an_extension_adopts_is_refused_and_another_object_i
         "{:?}",
         verdict.blockers
     );
+}
+
+#[test]
+fn a_deleted_list_of_a_removed_form_and_a_removed_attribute_is_judged_for_the_attribute_only() {
+    let added = crate::restructure::plan::plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let mut back = inputs(NEW_ROW, OLD_ROW);
+    back.schema = added.new_schema.clone();
+    back.main_names = added.new_names_row.clone();
+    let form = "8a7546f4-bfc9-4732-bf60-43a41e2c8753";
+    let attribute_id = "c60cdc87-198a-4f6e-8f17-76bcb1b1914b";
+    // the platform's own import: the rows of the form with the flag 0, the attribute with the flag 1
+    let list = format!("\u{feff}4,\"{form}\",0,\"{form}.0\",0,\"{form}.1\",0,\"{attribute_id}\",1");
+    let stored = crate::restructure::names::deflate(list.as_bytes()).unwrap();
+    let check = check_of(vec![attribute("ДемоНовыйРеквизит", ChangeOp::Removed)]);
+
+    // the plan alone: the rows of a form are no attributes, the whole list is refused
+    back.staged.deleted = Some(stored.clone());
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, &format!("deletes {form}")),
+        "{:?}",
+        verdict.blockers
+    );
+
+    // the apply has executed the form's rows itself: the gate judges the attribute that is left
+    let executed: HashSet<String> = [form.to_owned(), format!("{form}.0"), format!("{form}.1")]
+        .into_iter()
+        .collect();
+    back.staged.deleted = without_names(Some(stored.clone()), &executed).unwrap();
+    let left =
+        crate::restructure::plan::parse_deleted(back.staged.deleted.as_deref().unwrap()).unwrap();
+    assert_eq!(left, vec![(attribute_id.to_owned(), 1)]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert!(phase.objects[0].contains("removed attributes Fld11034"));
+    assert_eq!(phase.consumed_staged_rows, 1);
+
+    // a row the apply did not execute stays in the list, and the plan refuses it
+    let partly: HashSet<String> = [form.to_owned(), format!("{form}.0")].into_iter().collect();
+    back.staged.deleted = without_names(Some(stored), &partly).unwrap();
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, &format!("deletes {form}.1")),
+        "{:?}",
+        verdict.blockers
+    );
+
+    // a stage with no list has nothing to strip
+    assert_eq!(without_names(None, &executed).unwrap(), None);
 }

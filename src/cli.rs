@@ -171,11 +171,14 @@ pub enum Commands {
     /// Apply the staged main configuration (ConfigSave to Config) without the
     /// platform, as an exclusive native `config apply` does for a
     /// configuration that needs no restructuring: changed modules, forms,
-    /// templates, pictures and help pages of any object, and new forms and
-    /// templates of existing objects. Anything else is refused with the list
-    /// of the rows that need the native apply. Takes the stage of this
-    /// program's `infobase config import` only; a stage with a `deleted` row
-    /// (removals, and every stage of the platform's own import) is refused.
+    /// templates, pictures and help pages of any object, new forms and
+    /// templates of existing objects, and the removal of forms and templates
+    /// that a stage's `deleted` list names. Anything else is refused with the
+    /// list of the rows that need the native apply. Takes the stage of this
+    /// program's `infobase config import`; a `deleted` list it cannot account
+    /// for name by name (a removal with a table or a column that its
+    /// restructuring gate does not judge, one file of an object that stays)
+    /// is refused whole.
     MssqlConfigApply(MssqlConfigApplyArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),

@@ -818,6 +818,7 @@ mod tests {
             dynamic: None,
             gate: None,
             new_objects: None,
+            removals: None,
             structure: None,
             backup: None,
             registrations: None,
