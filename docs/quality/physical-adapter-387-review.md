@@ -1,7 +1,11 @@
 # Review of the physical-adapter guard findings brought by PR #387
 
-Issue #396. Checkpoint 1: review only, no code changed. Base: `feat/0.4` at
-`7ad219d9`; branch `feat/0.4-guard-review`. Track exdg, 2026-09-30.
+Issue #396. Track exdg, 2026-09-30. Branch `feat/0.4-guard-review`.
+
+- Checkpoint 1 (review only, base `feat/0.4` at `7ad219d9`): sections 1-5 and the analysis of section 6.
+- Checkpoint 2 (the coordinator's decisions, `feat/0.4` `2cfe46a9` merged first): **G1 and G3 are done** (section 6),
+  **G2 is not in 0.4 and is filed as #413**, the text patching of `form_extension.rs` is filed as #414
+  (both in milestone 0.8). Section 10 has the final counts.
 
 The guard is `tools/validate-physical-adapter-policy.ps1`; its baseline is
 `tools/physical-adapter-policy-baseline.json`. Every line number below is a
@@ -21,8 +25,11 @@ line of `7ad219d9`. The decision for every single finding is in
   (`"CommonModule"`, `"UsualGroup"`) and a few type spellings (`"cfg:AnyRef"`).
 - Verdict: **401 of the 578 go away through three general fixes** (G1, G2, G3
   in section 6) and **177 stay in the baseline** with a stated reason
-  (sections 4 and 5). The three fixes change no user-visible spelling; G2
-  makes two exports name six more standard pictures.
+  (sections 4 and 5). Decided for 0.4: **G1 (150) and G3 (46) are done and
+  their entries are out of the baseline; G2 (205) is deferred to #413** because
+  it changes export behaviour (six pictures are named where the export fails
+  now) and `mod.rs` is a hot merge zone. So 196 fixed, 205 deferred, 177 kept
+  (13 of them also filed as #414).
 - **The one entry that came from the merge resolution** (2429d691) is the
   `{"Pattern"}` comparison of the defined-type condition (section 3). It is
   not a new literal: master already had it; the merge only changed its
@@ -94,15 +101,15 @@ Review categories (what the finding really is):
 
 | Id | Category | Entries | Occurrences | Guard categories | Verdict |
 |---|---|---|---|---|---|
-| R1 | Test-only module the guard scopes by mistake | 150 | 171 | uuid 121, xml 21, name 8 | fix G1 (guard rule) |
-| R2 | A second copy of the platform standard-picture table | 205 | 205 | uuid 205 | fix G2 (one table) |
-| R3 | A second copy of the kind-to-collection table | 46 | 46 | name 46 | fix G3 (one table) |
+| R1 | Test-only module the guard scopes by mistake | 150 | 171 | uuid 121, xml 21, name 8 | fix G1, **done** |
+| R2 | A second copy of the platform standard-picture table | 205 | 205 | uuid 205 | fix G2, **deferred to #413** |
+| R3 | A second copy of the kind-to-collection table | 46 | 46 | name 46 | fix G3, **done** |
 | R4 | Storage-format marker (tag, version, flag, row name) | 72 | 75 | name 72 | keep |
 | R5 | Platform class or type id (named constant, nil uuid) | 21 | 21 | uuid 21 | keep |
 | R6 | Platform kind, element or command name | 27 | 27 | name 27 | keep |
 | R7 | XML output or edit fragment | 36 | 36 | xml 33, name 3 | keep |
 | R8 | Guard heuristic hit (not a decision) | 21 | 24 | xml 21 | keep |
-| | **Total** | **578** | **605** | uuid 347, name 156, xml 75 | 401 fix, 177 keep |
+| | **Total** | **578** | **605** | uuid 347, name 156, xml 75 | 196 fixed, 205 deferred, 177 keep |
 
 The merge entry is one more R4 keep (not counted in the 578).
 
@@ -254,19 +261,18 @@ would also stop counting real decisions; not proposed.
 
 ## 6. The fix list and its risk
 
-Proposed for 0.4, in the order I would do them. The coordinator decides.
+Proposed at checkpoint 1, decided by the coordinator for checkpoint 2:
 
-| Id | What | Entries out of the baseline | Production code |
-|---|---|---|---|
-| G1 | The guard follows `#[cfg(test)] mod x;` to the file | 150 (171 occ.), 2 file records | none |
-| G2 | One standard-picture table, in the metadata model | 205 | yes, small |
-| G3 | One kind-to-collection table, in the metadata model | 46 | yes, small |
+| Id | What | Entries out of the baseline | Production code | Decision |
+|---|---|---|---|---|
+| G1 | The guard follows `#[cfg(test)] mod x;` to the file | 150 (171 occ.), 2 file records | none | **done**, commit `8255560c` |
+| G2 | One standard-picture table, in the metadata model | 205 | yes, small | **not in 0.4**, #413 (milestone 0.8) |
+| G3 | One kind-to-collection table, in the metadata model | 46 | yes, small | **done**, commit `0bfc2f59` |
 
-After G1-G3 the baseline holds 8 354 entries (now 8 755) and 9 613
-occurrences (now 10 035); of the 578, 177 remain (183 occurrences), plus the
-merge entry.
+The analysis below is the checkpoint-1 text; section 10 has what G1 and G3
+measured, and G2 stays as the plan of #413.
 
-### G1. The guard follows `#[cfg(test)] mod x;`
+### G1. The guard follows `#[cfg(test)] mod x;` (done)
 
 Change (tool only): the scanner learns the predicate it already computes for
 inline items (`TryParseCfgAttribute`, "cannot be true outside tests") for an
@@ -292,7 +298,7 @@ Proof, offline, no lab needed:
 3. The declarations exist as quoted (`mod.rs:982`, `mod.rs:46146`,
    `tests.rs:79566`): a test module cannot be reached by production code.
 
-### G2. One standard-picture table
+### G2. One standard-picture table (not in 0.4: #413)
 
 Change: the 212-row union (with the evidence comments and counts) becomes the
 only `STANDARD_PICTURES`, in `metadata_model` (outside the guard's scope, next
@@ -340,7 +346,7 @@ Proof:
    `external_corpus` against `tests/fixtures/external/corpus-baseline.txt`.
 5. Guard: the baseline diff is removal of exactly the 205 entries.
 
-### G3. One kind-to-collection table
+### G3. One kind-to-collection table (done)
 
 Change: a single `ROOT_COLLECTIONS` pair table in `metadata_model/index.rs`;
 `kind_of_collection` (folder to kind, plus the five nested kinds) and a new
@@ -376,9 +382,10 @@ they are about one working day, mostly for the corpus reruns.
   code that has evidence attached; the risk is real (they sit in the readers
   and writers that the БСП/УХ parity depends on) and the gain is only fewer
   baseline lines. Renaming a tag to a constant only moves the string.
-- **`form_extension.rs` text edits** (13 entries). Real design smell, see R7.
-  Proof would be the four БСП extensions and the adopted forms of the fixtures
-  (`extension_adopted*`, `form_events`) byte-equal after the change. Post 0.4.
+- **`form_extension.rs` text edits** (13 entries of #387, 15 with the later
+  `with_action_call_types`). Real design smell, see R7; filed as #414 (milestone
+  0.8). Proof would be the four БСП extensions and the adopted forms of the fixtures
+  (`extension_adopted*`, `form_events`) byte-equal after the change.
 - **A repository-wide platform-ids module** (R5 side observation). Out of scope.
 - **Narrowing the guard's `xml`+`default` rule** (R8). Would hide real
   decisions.
@@ -416,3 +423,66 @@ Mapping an entry back to its literal needs the scanner, not the baseline
 compare fingerprints. The CSV next to this file carries the result: origin,
 review category, verdict, reason, file, current lines, item, guard category,
 count, the literal (ASCII-escaped) and the full fingerprint.
+
+## 10. Checkpoint 2: what was done and the final counts
+
+Order of the work: `feat/0.4` `2cfe46a9` (track ddl's wave 1) merged into the branch first; it touches none of
+`tools/`, `src/mssql_dump/`, `src/module_blob.rs` or `src/metadata_model/`, so the review of section 5 stands
+unchanged.
+
+### 10.1 G1, commit `8255560c`
+
+- `tools/validate-physical-adapter-policy.ps1`: a new scanner method `TestOnlyModules` (C# 5, so Windows
+  PowerShell 5.1 compiles it) lists the modules a file declares as `mod name;` under a cfg predicate that cannot
+  be true outside tests; `Get-ScopedFiles` leaves out `name.rs`, `name/mod.rs` and everything below the module's
+  directory (for a host that is not `mod.rs`, next to its own directory). `$ExcludedMssqlModules` keeps only
+  `mxl_ir.rs` and `moxel.rs`. `tools/physical-adapter-policy-guard.md` and the OpenSpec requirement
+  (`openspec/changes/guard-physical-adapter-policy/specs/...`) say so.
+- The scope self-test (`Invoke-ScopeSelfTest`) builds a synthetic tree: a declared test module and its child (excluded),
+  a `pub(crate)` one with `mod.rs` and a child (excluded), a module of a host file that is not `mod.rs` (excluded;
+  the same-named sibling file is *not* its module and stays guarded), `#[cfg(any(test, feature = ...))]` (guarded), a
+  plain module (guarded), a `#[path = "..."]` module (guarded), an inline test module (already removed by the token pass).
+  It also checks that a UUID added to an excluded file is allowed and to a guarded one is rejected. With the rule turned
+  off the self-test fails.
+- Proof: **removal-only baseline diff**, entries by `(file, category, fingerprint)`: 8 755 to 8 605 entries, 10 035 to
+  9 864 occurrences, files 42 to 40; removed exactly the 150 R1 entries (171 occurrences) and the two file records
+  `src/mssql_dump/revision_mix_tests.rs` (47) and `src/mssql_dump/tests/onecdec.rs` (103); nothing added, nothing raised.
+  The guard passes, and `-SelfTest` passes under `pwsh` and Windows PowerShell 5.1 (3 s each; the guard 5-11 s).
+
+### 10.2 G3, commit `0bfc2f59`
+
+- `src/metadata_model/index.rs`: `ROOT_COLLECTIONS` (the 46 `(folder, kind)` pairs) and `NESTED_COLLECTIONS` (the five
+  nested kinds) are the only table. `kind_of_collection` reads both; the new `collection_of_kind` reads the first.
+  `mssql_dump::root_family_folder` is one call to `collection_of_kind` (its three users keep the signature).
+- `src/metadata_model/collection_tests.rs` carries the two old tables as data and checks: every one of the 46 kinds in
+  both directions and through `root_family_folder`; the five nested kinds (a collection name, no root family: `None` from
+  `collection_of_kind` and `root_family_folder`); a set of names that are neither kind nor folder, and that a folder is
+  not a kind and a kind is not a folder; the table is exactly the two old ones (46 and 5, no duplicate kind or folder).
+- Proof: the four new tests pass; the full lib suite passes (`cargo test --locked -p ibcmd-rs --lib --no-default-features`:
+  3 328 passed, 9 ignored, 0 failed); the #387 integration tests pass (`cf_export` 4, `cf_roundtrip` 2,
+  `cf_native_roundtrip` 2 + 1 ignored, `cf_load` 16, `cf_load_compiled` 12 + 1 ignored, `cf_overlay` 5,
+  `external_export` 7, `extension_export` 11, `extension_adopted` 8, `form_events` 4, `cf_corpus` 2; `external_corpus`
+  is ignored without `IBCMD_ONECDEC_CORPUS`); the baseline diff is **removal only**: 8 605 to 8 559 entries, exactly
+  the 46 R3 entries, all in `mod.rs`.
+- Offline equality on the БСП rows, 8.3.27 and 8.5, binary built before the change against binary built after it: OFFLINE_RESULT
+
+### 10.3 Filed
+
+- #413 (milestone 0.8): one standard-picture table, with the evidence (0 hits of the six names in the native trees of
+  БСП 8.3.27, БСП 8.5, УХ 8.3.27, УХ 8.5 and the seven БСП extension trees) and the proof plan of G2.
+- #414 (milestone 0.8): the adopted-form text patching of `form_extension.rs` (15 entries: 13 of #387, 2 of
+  `with_action_call_types`), with the proof on the four БСП extensions.
+
+### 10.4 The final counts
+
+| | Entries | Occurrences |
+|---|---|---|
+| findings of #387 | 578 | 605 |
+| fixed and out of the baseline (G1 150, G3 46) | 196 | 217 |
+| deferred, still in the baseline (G2, #413) | 205 | 205 |
+| kept, with the reason of section 5 (13 of them also #414) | 177 | 183 |
+| plus the merge entry, kept | 1 | 1 |
+
+The baseline now holds 8 559 entries, 9 818 occurrences and 40 files (before this task: 8 755, 10 035, 42). The CSV has
+the decision of every finding and, in `in_baseline_now`, whether it is still in the baseline. Master is unchanged by
+this work: it turns green when 0.4 merges into it.
