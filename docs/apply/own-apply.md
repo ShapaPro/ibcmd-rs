@@ -17,7 +17,8 @@ of the platform's own `ibcmd infobase config import` is refused: it carries a
 `deleted` row (a list of removals, written to every stage), about 600 descriptors
 rewritten in another record shape (format 56 to 57, a `{68}` Configuration row),
 new version guids for every name and values above 10 MB cut into parts. The plan
-stops at a `deleted` row that names anything but the rows of a dynamic update, with
+stops at a `deleted` row that names anything but the rows of a dynamic update and of the forms and templates it can
+account for name by name (since #393; before, anything but the dynamic rows), with
 a message that says so; the conservative gate would stop at the descriptors. The
 restructure check of track rcheck (#338, `apply_check::check_staged`, the default gate
 since checkpoint 2) refuses such a stage as unknown, too. Measured on the stages the
@@ -38,7 +39,8 @@ written** by this apply; see [known differences](#known-differences-from-the-nat
   the conservative rule is the explicit option ([the default gate](#the-default-gate)).
 - A staged `deleted` row that is **empty** or names **all** the dynamic-update rows of the
   base is consumed as the native apply consumes it ([removals](#removals-the-stages-deleted-row));
-  any other list is still refused.
+  since #393 a list that names the rows of removed forms and templates is executed too, and any list the apply
+  cannot account for name by name is refused whole.
 - **Typed refusals** for callers that sort them ([refusals](#refusals-a-caller-can-sort)).
 - The recovery artifact is **one file** and the newest five per database are kept
   ([recovery](#recovery-artifact-and-its-retention)).
@@ -286,7 +288,8 @@ Also in the script since checkpoint 2: a staged `deleted` row that the plan cons
 left out of step 5 (it is not moved into `Config`), out of the moved-row count and of the
 postconditions, and the in-transaction check for unfinished operations does not count it as
 one; the dynamic rows a consumed list names are deleted instead of folded in step 4
-([removals](#removals-the-stages-deleted-row)); and a structure phase from a gate that lets a
+([removals](#removals-the-stages-deleted-row)); the rows of a removed form or template are deleted by name between
+steps 4 and 5, under a fingerprint of their own (#393); and a structure phase from a gate that lets a
 restructuring through runs between the assertions and step 4, in the same transaction
 ([S1-A](#restructuring-inside-the-apply-s1-a-397)).
 
@@ -406,37 +409,80 @@ Evidence on the БСП clone, which carries one generation (`06cb0442-...`) with
 
 ### Removals (the stage's `deleted` row)
 
-**What the native apply does, from the tracks that measured it.** It never deletes a `Config` row that the
+**What the native apply does, measured on 8.3.27.2214 (#393, this section's twins).** It never deletes a `Config` row that the
 stage merely omits: a form removed from the tree leaves its three rows in `Config` (import track,
-`docs/import/patch-mode.md`, section 6.3; the trace track saw no deletion in a plain apply,
-`docs/apply/native-apply-trace.md`, section 4.1). A removal travels in the row `deleted` of the stage:
-`<BOM><count>,"<row name>",<flag>,...`, `0` when nothing is removed. Seen in the lab (read-only, in the stages
-the other tracks left): `0`; `1,"5ff28850-...",0`; and 30 names, all with flag 0, on the stage of a native import
-of an edited БСП tree -- the six dynamic-update rows of the clone and the descriptors and bodies of the
-removed objects. The native apply copies the row as `deleted.new` and deletes it **without promoting it**
-(trace, phase D2), so `Config` after the apply equals the stage minus `deleted` (ddl track); the list "drives
-the removal of the column" when an attribute is removed (trace 4.1). The platform's own import writes the row
-to every stage; the importers of this repository do not yet (import track, step 2).
+`docs/import/patch-mode.md`, section 6.3). A removal travels in the row `deleted` of the stage:
+`<BOM><count>,"<row name>",<flag>,...`, flag `0` for a `Config` row and `1` for an element that has no row of its own (an
+attribute id, the platform's own import). The native apply copies the row as `deleted.new` and deletes it **without promoting
+it** (trace, phase D2), so `Config` after the apply equals the stage minus the named rows.
 
-**What this apply does today (step 1 below is done).** The `deleted` row is read as the list it is.
-Three cases:
+The edit is the БСП tree without the form `ВсеЗаметки` of `Catalog.Заметки` (rows `8a7546f4-...`, `.0`, `.1`) and the template
+`ДатыПасха` of `DataProcessor.ЗаполнениеКалендарныхГрафиков` (rows `0384ec55-...`, `.0`); the БСП clone carries a pending
+dynamic update (`06cb0442`), so the platform's list also names its six rows. Three native runs: an import of the whole tree and
+an import of the unedited tree, each followed by `config apply --force --dynamic=disable` (`fdk`, `fdc`: the control, whose end
+state differs from `fdk` in nothing but the removal), and the apply of the stage that this repository's import writes (`fdp`).
+What the removal does, from `snapdiff`, `si_diff` and `reg_cmp` of the kit against the control:
 
-1. *Empty* (`0`, no text: what the platform's own import writes): the row is consumed.
-2. *Names only rows of the dynamic update that `Config` carries, and all of them* (the six rows of a
-   generation: two alias descriptors, two alias bodies, `DynamicallyUpdated`, `versions_dynupdate_<g>`): the
-   row is consumed, and the named rows are **deleted, not folded**; the ordinary rows keep the text from
-   before the online update, as the native apply leaves them. A list that names only some of the
-   overlay rows, or names them for a generation `Config` does not carry, is refused.
-3. *Anything else*: refused before anything is read further, with `NeedsNativeApply::apply` and a message
-   that says what the list holds (row count, how many are dynamic-update rows, the first other name).
+| State | Native apply of a stage that drops a form and a template |
+|---|---|
+| `Config` | the five rows of the two objects are gone (9 836 rows: 9 847 - 5 - 6 dynamic-update rows); the staged owners' descriptors replace the active ones |
+| `_ConfigChngR`, `_ConfigChngR_ExtProps` | with `_MessageNo` NULL everywhere (the corpus): **untouched for the removed objects**: 20 685 rows and 21 365 file rows, the removed objects' rows (5 nodes for the form, 3 for the template) and their file lists stay. Against the control: 0 rows differ, 0 message numbers, 0 file lists. With message numbers and a missing row (twin `fdq`): the removed object is registered **like a changed one** -- its message numbers become NULL (7 and 0 in the twin) and a node that has no row of it gets one, `_MessageNo` NULL, with the object's body files in name order (`.0`, `.1` for the form, `.0` for the template) |
+| `Params` main search information (`1a621f0f-....si`) | the two records are gone (`{10807,` becomes `{10805,`); nothing else changes |
+| `Params` properties row (`c4629235-....si`) | the form's entry is gone (`8a7546f4-...,1,0,{"S","v8config://v8cfgHelp/mdobject/id8a7546f4-.../038b5c85-..."}`: a form with a help page has one, a template none); the count `{2376,` becomes `{2375,` |
+| `siVersions` | both rows have new versions |
+| `DBSchema`, `SchemaStorage`, `DBNames` | unchanged (a form and a template have no table; `DBNames` does not know their ids) |
+| the other cache rows, `IBVersion` | as in any full apply (the `.ui` rows, `MobileVersions.dat`, the help index, the CAS collection: [known differences](#known-differences-from-the-native-apply)) |
 
-"Consumed" means: left out of the moved rows, out of the moved-row count and out of the postconditions;
-`ConfigSave` is emptied as ever; the in-transaction check for unfinished operations does not count it
-(`deleted` is one of the unfinished-operation names, and a first version of the script refused its own
-consumed row with code 57307 -- safe, a rollback -- before this was fixed). Every `DELETE` on `Config`
-still names its rows by a staged row, by the alias of a folded or dropped generation or by a marker.
+**The `deleted` row of the platform against the one of this repository's import** (branch `feat/0.4-import-override`, built
+from source in the apply lab): the same text format (BOM, count, `"name",0` pairs joined by commas, no line break, 655 bytes for
+11 names), the same set of 11 names: the five rows of the two objects and the six dynamic-update rows
+(`tools\deleted_cmp.py`). The order differs, and the platform's own order is not stable either: two runs on the same tree wrote
+two different orders, the same bytes otherwise. So byte equality of the row is not a property the platform itself has; the set
+of names is the comparison, and it is equal.
 
-**Evidence: twins of БСП 8.3.27 (`tools\verify_new.py`, native against own on byte-equal stages).** A delta stage
+**What this apply does with a `deleted` list.** It answers the list name by name (`mod.rs`: `answer_removals`):
+
+1. an empty list, and a list that names **all** the rows of the dynamic update `Config` carries (or none of them): consumed,
+   the rows deleted without folding ([step 1](#what-this-apply-does), E1-E4 below);
+2. the rows of **a removed form or template** that the analysis (`removals.rs`) accounts for: deleted, with the records of the
+   two search-information rows. The analysis takes an object only when all of this holds, and refuses it (the list is refused whole)
+   otherwise:
+   - the list names exactly the object's rows: its descriptor and every `<uuid>.<n>` that `Config` holds, nothing that `Config` does
+     not hold; a name that is a service row, a body of an object that stays, or of no known shape is refused;
+   - the stage has no row of the object (a stage that removes an object and stages its bodies is contradictory);
+   - exactly one descriptor of the active `Config` mentions the object's uuid (its owner, which lists it in a group of forms or of
+     templates: another kind of owned object is refused), and no staged descriptor mentions it;
+   - the owner's descriptor is staged and equals the active one **minus the removed references** as a tree (the inverse of the
+     new-object analysis in `objects::analyze`: a descriptor that changes anything else is a metadata change and stays for the
+     native apply);
+   - the object has no table or column: `Params.DBNames` and the `DBNames-Ext-*` rows do not mention its uuid;
+   - the staged `versions` row no longer lists its rows;
+   - no extension adopts it (`restructure::extensions`, the check of S1-I: what the platform does to an extension whose adopted
+     object goes is not measured);
+   - 8.3.27 only (on 8.5 the platform's own apply removes it);
+3. anything else, that is the names with flag `1` (attributes) or a flag-`0` name the analysis did not take: **the gate judges
+   them when it says it can** (`StructuralGate::judges_deleted_row`, the S1 gate for the attributes the stage removes), and the
+   list is consumed only when a structure phase answers for them; otherwise the whole list is refused with
+   `NeedsNativeApply::apply`, the form included, naming the first name it cannot account for and the reasons of the analysis.
+
+The names that steps 1 and 2 execute are handed to the gate (`GateInput::removed_rows`); the S1 gate leaves them out of the
+`deleted` list it gives its plan (`restructure::s1::without_names`), so the plan sees the attribute ids alone, and the owners'
+descriptors are accepted like those of new objects (`accepted_owner_descriptors`).
+
+*The change register* is the plan's (`registrations::plan`): the removed rows' names go in with the names of a dynamic update that
+the list names, so the objects' rows get their `_MessageNo` reset, a node with no row of the object gets one with the files, and
+the bodies missing from an existing list are appended -- what the twin `fdq` showed the native apply does. *In the script* (one
+transaction, as before): the fingerprint of the removed rows (count, bytes, three digest sums) is asserted under the locks with
+the others (`57320`); after the dynamic rows are dropped or folded the rows are deleted by name, every part, and both the count
+of the deleted rows and the absence of any of them are checked (`57321`); then the move, then the change registrations. *In the
+plan*: the two cache rows are edited **on top of** whatever the new objects and a restructuring of the same stage rewrite in the
+same stage (`removals::plan_search_info`): the edit is by uuid on the text that the earlier edit produced and keeps the digest of
+the stored row, so the object registry `1a621f0f` can lose the records of a form and of an attribute in one stage, where a new form
+and an attribute still clash (`merge_params_rewrites`). A record has to be the object's own (parent, name and class as its owner
+files it, no children), or the plan refuses. *The recovery artifact* gets `removed_rows.tsv` (name, part, attributes, dates, and
+where the bytes are in `rows.pack`). *The report* names the removed objects (`removals`: objects, rows, records, property entries).
+
+**Evidence for the rows of a dynamic update (checkpoint 2): twins of БСП 8.3.27 (`tools\verify_new.py`, native against own on byte-equal stages).** A delta stage
 of four modules and their `versions`; E1 and E2 on a base without an overlay, E3, E3b and E4 on a base that
 carries the dynamic generation `06cb0442` (two objects, `a627e390` and `ab132638`).
 
@@ -452,22 +498,68 @@ The `Files` rows differ in E3b and E4 by the help-index chunks only (known diffe
 register difference is reproduced since #412 (see the row above); the case needs a list that names overlay rows, which
 neither importer of this repository writes yet.
 
-**What is left, in the order the evidence allows; each step is enabled only after the own apply
-reproduces the native end state on a twin of the same stage:**
+**Evidence: twins on the same stage** (`tools\native_twin.ps1`, `native_cmd.ps1`, `deleted_cmp.py`, `removals` tests). The stage is
+what this repository's import writes for the tree (`import-override` build, 9 516 rows, the row of 11 names); native and this apply
+run on byte-equal copies of it (a COPY_ONLY backup restored twice). The same acceptance on the build that has the import merged
+(`feat/0.4` 029b4a2b), through the drop-in commands `infobase config import` and `infobase config apply`
+(`scripts/apply-lab/final_acceptance.ps1`, `evidence/own-apply/removals-393-final-acceptance.txt`): `Config` 9 836 of 9 836 equal to the
+platform's apply of the same stage, 15 of 16 `.si` texts equal, the platform's export equal to the tree (12 190 of 12 190 files,
+`ConfigDumpInfo.xml` aside), the platform's second apply «не требуется».
 
-2. *A removed form, template or body.* The rows the list names (the descriptor `<uuid>` and the bodies
-   `<uuid>.<n>`) are deleted in the same transaction, only when the owner's staged descriptor differs from the
-   active one by exactly the removed references (the inverse of the new-object analysis in `objects::analyze`) and
-   the list names exactly the object's rows. What is **not known** and must come from the native twin of the
-   `formdel` edit that track import stages alone: whether the native apply deletes the named rows at all; what it
-   does to the object's `_ConfigChngR` and `_ConfigChngR_ExtProps` rows (deleted or kept) and to its record in the
-   main `.si`; whether `DBNames` keeps the entry (it did for an attribute); which path it takes (short or long);
-   the `_MessageNo` of the owner. The apply then writes the same.
-3. *A name that has a table or a column* (catalog, attribute, tabular section, register): structural, refused as
-   before; the native apply removes the column.
+| Check | Form and template (`fdp` native, `fdo` ours) | Form, template and an attribute, gate S1 (`mxp`, `mxo`) |
+|---|---|---|
+| `Config`, dates and attributes included | 9 836 of 9 836 rows equal (0 differ) | 9 836 of 9 836 |
+| the 16 `.si` rows compared after inflate | 15 of 16 equal; `1a621f0f` and `c4629235` equal: the records and the entry are exactly the platform's. The sixteenth, `c77bc206`, is the same list in another order (71 116 characters both) | the same 15 of 16; `1a621f0f` equal with **both** edits, the attribute's record (the gate's) and the two records of the form and the template (the apply's) |
+| tables, `DBSchema`, `DBNames` | not touched (no difference) | the rebuilt `_Reference3347`: 4 rows both ways with `EXCEPT`; `DBNames` text equal; entries equal but `DbCopies`/`DbCopiesUpdates` (known) |
+| a native `config export` of our result against the tree | 12 190 of 12 190 files, `ConfigDumpInfo.xml` aside | 12 190 of 12 190 |
+| a native `config apply` on our result | «Обновление конфигурации базы данных не требуется» | the same; `config check` succeeds |
+| the change register | 20 685 rows both; the same as the known long-path difference (782 objects' `_MessageNo` NULL against 0) and the order of the file list of two objects that have a body unchanged and a body changed (6 rows: the platform lists the unchanged file first) | the same 782 and 6 |
+| a register with message numbers and a missing row for the removed objects (`fdq` native, `fdq2` ours; the form has 7 at one node, 0 at another and no row at a third, the template 7 and no row at the third) | the removed objects' rows: `_MessageNo` NULL everywhere, the missing rows inserted with the body files; equal on both (`reg_state.py show`); the other differences are the 782 and 6 above (the native apply writes the node's last message number, 7 here, where the corpus had NULL) | |
+| a rehearsal | `snapdiff` before and after: nothing changed | |
+| a tampered removed row after the plan | error `57320`, nothing changed (Config 9 847, ConfigSave 9 516) | |
 
-Until step 2 lands the only rows this apply deletes that a staged row does not replace are the dynamic-update rows
-a consumed list names.
+Time of the real run: 375 s for the first (debug build, other tracks running; 187 s of them SQL, 124 s the recovery artifact), 232 s
+for the second; the native apply of the same stage 137 s and 227 s.
+
+**Lists refused whole** (`tools\refusal_cases.ps1`, `--dry-run` on the clone that holds the stage of the first twin; the control, the
+platform's list of 11 names, is planned; each of the others is `needs_native_apply` and names its reason):
+
+| The list, changed | Answer |
+|---|---|
+| an attribute id with flag 1 next to the form and the template | «1 name(s) not accounted for, the first c1a2b3d4-...» (the default gate does not judge attributes; under `--allow-restructure s1` the same list is the gate's, as the second twin shows) |
+| a body row of an object that stays (`00149051-....0`) | «a body row of an object that stays (a module, picture or help page of it): the removal of one file of an object is not measured» |
+| the form's `.1` left out | «a row of a removed object that the list does not name: the list must name the object's rows exactly» |
+| a name `Config` does not hold (`<form>.7`) | «the list names a row that Config does not hold» |
+| four of the six rows of the dynamic update | «it names 4 of the 6 rows of the dynamic update that Config carries, and the native apply's answer to a partial list is not measured» |
+
+The other refusals of the analysis (a second descriptor that mentions the object, an owner that is not staged or changes more
+than the references, a table or column in `DBNames`, a staged `versions` that still lists a row, a message number or a missing row in
+the register, an extension that adopts the object, 8.5) are unit tests of `removals_tests.rs` on a database of canned answers, one
+test each, and of `answer_removals` (`mod.rs`) for the whole-list rule, the mixed list of a form and an attribute included; the seam
+with the S1 gate (`without_names`, the plan's refusal of a form's rows it is still handed) is `restructure::tests_s1`.
+
+**What is not done, and why** (the twin is missing or the answer is a refusal):
+
+- **one file of an object that stays** (a module, a picture, a help page): the list names `<owner>.<n>` of an object that is not
+  removed, the analysis refuses it, and this repository's import does not write it either (its guard refuses the stage). A native twin
+  of the `moddel` edit (the manager module of a data processor) is prepared; the platform's first `config import` of a fresh clone
+  fails or stages a subset in most attempts (finding below);
+- a **common module** or any other object with rows of its own that other descriptors and the roles' rights mention (all 801 common
+  modules of the БСП tree are mentioned by some XML file: a role's rights, a subsystem's content, an event subscription): the edit that removes one changes the
+  roles as well, a stage of many objects; not measured;
+- an owner that both loses and gains a form or a template in one stage: the two analyses each see the other's change as "more
+  than the references", the stage is refused;
+- **objects with tables or columns** (a catalog, a document, a register; an attribute or a tabular section): the platform removes
+  the columns; refused as before unless the S1 gate judges the attribute ids;
+- 8.5.
+
+**A finding for the twins of the platform's own import.** On a fresh clone the platform's first `config import` of a tree stages a
+subset of the rows (9 620-9 640 of 9 840) or ends with «Ссылка на неизвестный предопределенный элемент - ...» or another
+critical error of the same family, whatever the tree (the unedited tree fails the same way); a second and a third import, into the
+same clone, stage everything (9 837 rows for the tree without the form and the template, 9 842 for the unedited one). A twin made
+from the platform's own stage repeats the import until the row count is the tree's, and checks it (`native_twin.ps1`). Two
+native stages of trees that differ by the removal alone are not equal outside it either: 1 949 `Config` bodies differ between
+the two apply results (the importer re-serialises), which is why the twins above start from **one** stage.
 
 ### Which native path these writes correspond to, and why
 
@@ -510,7 +602,7 @@ writing any long extra, and to run once on a long stage of 21 to 30 rows if a re
 
 - **Fail closed**: an unknown storage layout (table fingerprint of the profile), an
   unsupported platform profile, a `deleted_dynupdate_*` row, an unfinished operation,
-  a `deleted` row that asks for more than the dynamic rows (removals), a reused generation,
+  a `deleted` list with a name that the analysis of removals cannot account for, a reused generation,
   an unlisted staged row (warning), any structural blocker, a restructuring without a stated
   way back: no write.
 - **Plan without locks, verify under locks**: the plan reads metadata and server-side
@@ -762,7 +854,7 @@ any other caller sort by type, not by text; `run_command` prints the same distin
 | Type | Fields | When | `refused` in the report |
 |---|---|---|---|
 | `StructuralRefusal` | the gate's verdict | the gate refuses the stage (message: the gate's own text, for the default gate `Verdict::refusal()`) | `needs_native_apply` |
-| `NeedsNativeApply` | `command` (`NativeCommand::Apply` or `Repair`), `reason` | the stage or the base needs the native tool: a `deleted` list that asks for more, an overlay in `Params`, a `deleted_dynupdate_*` row, a new object on an empty change register, a new object on 8.5, an unfinished operation (`Repair`) | `needs_native_apply` (with `native_command`, `reason`) |
+| `NeedsNativeApply` | `command` (`NativeCommand::Apply` or `Repair`), `reason` | the stage or the base needs the native tool: a `deleted` list with a name the apply cannot account for, an overlay in `Params`, a `deleted_dynupdate_*` row, a new object on an empty change register, a new object on 8.5, an unfinished operation (`Repair`) | `needs_native_apply` (with `native_command`, `reason`) |
 | `ExclusiveAccessRefused` | `database`, `sessions` (id, login, host, program, ...), `in_transaction` | other user sessions on the database; `in_transaction` is true when the in-transaction check (`THROW 57302`) found them after the plan had not | `exclusive_access` |
 | `ExclusiveAccessUnprovable` | `reason` | exclusivity cannot be proved: no `VIEW SERVER STATE` (57301) | `exclusive_access_unprovable` |
 | `BackupRequired` | none | a restructuring that writes, without `--recovery-backup` or `--i-have-a-backup` (Russian message naming both) | `backup_required` |
@@ -1070,10 +1162,10 @@ gate's finding of checkpoint 2, `versions must be based on the effective row`).
   although only the edited ones differ from `Config` (9 517 staged, 9 515 identical in the cluster proof); the native apply
   moves them all too. A mode that would leave the byte-identical rows out is possible, and would differ from the native
   apply only in `Creation`/`Modified` of those rows -- a proposal, not done.
-- **Removals** are honored only as the native apply consumes an empty list or the dynamic rows (step 1); a `deleted`
-  list that names a removed form, template or body is refused (step 2 waits for a native twin of the `formdel` edit), and
-  no row is deleted that a staged row does not replace, apart from the dynamic rows a consumed list names (see
-  "Removals"). The stage of the platform's own import is refused for its non-empty list and for its rewritten descriptors.
+- **Removals**: a `deleted` list is executed for the forms and templates the analysis accounts for name by name (their rows are
+  deleted with the two search-information records; [removals](#removals-the-stages-deleted-row)), for the rows of a dynamic update, and
+  for the attributes the S1 gate judges; any list with a name it cannot account for is refused whole. Not done: one file of an object
+  that stays, common modules and other objects the rest of the configuration mentions, objects with tables, 8.5.
 - **8.5** is admitted for the same stages as 8.3.27 minus new objects (see [8.5](#85-392)); on any other 8.x profile the apply
   is refused.
 - **Restructuring**: `--allow-restructure s1` runs the restructure track's S1 gate in the apply's transaction (attributes added or

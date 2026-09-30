@@ -49,6 +49,25 @@ fn sha256_upper(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The stored `deleted` row without the given names (lower-cased); `None` stays `None`.
+pub(super) fn without_names(
+    stored: Option<Vec<u8>>,
+    names: &HashSet<String>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let kept: Vec<(String, i64)> = crate::restructure::plan::parse_deleted(&stored)?
+        .into_iter()
+        .filter(|(id, _)| !names.contains(id))
+        .collect();
+    let mut text = format!("\u{feff}{}", kept.len());
+    for (id, flag) in &kept {
+        text.push_str(&format!(",\"{id}\",{flag}"));
+    }
+    Ok(Some(crate::restructure::names::deflate(text.as_bytes())?))
+}
+
 /// The plan as the apply takes it: T-SQL for its transaction and the cache rows as guarded rewrites. The
 /// stage's `deleted` row, when there is one, is answered for by the phase (`consumed_staged_rows`): the
 /// apply does not move it into `Config` and drops it with the rest of `ConfigSave`.
@@ -373,6 +392,12 @@ impl StructuralGate for S1Gate<'_> {
             database: input.database,
         };
         let (mut inputs, storage) = read_inputs(&mut source)?;
+        // The names of the `deleted` list that the apply has executed itself (the rows of removed forms
+        // and templates) are not the plan's to judge: it reads the attributes that are left.
+        if !input.removed_rows.is_empty() {
+            inputs.staged.deleted =
+                without_names(inputs.staged.deleted.take(), input.removed_rows)?;
+        }
         // The objects the extensions adopt (S1-I): the plan refuses to change one. What cannot be read
         // is a refusal, not an error: the stage is then not one this gate can vouch for.
         if inputs.extensions.registered > 0 {

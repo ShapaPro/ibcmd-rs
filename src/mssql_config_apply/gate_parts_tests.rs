@@ -104,6 +104,7 @@ fn check(
             accepted_owner_descriptors: &accepted_owner_descriptors,
             new_object_kinds: &new_object_kinds,
             consumed_rows: &consumed_rows,
+            removed_rows: &consumed_rows,
         })
         .unwrap()
 }
@@ -251,6 +252,7 @@ fn a_consumed_row_is_not_judged_and_an_unconsumed_one_is_refused() {
                 accepted_owner_descriptors: &accepted,
                 new_object_kinds: &kinds,
                 consumed_rows: consumed,
+                removed_rows: &accepted,
             })
             .unwrap()
     };
@@ -339,6 +341,7 @@ fn ask(gate: &dyn StructuralGate) -> GateVerdict {
         accepted_owner_descriptors: &none,
         new_object_kinds: &HashMap::new(),
         consumed_rows: &none,
+        removed_rows: &none,
     })
     .unwrap()
 }
