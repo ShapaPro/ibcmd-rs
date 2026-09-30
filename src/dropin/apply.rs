@@ -180,7 +180,15 @@ fn connect(request: &ApplyRequest) -> Result<(SqlExec, ConfigApplyOptions)> {
         password_env: &db_pwd_env,
         trust_server_certificate: true,
     })?;
-    Ok((sql, apply_options(request, &config.db_name, profile)))
+    let mut options = apply_options(request, &config.db_name, profile);
+    // No native-looking flag: the limit on the rebuilt tables comes from the settings chain
+    // (IBCMD_RS_RESTRUCTURE_LIMIT_ROWS / _BYTES, `restructure-limit-rows` / `-bytes` of ibcmd-rs.toml).
+    options.restructure_limit = crate::restructure::size_guard::resolve_limit(
+        &Settings::load(common.native_config.as_deref())?,
+        None,
+        None,
+    )?;
+    Ok((sql, options))
 }
 
 /// The options of the own apply for a request. The platform's `--force`

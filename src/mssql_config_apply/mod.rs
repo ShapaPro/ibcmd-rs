@@ -143,6 +143,9 @@ pub struct ConfigApplyOptions {
     /// See [`ConservativeGate::admit_unverified_roles`]; only with
     /// [`GateChoice::Conservative`].
     pub admit_unverified_roles: bool,
+    /// The most rows and bytes of tables a restructuring may rebuild in the transaction (S1-J); the
+    /// measured default unless a flag or the settings chain says otherwise.
+    pub restructure_limit: crate::restructure::size_guard::LimitSetting,
 }
 
 /// The XML dialect the restructure check decodes descriptors with.
@@ -189,7 +192,8 @@ fn restructure_gate<'a>(
                 options.conservative_gate(),
                 crate::restructure::plan::PlanOptions::default(),
             )
-            .xml_version(xml_version_of(options.platform_profile)),
+            .xml_version(xml_version_of(options.platform_profile))
+            .size_limit(options.restructure_limit.clone()),
         )),
     }
 }
@@ -216,6 +220,7 @@ impl ConfigApplyOptions {
             allow_restructure: None,
             backup: BackupPolicy::None,
             admit_unverified_roles: false,
+            restructure_limit: Default::default(),
         }
     }
 }
@@ -1467,6 +1472,11 @@ pub fn run_command(args: &crate::cli::MssqlConfigApplyArgs) -> Result<()> {
         );
     }
     options.admit_unverified_roles = args.admit_unverified_roles;
+    options.restructure_limit = crate::restructure::size_guard::resolve_limit(
+        &crate::settings::Settings::load(None)?,
+        args.restructure_limit_rows,
+        args.restructure_limit_bytes.as_deref(),
+    )?;
     match apply_staged_configuration(&sql, &options) {
         Ok(report) => {
             let json = serde_json::to_string_pretty(&report)?;
