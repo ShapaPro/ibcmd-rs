@@ -1069,6 +1069,7 @@ struct FlowchartXmlItem {
     events: BTreeMap<String, Option<String>>,
 }
 
+mod form_root_42;
 mod help_pages;
 mod interface_assets;
 
@@ -25361,6 +25362,9 @@ pub fn parse_form_body_blob(blob: &[u8]) -> Result<ParsedFormBodyBlob> {
 }
 
 pub(crate) fn parse_form_body_plain(plain: &str) -> Result<ParsedFormBodyBlob> {
+    // An older platform's root-`42` form is read as 8.3.27 re-saves it.
+    let upgraded = form_root_42::upgrade_root_42_body(plain);
+    let plain = upgraded.as_deref().unwrap_or(plain);
     let container = FormBodyContainer::parse(&plain)?;
     let layout = plain[container.layout_range.clone()].trim().to_string();
     let module_text = parse_1c_quoted_string(plain[container.module_range.clone()].trim())
