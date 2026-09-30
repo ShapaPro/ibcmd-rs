@@ -38,7 +38,8 @@ interfaces. What differs from the target in a way those rows cannot carry is now
 6. **The rows a stage patches start from what the storage publishes.** When an online (dynamic) update of the target
    is pending, its alias rows (`<uuid>_dynupdate_<generation>`, `versions_dynupdate_<generation>` first among them)
    hold the current content, and the staged `versions` is based on that one: the apply's gate flags ids that come from
-   the plain row as unknown otherwise.
+   the plain row as unknown otherwise. The rule that names the alias is the export's overlay, the same one the online apply's
+   row-by-row stage asks (`mssql_dump::stored_row_name`, `docs/apply/online-activation.md` section 6.4).
 7. The rows are staged over the target's as before (one transaction that replaces ConfigSave), with two changes of
    shape that make ConfigSave the platform's own: the dates are 2000 years ahead (the platform's `_YearOffset`, 4026,
    where the stage wrote 2026), and a row larger than 10 000 000 bytes is written in parts of that size, each part

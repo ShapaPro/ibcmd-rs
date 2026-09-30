@@ -2315,6 +2315,24 @@ pub(crate) fn dynamic_generation_aliases<'a>(
         .collect())
 }
 
+/// The stored row that holds the current content of the published `name`,
+/// among `stored_names`: the alias of the newest generation of `history` that
+/// carries it, else `name` itself.
+///
+/// One rule for every reader of the current content: the export's overlay, the
+/// stage that has read the whole table ([`dynamic_generation_aliases`]) and the
+/// stage that asks row by row (`mssql_effective_row`, which only adds the seek
+/// that finds the candidates).
+pub(crate) fn stored_row_name<'a>(
+    history: &[String],
+    name: &str,
+    stored_names: impl IntoIterator<Item = &'a str>,
+) -> String {
+    dynamic_generation::storage_generation_overlay(history, stored_names)
+        .stored_name(name)
+        .to_owned()
+}
+
 /// The rows a state export starts from.
 pub(crate) enum StateBase<'a> {
     /// Nothing is stored: the staged rows are the whole configuration (a
@@ -45944,6 +45962,27 @@ fn generation_history(
         .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))
 }
 
+/// The generation history of `database`'s `Config` table, oldest first; empty
+/// when no online generation is active. A marker this reader cannot read is an
+/// error, as it is for the export.
+///
+/// Reads the rows as stored, whatever view an export of this process installed.
+pub(crate) fn active_generation_history(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<String>> {
+    let _stored = dynamic_generation::StorageViewScope::begin(database);
+    let marker = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
+    Ok(generation_history(
+        sql,
+        database,
+        MssqlConfigurationTableRole::Current.sql_name(),
+        &marker,
+        &[],
+    )?
+    .unwrap_or_default())
+}
+
 /// The row that lists a whole configuration, in `Config` and in a stage.
 const STAGE_INVENTORY_ROW: &str = "versions";
 
@@ -46061,10 +46100,23 @@ const DYNAMIC_UPDATE_MARKER_ROW: &str = "DynamicallyUpdated";
 /// it always was. With one, it is a derived table that reads the configuration
 /// that generation publishes -- see [`dynamic_generation`].
 fn qualified_storage_table(database: &str, table: &str) -> String {
+    qualified_storage_table_for(database, table, dynamic_generation::Selection::All)
+}
+
+/// [`qualified_storage_table`] for a query that keeps only `selection`: with an
+/// active dynamic generation the scan under the derived table is limited to the
+/// stored rows that can publish it, so a bounded read seeks instead of reading
+/// the whole table (#409 F-15).
+fn qualified_storage_table_for(
+    database: &str,
+    table: &str,
+    selection: dynamic_generation::Selection<'_>,
+) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
-    dynamic_generation::storage_table_expression(
+    dynamic_generation::storage_table_expression_for(
         &qualified,
         dynamic_generation::storage_generation_overlay_for(database, table).as_deref(),
+        selection,
     )
 }
 

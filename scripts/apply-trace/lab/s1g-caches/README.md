@@ -54,3 +54,26 @@ prove.ps1 -Database <each> -Label <x>_native -Steps check,apply
 ```
 
 Results: `docs/apply/evidence/derived-caches/{prove_*_all,necessity_*,prove_*_all_native}.txt`.
+
+## S1-F: the native cases N1-N7 and their twins (`docs/apply/new-object.md`, section 8)
+
+The stages of the seven cases are made from the native export tree of the base (a database that already had a native apply):
+`make_cases_n.py [case ...]` writes `F:\ibcmd\lab\05\s1g\n\<case>\{stage, files.txt}` (the uuids are new at every run: name the
+cases to write). One case, end to end:
+
+```
+twin_stage.ps1 -Case n5 -Tag tw5 -Native     # staged clone, native partial import, backup n5_staged.bak, the twins _nat and _own,
+                                             # the native apply on _nat, full snapshot nat_after
+twin_run.ps1 (ddl kit, DDL_LAB=<store>) -Case n5 -Nat ..._tw5_nat -Own ..._tw5_own -Base ..._tw5_st -StagedLabel n5_staged -Exe <ibcmd-rs.exe>
+                                             # dry run, rehearsal (check 10), the real run, checks 2-6
+python reg_cmp.py <nat> <own> <staged clone> # the change register without the random keys
+twin_extra.ps1 -Nat .. -Own .. -Label n5 -Steps noop,session,export   # checks 7, 9, 8
+twin_inject.ps1 -Case n5 -Run <store>\out\run_n5 -Own .. -To ..      # check 12
+twin_final.ps1                               # all seven cases on fresh own twins with the final binary
+python assemble_twin_evidence.py <file>      # the evidence file
+```
+
+`f_created.bsl` is the session job (the names `ДемоКатН*`, `ДемоДокН*`): metadata, XDTO types, a write with a value in every
+attribute and tabular row, read back, queries, the serialization, deletion. `twin_run.ps1`, `twin_check.ps1`, `inject_failure.ps1` and the
+other checks are the ddl kit's (`scripts/restructure-lab`); `twin_extra.ps1` and `twin_inject.ps1` are their trace-track versions
+(the ddl scripts accept `ibcmd_rs_04_ddl_*` databases only).
