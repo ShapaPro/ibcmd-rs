@@ -15,6 +15,8 @@ ddl track's kit (`scripts/restructure-lab`: `snapshot.py`, `snapdiff.py`, `si_di
 | `evidence_393.ps1` | collects the checks of the two twins into `docs/apply/evidence/own-apply/removals-393-twin-checks.txt` |
 | `deleted_cmp.py`, `deleted_row.py`, `deleted_classify.py` | the `deleted` row of a stage: format and set of names against another row, its text, its names against `Config` |
 | `reg_cmp.py` | the change registers of two clones: message numbers and file lists per (node, object) |
+| `reg_state.py` | the register rows of the removed form and template: `show`, and `setup` (message numbers and missing rows) |
+| `final_acceptance.ps1` | our `infobase config import` and drop-in `infobase config apply` of a tree on a fresh clone, the platform's apply of the same stage on a twin, the platform's re-apply and export of our result, and the comparisons |
 | `stage_tools.py` | helpers for stages in disposable clones (copy a stage, add or drop the `deleted` row, ...) |
 | `tree_edit.py`, `unused_modules.py`, `module_mentions.py` | edits of a working copy of the exported tree, and which common modules the rest of the tree mentions |
 

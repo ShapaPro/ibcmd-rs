@@ -7,7 +7,8 @@
 //!
 //! - the rows the list names leave `Config` (the descriptor and every `<uuid>.<n>` of each object);
 //! - the owner's descriptor, staged without the reference, is replaced like any staged row;
-//! - the change register and its file lists **keep** the removed objects' rows;
+//! - the change register treats a removed object like a changed one: the message numbers of its rows are reset
+//!   and a node that has no row of it gets one, with the object's files;
 //! - the main search information (`1a621f0f-....si`) loses the record of each object (its count follows),
 //!   `c4629235-....si` loses the object's entry when it has one (a form with a help page has), and
 //!   `siVersions` gives both rows a new version;
@@ -32,7 +33,7 @@ use crate::sql::{SqlClient, SqlExec, SqlValue};
 
 use super::gate::GateBlocker;
 use super::model::{RowMeta, RowName, classify_name, hex_upper, quote_ident};
-use super::objects::{describe, registration_nodes};
+use super::objects::describe;
 use super::si;
 use super::sqlgen::ParamsRewrite;
 use super::versions::{deflate_row, inflate_row, parse_versions, strip_bom};
@@ -93,8 +94,6 @@ pub struct RemovalInput<'a> {
     pub overlay_rows: &'a HashSet<String>,
     /// Every `ConfigSave` row.
     pub staged: &'a [RowMeta],
-    /// `_ConfigChngR` exists.
-    pub has_change_registrations: bool,
 }
 
 fn blocker(blockers: &mut Vec<GateBlocker>, row: &str, reason: impl Into<String>) {
@@ -614,80 +613,11 @@ pub fn analyze(input: &RemovalInput<'_>) -> Result<RemovalAnalysis> {
         }
     }
 
-    // The change register: it keeps the rows of a removed object, and what the native apply does to a
-    // row that carries a message number, or at a node that has none, is not measured.
-    if !found.is_empty() && input.has_change_registrations {
-        let hexes: Vec<String> = found
-            .iter()
-            .filter_map(|object| Uuid::parse_str(&object.uuid).ok())
-            .map(|uuid| hex_upper(&uuid.to_bytes_le()))
-            .collect();
-        let nodes = match registration_nodes(client, &db) {
-            Ok(nodes) => Some(nodes),
-            Err(reason) if reason == "no node registers changes yet" => None,
-            Err(reason) => {
-                blocker(&mut blockers, "", reason);
-                found.clear();
-                None
-            }
-        };
-        if !found.is_empty() && !hexes.is_empty() {
-            let literals = hexes
-                .iter()
-                .map(|hex| format!("0x{hex}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut present: HashSet<(String, String)> = HashSet::new();
-            let mut numbered: HashSet<String> = HashSet::new();
-            client.read_rows(
-                &format!(
-                    "SELECT CONVERT(varchar(32), _NodeRRef, 2), CONVERT(varchar(32), _MDObjID, 2), _MessageNo FROM {db}.dbo._ConfigChngR WHERE _MDObjID IN ({literals})"
-                ),
-                &[],
-                &mut |row| {
-                    let node = row.text(0)?.to_ascii_uppercase();
-                    let object = row.text(1)?.to_ascii_uppercase();
-                    if !row.value(2)?.is_null() {
-                        numbered.insert(object.clone());
-                    }
-                    present.insert((node, object));
-                    Ok(())
-                },
-            )?;
-            let mut refused: HashSet<String> = HashSet::new();
-            for object in &found {
-                let Ok(uuid) = Uuid::parse_str(&object.uuid) else {
-                    continue;
-                };
-                let hex = hex_upper(&uuid.to_bytes_le());
-                if numbered.contains(&hex) {
-                    blocker(
-                        &mut blockers,
-                        &object.uuid,
-                        "the change register holds a message number for the removed object: an exchange has sent it, and what the native apply does to that registration is not measured",
-                    );
-                    refused.insert(object.uuid.clone());
-                    continue;
-                }
-                if let Some(nodes) = &nodes
-                    && let Some(node) = nodes.iter().find(|node| {
-                        !present.contains(&(node.reference.to_ascii_uppercase(), hex.clone()))
-                    })
-                {
-                    blocker(
-                        &mut blockers,
-                        &object.uuid,
-                        format!(
-                            "the change register has no row of the removed object at the node {}: what the native apply registers there is not measured",
-                            node.reference
-                        ),
-                    );
-                    refused.insert(object.uuid.clone());
-                }
-            }
-            found.retain(|object| !refused.contains(&object.uuid));
-        }
-    }
+    // The change register needs nothing from this analysis: the native apply treats a removed object like an
+    // object that owns a staged row -- it sets the message numbers of its rows to NULL and inserts the row
+    // (with the object's files) at a node that has none (twins `fdq`/`fdq2`, docs/apply/own-apply.md,
+    // "Removals") -- so the plan hands the removed rows' names to `registrations::plan` like those of a
+    // dynamic update that a `deleted` list names.
 
     // Owners whose objects were all refused are not accepted.
     let alive_owners: HashSet<String> = found.iter().map(|object| object.owner.clone()).collect();

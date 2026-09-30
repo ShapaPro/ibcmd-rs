@@ -73,10 +73,10 @@ reg_cmp.py fdp fdo (change registers)
 rows 20685 20685
 only in A 0 only in B 0
 message number differs 782 | file list differs 6
-  msg 0190A866 obj bb47ced2-31f9-4870-8633-20b986e53ccc 0 None
-  msg 0190A866 obj 5cfa65ec-4676-4f8f-88d6-d9aefc9547ff 0 None
+  msg 0190A866 obj e8b248d9-9049-456a-9c7d-7a0462cc67ab 0 None
+  msg 8792107B obj f24de2ea-fcda-4052-b90f-e9d84314c4f2 0 None
   files 0190A866 obj 6707f7f5-4a6c-4d8b-84cf-483768cb71b9 [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0')] [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3')]
-  files 0190A866 obj a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9 [(0, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.2'), (1, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.0'), (2, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.1'), (3, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.3')] [(0, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.0'), (1, ' ...
+  files 0190A866 obj 6707f7f5-4a6c-4d8b-84cf-483768cb71b9 [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0')] [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3')]
 
 ====================================================================================================
 Control twin (native import of the unedited tree, native apply: fdc) against the removal twin (native, fdk): the removal's effect on the register
@@ -166,8 +166,8 @@ _Reference3347	rows 4 / 4	only in A 0	only in B 0
 rows 20685 20685
 only in A 0 only in B 0
 message number differs 782 | file list differs 6
-  msg 8792107B obj 69930d8e-9fba-4580-9b3f-96f68cbffee3 0 None
-  files 0190A866 obj 6707f7f5-4a6c-4d8b-84cf-483768cb71b9 [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0')] [(0, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.0'), (1, '6707f7f5-4a6c-4d8b-84cf-483768cb71b9.3')]
+  msg 8792107B obj 8a7e61ad-90c2-4b5c-bd85-cfc28d4c1958 0 None
+  files 0190A866 obj a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9 [(0, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.2'), (1, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.0'), (2, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.1'), (3, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.3')] [(0, 'a1c76fb2-6237-41a1-8b2f-66d8c1ed2fd9.0'), (1, ' ...
 native export of our result against the tree mix: left_only 0, right_only 0, different 1, unchanged 12190; differing files: ConfigDumpInfo.xml
 native config apply on our result:
 [INFO] Обновление конфигурации базы данных...
@@ -176,6 +176,22 @@ native config apply on our result:
 native config check on our result:
 [INFO] Проверка корректности метаданных...
 [INFO] Проверка корректности метаданных успешно завершена
+
+====================================================================================================
+Twin 3: the register of the removed objects with message numbers and a missing row. fdq = native apply, fdq2 = this apply; the same stage and register state
+====================================================================================================
+before (reg_state.py show on the state set up by reg_state.py setup; node prefixes, _MessageNo, file rows):
+  form     [('0190A866', 7, 2), ('0190A866', None, 2), ('84D4816E', None, 2), ('B9E29B2B', 0, 2)]   (no row at 8792107B)
+  template [('0190A866', 7, 1), ('0190A866', None, 1)]                                              (no row at 8792107B)
+after the native apply (fdq):
+form 8a7546f4 [('0190A866', None, 2), ('0190A866', None, 2), ('84D4816E', None, 2), ('8792107B', None, 2), ('B9E29B2B', None, 2)]
+template 0384ec55 [('0190A866', None, 1), ('0190A866', None, 1), ('8792107B', None, 1)]
+after this apply (fdq2):
+form 8a7546f4 [('0190A866', None, 2), ('0190A866', None, 2), ('84D4816E', None, 2), ('8792107B', None, 2), ('B9E29B2B', None, 2)]
+template 0384ec55 [('0190A866', None, 1), ('0190A866', None, 1), ('8792107B', None, 1)]
+rows 20685 20685
+only in A 0 only in B 0
+message number differs 782 | file list differs 6
 
 ====================================================================================================
 Rehearsal (fdr): snapdiff before / after

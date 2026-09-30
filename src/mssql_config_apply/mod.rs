@@ -858,7 +858,6 @@ pub fn plan_with_gate(
                 names: &object_names,
                 overlay_rows: &overlay_rows,
                 staged: &staged,
-                has_change_registrations,
             })?
         };
         // Removals are measured on 8.3.27 only: the search-information records and the change register
@@ -1281,8 +1280,16 @@ pub fn plan_with_gate(
 
     // The change registrations of the nodes of distributed infobases: the rows a node with no rows gets
     // for the objects this stage changes (docs/apply/own-apply.md, "Exchange plans").
+    // A removed object is registered like an object that owns a staged row: its message numbers are reset and a
+    // node with no row of it gets one, with its files -- as for the rows of a dynamic update a `deleted` list names
+    // (twins of a removed form and template with message numbers and a missing row, docs/apply/own-apply.md).
+    let registered_names: Vec<String> = dropped_rows
+        .iter()
+        .chain(removals.rows.iter())
+        .cloned()
+        .collect();
     let registration = if has_change_registrations {
-        registrations::plan(client, database, &staged, &dropped_rows)?
+        registrations::plan(client, database, &staged, &registered_names)?
     } else {
         registrations::RegistrationPlan::default()
     };

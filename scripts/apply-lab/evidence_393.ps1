@@ -50,6 +50,16 @@ Add (Get-Content "$lab\logs\native_mxo_apply2.out" -Encoding UTF8)
 Add 'native config check on our result:'
 Add (Get-Content "$lab\logs\native_mxo_check.out" -Encoding UTF8)
 
+Section 'Twin 3: the register of the removed objects with message numbers and a missing row. fdq = native apply, fdq2 = this apply; the same stage and register state'
+Add 'before (reg_state.py show on the state set up by reg_state.py setup; node prefixes, _MessageNo, file rows):'
+Add "  form     [('0190A866', 7, 2), ('0190A866', None, 2), ('84D4816E', None, 2), ('B9E29B2B', 0, 2)]   (no row at 8792107B)"
+Add "  template [('0190A866', 7, 1), ('0190A866', None, 1)]                                              (no row at 8792107B)"
+Add 'after the native apply (fdq):'
+Add (& python "$PSScriptRoot\reg_state.py" ibcmd_rs_04_apply_fdq_20260930 show 2>&1)
+Add 'after this apply (fdq2):'
+Add (& python "$PSScriptRoot\reg_state.py" ibcmd_rs_04_apply_fdq2_20260930 show 2>&1)
+Add (& python "$PSScriptRoot\reg_cmp.py" ibcmd_rs_04_apply_fdq_20260930 ibcmd_rs_04_apply_fdq2_20260930 --show 0 2>&1 | Select-Object -First 4)
+
 Section 'Rehearsal (fdr): snapdiff before / after'
 Push-Location $kit
 Add (& python snapdiff.py ibcmd_rs_04_apply_fdr_20260930 before ibcmd_rs_04_apply_fdr_20260930 after_rehearsal 2>&1 | Select-Object -First 14)

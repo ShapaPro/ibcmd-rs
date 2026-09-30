@@ -12,8 +12,6 @@ const FORMS: &str = "d5b0e5ed-256d-401c-9c36-f630cafd8a62";
 const TEMPLATES: &str = "3daea016-69b7-4ed4-9453-127911372fe6";
 const NIL: &str = "00000000-0000-0000-0000-000000000000";
 const OTHER: &str = "0d0d0d0d-0000-4000-8000-000000000001";
-const NODE: &str = "0190A8667F21FDE411E728F60896C4FA";
-const OWN_NODE: &str = "0190A8667F21FDE411E728F60896C503";
 
 /// Canned answers: the first rule whose text the query contains answers.
 #[derive(Default)]
@@ -191,7 +189,6 @@ fn run(client: &Canned, names: &[String], staged: &[RowMeta]) -> RemovalAnalysis
         names,
         overlay_rows: &HashSet::new(),
         staged,
-        has_change_registrations: false,
     })
     .unwrap()
 }
@@ -472,127 +469,6 @@ fn the_stage_that_removes_an_object_and_stages_rows_of_it_is_contradictory() {
     );
     assert!(
         reasons(&analysis).contains("stages rows of it too"),
-        "{}",
-        reasons(&analysis)
-    );
-    assert!(analysis.removals.is_empty());
-}
-
-fn with_register(messages: [SqlValue; 4], own_row: bool) -> Canned {
-    let mut client = database();
-    let hex_of = |uuid: &str| hex_upper(&Uuid::parse_str(uuid).unwrap().to_bytes_le());
-    let mut rows = vec![
-        vec![text(NODE), text(&hex_of(FORM_A)), messages[0].clone()],
-        vec![text(NODE), text(&hex_of(TEMPLATE_A)), messages[1].clone()],
-    ];
-    if own_row {
-        rows.push(vec![
-            text(OWN_NODE),
-            text(&hex_of(FORM_A)),
-            messages[2].clone(),
-        ]);
-        rows.push(vec![
-            text(OWN_NODE),
-            text(&hex_of(TEMPLATE_A)),
-            messages[3].clone(),
-        ]);
-    }
-    client
-        .rule("WHERE _MDObjID IN", rows)
-        .rule(
-            "SELECT DISTINCT CONVERT(bigint",
-            vec![
-                vec![SqlValue::Int(7), text("0000000A"), text(NODE)],
-                vec![SqlValue::Int(7), text("0000000A"), text(OWN_NODE)],
-            ],
-        )
-        .rule(
-            "OBJECT_ID(N'[testdb].dbo._Node7'",
-            vec![vec![SqlValue::Int(1)]],
-        )
-        .rule(
-            "CASE WHEN _PredefinedID",
-            vec![
-                vec![text(NODE), SqlValue::Int(0), SqlValue::Int(0)],
-                vec![text(OWN_NODE), SqlValue::Int(1), SqlValue::Int(0)],
-            ],
-        );
-    client
-}
-
-fn run_with_register(client: &Canned) -> RemovalAnalysis {
-    analyze(&RemovalInput {
-        client,
-        database: "testdb",
-        names: &names(),
-        overlay_rows: &HashSet::new(),
-        staged: &staged(),
-        has_change_registrations: true,
-    })
-    .unwrap()
-}
-
-#[test]
-fn a_register_that_never_sent_the_objects_and_holds_a_row_at_every_node_is_left_alone() {
-    let client = with_register(
-        [
-            SqlValue::Null,
-            SqlValue::Null,
-            SqlValue::Null,
-            SqlValue::Null,
-        ],
-        true,
-    );
-    let analysis = run_with_register(&client);
-    assert!(analysis.blockers.is_empty(), "{}", reasons(&analysis));
-    assert_eq!(analysis.removals.objects.len(), 2);
-}
-
-#[test]
-fn a_message_number_of_a_removed_object_is_not_measured_and_refuses_it() {
-    let client = with_register(
-        [
-            SqlValue::Int(12),
-            SqlValue::Null,
-            SqlValue::Null,
-            SqlValue::Null,
-        ],
-        true,
-    );
-    let analysis = run_with_register(&client);
-    assert!(
-        reasons(&analysis).contains("holds a message number for the removed object"),
-        "{}",
-        reasons(&analysis)
-    );
-    assert_eq!(analysis.removals.objects.len(), 1);
-    assert_eq!(analysis.removals.objects[0].uuid, TEMPLATE_A);
-}
-
-#[test]
-fn a_node_with_no_row_for_a_removed_object_is_not_measured_and_refuses_it() {
-    // no row at the plan's own node is right (it gets none); no row at the ordinary node is not
-    let mut client = database();
-    client
-        .rule("WHERE _MDObjID IN", vec![])
-        .rule(
-            "SELECT DISTINCT CONVERT(bigint",
-            vec![vec![SqlValue::Int(7), text("0000000A"), text(NODE)]],
-        )
-        .rule(
-            "OBJECT_ID(N'[testdb].dbo._Node7'",
-            vec![vec![SqlValue::Int(1)]],
-        )
-        .rule(
-            "CASE WHEN _PredefinedID",
-            vec![
-                vec![text(NODE), SqlValue::Int(0), SqlValue::Int(0)],
-                vec![text(OWN_NODE), SqlValue::Int(1), SqlValue::Int(0)],
-            ],
-        );
-    let analysis = run_with_register(&client);
-    assert!(
-        reasons(&analysis).contains("has no row of the removed object at the node"),
         "{}",
         reasons(&analysis)
     );

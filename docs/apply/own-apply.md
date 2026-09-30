@@ -286,7 +286,8 @@ Also in the script since checkpoint 2: a staged `deleted` row that the plan cons
 left out of step 5 (it is not moved into `Config`), out of the moved-row count and of the
 postconditions, and the in-transaction check for unfinished operations does not count it as
 one; the dynamic rows a consumed list names are deleted instead of folded in step 4
-([removals](#removals-the-stages-deleted-row)); and a structure phase from a gate that lets a
+([removals](#removals-the-stages-deleted-row)); the rows of a removed form or template are deleted by name between
+steps 4 and 5, under a fingerprint of their own (#393); and a structure phase from a gate that lets a
 restructuring through runs between the assertions and step 4, in the same transaction
 ([S1-A](#restructuring-inside-the-apply-s1-a-397)).
 
@@ -423,7 +424,7 @@ What the removal does, from `snapdiff`, `si_diff` and `reg_cmp` of the kit again
 | State | Native apply of a stage that drops a form and a template |
 |---|---|
 | `Config` | the five rows of the two objects are gone (9 836 rows: 9 847 - 5 - 6 dynamic-update rows); the staged owners' descriptors replace the active ones |
-| `_ConfigChngR`, `_ConfigChngR_ExtProps` | **untouched for the removed objects**: 20 685 rows and 21 365 file rows, the removed objects' rows (5 nodes for the form, 3 for the template) and their file lists stay, `_MessageNo` as it was. Against the control: 0 rows differ, 0 message numbers, 0 file lists |
+| `_ConfigChngR`, `_ConfigChngR_ExtProps` | with `_MessageNo` NULL everywhere (the corpus): **untouched for the removed objects**: 20 685 rows and 21 365 file rows, the removed objects' rows (5 nodes for the form, 3 for the template) and their file lists stay. Against the control: 0 rows differ, 0 message numbers, 0 file lists. With message numbers and a missing row (twin `fdq`): the removed object is registered **like a changed one** -- its message numbers become NULL (7 and 0 in the twin) and a node that has no row of it gets one, `_MessageNo` NULL, with the object's body files in name order (`.0`, `.1` for the form, `.0` for the template) |
 | `Params` main search information (`1a621f0f-....si`) | the two records are gone (`{10807,` becomes `{10805,`); nothing else changes |
 | `Params` properties row (`c4629235-....si`) | the form's entry is gone (`8a7546f4-...,1,0,{"S","v8config://v8cfgHelp/mdobject/id8a7546f4-.../038b5c85-..."}`: a form with a help page has one, a template none); the count `{2376,` becomes `{2375,` |
 | `siVersions` | both rows have new versions |
@@ -456,9 +457,6 @@ of names is the comparison, and it is equal.
    - the staged `versions` row no longer lists its rows;
    - no extension adopts it (`restructure::extensions`, the check of S1-I: what the platform does to an extension whose adopted
      object goes is not measured);
-   - the change register (when the database keeps one) has a row of the object at every ordinary node of the plans that register
-     changes, and none carries a message number (an exchange has sent the object: what the native apply does to that registration
-     is not measured; the twins only had NULLs);
    - 8.3.27 only (on 8.5 the platform's own apply removes it);
 3. anything else, that is the names with flag `1` (attributes) or a flag-`0` name the analysis did not take: **the gate judges
    them when it says it can** (`StructuralGate::judges_deleted_row`, the S1 gate for the attributes the stage removes), and the
@@ -469,16 +467,18 @@ The names that steps 1 and 2 execute are handed to the gate (`GateInput::removed
 `deleted` list it gives its plan (`restructure::s1::without_names`), so the plan sees the attribute ids alone, and the owners'
 descriptors are accepted like those of new objects (`accepted_owner_descriptors`).
 
-*In the script* (one transaction, as before): the fingerprint of the removed rows (count, bytes, three digest sums) is asserted
-under the locks with the others (`57320`); after the dynamic rows are dropped or folded the rows are deleted by name, every part,
-and both the count of the deleted rows and the absence of any of them are checked (`57321`); then the move. The change register
-is not touched for the removed objects. *In the plan*: the two cache rows are edited **on top of** whatever the new objects
-and a restructuring of the same stage rewrite in the same stage (`removals::plan_search_info`): the edit is by uuid on the text
-that the earlier edit produced and keeps the digest of the stored row, so the object registry `1a621f0f` can lose the records of
-a form and of an attribute in one stage, where a new form and an attribute still clash (`merge_params_rewrites`). A record has to
-be the object's own (parent, name and class as its owner files it, no children), or the plan refuses. *The recovery artifact*
-gets `removed_rows.tsv` (name, part, attributes, dates, and where the bytes are in `rows.pack`). *The report* names the removed
-objects (`removals`: objects, rows, records, property entries).
+*The change register* is the plan's (`registrations::plan`): the removed rows' names go in with the names of a dynamic update that
+the list names, so the objects' rows get their `_MessageNo` reset, a node with no row of the object gets one with the files, and
+the bodies missing from an existing list are appended -- what the twin `fdq` showed the native apply does. *In the script* (one
+transaction, as before): the fingerprint of the removed rows (count, bytes, three digest sums) is asserted under the locks with
+the others (`57320`); after the dynamic rows are dropped or folded the rows are deleted by name, every part, and both the count
+of the deleted rows and the absence of any of them are checked (`57321`); then the move, then the change registrations. *In the
+plan*: the two cache rows are edited **on top of** whatever the new objects and a restructuring of the same stage rewrite in the
+same stage (`removals::plan_search_info`): the edit is by uuid on the text that the earlier edit produced and keeps the digest of
+the stored row, so the object registry `1a621f0f` can lose the records of a form and of an attribute in one stage, where a new form
+and an attribute still clash (`merge_params_rewrites`). A record has to be the object's own (parent, name and class as its owner
+files it, no children), or the plan refuses. *The recovery artifact* gets `removed_rows.tsv` (name, part, attributes, dates, and
+where the bytes are in `rows.pack`). *The report* names the removed objects (`removals`: objects, rows, records, property entries).
 
 **Evidence for the rows of a dynamic update (checkpoint 2): twins of БСП 8.3.27 (`tools\verify_new.py`, native against own on byte-equal stages).** A delta stage
 of four modules and their `versions`; E1 and E2 on a base without an overlay, E3, E3b and E4 on a base that
@@ -508,6 +508,7 @@ run on byte-equal copies of it (a COPY_ONLY backup restored twice).
 | a native `config export` of our result against the tree | 12 190 of 12 190 files, `ConfigDumpInfo.xml` aside | 12 190 of 12 190 |
 | a native `config apply` on our result | «Обновление конфигурации базы данных не требуется» | the same; `config check` succeeds |
 | the change register | 20 685 rows both; the same as the known long-path difference (782 objects' `_MessageNo` NULL against 0) and the order of the file list of two objects that have a body unchanged and a body changed (6 rows: the platform lists the unchanged file first) | the same 782 and 6 |
+| a register with message numbers and a missing row for the removed objects (`fdq` native, `fdq2` ours; the form has 7 at one node, 0 at another and no row at a third, the template 7 and no row at the third) | the removed objects' rows: `_MessageNo` NULL everywhere, the missing rows inserted with the body files; equal on both (`reg_state.py show`); the other differences are the 782 and 6 above (the native apply writes the node's last message number, 7 here, where the corpus had NULL) | |
 | a rehearsal | `snapdiff` before and after: nothing changed | |
 | a tampered removed row after the plan | error `57320`, nothing changed (Config 9 847, ConfigSave 9 516) | |
 
@@ -533,9 +534,6 @@ with the S1 gate (`without_names`, the plan's refusal of a form's rows it is sti
 
 **What is not done, and why** (the twin is missing or the answer is a refusal):
 
-- a form or template **with a message number in the register**, or **missing at an ordinary node** (an imaged node): refused
-  (`objects_of_dropped_rows` resets the owners of the rows a `deleted` list names for the rows of a dynamic update; whether the
-  platform does the same for a removed object is a DIB twin still to build);
 - **one file of an object that stays** (a module, a picture, a help page): the list names `<owner>.<n>` of an object that is not
   removed, the analysis refuses it, and this repository's import does not write it either (its guard refuses the stage). A native twin
   of the `moddel` edit (the manager module of a data processor) is prepared; the platform's first `config import` of a fresh clone
@@ -1161,8 +1159,7 @@ gate's finding of checkpoint 2, `versions must be based on the effective row`).
 - **Removals**: a `deleted` list is executed for the forms and templates the analysis accounts for name by name (their rows are
   deleted with the two search-information records; [removals](#removals-the-stages-deleted-row)), for the rows of a dynamic update, and
   for the attributes the S1 gate judges; any list with a name it cannot account for is refused whole. Not done: one file of an object
-  that stays, common modules and other objects the rest of the configuration mentions, objects with tables, removed objects the
-  change register has sent to a node or lacks at a node, 8.5.
+  that stays, common modules and other objects the rest of the configuration mentions, objects with tables, 8.5.
 - **8.5** is admitted for the same stages as 8.3.27 minus new objects (see [8.5](#85-392)); on any other 8.x profile the apply
   is refused.
 - **Restructuring**: `--allow-restructure s1` runs the restructure track's S1 gate in the apply's transaction (attributes added or
