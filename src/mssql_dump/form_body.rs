@@ -973,7 +973,14 @@ pub(super) fn with_no_main_table_default_picture_unmarked(
         let Some(settings) = attribute.settings.as_ref() else {
             continue;
         };
-        if settings.main_table.is_some() {
+        // A list with no main table, or an Enum list under the platform's
+        // own query, whose default picture the old modes never mark.
+        let enum_own_query = !settings.manual_query
+            && settings
+                .main_table
+                .as_deref()
+                .is_some_and(|table| table.starts_with("Enum."));
+        if settings.main_table.is_some() && !enum_own_query {
             continue;
         }
         let marked = format!(">~{}.DefaultPicture<", attribute.name);
@@ -27048,17 +27055,16 @@ pub(super) fn form_dynamic_list_default_picture_is_out_of_main_table(
 /// readers that hold the table itself rather than a metadata-owner record.
 pub(super) fn form_dynamic_list_default_picture_is_out_of_table(
     main_table: Option<&str>,
-    manual_query: bool,
+    _manual_query: bool,
 ) -> bool {
-    // An `Enum` list reads its default picture from the table after all when
-    // its query is the platform's own: 1C:Документооборот's
-    // `Enums/СтатусыПриглашений` list forms and the `Enum.ТипыОбъектов` list
-    // of `Catalogs/АлгоритмыПроверки/Forms/ФормаСписка` (`ManualQuery`
-    // false) are dumped without `~`.
+    // An `Enum` list is marked like any other (compatibility 8.3.21 and
+    // 8.3.24: 1C:Документооборот's `Enums/СтатусыПриглашений` list forms);
+    // under 8.3.17 the platform writes it unmarked when its query is its own,
+    // which `with_no_main_table_default_picture_unmarked` restores.
     match main_table {
         None => true,
         Some(main_table) => main_table.split_once('.').is_some_and(|(family, _)| {
-            family == "FilterCriterion" || (family == "Enum" && manual_query)
+            family == "FilterCriterion" || family == "Enum"
         }),
     }
 }

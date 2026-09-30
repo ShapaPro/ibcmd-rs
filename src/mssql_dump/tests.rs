@@ -71425,10 +71425,11 @@ fn marks_a_default_picture_the_declared_main_table_cannot_hold() {
     let owner_for = |main_table: Option<&str>, dynamic_list: bool| {
         owner_with(main_table, dynamic_list, true)
     };
-    // An Enum list under the platform's own query reads its default picture
-    // from the table: 1C:Документооборот's `Enums/СтатусыПриглашений` list
-    // forms (`ManualQuery` false) are dumped without `~`.
-    assert!(!form_dynamic_list_default_picture_is_out_of_main_table(&owner_with(
+    // An Enum list under the platform's own query is marked like any other
+    // (1C:Документооборот's `Enums/СтатусыПриглашений` list forms under
+    // compatibility 8.3.21 and 8.3.24); under 8.3.17 the platform writes them
+    // unmarked, which `with_no_main_table_default_picture_unmarked` restores.
+    assert!(form_dynamic_list_default_picture_is_out_of_main_table(&owner_with(
         Some("Enum.СтатусыПриглашений"),
         true,
         false
@@ -79351,5 +79352,21 @@ fn a_planner_border_with_a_zero_style_id_is_a_control_border() {
             .matches(r#"<v8ui:style xsi:type="v8ui:ControlBorderType">"#)
             .count(),
         2
+    );
+}
+
+/// An Enum list under the platform's own query is unmarked under the old
+/// compatibility modes, exactly as a list with no main table is.
+#[test]
+fn old_compatibility_unmarks_the_default_picture_of_an_enum_list() {
+    let mut attribute = data_path_form_attribute("1", "Список", None);
+    let mut settings = data_path_dynamic_list_settings(Vec::new());
+    settings.main_table = Some("Enum.СтатусыПриглашений".to_owned());
+    settings.manual_query = false;
+    attribute.settings = Some(settings);
+    let xml = "<RowPictureDataPath>~Список.DefaultPicture</RowPictureDataPath>".to_owned();
+    assert_eq!(
+        with_no_main_table_default_picture_unmarked(xml, &[attribute]),
+        "<RowPictureDataPath>Список.DefaultPicture</RowPictureDataPath>"
     );
 }

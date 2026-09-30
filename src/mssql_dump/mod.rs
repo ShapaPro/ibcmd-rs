@@ -8634,9 +8634,14 @@ fn form_module_body_paths(
 
 fn is_configuration_module_group(suffixes: &BTreeSet<&str>) -> bool {
     let registry = crate::compiler::families::assets::SourceAssetRegistry;
+    // The configuration's own `Ext` bodies hang off the one id that has no
+    // row of its own, and a configuration need not have every module: the
+    // DMIL, ISL and mon configurations have no external connection module
+    // (their splash and main section pictures went unwritten while all four
+    // were required). Any one module marks the group.
     registry
         .module_routes("Configuration")
-        .all(|route| suffixes.contains(route.suffix().trim_start_matches('.')))
+        .any(|route| suffixes.contains(route.suffix().trim_start_matches('.')))
         && registry
             .configuration_routes()
             .filter(|route| {
