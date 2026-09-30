@@ -12710,7 +12710,7 @@ fn parse_form_child_item_with_metadata_owners(
     field: &str,
     main_data_path: Option<&str>,
     parent_data_path: Option<&str>,
-    _parent_tag: Option<&str>,
+    parent_tag: Option<&str>,
     attribute_names_by_id: &BTreeMap<String, String>,
     attribute_metadata_owners_by_id: &BTreeMap<String, FormAttributeMetadataOwner>,
     table_name_by_id: &BTreeMap<String, String>,
@@ -12788,7 +12788,11 @@ fn parse_form_child_item_with_metadata_owners(
     let fields = normalized_fields.as_deref().unwrap_or(&raw_fields);
     let identity = split_1c_braced_fields(fields.get(1)?.trim(), 0)?;
     let id = identity.first()?.trim();
-    if id == "0" {
+    // A Gantt chart's own nested table may carry id `0`: 1C:Документооборот
+    // 3.0 `Catalogs/ПроектныеЗадачи/Forms/ФормаПланаПроекта` (three trees) has
+    // `<Table name="Table" id="0">` in the platform's dump. Anywhere else
+    // `0` is the absent item.
+    if id == "0" && !(parent_tag == Some("GanttChartField") && wrapper == "55") {
         return None;
     }
     let tag = form_child_item_tag(wrapper, fields)?;
@@ -15697,7 +15701,7 @@ fn parse_form_child_item_with_metadata_owners(
                     // writes in `<AdditionSource><Item>`. The wider item index is
                     // consulted only under that owner, so no addition that the
                     // table index already answers changes hands.
-                    (_parent_tag == Some("PDFDocumentField"))
+                    (parent_tag == Some("PDFDocumentField"))
                         .then(|| parse_form_search_addition_source_item(field, item_name_by_id))
                         .flatten()
                 })
