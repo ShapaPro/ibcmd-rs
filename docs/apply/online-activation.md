@@ -469,6 +469,21 @@ title of the native generation. The reproducing test is a live test (`the_stage_
 `IBCMD_RS_DYNGEN_DB=<lab database>`, feature `mssql-live-tests`): on the commit before the fix it fails ("the stage reads the plain
 `versions` row"), on the fix it passes; the rest is pure (`mssql_effective_row`: alias names, the `LIKE` pattern, which row wins).
 
+*After the reconciliation with the import (feat/0.4 029b4a2b merged).* The import track's kit writes into its own lab folder, takes the
+native lock as `import` and accepts only its own databases, so the same steps were run with a script of this lab: the drop-in
+`infobase config import`, the drop-in `infobase config apply`, the platform's `config export`, `source-diff` of the tree against the
+export. Clones of the corpus backup, which carries the native generation:
+
+| case | result |
+|---|---|
+| F-18 proof again, on the merged binary: native generation, ours 2 (module A), ours 3 (module B) | stamps that differ: 5, 5 and 7, as before; export against the native platform **12 198 of 12 198** |
+| import on the marker base: a comment appended to `CommonModule._ДемоЗаметки` (the object of the native generation), our import 39.8 s, our apply 130 s (folds the generation: no dynamic row left, Config 9 841, ConfigSave empty), native export | **the export equals the tree** (12 197 files identical; `ConfigDumpInfo.xml` differs, as it does for the native import) |
+| the same after our own online generation (module A, `v1`) was put on top of the native one, then the import of the same tree | the same: 12 197 identical; the import overwrote A with the tree's text and its stage was based on our alias rows |
+| the import of `rem2` (a form and a template removed): our import 53.5 s | our apply refuses ("требуется штатный config apply": the removals need the platform's), as the import's own acceptance applies that case natively; a descriptor-changing tree (`syn`, `prop`, `confver`, rights, command interface, predefined) is refused the same way ("possibly structural") |
+
+Tests, on the merged tree: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries)
+**3 699 passed, 0 failed, 12 ignored**.
+
 ## 7. Recovery
 
 **ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from
