@@ -1640,6 +1640,11 @@ pub(super) struct FormExtendedTooltip {
     pub(super) horizontal_align: Option<&'static str>,
     pub(super) vertical_align: Option<&'static str>,
     pub(super) events: Vec<FormBodyEvent>,
+    /// `Visible`/`Enabled` of the tooltip itself: members 9 and 20 of its
+    /// record read `0` on exactly the 9 native tooltips (1C:Документооборот
+    /// `DataProcessors/ПлюсСервис`) that write both `false`, `1` on the rest.
+    pub(super) hidden: bool,
+    pub(super) disabled: bool,
 }
 
 impl FormExtendedTooltip {
@@ -1672,6 +1677,8 @@ impl FormExtendedTooltip {
             || self.horizontal_align.is_some()
             || self.vertical_align.is_some()
             || !self.events.is_empty()
+            || self.hidden
+            || self.disabled
     }
 }
 
@@ -10250,10 +10257,16 @@ fn parse_form_command_with_items(
         _ => return None,
     };
     let current_row_use = schema.current_row_use();
-    let associated_table_element_id = schema
-        .associated_table_element_id()
-        .and_then(|id| item_name_by_id.get(id))
-        .cloned();
+    // An id no item of the form carries is written raw, `<id>:<item class>`,
+    // exactly as the user settings group reference is (1C:Документооборот
+    // `Catalogs/МЧД003/Forms/ЧерновикПередоверияМЧД`: three commands name item
+    // 506, which the form does not have). Zero stays the absent reference.
+    let associated_table_element_id = schema.associated_table_element_id().and_then(|id| {
+        item_name_by_id.get(id).cloned().or_else(|| {
+            (id.trim() != "0" && id.trim().parse::<i64>().is_ok())
+                .then(|| format!("{}:{FORM_ITEM_TYPE_UUID}", id.trim()))
+        })
+    });
     let current_row_use = (current_row_use.is_some() || associated_table_element_id.is_some())
         .then_some(FormCommandCurrentRowProperties {
             value: current_row_use,
@@ -22243,6 +22256,10 @@ pub(super) fn parse_form_child_item_extended_tooltip(
             return None;
         }
         let mut tooltip = FormExtendedTooltip::new(name, id.to_string());
+        if nested.first().map(|value| value.trim()) == Some("12") && nested.len() == 34 {
+            tooltip.hidden = nested.get(9).map(|value| value.trim()) == Some("0");
+            tooltip.disabled = nested.get(20).map(|value| value.trim()) == Some("0");
+        }
         tooltip.display_importance = FormChildItemDisplayImportanceSchema::from_raw_layout(
             nested.first()?.trim(),
             nested.len(),
@@ -32223,11 +32240,17 @@ pub(super) fn format_form_child_item_xml(
     // 11 `SearchStringAddition` and 13 `SearchControlAddition` that carry it,
     // ahead of `AdditionSource` (9/11/13), `HorizontalLocation` (2) and
     // `AutoMaxWidth` (1), and nothing precedes it.
-    if matches!(
+    // An addition that is also hidden writes `Visible` first, then `Enabled`
+    // (1C:Документооборот `DataProcessors/ПлюсСервис/Forms/
+    // ФормаКомандыРасширения`: all three additions of its table).
+    let is_list_addition = matches!(
         item.tag,
         "SearchStringAddition" | "SearchControlAddition" | "ViewStatusAddition"
-    ) && item.enabled == Some(false)
-    {
+    );
+    if is_list_addition && item.visible == Some(false) {
+        xml.push_str(&format!("{tab}\t<Visible>false</Visible>\r\n"));
+    }
+    if is_list_addition && item.enabled == Some(false) {
         xml.push_str(&format!("{tab}\t<Enabled>false</Enabled>\r\n"));
     }
     // A `Pages` group opens with `ReadOnly`: on all 7 native groups that carry
@@ -32268,13 +32291,6 @@ pub(super) fn format_form_child_item_xml(
     // that carries the element -- the only one of the 13 942 in UT 11.5.27.75
     // -- writes `Visible`, `AdditionSource`, `Title`, `ContextMenu`,
     // `ExtendedTooltip` in that order.
-    if matches!(
-        item.tag,
-        "SearchStringAddition" | "SearchControlAddition" | "ViewStatusAddition"
-    ) && item.visible == Some(false)
-    {
-        xml.push_str(&format!("{tab}\t<Visible>false</Visible>\r\n"));
-    }
     if item.tag.ends_with("Addition") {
         // The block is written for the source it names, and the platform never
         // writes one that names none: over all eight native stand trees every
@@ -35970,6 +35986,12 @@ pub(super) fn format_form_extended_tooltip_xml(
         escape_xml_text(&tooltip.name),
         escape_xml_text(&tooltip.id)
     );
+    if tooltip.hidden {
+        xml.push_str(&format!("{tab}\t<Visible>false</Visible>\r\n"));
+    }
+    if tooltip.disabled {
+        xml.push_str(&format!("{tab}\t<Enabled>false</Enabled>\r\n"));
+    }
     for property in FORM_EXTENDED_TOOLTIP_XML_ORDER {
         xml.push_str(&format_form_extended_tooltip_property_xml(
             tooltip,
