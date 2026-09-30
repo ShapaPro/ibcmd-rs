@@ -38,3 +38,11 @@ tree: the import lab tree rem2 (form ВсеЗаметки and template Даты�
 2026-09-30T09:24:27   ...
 2026-09-30T09:24:27 15 of 16 `.si` rows have the same text (compared after inflate)
 2026-09-30T09:24:27 done
+
+The same on the merge of feat/0.4 fe57154c (the newest, with #416 F-18): our import and our apply as above (f2); the platform's apply of the twin was not run (the native lock queue was long), the result is compared with the twin of the run above, whose stage has the same rows:
+2026-09-30T09:33:35 our import: exit 0, 129 s ; [INFO] Импорт конфигурации из XML успешно завершен
+2026-09-30T09:36:08 snapshot ibcmd_rs_04_apply_f2o_20260930/staged: 2234 tables, Config=9847 ConfigSave=9516 Params=39
+2026-09-30T09:41:34 our apply (drop-in): exit 0, 313.8 s ; [INFO] Обновление конфигурации базы данных... | [INFO] Создано поколение конфигурации: a1e858c03de5c54da5847cf0c744777f00000000 | [INFO] Обновление конфигурации базы данных успешно завершено
+2026-09-30T09:41:59 snapshot ibcmd_rs_04_apply_f2o_20260930/own_after: 2234 tables, Config=9836 ConfigSave=0 Params=38
+stage f1 against stage f2 (snapdiff of the ddl kit): ConfigSave rows 9516 -> 9516, changed 1 (the versions row, a new generation), meta-only 9515 (dates); Config 9847 -> 9847, 0 changed
+result f2 (ours) against the native apply of the stage f1: Config 9836 -> 9836, changed 1 (versions), meta-only 9514 (dates); 15 of 16 .si texts equal (c77bc206 permuted); the same differences as for f1 in Params, Files, ConfigCAS, the register
