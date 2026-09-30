@@ -315,7 +315,11 @@ the words used to say `config apply` for an operation that was never finished.
    stage that our importer can make and the apply can take is the import track's. **S1 on 8.5 is proven** on the
    platform's own stages `b1`, `c1`, `d1` of the БСП 8.5.1.1150 (checks 3, 4, 5, 7, 8 equal to the native twin, the `*.si`
    rows the same up to order): `evidence/dropin-apply/s1-acceptance-85.md`. What it needed was the `root` row: the 8.5
-   platform re-stamps the final block of its payload on every write, and the check reads the row for that. ERP УХ is not
-   measured for S1 on either platform.
+   platform re-stamps the final block of its payload on every write, and the check reads the row for that. **S1 on the ERP
+   УХ 8.3.27** is proven on two cases (`b1` deletes and adds attributes, `c1` widens strings; checks 2, 3, 4, 5, 7, 8 equal to the
+   native twin, the 16 `*.si` rows identical): `evidence/dropin-apply/s1-acceptance-uha.md`. The УХ backup holds the configuration
+   only, so the rebuilt tables are empty: it proves the structure path at УХ's metadata scale, not the copy of data. One
+   difference from the platform: it appends the rebuilt tables at the end of the `DBSchema` list, ours are placed before
+   `ConfigChngR`, which is the end only on the БСП. ERP УХ 8.5 is not measured.
 6. **Dynamic update (`--dynamic=force`)** and **ending sessions** are the natural next steps
    (0.5, "смена поколения").

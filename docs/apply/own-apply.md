@@ -1079,7 +1079,8 @@ gate's finding of checkpoint 2, `versions must be based on the effective row`).
 - **Restructuring**: `--allow-restructure s1` runs the restructure track's S1 gate in the apply's transaction (attributes added or
   deleted, strings widened, the index flag; the operations built by the track); an object an extension adopts is refused (S1-I); a
   structural apply needs `--recovery-backup` or `--i-have-a-backup`. Proven on the БСП 8.3.27 and the БСП 8.5.1.1150
-  (`evidence/dropin-apply/s1-acceptance.md`, `s1-acceptance-85.md`); ERP УХ is not measured.
+  (`evidence/dropin-apply/s1-acceptance.md`, `s1-acceptance-85.md`) and the ERP УХ 8.3.27 on two cases with empty tables (`s1-acceptance-uha.md`); ERP УХ 8.5 and the
+  copy of a large table are not measured.
 - **Exchange plans**: proved on one exchange plan (`_ДемоОбменВРаспределеннойИнформационнойБазе`, DIB) of the БСП 8.3.27
   clone; an object with no register row at any node is not registered (the native rule for it is unknown); a node marked for
   deletion makes the apply refuse (`NeedsNativeApply`); the file list of an inserted row is measured for one-file objects

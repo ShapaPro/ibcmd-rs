@@ -1059,7 +1059,7 @@ match of `S1Operation` and one more set in the agreement of the two decoders; `a
 appears). Each sub-issue starts with the corpus test of its case (`tests_corpus.rs`: the plan made offline from the staged
 snapshot against the native result), which is the quick loop; the twin run of 12.6 closes it.
 
-Not in S1 and not filed: ERP УХ, types by reference and composite types (need the map from type ids to tables), predefined data, registers.
+Not in S1 and not filed: types by reference and composite types (need the map from type ids to tables), predefined data, registers.
 
 ### 12.8 The first step: attributes of every primitive type on catalogs and documents
 
@@ -1141,7 +1141,10 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
    from 8.3.27 in the `ALTER INDEX` lists (native only, not needed for the result), all sixteen `*.si` rows rewritten in
    another order (the same up to order after an own apply), 2.21 records, and the `root` row whose payload the platform
    re-stamps on every write (`apply_check::root_row`). ERP УХ 8.5 is not measured.
-9. **ERP УХ** (big tables, predefined data everywhere): needs the coordinator's OK; the size guard decides most of it.
+9. **ERP УХ** (big tables, predefined data everywhere): 8.3.27 measured on two cases with empty tables (s-uha: `b1`, `c1`,
+   checks 2, 3, 4, 5, 7, 8 equal to native, `evidence/dropin-apply/s1-acceptance-uha.md`); the platform appends the rebuilt
+   tables at the end of `DBSchema`, this plan puts them before `ConfigChngR` (equal only where that table is last, as on
+   the БСП). Rebuilding tables with data and УХ 8.5: not measured; the size guard decides most of it.
 10. **The dynamic history**: the apply folds it; a restructure over an active dynamic update (`Status` not 100) is refused.
 11. **A running server across the restructure** (0.5): the guids of `siVersions` of a cache row that changed.
 12. **The alter method** (9.5): kept as a research switch of the direct command; it is not offered to the apply (the physical

@@ -639,8 +639,8 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
     defaults seen in one import (8.3.27.2214 on the БСП). Another platform edition or another configuration may
     write a default the table does not have; such a row is refused by name, never guessed. The base-free stage of
     the 8.5 БСП is still refused as it is (finding 10 of section 8).
-11. **Speed.** ConfigSave check on the БСП: about 5 s; on ERP УХ (118 000 rows) not measured (a full УХ stage takes
-    minutes). Tree against database: 11 s (БСП 8.3.27), 14 s (БСП 8.5), 144 s (УХ 8.3.27), 202 s (УХ 8.5), of
+11. **Speed.** ConfigSave check on the БСП: about 5 s; on ERP УХ (118 000 rows) the whole gate of the S1 apply (the check
+    and the S1 plan together) took 56 s in a release build and 327 s in a debug build (`s1-acceptance-uha.md`). Tree against database: 11 s (БСП 8.3.27), 14 s (БСП 8.5), 144 s (УХ 8.3.27), 202 s (УХ 8.5), of
     which the model's export of every descriptor is most.
 
 ## 8. Findings other tracks need
