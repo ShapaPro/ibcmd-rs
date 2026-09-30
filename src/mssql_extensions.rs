@@ -349,10 +349,18 @@ pub fn list_extensions(args: &MssqlExtensionListArgs) -> Result<MssqlExtensionLi
         password_env: &args.sql_pwd_env,
         trust_server_certificate: args.sqlcmd_trust_cert,
     })?;
-    let preflight = registry_lines(&sql, &extension_registry_preflight_query(&args.database))?;
+    list_extensions_on(&sql, &args.database)
+}
+
+/// The registry of the extensions on a client that exists (the own apply's, say).
+pub(crate) fn list_extensions_on(
+    sql: &SqlExec,
+    database: &str,
+) -> Result<MssqlExtensionListReport> {
+    let preflight = registry_lines(sql, &extension_registry_preflight_query(database))?;
     let bounds = parse_preflight(&preflight)?;
     validate_preflight(bounds)?;
-    let lines = registry_lines(&sql, &extension_registry_rows_query(&args.database))?;
+    let lines = registry_lines(sql, &extension_registry_rows_query(database))?;
     let transport_bytes = lines
         .iter()
         .map(|fields| fields.iter().map(|field| field.len() + 1).sum::<usize>())
@@ -389,7 +397,7 @@ pub fn list_extensions(args: &MssqlExtensionListArgs) -> Result<MssqlExtensionLi
         // The same read envelope is evidenced on 8.5, but renaming this field
         // requires a future schema-version bump.
         storage_profile: "mssql-extensions-info-8.3.27",
-        database: args.database.clone(),
+        database: database.to_owned(),
         extensions,
     })
 }

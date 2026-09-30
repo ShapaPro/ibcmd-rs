@@ -15,6 +15,8 @@
 //! - [`plan`] -- the checks (fail closed) and the plan: new schema, new names, caches, the statements;
 //! - [`reader`] -- the database side of the plan's input;
 //! - [`exec`] -- the plan run in **one transaction**, verified before it commits;
+//! - [`extensions`] -- the extensions of the infobase (S1-I): the objects they adopt, which refuse a
+//!   restructure, and the proof that a restructure leaves their state as it was;
 //! - [`script`] -- the same plan as T-SQL text with assertions, to run inside another transaction (the
 //!   own apply's);
 //! - [`s1`] -- the structural gate of the own apply: which reasons of the restructuring check are S1
@@ -26,7 +28,11 @@
 pub mod caches;
 pub mod catalog;
 pub mod command;
+pub mod common;
+pub mod create;
+pub mod entry;
 pub mod exec;
+pub mod extensions;
 pub mod names;
 pub mod object;
 pub mod plan;
@@ -35,11 +41,16 @@ pub mod registry;
 pub mod s1;
 pub mod schema;
 pub mod script;
+pub mod size_guard;
 pub mod storage;
 pub mod xdto;
 
 #[cfg(test)]
 mod tests_corpus;
+#[cfg(test)]
+mod tests_create;
+#[cfg(test)]
+mod tests_entry;
 #[cfg(test)]
 mod tests_plan;
 #[cfg(test)]
@@ -48,3 +59,5 @@ mod tests_s1;
 mod tests_schema;
 #[cfg(test)]
 mod tests_sections;
+#[cfg(test)]
+mod tests_size_guard;

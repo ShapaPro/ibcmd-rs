@@ -169,9 +169,10 @@ pub fn dump_extensions(args: &MssqlDumpExtensionArgs) -> Result<MssqlExtensionDu
 }
 
 /// Which stored image of an extension was read.
-struct ImageSource {
-    image: &'static str,
-    root: CasHash,
+pub(crate) struct ImageSource {
+    /// `active` or `staged`.
+    pub(crate) image: &'static str,
+    pub(crate) root: CasHash,
 }
 
 /// The image of one extension: the staged one (`ConfigCASSave`) when the
@@ -182,7 +183,7 @@ struct ImageSource {
 /// holds them. A staged namespace is the changed rows and a new `configinfo`;
 /// the rows it leaves out are the ones `ConfigCAS` already holds under the
 /// same digest.
-fn fetch_extension_image(
+pub(crate) fn fetch_extension_image(
     sql: &SqlExec,
     database: &str,
     extension: &MssqlExtensionInfo,

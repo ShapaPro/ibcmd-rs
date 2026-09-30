@@ -39,7 +39,7 @@ impl RowSource for ClientSource<'_> {
     }
 }
 
-fn rows(
+pub(crate) fn rows(
     source: &mut dyn RowSource,
     query: &str,
     mut each: impl FnMut(SqlRow) -> Result<()>,
@@ -128,6 +128,11 @@ pub fn read_inputs(connection: &mut dyn RowSource) -> Result<(Inputs, Vec<Schema
     )
     .context("Config root")?;
     inputs.staged = read_staged(connection, &inputs.root_row)?;
+    if !crate::restructure::create::new_descriptor_names(&inputs.staged).is_empty() {
+        inputs.objects = read_objects(connection, &inputs.root_row, &inputs.staged)?;
+    }
+    inputs.extensions = crate::restructure::extensions::read_state(connection, &storage)
+        .context("the extensions")?;
     Ok((inputs, storage))
 }
 
@@ -172,6 +177,41 @@ fn read_staged(connection: &mut dyn RowSource, root_row: &[u8]) -> Result<Staged
     )
     .context("ConfigSave deleted")?;
     Ok(image)
+}
+
+/// The stored descriptors a created object's plan reads (see [`Inputs::objects`]).
+fn read_objects(
+    connection: &mut dyn RowSource,
+    root_row: &[u8],
+    staged: &StagedImage,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let uuid = configuration_uuid(root_row)?;
+    let configuration = staged
+        .old_descriptors
+        .get(&uuid)
+        .context("the stored configuration's descriptor was not read")?;
+    let wanted = crate::restructure::create::context_uuids(configuration)?;
+    let mut out = BTreeMap::new();
+    for chunk in wanted.chunks(200) {
+        let list = chunk
+            .iter()
+            .map(|uuid| format!("N'{uuid}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        rows(
+            connection,
+            &format!(
+                "SELECT FileName, BinaryData FROM dbo.Config WHERE PartNo = 0 AND FileName IN ({list})"
+            ),
+            |mut row| {
+                let name = row.take_text(0)?;
+                out.insert(name, row.take_binary(1)?);
+                Ok(())
+            },
+        )
+        .context("Config descriptors of the objects")?;
+    }
+    Ok(out)
 }
 
 /// The stored descriptors of the catalogs and documents the configuration's own descriptor lists that are not

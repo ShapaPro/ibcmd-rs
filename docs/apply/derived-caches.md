@@ -167,11 +167,17 @@ attribute is the property line number `standard + position` (`XdtoModel::insert_
 Checked against **all attributes of all catalogs and documents and their tabular sections in five snapshots**
 (pristine, c2, m, t1_nat, d_after: 139-140 objects, about 2150 lines each, references, composite types,
 value storage and uuid included): every line equal, with three sorts of lines that are not attributes left out:
-the platform adds `ОтредактированныеПредопределенныеРеквизиты` to catalogs with predefined items,
-`ОбластьДанныхВспомогательныеДанные` to some catalogs with data separation, and `...ЯзыкN` to catalogs with a
-multilingual description or comment (33 catalogs of the corpus), after the attributes and before the section
-properties. They are not made of the descriptor. A new object with predefined items (a `Config` row `<uuid>.1c`)
-is refused; the other two are not detectable and are **an open risk** (neither appears in cases c and d).
+the platform adds a property named after a **common attribute** to the XDTO type of every object that
+the common attribute lists with `Use` (`ОтредактированныеПредопределенныеРеквизиты`, `ОбластьДанныхВспомогательныеДанные`,
+`НаименованиеЯзык1`/`2`, `КомментарийЯзык1`/`2`; 33 catalogs of the corpus), after the attributes and before the section
+properties. They are not made of the object's descriptor but of the common attributes' `Content` (checked on all 114
+catalogs: the service properties of a catalog are exactly the common attributes that list it with `Use`,
+114 of 114; `docs/apply/new-object.md` 1.2). A **new** object is in no `Content`, and the only common attribute
+with `AutoUse = Use` in the corpus is the data separator, which adds a column but no XDTO property: a new
+object gets none, as cases c and d show. A stage that lists the new object in a common attribute changes that
+common attribute's row (refused by the classification); a configuration where another common attribute has
+`AutoUse = Use` is refused by the planner of S1-F (`common.rs`). A new object with predefined items (a `Config` row
+`<uuid>.1c`) is refused as well.
 
 ## 7. Every row against native, per case
 
@@ -251,8 +257,8 @@ Add to the platform's own derived state that a twin comparison tolerates:
 ## 11. What is left
 
 - **`c4629235` exact order** (see 4): stopped by decision; `exact = false` stays.
-- **The service properties** of section 6 for a new object with a multilingual description or with data
-  separation: an open risk; a case with such an object would close it.
+- **The service properties** of section 6 are the common attributes that list an object: none for a new object of
+  the corpus (the risk is closed there); the refusal of another `AutoUse = Use` common attribute is S1-F's.
 - **Defined types** of attributes: refused (the `Ref` and composite mapping is built).
 - **`facbfffe` section 7** (`Explanation`) and the sections 0, 5, 6 (constants, registers) are refused.
 - **Kinds other than catalogs and documents** are refused (`Enum` and `ExchangePlan` on purpose).

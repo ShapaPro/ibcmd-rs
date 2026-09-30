@@ -62,6 +62,8 @@ pub(super) fn inputs(old: &[u8], new: &[u8]) -> Inputs {
             new_descriptors: [(CATALOG.to_owned(), new.to_vec())].into(),
             deleted: Some(deflate("\u{feff}0".as_bytes()).unwrap()),
         },
+        objects: Default::default(),
+        extensions: Default::default(),
     }
 }
 
@@ -237,6 +239,31 @@ fn the_phase_text_is_the_statements_with_assertions() {
     let mut alter = plan.clone();
     alter.method = crate::restructure::plan::Method::AlterAdd;
     assert!(alter.phase_sql("@now").is_err());
+}
+
+#[test]
+fn the_phase_text_asserts_that_what_the_extensions_keep_is_untouched() {
+    let plan = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let text = plan.phase_sql("@now").unwrap();
+    // The fingerprint is taken before the first guard and compared after the last publication step.
+    let before = text.find("SET @ext_before").expect("the state before");
+    let guards = text.find("-- restructure: guards").unwrap();
+    let publication = text.find("-- restructure: publication").unwrap();
+    let after = text.find("SET @ext_after").expect("the state after");
+    assert!(before < guards && guards < publication && publication < after);
+    assert!(text.contains("IF @ext_after <> @ext_before THROW 57406,"));
+    // What it reads: the extension schema, the extensions' DBNames rows, the registry and its bookkeeping,
+    // the X1 tables; nothing of the main configuration.
+    for part in [
+        "SchemaID <> 0",
+        "N'DBNames%-Ext-%'",
+        "dbo._ExtensionsInfo",
+        "dbo._ExtensionsRestruct",
+        "dbo._ExtensionsRestructNGS",
+        "LIKE N'%X1'",
+    ] {
+        assert!(text.contains(part), "{part}");
+    }
 }
 
 /// The state after case a2 (the attribute is there) and the stage that removes it again.

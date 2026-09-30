@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::metadata_model::brace::{Brace, parse_row};
 use crate::restructure::names::inflate;
 
-pub(super) fn lab() -> Option<PathBuf> {
+pub(crate) fn lab() -> Option<PathBuf> {
     let root = std::env::var_os("IBCMD_RS_DDL_LAB")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"F:\ibcmd\lab\04\restructure"));
@@ -30,10 +30,13 @@ pub(super) fn lab() -> Option<PathBuf> {
 
 type Parts = BTreeMap<String, BTreeMap<i64, String>>;
 
-pub(super) struct Snap {
+pub(crate) struct Snap {
     root: PathBuf,
     params: Parts,
     config: Parts,
+    save: Parts,
+    /// The blob of `SchemaStorage.CurrentSchema` of `SchemaID 0`.
+    schema: Option<String>,
 }
 
 fn parts_of(svc: &Value, table: &str) -> Parts {
@@ -61,7 +64,7 @@ fn trace_store() -> Option<PathBuf> {
 impl Snap {
     /// One of `pristine`, `c2`, `m`, `t1_before`, `t1_nat` (the `ddl` lab) or `d_staged`, `d_after`
     /// (the `trace` store).
-    pub(super) fn open(name: &str) -> Option<Self> {
+    pub(crate) fn open(name: &str) -> Option<Self> {
         let (db, label) = match name {
             "pristine" => ("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
             "c2" => ("ibcmd_rs_04_ddl_bsp8327_c2", "c2_now"),
@@ -85,10 +88,17 @@ impl Snap {
         let text = std::fs::read_to_string(root.join("snap").join(db).join(label).join("svc.json"))
             .ok()?;
         let svc: Value = serde_json::from_str(&text).ok()?;
+        let schema = svc["SchemaStorage"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"].as_i64() == Some(0)))
+            .and_then(|row| row["cur"].as_str())
+            .map(str::to_owned);
         Some(Self {
             root,
             params: parts_of(&svc, "Params"),
             config: parts_of(&svc, "Config"),
+            save: parts_of(&svc, "ConfigSave"),
+            schema,
         })
     }
 
@@ -101,31 +111,60 @@ impl Snap {
         Some(bytes)
     }
 
+    /// The names of the rows of `Params`, `Config` or `ConfigSave`.
+    pub(crate) fn names(&self, table: &str) -> Vec<String> {
+        let parts = match table {
+            "Params" => &self.params,
+            "Config" => &self.config,
+            "ConfigSave" => &self.save,
+            other => panic!("no table {other}"),
+        };
+        parts.keys().cloned().collect()
+    }
+
+    /// The row as stored (the parts joined, not inflated).
+    pub(crate) fn stored_row(&self, table: &str, name: &str) -> Option<Vec<u8>> {
+        let parts = match table {
+            "Params" => &self.params,
+            "Config" => &self.config,
+            "ConfigSave" => &self.save,
+            other => panic!("no table {other}"),
+        };
+        self.stored(parts, name)
+    }
+
     /// The inflated text of a `Params` row (raw when it is not deflated).
-    pub(super) fn params(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn params(&self, name: &str) -> Option<Vec<u8>> {
         let stored = self.stored(&self.params, name)?;
         Some(inflate(&stored).unwrap_or(stored))
     }
 
     /// The inflated text of a `Config` row.
-    pub(super) fn config(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn config(&self, name: &str) -> Option<Vec<u8>> {
         let stored = self.stored(&self.config, name)?;
         Some(inflate(&stored).unwrap_or(stored))
     }
 
     /// The parsed descriptor row of an object.
-    pub(super) fn descriptor(&self, uuid: &str) -> Option<Brace> {
+    pub(crate) fn descriptor(&self, uuid: &str) -> Option<Brace> {
         parse_row(&self.config(uuid)?).ok()
     }
 
+    /// The text of the stored `DBSchema` (`SchemaStorage.CurrentSchema`, inflated).
+    pub(crate) fn schema(&self) -> Option<Vec<u8>> {
+        let sha = self.schema.as_ref()?;
+        let bytes = std::fs::read(self.root.join("blobs").join(sha)).ok()?;
+        Some(inflate(&bytes).unwrap_or(bytes))
+    }
+
     /// Whether a `Config` row exists.
-    pub(super) fn has_config(&self, name: &str) -> bool {
+    pub(crate) fn has_config(&self, name: &str) -> bool {
         self.config.contains_key(name)
     }
 }
 
 /// The 16 cache rows by the short id of their uuid.
-pub(super) const CACHE_ROWS: &[(&str, &str)] = &[
+pub(crate) const CACHE_ROWS: &[(&str, &str)] = &[
     ("0b698dcd", "0b698dcd-501d-42d9-892d-5a9157bc996a.si"),
     ("1a621f0f", "1a621f0f-5568-4183-bd9f-f6ef670e7090.si"),
     ("215d232c", "215d232c-9c9e-4f7c-8a87-142cd3797264.si"),
@@ -144,12 +183,12 @@ pub(super) const CACHE_ROWS: &[(&str, &str)] = &[
     ("fe8acd6a", "fe8acd6a-22c9-4b5a-aeae-232a1c8324cb.si"),
 ];
 
-pub(super) fn row_name(short: &str) -> &'static str {
+pub(crate) fn row_name(short: &str) -> &'static str {
     CACHE_ROWS.iter().find(|(id, _)| *id == short).unwrap().1
 }
 
 /// The root row of the configuration.
-pub(super) const ROOT_ROW: &str = "66193438-abc5-410b-a1f1-a204102d1a62";
+pub(crate) const ROOT_ROW: &str = "66193438-abc5-410b-a1f1-a204102d1a62";
 
 macro_rules! lab_snap {
     ($name:expr) => {
@@ -163,7 +202,7 @@ macro_rules! lab_snap {
     };
 }
 
-pub(super) use lab_snap;
+pub(crate) use lab_snap;
 
 // ---------------------------------------------------------------------------------------------
 // 2203278d: the model against the root sections and the tabular-section section

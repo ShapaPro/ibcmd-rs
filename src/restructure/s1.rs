@@ -34,8 +34,10 @@ use crate::mssql_config_apply::gate::{
     ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase,
 };
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
+use crate::restructure::extensions::read_adoptions;
 use crate::restructure::plan::{Inputs, Plan, PlanOptions, plan};
 use crate::restructure::reader::{ClientSource, read_inputs};
+use crate::restructure::size_guard::{LimitSetting, guard_phase};
 use crate::sql::SqlExec;
 
 pub const GATE_NAME: &str = "s1";
@@ -98,6 +100,7 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             .iter()
             .map(|cache| format!("Params.{}: {}", cache.row_name, cache.what))
             .collect(),
+        size_check: None,
     })
 }
 
@@ -314,6 +317,8 @@ pub struct S1Gate<'a> {
     options: PlanOptions,
     /// The XML dialect the check decodes descriptors with (`2.20` for 8.3); `None` lets it infer it.
     xml_version: Option<&'static str>,
+    /// The limit on the rows and bytes the stage may rebuild (S1-J, `size_guard`).
+    limit: LimitSetting,
     prepared: RefCell<Option<StructurePhase>>,
 }
 
@@ -324,8 +329,15 @@ impl<'a> S1Gate<'a> {
             conservative,
             options,
             xml_version: None,
+            limit: LimitSetting::default(),
             prepared: RefCell::new(None),
         }
+    }
+
+    /// The limit on the rebuilt tables; the measured default when not given.
+    pub fn size_limit(mut self, limit: LimitSetting) -> Self {
+        self.limit = limit;
+        self
     }
 
     /// The XML dialect the restructure check decodes the descriptors with.
@@ -358,7 +370,27 @@ impl StructuralGate for S1Gate<'_> {
             client: input.client,
             database: input.database,
         };
-        let (inputs, storage) = read_inputs(&mut source)?;
+        let (mut inputs, storage) = read_inputs(&mut source)?;
+        // The objects the extensions adopt (S1-I): the plan refuses to change one. What cannot be read
+        // is a refusal, not an error: the stage is then not one this gate can vouch for.
+        if inputs.extensions.registered > 0 {
+            match read_adoptions(self.sql, input.database) {
+                Ok(adoptions) => {
+                    inputs.extensions.adoptions = adoptions;
+                    inputs.extensions.adoptions_read = true;
+                }
+                Err(error) => {
+                    let mut verdict = verdict;
+                    verdict.block(
+                        "extensions",
+                        format!(
+                            "S1: the objects the extensions adopt could not be read: {error:#}"
+                        ),
+                    );
+                    return Ok(verdict);
+                }
+            }
+        }
         let idle = storage
             .iter()
             .find(|row| row.schema_id == 0)
@@ -371,7 +403,16 @@ impl StructuralGate for S1Gate<'_> {
             );
             return Ok(verdict);
         }
-        let (verdict, phase) = decide(verdict, &check, &inputs, &self.options);
+        let (mut verdict, mut phase) = decide(verdict, &check, &inputs, &self.options);
+        // S1-J: the tables the plan rebuilds are copied in one transaction; above the limit the stage is
+        // refused and goes to the native apply.
+        guard_phase(
+            &mut source,
+            self.options.method,
+            &self.limit,
+            &mut verdict,
+            &mut phase,
+        )?;
         *self.prepared.borrow_mut() = phase;
         Ok(verdict)
     }
