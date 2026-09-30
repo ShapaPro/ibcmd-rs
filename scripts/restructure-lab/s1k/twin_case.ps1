@@ -1,20 +1,26 @@
 # S1-K, the twin protocol (docs/apply/restructuring.md, 12.6) for one case: the native side (native `import files --partial` of the
-# edited files + native `config apply`) against OUR side (the twin our import staged in import_phase.ps1, then OUR apply:
-# `mssql-config-apply --allow-restructure s1 --i-have-a-backup`).
+# edited files + native `config apply`) against OUR side (the twin our import staged in import_phase.ps1, then OUR apply: the
+# drop-in `ibcmd infobase config apply --recovery-backup=<file>`; the dry run and the rehearsal before it are the research command's,
+# `mssql-config-apply --allow-restructure s1`, which shares the apply).
 #
 #   pwsh -NoProfile -File twin_case.ps1 -Case b1 -Bin <ibcmd-rs.exe> [-Job jobs\s2_b1.bsl] [-Skip export,session,noop]
+#   -NativeOnly / -SkipNative   the native side alone / the rest alone (native_side.ps1 runs the native sides while the own side stages)
 #   -StageOwnNative   HARNESS VALIDATION ONLY: stage our twin with the native partial import instead of our import (it says nothing
 #                     about our import; it exercises the rest of the chain)
 #
 # Checks: 10 (a rehearsal changes nothing), 3 (EXCEPT both ways: the rebuilt tables, Config, every table of the extension schema),
 # 4 (Config rows; part of 3), 5 (DBSchema, DBNames), 6 (the 16 .si rows), 7 (a native apply on our twin), 8 (native export of both,
 # ibcmd-rs source-diff), 9 (a cluster session on both, outputs compared). Check 1 (the offline plan) is the corpus tests'; 2 is the
-# snapshot diff printed here; 11 and 12 are the refusal (check11.ps1, case i1) and the injected failure (check12.ps1, on the script
-# and the backup of the staged twin this writes: out\<case>\script_real.sql, staged.bak; -Skip check12 leaves the backup out).
+# snapshot diff printed here; 11 and 12 are the refusal (check11.ps1, case i1) and the injected failure (check12.ps1, on the dry-run
+# script and the way back the real apply takes: out\<case>\script_dry.sql, staged.bak).
 param(
     [Parameter(Mandatory = $true)][string]$Case,
     [Parameter(Mandatory = $true)][string]$Bin,
     [switch]$StageOwnNative,
+    # the native side alone (the native twin: restore, native import of the edited files, native apply, snapshot), so that it can
+    # wait in the queue of the native lock while the own side is still being staged; the own side follows with -SkipNative
+    [switch]$NativeOnly,
+    [switch]$SkipNative,
     [string]$Job = '',
     [string[]]$Skip = @()
 )
@@ -40,14 +46,17 @@ function Restore($db, $why) {
 $files = (Get-Content "$o\files.txt" -Encoding UTF8 | Where-Object { $_ }) -join ','
 if (-not $files) { throw "no edit of case $Case in $o (run import_phase.ps1 first)" }
 
-Log "native side ($nat)"
-Restore $nat "S1-K case $Case (native)"
-if ((sqlcmd -S localhost -E -C -d $nat -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM ConfigSave").Trim() -ne '0') { "the native twin has a stage already" }
-else {
-    pwsh -NoProfile -File "$kit\native_main.ps1" -Database $nat -Action ImportFiles -BaseDir "$o\stage" -Files $files | Select-String -Pattern 'exit' | ForEach-Object { $_.Line }
-    pwsh -NoProfile -File "$kit\native_main.ps1" -Database $nat -Action Apply | Select-String -Pattern 'exit|успешно|ошибк' | ForEach-Object { $_.Line }
+if (-not $SkipNative) {
+    Log "native side ($nat)"
+    Restore $nat "S1-K case $Case (native)"
+    if ((sqlcmd -S localhost -E -C -d $nat -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM ConfigSave").Trim() -ne '0') { "the native twin has a stage already" }
+    else {
+        # the import and the apply that follows it on this clone in ONE hold of the native lock (its queue is long)
+        pwsh -NoProfile -File "$kit\native_main.ps1" -Database $nat -Action ImportApply -BaseDir "$o\stage" -Files $files | Select-String -Pattern 'exit|успешно|ошибк' | ForEach-Object { $_.Line }
+    }
+    python "$rk\snapshot.py" $nat "${Case}_nat_after" | Select-Object -Last 1
 }
-python "$rk\snapshot.py" $nat "${Case}_nat_after" | Select-Object -Last 1
+if ($NativeOnly) { Log "native side of $Case done"; return }
 
 if ($StageOwnNative) {
     Log 'HARNESS VALIDATION: staging our twin natively'
@@ -57,6 +66,8 @@ if ($StageOwnNative) {
 python "$rk\snapshot.py" $own "${Case}_staged" | Select-Object -Last 1
 
 $common = @('mssql-config-apply', '--platform-profile', 'platform-8.3.27.2214', '--database', $own, '--allow-restructure', 's1', '--allow-non-lab')
+Remove-Item "$o\script_dry.sql", "$o\script_rehearse.sql", "$o\script_real.sql", "$o\staged.bak" -Force -ErrorAction SilentlyContinue   # an artifact of an earlier run is never overwritten
+Remove-Item "$o\recovery" -Recurse -Force -ErrorAction SilentlyContinue
 Log 'our apply: dry run'
 & $Bin @common --dry-run --report "$o\dry.json" --script-output "$o\script_dry.sql" > "$o\dry.txt" 2> "$o\dry.err"
 "dry exit $LASTEXITCODE"
@@ -67,24 +78,37 @@ Log 'our apply: rehearsal (check 10)'
 python "$rk\snapshot.py" $own "${Case}_rehearsed" | Select-Object -Last 1
 python "$rk\snapdiff.py" $own "${Case}_staged" $own "${Case}_rehearsed" > "$o\rehearse_diff.txt"
 "check 10: " + ((Get-Content "$o\rehearse_diff.txt" -Encoding UTF8 | Select-String -Pattern '^changed \(0\)|^\(0\)' ) -join ' ')
-if ($Skip -notcontains 'check12') {
-    # the staged state, for check12.ps1 (a fresh twin the injected failure runs on)
-    sqlcmd -S localhost -E -C -b -Q "BACKUP DATABASE [$own] TO DISK = N'$o\staged.bak' WITH COPY_ONLY, COMPRESSION, INIT" | Select-Object -Last 1
-}
-Log 'our apply: real run'
-& $Bin @common --i-have-a-backup --report "$o\real.json" --script-output "$o\script_real.sql" --recovery-dir "$o\recovery" > "$o\real.txt" 2> "$o\real.err"
+Log 'our apply: real run (the drop-in `infobase config apply --recovery-backup`)'
+# The way back the apply takes just before it writes is a full backup of the staged state: check12.ps1 restores its fresh twin from it.
+$staged = "$o\staged.bak"
+if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+$data = "$lab\ibdata\$own"
+New-Item -ItemType Directory -Force $data | Out-Null
+& $Bin infobase config apply --dbms=MSSQLServer --db-server=localhost "--db-name=$own" "--data=$data" --force --dynamic=disable --exclusivity=assumed --platform=8.3.27 "--recovery-backup=$staged" "--report=$o\real.json" > "$o\real.txt" 2> "$o\real.err"
 "real exit $LASTEXITCODE"
-if ($LASTEXITCODE -ne 0) { Get-Content "$o\real.err" -Tail 5; throw 'the real run failed' }
+if ($LASTEXITCODE -ne 0) { Get-Content "$o\real.txt", "$o\real.err" -Tail 5 | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) } else { $_ } }; throw 'the real run failed' }
 $report = Get-Content "$o\real.json" -Raw -Encoding UTF8 | ConvertFrom-Json
-"structure: " + (($report.structure.objects) -join ' | ')
+# the drop-in wraps the apply's report: {operation, ok, nothing_to_apply, apply: {...}}
+$apply = if ($report.apply) { $report.apply } else { $report }
+"structure: " + (($apply.structure.objects) -join ' | ')
 python "$rk\snapshot.py" $own "${Case}_own_after" | Select-Object -Last 1
 
+if ($SkipNative) {
+    # the native side runs apart (native_side.ps1) and may still be waiting for the native lock; everything above needed none of it
+    $deadline = (Get-Date).AddMinutes(360)
+    while (-not (Test-Path "$o\native_side.log") -or -not (Select-String -Path "$o\native_side.log" -Pattern 'native side of .* done' -Quiet)) {
+        if ((Get-Date) -gt $deadline) { throw "the native side of $Case never finished" }
+        Start-Sleep -Seconds 20
+    }
+    Log "native side of $Case is done"
+}
 Log 'checks 2-6'
 python "$rk\snapdiff.py" $nat "${Case}_nat_after" $own "${Case}_own_after" --max 12 > "$o\nat_vs_own.txt"
 Get-Content "$o\nat_vs_own.txt" -Encoding UTF8 | Select-String -Pattern '^(changed|added|removed) \(|^  T |^\(\d+\)' | ForEach-Object { $_.Line }
-$tables = @($report.structure.tables)   # Config is check 4 (dates and the generation differ when the twins were staged apart)
+$tables = @($apply.structure.tables)   # Config is check 4 (dates and the generation differ when the twins were staged apart)
 python "$kit\compare_twins.py" $nat $own @tables 2>&1 | Tee-Object "$o\check3.txt" | Select-Object -Last 6
 python "$kit\check4.py" $nat $own 2>&1 | Tee-Object "$o\check4.txt"
+python "$kit\check_register.py" $nat $own 2>&1 | Tee-Object "$o\check_register.txt"
 python "$kit\checks56.py" $nat "${Case}_nat_after" $own "${Case}_own_after" 2>&1 | Tee-Object "$o\check56.txt"
 
 if ($Skip -notcontains 'noop') {

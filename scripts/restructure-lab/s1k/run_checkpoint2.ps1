@@ -11,6 +11,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Bin,
     [string]$Cases = 'a1,b1,b2,c1,d0,d1,i1',
     [string]$ImportArgs = '',
+    # check 9 (a cluster session on both twins) takes minutes and two registrations: once, on these cases
+    [string]$SessionCases = 'a1,f1',
+    # the import phase was run already (run_phase1.ps1): the twins are staged, go on from there
+    [switch]$SkipImport,
+    # with -SkipImport: wait for each case's import phase (phase1.json newer than this) before its own side
+    [datetime]$Since = [datetime]::MinValue,
+    # the native sides run apart (native_side.ps1); twin_case.ps1 waits for each before it compares
+    [switch]$NativeApart,
     [switch]$Drop
 )
 $ErrorActionPreference = 'Continue'
@@ -22,7 +30,9 @@ $jobs = Join-Path (Split-Path $kit -Parent) 'jobs'
 # the session job of each case (check 9); i1 is refused, so it has none
 $job = @{
     a1 = 's1k_a1.bsl'; b1 = 's2_b1.bsl'; b2 = 's2_b2.bsl'; c1 = 's2_c1.bsl'; d0 = 's2_d0.bsl'; d1 = 's2_d1.bsl'
+    e5 = 's2_e.bsl'; e6 = 's2_e.bsl'; f1 = 's1k_f.bsl'; f2 = 's1k_f.bsl'
 }
+$sessions = @($SessionCases -split ',' | Where-Object { $_ })
 function Log($m) { "[{0}] {1}" -f (Get-Date -Format s), $m }
 $summary = @()
 foreach ($case in ($Cases -split ',' | Where-Object { $_ })) {
@@ -32,7 +42,13 @@ foreach ($case in ($Cases -split ',' | Where-Object { $_ })) {
     "" | Set-Content $log
     $verdict = 'ok'
     Log "== $case" | Tee-Object -FilePath $log -Append
-    pwsh -NoProfile -File "$kit\import_phase.ps1" -Case $case -Bin $Bin -ImportArgs $ImportArgs *>&1 | Tee-Object -FilePath $log -Append | Out-Null
+    if (-not $SkipImport) {
+        pwsh -NoProfile -File "$kit\import_phase.ps1" -Case $case -Bin $Bin -ImportArgs $ImportArgs *>&1 | Tee-Object -FilePath $log -Append | Out-Null
+    } else {
+        $marker = "$o\phase1.json"
+        $deadline = (Get-Date).AddMinutes(180)
+        while (-not ((Test-Path $marker) -and ((Get-Item $marker).LastWriteTime -gt $Since)) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 15 }
+    }
     $phase = Get-Content "$o\phase1.json" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue | ConvertFrom-Json
     if (-not $phase) { $summary += "$case : the import phase did not finish"; continue }
     if ($case -eq 'i1') {
@@ -41,7 +57,10 @@ foreach ($case in ($Cases -split ',' | Where-Object { $_ })) {
     } elseif ($phase.import_exit -ne 0) {
         $verdict = "our import refused or failed (exit $($phase.import_exit)): nothing to apply"
     } else {
-        pwsh -NoProfile -File "$kit\twin_case.ps1" -Case $case -Bin $Bin -Job (Join-Path $jobs $job[$case]) *>&1 | Tee-Object -FilePath $log -Append | Out-Null
+        $twinArgs = @('-Case', $case, '-Bin', $Bin, '-Job', (Join-Path $jobs $job[$case]))
+        if ($sessions -notcontains $case) { $twinArgs += @('-Skip', 'session') }
+        if ($NativeApart) { $twinArgs += '-SkipNative' }
+        pwsh -NoProfile -File "$kit\twin_case.ps1" @twinArgs *>&1 | Tee-Object -FilePath $log -Append | Out-Null
         if ($LASTEXITCODE -ne 0) { $verdict = 'twin protocol stopped' }
         pwsh -NoProfile -File "$kit\check12.ps1" -Case $case *>&1 | Tee-Object -FilePath $log -Append | Out-Null
         if ($LASTEXITCODE -ne 0) { $verdict += '; check 12 FAILED' }

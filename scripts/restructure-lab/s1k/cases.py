@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import edit_cases_s1 as s1  # noqa: E402
 import edit_cases_s2 as s2  # noqa: E402
+import edit_cases_s3 as s3  # noqa: E402
+import new_objects  # noqa: E402
 
 REF = s1.REF
 EXT_TREES = os.environ.get("S1K_EXT_TREES", r"F:\ibcmd\lab\05\ext\native\8327")
@@ -202,6 +204,14 @@ def from_s2(name):
     return run
 
 
+def from_s3(name):
+    def run(out):
+        tree = s3.Tree(out)
+        s3.CASES[name](tree)
+        tree.save()
+    return run
+
+
 # id -> (S1 operation, title, editor, built, expected outcome of the chain with the import of this branch, notes)
 CASES = {
     "a1": ("A", "add attributes of every primitive type (objects no extension adopts)", run_a1, True),
@@ -212,8 +222,12 @@ CASES = {
     "d1": ("D", "the index flag on and off, additional order", from_s2("d1"), True),
     "i1": ("I", "an attribute on adopted objects (refused by S1-I)", run_i1, True),
     # designed in docs/apply/restructuring.md 12.3, not built in the gate yet: the editors come with the operations
-    "e1": ("E", "add a tabular section (not built)", None, False),
-    "f1": ("F", "add a catalog / a document (not built)", None, False),
+    # S1-E (merged): the shapes of the ddl track's e1 and e3 on the objects no extension adopts
+    "e5": ("E", "add tabular sections (flat, hierarchical and subordinate catalogs, two documents)", from_s3("e5"), True),
+    "e6": ("E", "add attributes to existing tabular sections (first / middle / last, indexed; catalog and document)", from_s3("e6"), True),
+    # S1-F (merged): a new object with attributes; no forms, templates, commands or predefined items, one new object per kind per stage
+    "f1": ("F", "add a flat catalog with attributes of every primitive type, a reference, an indexed one (trace's N1)", new_objects.run_f1, True),
+    "f2": ("F", "add a document with a periodic numeric number and indexed attributes (trace's N4)", new_objects.run_f2, True),
 }
 
 if __name__ == "__main__":
@@ -227,6 +241,8 @@ if __name__ == "__main__":
         if editor is None:
             raise SystemExit("case %s (%s) has no editor: the operation is not built yet" % (case, title))
         os.makedirs(out, exist_ok=True)
+        if os.path.exists(os.path.join(out, "new.txt")):
+            os.remove(os.path.join(out, "new.txt"))   # the files a case adds are listed by its editor; an old list is not this case's
         editor(out)
     elif command == "files":
         with open(os.path.join(sys.argv[2], "files.txt"), encoding="utf-8") as f:

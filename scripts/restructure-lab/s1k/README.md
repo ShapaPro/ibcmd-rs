@@ -24,12 +24,19 @@ pwsh -NoProfile -File twin_case.ps1 -Case d0 -Bin <ibcmd-rs.exe> -Job ..\jobs\s2
 Checkpoint 2 in one command (the import phase, the twin protocol with the session job, check 12 per case; check 11 for i1):
 
 ```powershell
-pwsh -NoProfile -File run_checkpoint2.ps1 -Bin <ibcmd-rs.exe> -Cases "a1,b1,b2,c1,d0,d1,i1" [-Drop]
+pwsh -NoProfile -File run_checkpoint2.ps1 -Bin <ibcmd-rs.exe> -Cases "a1,b1,b2,c1,d0,d1,e5,e6,f1,f2,i1" [-Drop]
 # or by hand, per case, after import_phase.ps1 staged the own twin:
 pwsh -NoProfile -File twin_case.ps1 -Case b1 -Bin <ibcmd-rs.exe> -Job ..\jobs\s2_b1.bsl   # also takes out\<case>\staged.bak
 pwsh -NoProfile -File check12.ps1 -Case b1                                                # the injected failure on a fresh twin
 pwsh -NoProfile -File check11.ps1 -Case i1 -Bin <ibcmd-rs.exe> [-Native]                  # the refusal (adopted objects)
 ```
+
+The native lock has a long queue: the native side of each case can wait apart while the own side stages --
+`run_phase1.ps1` (all import phases), `native_side.ps1 -Since <time>` (the native side of each case as its edit appears),
+`run_checkpoint2.ps1 -SkipImport -NativeApart -Since <time>` (the own side; it waits for its native side before it compares).
+`assemble_checkpoint2.py <lab> "<title>" a1,b1,...` writes the record of all cases (`evidence/restructuring/s1k-checkpoint2.txt`).
+The cases: `a1`..`d1` (the ddl track's edits), `e5`, `e6` (sections), `f1`, `f2` (`new_objects.py`: a new catalog and a new document
+from the trace track's N1 and N4; `skeleton_catalog.xml` is the catalog the platform made), `i1` (refused).
 
 `python cases.py list` prints the cases. Set `PYTHONDONTWRITEBYTECODE=1` (the repository ignores `__pycache__`, but a
 kit that leaves bytecode about is a nuisance). Databases are dropped by the caller with

@@ -22,6 +22,21 @@ a = zlib.decompress(lab.row(nat_label, "Params", "DBNames", 0, nat_db), -15)
 b = zlib.decompress(lab.row(own_label, "Params", "DBNames", 0, own_db), -15)
 print("5. DBNames text equal after inflate: %s (%d / %d bytes)" % (a == b, len(a), len(b)))
 
+# The platform's own system tables that a native apply of a stage with a created object adds on this build (the trace track's drift,
+# docs/apply/new-object.md 8: `_DbCopiesInfoBaseUse` and its companions; ours does not), and the two tables it upgrades on its own.
+PLATFORM_OWN = {"DbCopies", "DbCopiesUpdates", "DbCopiesInfoBaseUse", "DbCopiesUpdateStat", "DbCopiesUpdateTableStat", "WebSocketClients"}
+if a != b:
+    def without_platform_names(text):
+        lines = text.decode("utf-8-sig").split("\r\n")
+        added = ("DbCopiesInfoBaseUse", "DbCopiesUpdateStat", "DbCopiesUpdateTableStat")
+        # the entries are appended at the end: the last entry that stays loses its comma when they are taken out
+        kept = [line.rstrip(",") for line in lines[2:] if not any(('"%s",' % name) in line for name in added)]
+        return kept, len(lines) - 2 - len(kept), lines[:2]
+    ka, dropped_a, head_a = without_platform_names(a)
+    kb, dropped_b, head_b = without_platform_names(b)
+    print("5. DBNames equal after taking out the entries of the platform's own system tables (native %d, own %d taken out): %s; headers native %s own %s"
+          % (dropped_a, dropped_b, ka == kb, head_a, head_b))
+
 
 def tables(db, label):
     d = bf.parse(lab.dbschema(label, db))
@@ -31,8 +46,8 @@ def tables(db, label):
 ta, tb = tables(nat_db, nat_label), tables(own_db, own_label)
 differ = sorted([k for k in ta if ta[k] != tb.get(k)] + [k for k in tb if k not in ta])
 print("5. DBSchema entries: native %d, own %d; differing: %s" % (len(ta), len(tb), differ))
-tolerated = {"DbCopies", "DbCopiesUpdates"}
-print("5. DBSchema equal but the platform's own upgrades: %s" % (set(differ) <= tolerated))
+tolerated = PLATFORM_OWN
+print("5. DBSchema equal but the platform's own upgrades: %s (%s)" % (set(differ) <= tolerated, ", ".join(differ) or "none"))
 
 result = subprocess.run(
     [sys.executable, "-X", "utf8", os.path.join(os.path.dirname(HERE), "si_diff.py"), nat_db, nat_label, own_db, own_label],

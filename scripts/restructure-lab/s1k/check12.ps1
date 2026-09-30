@@ -1,7 +1,8 @@
 # S1-K check 12 (docs/apply/restructuring.md 12.6): a failure inside the transaction of OUR apply takes everything back.
-# Runs the script our real apply generated for the case (`--script-output`, written by twin_case.ps1 as out\<case>\script_real.sql)
-# on a FRESH twin of the staged state (out\<case>\staged.bak, a COPY_ONLY backup twin_case.ps1 takes of the own twin just before the
-# real run) with a THROW injected as the last statement before COMMIT, and compares the digest of the database before and after.
+# Runs the script our apply generates for the case (the dry run's `--script-output`, out\<case>\script_dry.sql: the text the real run
+# executes) on a FRESH twin of the staged state (out\<case>\staged.bak: the way back the drop-in `config apply --recovery-backup`
+# takes just before it writes, a full backup of the staged state) with a THROW injected as the last statement before COMMIT, and
+# compares the digest of the database before and after.
 #
 #   pwsh -NoProfile -File check12.ps1 -Case b1 [-Keep]
 #
@@ -17,7 +18,7 @@ $lab = if ($env:S1K_LAB) { $env:S1K_LAB } else { 'F:\ibcmd\lab\05\ext\s1k' }
 $o = "$lab\out\$Case"
 $own = "ibcmd_rs_05_ext_s1k_${Case}_own"
 $inj = "ibcmd_rs_05_ext_s1k_${Case}_inj"
-$script = "$o\script_real.sql"
+$script = "$o\script_dry.sql"
 $backup = "$o\staged.bak"
 foreach ($f in $script, $backup) { if (-not (Test-Path -LiteralPath $f)) { throw "missing $f (run twin_case.ps1 first)" } }
 
@@ -29,7 +30,7 @@ if ($text -notmatch [regex]::Escape("USE [$own];")) { throw "the script does not
 $text = $text.Replace("USE [$own];", "USE [$inj];")
 if ($text -notmatch "(\r?\n)COMMIT TRANSACTION;(\r?\n)END TRY") { throw 'no COMMIT before END TRY in the script' }
 $text = $text -replace "(\r?\n)COMMIT TRANSACTION;(\r?\n)END TRY", "`$1THROW 51999, N'injected failure before COMMIT', 1;`$1COMMIT TRANSACTION;`$2END TRY"
-$injected = "$o\script_real.injected.sql"
+$injected = "$o\script_injected.sql"
 [IO.File]::WriteAllText($injected, $text, (New-Object Text.UTF8Encoding($true)))
 
 "before:"

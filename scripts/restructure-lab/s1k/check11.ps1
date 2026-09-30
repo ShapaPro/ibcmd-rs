@@ -9,7 +9,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Case,
     [Parameter(Mandatory = $true)][string]$Bin,
-    [string]$Expect = '_ДемоПартнеры,_ДемоНоменклатура',
+    # the objects the refusal must name: it stops at the first adopted object of the stage (the other one is refused in its turn)
+    [string]$Expect = '_ДемоПартнеры',
     [switch]$Native
 )
 $ErrorActionPreference = 'Continue'
@@ -25,7 +26,8 @@ $common = @('mssql-config-apply', '--platform-profile', 'platform-8.3.27.2214', 
 $before = Get-LabDigest $own
 $ok = $true
 foreach ($mode in 'dry run', 'real run') {
-    $extra = if ($mode -eq 'dry run') { @('--dry-run') } else { @('--i-have-a-backup', '--recovery-dir', "$o\recovery11") }
+    # @(...) around the whole `if`: a one-element result would be a string, and splatting a string splats its characters
+    $extra = @(if ($mode -eq 'dry run') { '--dry-run' } else { '--i-have-a-backup'; '--recovery-dir'; "$o\recovery11" })
     $stem = if ($mode -eq 'dry run') { 'refuse_dry' } else { 'refuse_real' }
     & $Bin @common @extra --report "$o\$stem.json" > "$o\$stem.out" 2> "$o\$stem.err"
     $exit = $LASTEXITCODE
@@ -41,9 +43,23 @@ foreach ($mode in 'dry run', 'real run') {
     Say ("  says the object is adopted by an extension: {0}" -f $named)
     if (-not $named) { $ok = $false }
 }
+# the drop-in `ibcmd infobase config apply` (the command line a user runs): the platform's words for the refusal, exit 1
+$bak = "$o\refuse_dropin.bak"
+Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+$data = "$lab\ibdata\$own"
+New-Item -ItemType Directory -Force $data | Out-Null
+& $Bin infobase config apply --dbms=MSSQLServer --db-server=localhost "--db-name=$own" "--data=$data" --force --dynamic=disable --exclusivity=assumed --platform=8.3.27 "--recovery-backup=$bak" "--report=$o\refuse_dropin.json" > "$o\refuse_dropin.out" 2> "$o\refuse_dropin.err"
+$exit = $LASTEXITCODE
+$text = [regex]::Replace(((Get-Content "$o\refuse_dropin.out", "$o\refuse_dropin.err" -Encoding UTF8 -Raw) -join "`n"), "`e\[[0-9;]*m", '')
+Say "drop-in `infobase config apply --recovery-backup`: exit $exit"
+$words = $text -match 'требуется штатный config apply'
+Say ("  says «требуется штатный config apply»: {0}" -f $words)
+$named = foreach ($name in ($Expect -split ',' | Where-Object { $_ })) { $text.Contains($name) }
+Say ("  names the object: {0}" -f (@($named) -notcontains $false))
+if ($exit -ne 1 -or -not $words -or (@($named) -contains $false)) { $ok = $false }
 $after = Get-LabDigest $own
 $same = (($before -join "`n") -eq ($after -join "`n"))
-Say "digest unchanged after the real run: $same"
+Say "digest unchanged after the real runs: $same"
 if (-not $same) { $ok = $false }
 if ($Native) {
     Say 'the platform apply on the same twin (what the refusal hands over to):'
