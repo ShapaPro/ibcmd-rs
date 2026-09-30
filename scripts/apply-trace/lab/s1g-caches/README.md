@@ -13,6 +13,8 @@ under the lab "native" lock (`DDL_LOCK_TRACK=trace`). Nothing here touches a dat
 | `swap_row.ps1` | put a stored (deflated) cache row and give it a new guid in `siVersions`, as the apply does |
 | `srv.ps1`, `job.ps1` | a stand-alone `ibsrv` on a lab database, and a thin-client session that runs a BSL job |
 | `prove.ps1` | the proof: stand-alone server + session, cluster session, native `config check`, native `config apply` |
+| `necessity.ps1` | the necessity table of 12.5: one cache row absent or stale at a time, the probe in a session each time |
+| `rowdiff.py`, `regdiff.py`, `xdtodiff.py` | which of the 16 rows differ between two snapshots; the registry records and the XDTO lines a case inserted |
 | `make_case_d.py` | case d: a new document with a tabular section cloned from a small БСП document |
 | `stage_d.ps1` | stage case d with the native partial import, snapshot, apply natively, snapshot |
 
@@ -37,3 +39,18 @@ python make_case_d.py          # needs the native export tree of a БСП clone 
 stage_d.ps1 -Database ibcmd_rs_05_trace_d_base       # snapshots d_staged and d_after into F:\ibcmd\lab\05\s1g\store
 cargo test --lib restructure::caches                  # IBCMD_RS_TRACE_LAB=<store> when the store is elsewhere
 ```
+
+## The necessity table on our rows (derived-caches.md 8)
+
+```
+restore-clone.ps1 -Corpus bak -Bak ...bsp8327_c2_native_after.bak -Name ibcmd_rs_05_trace_n_base  ...   # native rows
+restore-clone.ps1 -Corpus bak -Bak ...bsp8327_c2_native_after.bak -Name ibcmd_rs_05_trace_n_ours  ...   # the twin
+IBCMD_RS_CACHES_DUMP=<dir> IBCMD_RS_CACHES_CASE=c cargo test --lib restructure::caches::tests_change::dump_the_rows
+swap_row.ps1 -Database ibcmd_rs_05_trace_n_ours -Row <each of the eight rows> -Blob <dir>\<row>.deflated
+prove.ps1 -Database ibcmd_rs_05_trace_n_ours -Label ours_all -Steps standalone,cluster
+necessity.ps1 -Database ibcmd_rs_05_trace_n_ours -Label ours          # the stale bytes: F:\ibcmd\lab\05\s1g\rows\stale (rowdiff.py of the pristine snapshot)
+necessity.ps1 -Database ibcmd_rs_05_trace_n_base -Label base
+prove.ps1 -Database <each> -Label <x>_native -Steps check,apply
+```
+
+Results: `docs/apply/evidence/derived-caches/{prove_*_all,necessity_*,prove_*_all_native}.txt`.

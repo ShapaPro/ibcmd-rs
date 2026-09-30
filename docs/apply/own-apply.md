@@ -49,6 +49,11 @@ written** by this apply; see [known differences](#known-differences-from-the-nat
   whole configuration (1.6 GB) 699 s with a log peak of 9.2 GB.
 - **8.5** admitted ([8.5](#85-392)).
 
+**#412 (exchange plans of distributed infobases).** The native apply registers a changed object at **every
+node of the plans that register changes**, inserting the row where the node has none (a node with an initial
+image has none); this apply only updated the rows that existed, so the message for such a node carried none
+of the change. Fixed and proved against the native messages ([exchange plans](#exchange-plans-of-distributed-infobases-412)).
+
 Contents: [what the native apply does](#what-the-native-apply-does-measured) -
 [what this apply does](#what-this-apply-does) -
 [what it does not write](#what-it-does-not-write) -
@@ -58,6 +63,7 @@ Contents: [what the native apply does](#what-the-native-apply-does-measured) -
 [the default gate](#the-default-gate) - [refusals](#refusals-a-caller-can-sort) -
 [recovery](#recovery-artifact-and-its-retention) -
 [restructuring seam and backup policy](#restructuring-inside-the-apply-s1-a-397) -
+[exchange plans](#exchange-plans-of-distributed-infobases-412) -
 [command line](#command-line) - [verification](#verification) -
 [ERP UH at scale](#erp-uh-8327-at-scale-392) - [8.5](#85-392) -
 [limits and open points](#limits-and-open-points).
@@ -325,13 +331,16 @@ the platform does not mind (S2, S3, S4, and the probe below):
 - **ConfigCAS garbage collection, `_ExtensionsRestructNGS`**: caches and scratch of the native apply,
   see the table above.
 - **`Creation`/`Modified` of `Files.MobileVersions.dat`** and the random head guid differ.
-- **`_ConfigChngR._MessageNo` of objects the stage does not touch (first apply after a restore)**:
+- **`_ConfigChngR._MessageNo` of objects the stage does not touch (the long path)**:
   on a base whose register holds NULL for such objects (a clone restored from a corpus backup:
-  17 280 of 20 685 rows on the 8.3.27 twin, 17 374 of 21 219 on the 8.5 twin) the native apply
-  writes 0 to them; this apply writes NULL for the staged objects only (42 of 42 rows equal on
-  8.5). Measured equal from a register that held 0 (S2-S4, E1-E4). Nothing in the platform's
-  checks, the exports or the cluster sessions reads it; it matters to the exchange plans of a
-  base that has nodes with pending messages, and is untested there.
+  17 280 of 20 685 rows on the 8.3.27 twin, 17 374 of 21 219 on the 8.5 twin) the native apply, when
+  it rebuilds the register (more than 20 staged rows), writes 0 to them; this apply writes NULL for the
+  staged objects only (42 of 42 rows equal on 8.5) and leaves the others. Measured equal from a register
+  that held 0 (S2-S4, E1-E4). **The message for a node does not depend on it**: with an earlier
+  apply's NULL rows at an imaged node turned to 0 by the native long path (a 4-module apply, then a
+  30-module one, no message between), the native message and this apply's both carried the same 34 objects,
+  with the node before and after it had acknowledged a message
+  ([exchange plans](#exchange-plans-of-distributed-infobases-412)).
 - **`.si` rows on 8.5**: the native apply rewrites all 16 with their records in another order
   (2 identical, 13 the same lines permuted, and the 29 MB XDTO-model row `ea13a2c9` at the same
   length in another base64 layout); on 8.3.27 the same rows come back with identical text. This
@@ -357,7 +366,7 @@ alone from a full native set, because nothing in the results asks for it:
 |---|---|---|
 | `Config` rows: `.new` copy, `commit` marker, promotion row by row outside a transaction | one `INSERT ... SELECT` in one transaction; `commit`, `dbStruFinal`, `dynamicCommit` are never written | **required**: the rows (identical to native in S2, S3, S4). The markers exist to resume an interrupted promotion; a transaction has nothing to resume. |
 | Fold of dynamic overlays (`X_dynupdate_G` over `X`, `versions_dynupdate_G`, `DynamicallyUpdated`) | written, oldest generation first; done **whether or not the stage lists those rows** (it never does) | **required** when the base has an overlay (S1-S4 all had one); rows identical. See "Dynamic-update rows" below. |
-| `_ConfigChngR._MessageNo := NULL` | written for every owner of a staged row | **required** (it is what the exchange plans read); identical in S2-S4. |
+| `_ConfigChngR._MessageNo := NULL` | written for every owner of a staged row; a row is **inserted** where a node of the plans that register changes has none | **required** (it is what the exchange plans read); identical in S2-S4 and, for imaged nodes, in the messages of [#412](#exchange-plans-of-distributed-infobases-412). |
 | New objects: rows in `_ConfigChngR`, `_ConfigChngR_ExtProps` | written | **required**; identical to native but for the ids. |
 | `_ConfigChngR` and `_ExtProps` rebuilt through `..NG` tables with new ids (long path) | not written | **not required**: the platform runs on the old ids (check, apply afterwards, cold server); the short path does not renumber. |
 | 16 `.si` rows and `siVersions` rewritten | only the main `.si` row and its version, when a new form or template adds records | **required for new objects** (the row lists them; text identical to native in S4); **not required otherwise** (content unchanged, S2-S4). |
@@ -436,11 +445,11 @@ carries the dynamic generation `06cb0442` (two objects, `a627e390` and `ab132638
 | E1 | `0`, base without overlay | consumed | consumed | `Config` 9 841 of 9 841, `_ConfigChngR`, `ExtProps` (16 343 objects), all 16 `.si` texts, `Params`, `Files` equal |
 | E2 | empty text, base without overlay | consumed | consumed | the same |
 | E3 (first try) | the 6 overlay names, base with overlay | rows deleted, **no fold** | folded | `Config` differed for the two objects: the native apply keeps the plain text |
-| E3b | the 6 overlay names | rows deleted, no fold | deleted, not folded | `Config` 9 841 of 9 841; `.si`, `siVersions`, `Params` equal; **8 register rows differ**: the native apply also sets `_MessageNo` NULL for the two objects and appends their alias file names to `_ConfigChngR_ExtProps` (2 objects x 4 nodes), this apply does not |
+| E3b | the 6 overlay names | rows deleted, no fold | deleted, not folded | `Config` 9 841 of 9 841; `.si`, `siVersions`, `Params` equal; the native apply also sets `_MessageNo` NULL for the two objects and appends their alias file names to `_ConfigChngR_ExtProps` (2 objects x 4 nodes): **this apply does the same since #412** (the owners of the rows a `deleted` list names are reset, the alias bodies appended to the lists, and the row inserted where a node has none) |
 | E4 | `0`, base with overlay | consumed, **folded** | consumed, folded | `Config`, register, `ExtProps`, `.si`, `Params` equal (the alias text is the ordinary row afterwards) |
 
 The `Files` rows differ in E3b and E4 by the help-index chunks only (known difference). The E3b
-difference is written down and not reproduced: the case needs a list that names overlay rows, which
+register difference is reproduced since #412 (see the row above); the case needs a list that names overlay rows, which
 neither importer of this repository writes yet.
 
 **What is left, in the order the evidence allows; each step is enabled only after the own apply
@@ -850,8 +859,8 @@ backup before the recovery artifact and of both before the transaction.
 **Base.** The corpus `uha8327` (ERP УХ on 8.3.27), restored with `restore-clone.ps1 -Corpus uha8327`: 118 377 `Config`
 rows (51 second parts, 1 638 572 555 bytes), database 4.3 GB, 21 187 tables, no infobase users, `SchemaStorage` state
 100, 156 dynamic alias rows of two generations with no `DynamicallyUpdated` marker (the plan warns that they belong to no
-generation and leaves them), `_ConfigChngR` **empty** (no change registrations, so `_MessageNo` has nothing to reset and
-a new form or template is refused; no register row is inserted for an existing object). The twin of the staged clone is
+generation and leaves them), `_ConfigChngR` **empty** (no node registers changes, so `_MessageNo` has nothing to reset, no node exists to
+insert a row for, and a new form or template is refused). The twin of the staged clone is
 a `BACKUP ... COPY_ONLY` of it, restored (`uha_stage_a.bak`, 1.7 GB); native runs took the heavy lock and the native lock,
 one command per hold; ours the heavy lock.
 
@@ -935,6 +944,92 @@ whose administrator is «Администратор (обычное прилож
 removed with `rac infobase drop` under its own name and uuid. And the drop-in keeps a refusal of 8.5 of its own
 (`src/dropin/apply.rs`); with this branch it can go (it went in rcheck-6, together with the text matching of the errors).
 
+## Exchange plans of distributed infobases (#412)
+
+**The question.** The change register `_ConfigChngR` (rows `(_NodeTRef, _NodeRRef, _MDObjID, _MessageNo, _IDRRef)`) and
+`_ConfigChngR_ExtProps` (the object's changed files) decide which configuration objects an exchange message for a node of a
+distributed infobase (DIB) carries. The own apply reset `_MessageNo` in the rows that existed and inserted rows for new objects;
+was the message for a node after it the same as after the native apply?
+
+**Setup (lab only; scripts in `F:\ibcmd\lab\04\apply\tools`, not in the repository).** The БСП 8.3.27 clone (`bsp8327`) has the plan
+`_ДемоОбменВРаспределеннойИнформационнойБазе` (`DistributedInfoBase`, the plan's own node ДМ and the nodes ПА, ПБ, МД, all with register
+rows for 4 929 to 5 749 objects, `_MessageNo` NULL for 4 929 of them as the corpus came). A **cluster session writes to the clone
+only**: the clone is registered in the 8.3.27 cluster (`register-ib.ps1`), an external connection (`V83.COMConnector`) creates nodes
+(`СоздатьУзел`, `Записать`), writes a message (`ПланыОбмена.СоздатьЗаписьСообщения`, `НачатьЗапись`, `ПланыОбмена.ЗаписатьИзменения`,
+`ЗакончитьЗапись`) and reads an acknowledgement (`СоздатьЧтениеСообщения`, `НачатьЧтение`). Two things the platform demands before it
+writes a DIB message: no data-changing extension that is not used in the DIB, and no disabled DIB extension in the session (the corpus
+has four extensions: two were deleted, `ServiceDesk` was marked "used in DIB" and left active). **An initial image**
+(`ПланыОбмена.СоздатьНачальныйОбраз(Узел, "File=...;")`, a 282 MB file infobase) was made for ПА and for a new node ЯТ1; a second new node
+ЯТ2 has no image. An imaged node has **no rows** in `_ConfigChngR`: the platform deletes them when it creates the image (ПА's 5 749
+rows were gone), and a node made afterwards has none either.
+
+**What a message carries.** The body is `<v8de:Changes>` with `<v8de:Config>` (one `<v8md:Metadata>` per configuration object: `ObjectID`,
+`ClassID`, `Version`, `Name`, `Content` = the descriptor, and `<v8md:Externals>` = the object's listed files that exist in `Config`), the
+extensions, the nodes and the data. Measured: **(1)** a node **without an image** gets the whole configuration (4 929 objects, 4 906
+files) in every message, whatever its register rows say (the register as the corpus came, set to all zeros, or after a bare acknowledgement message made by hand
+-- `ReceivedNo` 1, no body), so the register differences between the applies are invisible there; **(2)** a node **with an image** gets exactly
+the objects it has a row for, with their listed files, and after the message the rows carry the message number.
+
+**What the native apply does.** For every object a stage changes (the uuid a staged name starts with, the objects whose file lists name a
+staged row, and the owners of the rows a `deleted` list names) and every node of the plans that register changes except the plan's own
+node: **updates the row's `_MessageNo` to NULL, or inserts the row** (`_MessageNo` NULL, a new `_IDRRef` from a clock) **where the node has
+none** -- for the imaged nodes ПА and ЯТ1 and for the plain new node ЯТ2 alike. The inserted row's file list is the **changed files** of the
+object: the staged and dropped body files that are its own (`<uuid>.<n>`, `<uuid>_dynupdate_<g>.<n>`), the new form's `.0`, the alias body
+of an overlay owner; **empty** for an owner whose descriptor alone is staged. (Measured on twins in the five cases below and on scratch
+copies with the register inspected: `tools\reg_inspect.py`, `reg_objects.py`.)
+
+**What was wrong.** This apply updated the existing rows and inserted rows for new objects at the nodes the register already held. An
+imaged node has none, so nothing was registered for it: **after the own apply the message for the node carried none of the change**
+(objects in the native message against ours: 4 against 0, 3 against 0, 8 against 0, 30 against 0, 6 against 0), and the subordinate would
+have kept the old configuration. (The earlier rule "never insert register rows for existing objects" came from the УХ base, whose register is
+empty: no node registers changes there.)
+
+**The fix** (`registrations.rs`, `sqlgen.rs`, `recovery.rs`): the plan reads the nodes of the plans that register changes **from the plans'
+node tables** (`_Node<plan>`, `_PredefinedID` = 0 for a node that is not the plan's own), not only from the register; lists the changed objects
+the register knows at some node and the (node, object) pairs with no row; the file list of each. The transaction asserts the nodes' count per
+plan and that exactly the planned rows are missing, inserts them (`_MessageNo` NULL, ids continuing the table's greatest) and their lists;
+the owners of the rows a `deleted` list names are reset like the owners of staged rows, and the bodies it names are appended to the lists that
+exist. A node marked for deletion makes the apply refuse (`NeedsNativeApply`, unknown). The recovery artifact records the inserted pairs
+(`added_registrations.tsv`); the report has `registrations` (nodes, changed objects, rows and file rows added). Cost: a whole-tree stage of
+the БСП clone with five nodes (4 929 objects) plans 14 787 rows and 14 718 file rows in the 9 s of a dry run and inserts them in a 22 s
+transaction (debug build).
+
+**Proof: the message for the node after the own apply against after the native apply**, twins of the imaged base (`ПА`, `ЯТ1` imaged, `ПБ`, `МД`
+plain), the same stage on both, then one message for each imaged node from each twin (`tools\dib_case.py`, compared by `msg_survey.py`:
+`ObjectID`, `ClassID`, `Version`, `Name`, SHA-256 of `Content`, and of every external with its name and version):
+
+| Case | Stage | Native message | Own apply before | Own apply after |
+|---|---|---|---|---|
+| module change | 4 common modules, 11 rows (native: short path) | 4 objects | 0 | **equal** |
+| new form and template | delta: the two new objects, the owner's descriptor, `versions` | 3 objects (lists `[.0]`, `[.0]`, `[]`) | 0 | **equal** |
+| overlay removal (E3b) | 6 modules and a `deleted` list naming the 6 overlay rows | 8 objects (6 and the 2 owners; the owners' lists name the alias body, which is not in `Config`, so no externals) | 0 | **equal** |
+| long path | 30 modules (native: register rebuilt) | 30 objects | 0 | **equal** |
+| empty `deleted` list on the overlay base | 6 modules, overlay folded | 6 objects | 0 | **equal** |
+| two applies in a row | 4 modules, then 30 others, no message between | 34 objects | - | **equal**, with the node acknowledged or not |
+
+The register itself (`tools\reg_cmp.py`, the final build): the same rows, message numbers and ordered file lists in the module change, the
+new form and the empty-list cases; the long path differs in message numbers only (native 0, ours NULL at the nodes that hold NULL: 12 326 rows in
+M30, 12 328 in the two-step case, all of them at nodes whose messages do not depend on it); the overlay removal differs in two list rows of
+the plans' own nodes (below). Nodes without an image: the messages carry the whole configuration and were **equal**
+as well (module change with the register as it came and with all zeros; overlay removal with all zeros; the new-form case was not run
+for them). The M30 and D6 messages were written before the last two fixes of the script order and the node check, which only concern new
+objects and dropped bodies; the registers of all five cases were compared again with the final build. One run where the own apply refused: a delta stage on the overlay base whose `versions` was not based on the overlay's row (the default
+gate's finding of checkpoint 2, `versions must be based on the effective row`).
+
+**Not reproduced** (each measured or bounded):
+
+- **`_MessageNo` NULL -> 0 at the nodes the long path rebuilds**: invisible in the messages (above); the own apply keeps NULL, which is what
+  a message would send anyway. If a later exchange reads the number (an acknowledged node with a number in the register), it reads what the
+  platform wrote, not what the native apply would have.
+- **The alias body's name in the file lists of the plans' own nodes** (E3b): the native apply appended it to the lists of every node
+  when the register was all zeros, and to the lists of the nodes that are not the plan's own when the rows were NULL already; this apply
+  appends it everywhere. Two list rows differ in the second case (an own node is nobody's recipient: no message reads them).
+- **Row ids**: the native apply numbers inserted rows from a clock (`8F5B00E0...`), this one continues the table's greatest id. Unique, and
+  `_IDRRef` is not part of a message.
+- **The order of a multi-file object's list** (only the names' order is used) and objects that no node registers (the native rule is not
+  measured: the apply skips them). A database whose every subordinate node is imaged and whose own-node rows do not know an object cannot
+  tell that the object is registered: it is skipped, not guessed.
+
 ## Limits and open points
 
 - **New rows**: only a new form or template of an existing object (bodies `.0`, and `.1` for
@@ -964,9 +1059,11 @@ removed with `rac infobase drop` under its own name and uuid. And the drop-in ke
   is refused.
 - **Restructuring**: the seam is in place and tested, the gate that fills it (`--allow-restructure s1`) waits for track ddl's
   merge; a structural apply needs `--recovery-backup` or `--i-have-a-backup`.
-- **Exchange plans**: `_MessageNo` is reset for the owners of staged rows only; an object whose message number the native
-  apply turns from NULL to 0 (first apply of a restored clone) or to NULL (owners of a dropped overlay row, E3b) is not
-  touched. Untested on a base with pending node messages.
+- **Exchange plans**: proved on one exchange plan (`_ДемоОбменВРаспределеннойИнформационнойБазе`, DIB) of the БСП 8.3.27
+  clone; an object with no register row at any node is not registered (the native rule for it is unknown); a node marked for
+  deletion makes the apply refuse (`NeedsNativeApply`); the file list of an inserted row is measured for one-file objects
+  and for a descriptor-only owner; a multi-file object's order is the names' order. See
+  [exchange plans](#exchange-plans-of-distributed-infobases-412).
 - The help index and the extension CAS garbage are left as they are; they are caches.
 - A working process that keeps a pooled connection makes the SQL exclusivity check refuse; the
   native standalone `ibcmd` does not check at all.
