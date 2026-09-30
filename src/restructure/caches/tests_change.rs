@@ -395,3 +395,97 @@ fn dump_the_rows_of_a_case_for_the_twin_proofs() {
         .unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// what is refused
+// ---------------------------------------------------------------------------------------------
+
+/// A staged change made of catalogs the snapshot already has, presented as new: only the refusals are
+/// looked at.
+fn refusal_of(pick: impl Fn(&Snap, &[String]) -> Vec<ChangedObject>) -> String {
+    let Some(snap) = Snap::open("pristine") else {
+        eprintln!("skipped: no lab snapshot pristine");
+        return "skipped".to_owned();
+    };
+    let root = parse_row(&snap.config(ROOT_ROW).unwrap()).unwrap();
+    let all = collections(&root);
+    let catalogs = collection_of(&all, class_of_kind("Catalog").unwrap())
+        .unwrap()
+        .objects
+        .clone();
+    let changed = pick(&snap, &catalogs);
+    let nothing = |_: &str| None;
+    let after_row = |uuid: &str| snap.descriptor(uuid);
+    let cache = |name: &str| snap.params(name);
+    let error = rewrite(&Staged {
+        root: &root,
+        before: &nothing,
+        after: &after_row,
+        changed: &changed,
+        cache: &cache,
+    })
+    .unwrap_err();
+    format!("{error:#}")
+}
+
+fn changed(kind: &'static str, uuid: &str, has_predefined: bool) -> ChangedObject {
+    ChangedObject {
+        kind,
+        uuid: uuid.to_owned(),
+        table_number: Some(11036),
+        has_help: false,
+        has_predefined,
+    }
+}
+
+#[test]
+fn a_new_catalog_that_lists_forms_or_commands_is_refused() {
+    use crate::restructure::caches::members::Members;
+    let message = refusal_of(|snap, catalogs| {
+        let uuid = catalogs
+            .iter()
+            .find(|uuid| {
+                let row = snap.descriptor(uuid).unwrap();
+                !Members::parse("Catalog", &row).unwrap().others.is_empty()
+            })
+            .unwrap();
+        vec![changed("Catalog", uuid, false)]
+    });
+    assert!(
+        message == "skipped" || message.contains("collections beyond its attributes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_new_catalog_with_predefined_items_is_refused() {
+    use crate::restructure::caches::members::Members;
+    let message = refusal_of(|snap, catalogs| {
+        let uuid = catalogs
+            .iter()
+            .find(|uuid| {
+                let row = snap.descriptor(uuid).unwrap();
+                Members::parse("Catalog", &row).unwrap().others.is_empty()
+            })
+            .unwrap();
+        vec![changed("Catalog", uuid, true)]
+    });
+    assert!(
+        message == "skipped" || message.contains("predefined items"),
+        "{message}"
+    );
+}
+
+#[test]
+fn two_new_catalogs_in_one_stage_are_refused() {
+    let message = refusal_of(|_, catalogs| {
+        vec![
+            changed("Catalog", &catalogs[0], false),
+            changed("Catalog", &catalogs[1], false),
+        ]
+    });
+    assert!(
+        message == "skipped" || message.contains("more than one new Catalog"),
+        "{message}"
+    );
+}

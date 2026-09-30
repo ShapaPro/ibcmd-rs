@@ -184,3 +184,54 @@ fn the_xdto_lines_of_the_attributes_are_made_of_the_descriptors() {
         assert!(report.objects >= 139);
     }
 }
+
+#[test]
+fn an_attribute_of_a_defined_type_or_an_unknown_pattern_is_refused() {
+    use crate::metadata_model::brace::Brace;
+    let refs = RefNames::default();
+    let pattern = |item: Brace| Brace::List(vec![Brace::str("Pattern"), item]);
+    let defined = pattern(Brace::List(vec![
+        Brace::str("#"),
+        Brace::atom("09e14b81-e36d-4ff8-b21b-c41172266147"),
+    ]));
+    let error = attribute_property("Цена", &defined, false, &refs).unwrap_err();
+    assert!(
+        error.to_string().contains("neither a platform type"),
+        "{error:#}"
+    );
+    let unknown = pattern(Brace::List(vec![Brace::str("X")]));
+    assert!(attribute_property("Икс", &unknown, false, &refs).is_err());
+    let empty = Brace::List(vec![Brace::str("Pattern")]);
+    assert!(attribute_property("Пусто", &empty, false, &refs).is_err());
+}
+
+#[test]
+fn every_primitive_type_has_its_xdto_line() {
+    use crate::metadata_model::brace::Brace;
+    let refs = RefNames::default();
+    let pattern = |tag: &str| {
+        Brace::List(vec![
+            Brace::str("Pattern"),
+            Brace::List(vec![Brace::str(tag)]),
+        ])
+    };
+    let line = |tag: &str, nullable: bool| {
+        attribute_property("А", &pattern(tag), nullable, &refs).unwrap()
+    };
+    assert_eq!(
+        line("B", false),
+        "\t\t\t<property name=\"А\" type=\"xs:boolean\"/>\r\n"
+    );
+    assert_eq!(
+        line("S", true),
+        "\t\t\t<property name=\"А\" type=\"xs:string\" lowerBound=\"0\"/>\r\n"
+    );
+    assert_eq!(
+        line("N", false),
+        "\t\t\t<property name=\"А\" type=\"xs:decimal\"/>\r\n"
+    );
+    assert_eq!(
+        line("D", false),
+        "\t\t\t<property name=\"А\" type=\"xs:dateTime\"/>\r\n"
+    );
+}
