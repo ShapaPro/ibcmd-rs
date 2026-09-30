@@ -1145,8 +1145,12 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
    re-stamps on every write (`apply_check::root_row`). ERP УХ 8.5 is not measured.
 9. **ERP УХ** (big tables, predefined data everywhere): 8.3.27 measured on two cases with empty tables (s-uha: `b1`, `c1`,
    checks 2, 3, 4, 5, 7, 8 equal to native, `evidence/dropin-apply/s1-acceptance-uha.md`); the platform appends the rebuilt
-   tables at the end of `DBSchema`, this plan puts them before `ConfigChngR` (equal only where that table is last, as on
-   the БСП). Rebuilding tables with data and УХ 8.5: not measured; the size guard decides most of it.
+   tables at the end of `DBSchema`; the plan first put them before `ConfigChngR`, which is equal only where that table is last, as
+   on the БСП (the platform rebuilds it after the others), and not on the УХ, where the register is empty, the platform does not
+   rebuild `ConfigChngR` and it stays in the middle of the list. Since the merge of 12.15 the plan places a rebuilt table at the
+   end, ahead of `ConfigChngR` only when that is the last table (`DbSchema::insert_rebuilt`); the created tables of S1-F come
+   first, in the same place. Proved by unit tests for both shapes and the real relative orders of rcheck's logs; the УХ twin
+   itself is rcheck's `run_case_uha.ps1`. Rebuilding tables with data and УХ 8.5: not measured; the size guard decides most of it.
 10. **The dynamic history**: the apply folds it; a restructure over an active dynamic update (`Status` not 100) is refused.
 11. **A running server across the restructure** (0.5): the guids of `siVersions` of a cache row that changed.
 12. **The alter method** (9.5): kept as a research switch of the direct command; it is not offered to the apply (the physical
