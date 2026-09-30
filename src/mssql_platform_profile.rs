@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::sql::{SqlExec, SqlLogin, SqlTarget};
+use crate::sql::{SqlBackend, SqlExec, SqlLogin, SqlTarget};
 
 /// Capability that admits main-configuration writes for a platform profile.
 pub const CAPABILITY_MAIN_WRITE: &str = "mssql.main.write";
@@ -396,7 +396,17 @@ pub fn own_ras_processes_for_exclusive(
 /// seconds between the cluster query and the transaction, while the sessions
 /// stay idle.
 pub fn exclusive_session_gate(code: u32, message: &str, own: &[OwnRasProcess]) -> String {
-    let exempt = if own.is_empty() {
+    let exempt = session_exemption(own);
+    format!(
+        "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(){exempt}) THROW {code}, '{}', 1;",
+        message.replace('\'', "''")
+    )
+}
+
+/// The sessions the exclusive gates leave out, as a condition to append to a
+/// `WHERE` over `sys.dm_exec_sessions`: none when `own` is empty.
+fn session_exemption(own: &[OwnRasProcess]) -> String {
+    if own.is_empty() {
         String::new()
     } else {
         let mut by_host = BTreeMap::<&str, Vec<u32>>::new();
@@ -420,11 +430,53 @@ pub fn exclusive_session_gate(code: u32, message: &str, own: &[OwnRasProcess]) -
         format!(
             " AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ({alternatives}))"
         )
-    };
+    }
+}
+
+/// The sessions the gate of an exclusive activation would count, as a query for
+/// a connection that is not on the database: `session_id, login, host, program,
+/// status`. Same condition as [`exclusive_session_gate`].
+pub fn foreign_sessions_query(database: &str, own: &[OwnRasProcess]) -> String {
     format!(
-        "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(){exempt}) THROW {code}, '{}', 1;",
-        message.replace('\'', "''")
+        "SELECT session_id, ISNULL(login_name,N''), ISNULL(host_name,N''), ISNULL(program_name,N''), status FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(N'{}'){} ORDER BY session_id",
+        database.replace('\'', "''"),
+        session_exemption(own)
     )
+}
+
+/// For an exclusive activation: refuses, before anything is staged, a database
+/// that has a session the gate of the activation would count.
+///
+/// The gate inside the transaction stays the last word; this only moves its
+/// refusal before the stage, so that it leaves `ConfigSave` as it was (#409: an
+/// apply refused by the gate used to leave the stage behind). A connection
+/// through `--sqlcmd` cannot ask; it is left to the gate.
+pub fn refuse_foreign_sessions(sql: &SqlExec, database: &str, own: &[OwnRasProcess]) -> Result<()> {
+    let SqlBackend::Client(client) = sql.backend() else {
+        return Ok(());
+    };
+    let rows = client
+        .query_rows(&foreign_sessions_query(database, own), &[])
+        .context("failed to look at the sessions of the database")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut listed = Vec::new();
+    for row in rows.iter().take(5) {
+        listed.push(format!(
+            "session {} of {:?} on {:?} ({:?}, {})",
+            row.i64(0)?,
+            row.text(1)?,
+            row.text(2)?,
+            row.text(3)?,
+            row.text(4)?
+        ));
+    }
+    bail!(
+        "exclusive activation refused before any write: the database has {} other session(s) ({}); end them, or activate `online`",
+        rows.len(),
+        listed.join("; ")
+    );
 }
 
 fn run_rac_bounded<I>(rac: &Path, args: I) -> Result<String>
@@ -930,6 +982,26 @@ mod tests {
         let found = clients_of("", "", RAS_PROCESSES);
         assert!(found.clients.is_empty());
         assert!(found.ras_only_processes.is_empty());
+    }
+
+    #[test]
+    fn the_pre_stage_query_counts_what_the_gate_counts() {
+        let own = [own("DESKTOP-SMI5N4O", 22608)];
+        let gate = exclusive_session_gate(57209, "m", &own);
+        let query = foreign_sessions_query("lab'db", &own);
+        // The same condition, on the named database instead of the current one.
+        let condition = gate
+            .split_once("WHERE ")
+            .and_then(|(_, rest)| rest.split_once(") THROW"))
+            .map(|(condition, _)| condition.replace("DB_ID()", "DB_ID(N'lab''db')"))
+            .unwrap();
+        assert!(query.contains(&condition), "{query}\n{condition}");
+        assert!(query.starts_with("SELECT session_id, ISNULL(login_name,N'')"));
+        assert!(query.ends_with(" ORDER BY session_id"));
+        // No process named: every session.
+        let plain = foreign_sessions_query("db", &[]);
+        assert!(plain.contains("database_id=DB_ID(N'db') ORDER BY session_id"));
+        assert!(!plain.contains("1CV83 Server"));
     }
 
     #[test]

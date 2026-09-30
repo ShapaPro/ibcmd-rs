@@ -218,7 +218,8 @@ The recovery artifact of the apply (the bytes it overwrote) goes to its default 
    is not (see above). It is stricter than the platform on purpose: it moves rows in one
    transaction, but a working process holds the configuration in memory.
 3. **Only stages of this repository's importers**; the stage of the platform's own `config import`
-   (a `deleted` row, records in another format, a `{68}` Configuration row) is exit 1.
+   (records in another format, a `{68}` Configuration row, a `deleted` list this apply cannot account for name by name:
+   the rows of a removed form or template it can, docs/apply/own-apply.md "Removals") is exit 1.
 4. **LF line ends** (the platform writes CRLF), like the drop-in's export and import.
 5. **Exit 1** is the platform's code for a failed metadata check and this version's code for what
    it does not serve. A script that tells them apart reads stderr.
@@ -261,7 +262,7 @@ the words used to say `config apply` for an operation that was never finished.
 * **`--dynamic=force`, `--extension`, `--sqlcmd`, `--pid`, `--remote`** are refused by name (exit 1).
 * **Stages of the platform's own `config import`** are exit 1 unless the check proves them (`restructuring-check.md`
   3.6): the record-format noise of a whole native image is proven; a `deleted` list of removed attributes is judged
-  by the S1 gate, any other list is not read.
+  by the S1 gate, the rows of a removed form or template are deleted by the apply itself, any other list is not read.
 * **Stages of this program's own import** do not carry a restructuring today (evidence:
   [`s1-acceptance.md`](evidence/dropin-apply/s1-acceptance.md)): the patch mode transfers no attribute, and the
   base-free stage of a changed descriptor is refused by S1 for the rows it rewrites (the business process flowchart, the
