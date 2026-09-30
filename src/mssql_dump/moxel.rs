@@ -7266,7 +7266,16 @@ fn parse_moxel_gantt_chart(
     if text.len() > MAX_MOXEL_GANTT_CHART_BYTES {
         return None;
     }
-    let fields = split_1c_braced_fields(text, 0)?;
+    let mut fields = split_1c_braced_fields(text, 0)?.to_vec();
+    // Version 17 stops four members short of 18 (ERP WE 2.5 `Reports/
+    // АнализЖурналаРегистрации/Templates/ПродолжительностьРаботыРегламентныхЗаданий`)
+    // and the platform publishes for the missing 27..=30 what an 18 publishes
+    // for `{0,0,0}`, `0`, `0`, `0` -- the same reading the form attribute's
+    // Gantt settings take.
+    if fields.first().map(|field| field.trim()) == Some("17") && fields.len() == 27 {
+        fields[0] = "18";
+        fields.extend(["{0,0,0}", "0", "0", "0"]);
+    }
     // The record's own version. 19 carries two trailing members 18 does not,
     // and nothing else about the record moves: over the eleven `GanttChart`
     // records of the stand (both templates of ERP УХ 3.2.12.6, 1С:УТ
@@ -13700,6 +13709,16 @@ pub(super) fn push_moxel_localized_values_xml(
     if values.is_empty() && !present {
         return;
     }
+    // A language whose content is empty is not published: no
+    // `Templates/*/Ext/Template.xml` of ERP WE 2.5, БСП 3.1 or
+    // Документооборот 3.0 as the platform dumps them carries an empty
+    // `<v8:content>`, and ERP WE `Documents/СверкаВзаиморасчетов/Templates/
+    // ПФ_MXL_АктСверкиВзаимныхРасчетов` stores `{"ru",""}` for a format the
+    // platform writes as `<format/>`.
+    let values = values
+        .iter()
+        .filter(|value| !value.content.is_empty())
+        .collect::<Vec<_>>();
     if values.is_empty() {
         _ = write!(xml, "\t\t<{tag}/>\r\n");
         return;

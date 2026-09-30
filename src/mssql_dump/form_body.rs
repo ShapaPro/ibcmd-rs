@@ -1030,9 +1030,47 @@ pub(super) fn with_no_main_table_default_picture_unmarked(
         let marked = format!(">~{}.DefaultPicture<", attribute.name);
         if xml.contains(&marked) {
             xml = xml.replace(&marked, &format!(">{}.DefaultPicture<", attribute.name));
+            // The unmarked field sorts where its new spelling does (ERP WE
+            // 2.5 `Documents/ПриходныйОрдерНаТовары/Forms/ВыборРаспоряжения`:
+            // `Список.DefaultPicture` right after the last `~` field).
+            xml = with_use_always_blocks_sorted(xml);
         }
     }
     xml
+}
+
+/// Every `<UseAlways>` block with its `<Field>` lines in the order the
+/// attribute's own list is sorted in.
+fn with_use_always_blocks_sorted(xml: String) -> String {
+    const OPEN: &str = "<UseAlways>\r\n";
+    const CLOSE: &str = "</UseAlways>";
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml.as_str();
+    while let Some(at) = rest.find(OPEN) {
+        let body_start = at + OPEN.len();
+        let Some(body_len) = rest[body_start..].find(CLOSE) else {
+            break;
+        };
+        let body = &rest[body_start..body_start + body_len];
+        let line_end = body.rfind("\r\n").map_or(0, |index| index + 2);
+        let (lines, closing_indent) = body.split_at(line_end);
+        let mut fields = lines.split_inclusive("\r\n").collect::<Vec<_>>();
+        fields.sort_by_key(|line| {
+            line.trim()
+                .strip_prefix("<Field>")
+                .and_then(|field| field.strip_suffix("</Field>"))
+                .unwrap_or_default()
+                .to_string()
+        });
+        out.push_str(&rest[..body_start]);
+        for field in fields {
+            out.push_str(field);
+        }
+        out.push_str(closing_indent);
+        rest = &rest[body_start + body_len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The form with its Help buttons' command spelled as the raw id when the
@@ -3066,10 +3104,18 @@ pub(super) fn extract_form_report_attribute_ref(
     }
     let id_fields = split_1c_braced_fields(ref_fields.get(1)?.trim(), 0)?;
     let attribute_id = id_fields.first()?.trim();
-    attributes
-        .iter()
-        .find(|attribute| attribute.id == attribute_id)
-        .map(|attribute| attribute.name.clone())
+    // An attribute the form no longer has is written as its bare id (ERP WE
+    // 2.5 `Reports/КонтрольКорректностиЗаполненияОбъектовЭксплуатации/Forms/
+    // ФормаОтчета`: `<DetailsData>4</DetailsData>`,
+    // `<VariantAppearance>2</VariantAppearance>`).
+    Some(
+        attributes
+            .iter()
+            .find(|attribute| attribute.id == attribute_id)
+            .map(|attribute| attribute.name.clone())
+            .unwrap_or_else(|| attribute_id.to_string()),
+    )
+    .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -3476,7 +3522,10 @@ pub(super) fn extract_form_mobile_device_command_bar_content(
         } else if let Some(name) = item_name_by_id.get(&id) {
             items.push(name.clone());
         } else {
-            return Vec::new();
+            // An item the form no longer has is written physically (ERP WE
+            // 2.5 `DataProcessors/РаботаСФайлами/Forms/ФормаОтчета`: item `1`
+            // as `1:<item type uuid>`).
+            items.push(format!("{id}:{FORM_ITEM_TYPE_UUID}"));
         }
     }
     items
@@ -8280,6 +8329,21 @@ fn form_dynamic_list_main_table_auto_fields(
             .then(|| alias.clone())
             .flatten()
     });
+    // A query that selects the main table's reference under another name
+    // gives up the key the automatic fields hang on: ERP WE 2.5
+    // `Catalogs/ВидыНоменклатуры/Forms/ФормаСпискаДляНастройкиЦенообразования`
+    // selects `ВидыНоменклатуры.Ссылка КАК ВидНоменклатуры`, and the platform
+    // writes `~Список.Наименование` for the standard attribute it does not
+    // select.
+    if let Some(alias) = &main_table_alias
+        && selection
+            .paths
+            .get(&(alias.clone(), "Ссылка".to_string()))
+            .is_some_and(|selected_as| selected_as != "Ссылка")
+        && !selection.aliases.contains("Ссылка")
+    {
+        return Some(BTreeSet::new());
+    }
     let mut fields = BTreeSet::new();
     for name in candidates {
         if let Some(alias) = &main_table_alias
@@ -8839,6 +8903,22 @@ pub(super) fn parse_form_dynamic_list_query_selection(
     };
     for item in split_1c_query_items(&selection_tokens) {
         match form_query_selection_item_alias(&item) {
+            // A tabular-section star `<alias>.<section>.*` selects the section
+            // as one nested-table field, not every field of the source: ERP WE
+            // 2.5 `Documents/ПроизводствоБезЗаказа/Forms/ФормаСписка` selects
+            // ten such stars and the platform still writes
+            // `~Список.НалогообложениеНДС` for a document attribute the query
+            // does not select.
+            Some(alias)
+                if alias == "*"
+                    && item.len() == 5
+                    && item[1] == "."
+                    && item[3] == "."
+                    && is_1c_query_ident(&item[0])
+                    && is_1c_query_ident(&item[2]) =>
+            {
+                selection.aliases.insert(item[2].clone());
+            }
             Some(alias) if alias == "*" => {
                 let qualifier = (item.len() == 3 && item[1] == "." && is_1c_query_ident(&item[0]))
                     .then(|| item[0].clone());
@@ -22906,7 +22986,9 @@ fn parse_form_owned_picture(
         FormPictureValueKind::Reference => {
             let reference_fields = split_1c_braced_fields(value.get(2)?.trim(), 0)?;
             let exact_reference = match reference_fields.as_slice() {
-                [code] => code.trim().parse::<i32>().is_ok_and(|code| code < 0),
+                // `{0}` names nothing and is published as `<xr:Ref>0</xr:Ref>`
+                // (ERP WE 2.5 `НастройкаШаблоновПроводок` header pictures).
+                [code] => code.trim().parse::<i32>().is_ok_and(|code| code <= 0),
                 [kind, uuid] => kind.trim() == "0" && parse_non_zero_uuid(uuid.trim()).is_some(),
                 _ => false,
             };
@@ -24340,8 +24422,45 @@ fn resolve_form_owner_scoped_button_data_path(
                     FormOwnerScopedDataPath::Resolved(data_path) => Some(data_path),
                     FormOwnerScopedDataPath::Unknown | FormOwnerScopedDataPath::Ambiguous => None,
                 }
+            })
+            // A table item's current row, addressed by the metadata attribute
+            // the column shows: ERP WE 2.5 `Documents/ЗаказНаПроизводство2_2/
+            // Forms/ФормаДокумента`, Button `ПродукцияСпецификацииДеревоСпецификаций`
+            // carries `{2,{155,<item>},{0,<attribute uuid>}}` against table
+            // `Продукция`, and the platform writes
+            // `Items.Продукция.CurrentData.Спецификация`.
+            .or_else(|| {
+                resolve_form_item_metadata_column_data_path(field, table_name_by_id, object_refs)
             }),
     )
+}
+
+fn resolve_form_item_metadata_column_data_path(
+    field: &str,
+    table_name_by_id: &BTreeMap<String, String>,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let fields = split_1c_braced_fields(field.trim(), 0)?;
+    let [kind, owner, terminal] = fields.as_slice() else {
+        return None;
+    };
+    if kind.trim() != "2" {
+        return None;
+    }
+    let owner = split_1c_braced_fields(owner.trim(), 0)?;
+    let terminal = split_1c_braced_fields(terminal.trim(), 0)?;
+    let ([item_id, item_type], [terminal_kind, uuid]) = (owner.as_slice(), terminal.as_slice())
+    else {
+        return None;
+    };
+    if item_type.trim() != FORM_ITEM_TYPE_UUID || terminal_kind.trim() != "0" {
+        return None;
+    }
+    let table = table_name_by_id.get(item_id.trim())?;
+    let reference = object_refs.get(&parse_non_zero_uuid(uuid.trim())?)?;
+    let (_, attribute) = reference.rsplit_once(".Attribute.")?;
+    (!attribute.is_empty() && !attribute.contains('.'))
+        .then(|| format!("Items.{table}.CurrentData.{attribute}"))
 }
 
 /// The standard member a button's two-segment bound slot `{2,{attribute},{-n}}`
@@ -26204,6 +26323,13 @@ fn resolve_form_dynamic_list_member_data_path(
     let attribute = attribute_metadata_owners_by_id.get(attribute_id.trim())?;
     if !attribute.has_dynamic_list_settings {
         return None;
+    }
+    // `-3` is the list's grouping pseudo field, the same `Group` the
+    // `<UseAlways>` list spells for it; a field bound to it carries it bare
+    // (ERP WE 2.5 `InformationRegisters/ТоварныеОграничения/Forms/ФормаСписка`,
+    // `<DataPath>Список.Group</DataPath>`).
+    if marker.trim() == "-3" && rest.is_empty() {
+        return Some(format!("{}.Group", attribute.name));
     }
     let (name, collection) = match marker.trim() {
         "-1" => ("Order", FormSettingsComposerType::Order),
@@ -33818,15 +33944,18 @@ pub(super) fn format_form_child_item_xml(
     // `AutoMarkIncomplete` (7) and `EditFormat` (5) and precedes `AvailableTypes`
     // (8), `BorderColor` (6), `ChoiceList` (5), `TextEdit` (4), `MinValue` (2),
     // `MaxValue` (1), `InputHint` (1) and `ChoiceHistoryOnInput` (1).
-    if item.type_domain_enabled == Some(false) {
-        xml.push_str(&format!(
-            "{tab}\t<TypeDomainEnabled>false</TypeDomainEnabled>\r\n"
-        ));
-    }
+    // `IncompleteChoiceMode` leads it: ERP WE 2.5 `CommonForms/
+    // ФормаНастройки1ССчитывателиМагнитныхКарт` carries both, the mode first,
+    // in the order of their option slots (33, 35).
     if let Some(incomplete_choice_mode) = item.incomplete_choice_mode {
         xml.push_str(&format!(
             "{tab}\t<IncompleteChoiceMode>{}</IncompleteChoiceMode>\r\n",
             escape_xml_text(incomplete_choice_mode)
+        ));
+    }
+    if item.type_domain_enabled == Some(false) {
+        xml.push_str(&format!(
+            "{tab}\t<TypeDomainEnabled>false</TypeDomainEnabled>\r\n"
         ));
     }
     if item.text_edit == Some(false) {

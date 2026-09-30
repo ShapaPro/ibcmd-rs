@@ -4441,6 +4441,44 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
     } else {
         parse_configuration_mobile_application_permission_messages(tail)?
     };
+    // An older table may skip ids: ERP WE 2.5 declares 29 pairs, ids `0..=27`
+    // and then `33`, and the platform prints every functionality of the full
+    // table, the ones the record does not carry as unused.
+    if matches!(table_version, "0" | "1")
+        && matches!(source_version, "2.20" | "2.21")
+        && tail.len() == 1
+        && trailing_field.trim() == "0"
+    {
+        let mut flags = BTreeMap::new();
+        for field in raw_fields.iter().skip(2).take(count) {
+            let pair = split_1c_braced_fields(field.trim(), 0)?;
+            if pair.len() != 2 {
+                return None;
+            }
+            let id = pair.first()?.trim().parse::<u32>().ok()?;
+            let flag = parse_1c_bool_flag(pair.get(1)?.trim())?;
+            if flags.insert(id, flag).is_some() {
+                return None;
+            }
+        }
+        let sequential = flags.keys().copied().eq(0..count as u32);
+        if !sequential {
+            if flags
+                .keys()
+                .any(|id| !CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES.iter().any(|(known, _)| known == id))
+            {
+                return None;
+            }
+            let functionalities = CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES
+                .iter()
+                .map(|(id, name)| ConfigurationMobileApplicationFunctionality {
+                    name,
+                    use_functionality: flags.get(id).copied().unwrap_or(false),
+                })
+                .collect();
+            return Some((functionalities, permission_messages));
+        }
+    }
     let mut functionalities = Vec::with_capacity(38);
     for ((expected_id, name), field) in CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES
         .iter()
