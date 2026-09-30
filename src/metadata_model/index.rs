@@ -51,62 +51,83 @@ pub struct ConfigIndex {
     pub compatibility_mode: Option<String>,
 }
 
+/// The kinds that have a root family in a configuration, as `(folder, kind)`:
+/// the plural the platform lays a family out in (`Catalogs`) and the kind of
+/// what it holds (`Catalog`). The one table both directions read:
+/// [`kind_of_collection`] and [`collection_of_kind`].
+pub const ROOT_COLLECTIONS: &[(&str, &str)] = &[
+    ("Languages", "Language"),
+    ("Subsystems", "Subsystem"),
+    ("StyleItems", "StyleItem"),
+    ("Styles", "Style"),
+    ("CommonPictures", "CommonPicture"),
+    ("SessionParameters", "SessionParameter"),
+    ("Roles", "Role"),
+    ("CommonTemplates", "CommonTemplate"),
+    ("FilterCriteria", "FilterCriterion"),
+    ("CommonModules", "CommonModule"),
+    ("CommonAttributes", "CommonAttribute"),
+    ("ExchangePlans", "ExchangePlan"),
+    ("XDTOPackages", "XDTOPackage"),
+    ("WebServices", "WebService"),
+    ("HTTPServices", "HTTPService"),
+    ("WSReferences", "WSReference"),
+    ("EventSubscriptions", "EventSubscription"),
+    ("ScheduledJobs", "ScheduledJob"),
+    ("SettingsStorages", "SettingsStorage"),
+    ("FunctionalOptions", "FunctionalOption"),
+    ("FunctionalOptionsParameters", "FunctionalOptionsParameter"),
+    ("DefinedTypes", "DefinedType"),
+    ("CommonCommands", "CommonCommand"),
+    ("CommandGroups", "CommandGroup"),
+    ("Constants", "Constant"),
+    ("CommonForms", "CommonForm"),
+    ("Catalogs", "Catalog"),
+    ("Documents", "Document"),
+    ("DocumentNumerators", "DocumentNumerator"),
+    ("Sequences", "Sequence"),
+    ("DocumentJournals", "DocumentJournal"),
+    ("Enums", "Enum"),
+    ("Reports", "Report"),
+    ("DataProcessors", "DataProcessor"),
+    ("InformationRegisters", "InformationRegister"),
+    ("AccumulationRegisters", "AccumulationRegister"),
+    ("ChartsOfCharacteristicTypes", "ChartOfCharacteristicTypes"),
+    ("ChartsOfAccounts", "ChartOfAccounts"),
+    ("AccountingRegisters", "AccountingRegister"),
+    ("ChartsOfCalculationTypes", "ChartOfCalculationTypes"),
+    ("CalculationRegisters", "CalculationRegister"),
+    ("BusinessProcesses", "BusinessProcess"),
+    ("Tasks", "Task"),
+    ("IntegrationServices", "IntegrationService"),
+    ("Bots", "Bot"),
+    ("ExternalDataSources", "ExternalDataSource"),
+];
+
+/// The kinds that live inside another object (`Forms`, `Templates`, ...): a
+/// collection name but no root family.
+pub const NESTED_COLLECTIONS: &[(&str, &str)] = &[
+    ("Forms", "Form"),
+    ("Templates", "Template"),
+    ("Recalculations", "Recalculation"),
+    ("Interfaces", "Interface"),
+    ("PaletteColors", "PaletteColor"),
+];
+
 /// `Catalogs` -> `Catalog`; nested collections use the same folder names.
 pub fn kind_of_collection(folder: &str) -> Option<&'static str> {
-    Some(match folder {
-        "Languages" => "Language",
-        "Subsystems" => "Subsystem",
-        "StyleItems" => "StyleItem",
-        "Styles" => "Style",
-        "CommonPictures" => "CommonPicture",
-        "SessionParameters" => "SessionParameter",
-        "Roles" => "Role",
-        "CommonTemplates" => "CommonTemplate",
-        "FilterCriteria" => "FilterCriterion",
-        "CommonModules" => "CommonModule",
-        "CommonAttributes" => "CommonAttribute",
-        "ExchangePlans" => "ExchangePlan",
-        "XDTOPackages" => "XDTOPackage",
-        "WebServices" => "WebService",
-        "HTTPServices" => "HTTPService",
-        "WSReferences" => "WSReference",
-        "EventSubscriptions" => "EventSubscription",
-        "ScheduledJobs" => "ScheduledJob",
-        "SettingsStorages" => "SettingsStorage",
-        "FunctionalOptions" => "FunctionalOption",
-        "FunctionalOptionsParameters" => "FunctionalOptionsParameter",
-        "DefinedTypes" => "DefinedType",
-        "CommonCommands" => "CommonCommand",
-        "CommandGroups" => "CommandGroup",
-        "Constants" => "Constant",
-        "CommonForms" => "CommonForm",
-        "Catalogs" => "Catalog",
-        "Documents" => "Document",
-        "DocumentNumerators" => "DocumentNumerator",
-        "Sequences" => "Sequence",
-        "DocumentJournals" => "DocumentJournal",
-        "Enums" => "Enum",
-        "Reports" => "Report",
-        "DataProcessors" => "DataProcessor",
-        "InformationRegisters" => "InformationRegister",
-        "AccumulationRegisters" => "AccumulationRegister",
-        "ChartsOfCharacteristicTypes" => "ChartOfCharacteristicTypes",
-        "ChartsOfAccounts" => "ChartOfAccounts",
-        "AccountingRegisters" => "AccountingRegister",
-        "ChartsOfCalculationTypes" => "ChartOfCalculationTypes",
-        "CalculationRegisters" => "CalculationRegister",
-        "BusinessProcesses" => "BusinessProcess",
-        "Tasks" => "Task",
-        "IntegrationServices" => "IntegrationService",
-        "Bots" => "Bot",
-        "ExternalDataSources" => "ExternalDataSource",
-        "Forms" => "Form",
-        "Templates" => "Template",
-        "Recalculations" => "Recalculation",
-        "Interfaces" => "Interface",
-        "PaletteColors" => "PaletteColor",
-        _ => return None,
-    })
+    ROOT_COLLECTIONS
+        .iter()
+        .chain(NESTED_COLLECTIONS)
+        .find_map(|(collection, kind)| (*collection == folder).then_some(*kind))
+}
+
+/// `Catalog` -> `Catalogs`: the folder of a root family's kind. `None` for a
+/// nested kind (`Form`) and for anything that is not a kind.
+pub fn collection_of_kind(kind: &str) -> Option<&'static str> {
+    ROOT_COLLECTIONS
+        .iter()
+        .find_map(|(collection, root_kind)| (*root_kind == kind).then_some(*collection))
 }
 
 struct Parsed {
