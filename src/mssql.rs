@@ -81,7 +81,7 @@ use crate::module_blob::{HtmlPageOwner, html_page_storage_bytes};
 use crate::mssql_main_activation::{
     MainActivationDryRunReport, MainActivationExecutor, MainActivationMode, MainActivationPlan,
     MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation_for,
-    render_main_activation_sql,
+    render_main_activation_sql_with,
 };
 use crate::parallel;
 use crate::source::{scan_sources, scan_sources_with_prefixes};
@@ -355,6 +355,10 @@ pub struct MssqlActivateStagedMainReport {
     pub tail_log_output: Option<PathBuf>,
     pub live_recovery_command: Option<String>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
+    /// What the live gate found before the promotion (#409 F-9, F-10): the log backup chain, the tail directory, the sessions whose
+    /// work the switch interrupts. Only for the `live` mode on the built-in SQL client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<crate::mssql_live_gate::LiveGateReport>,
     /// The report of the own apply (`mssql_config_apply`) that carried the promotion out: the `exclusive` mode of
     /// the built-in SQL client (#408 step 2). Absent when the transaction of this module did.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -950,6 +954,9 @@ pub fn activate_staged_main(
     // The declared policy is checked before any external process starts, so an
     // unsupported build never reaches rac, sqlcmd, or the source tree.
     args.platform_profile.require_main_write_supported()?;
+    if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
+        bail!("--interrupt-sessions is only valid for live activation");
+    }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
@@ -1081,8 +1088,30 @@ pub fn activate_staged_main(
                 .ok_or_else(|| anyhow!("--tail-log-output is not valid Unicode"))
         })
         .transpose()?;
-    let rendered = render_main_activation_sql(&args.database, &plan, tail_log_output)
-        .map_err(anyhow::Error::new)?;
+    // The gate of the live switch (#409 F-9, F-10) asked here as well, so that a refusal names the sessions and the reason; the
+    // script has the same gate at its head, and that one is the last word (also on the `--sqlcmd` route, which cannot ask). The
+    // probe backup is left to the script's own gate.
+    let live_gate = match (
+        matches!(args.mode, MssqlMainActivationModeArg::Live),
+        plan.is_no_op(),
+        tail_log_output,
+    ) {
+        (true, false, Some(tail)) => crate::mssql_live_gate::preflight_live(
+            &sql,
+            &args.database,
+            tail,
+            args.interrupt_sessions,
+            false,
+        )?,
+        _ => None,
+    };
+    let rendered = render_main_activation_sql_with(
+        &args.database,
+        &plan,
+        tail_log_output,
+        args.interrupt_sessions,
+    )
+    .map_err(anyhow::Error::new)?;
     let worker_options =
         if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !plan.is_no_op() {
             Some(crate::mssql_worker_switch::WorkerSwitchOptions {
@@ -1162,6 +1191,7 @@ pub fn activate_staged_main(
         },
         worker_switch,
         config_apply: None,
+        live_gate,
     })
 }
 
@@ -1225,6 +1255,7 @@ fn activate_by_config_apply(
         live_recovery_command: None,
         worker_switch: None,
         config_apply: Some(applied),
+        live_gate: None,
     })
 }
 
@@ -10137,6 +10168,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,

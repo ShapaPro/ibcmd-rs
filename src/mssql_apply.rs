@@ -43,6 +43,9 @@ pub struct MssqlApplySourceChangeReport {
     pub recovery_token: Option<String>,
     pub staging: Option<Value>,
     pub activation: Option<Value>,
+    /// What the live gate found before the stage (#409 F-9, F-10); only for the `live` mode on the built-in SQL client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<crate::mssql_live_gate::LiveGateReport>,
     pub timings: MssqlApplySourceChangeTimings,
 }
 
@@ -67,6 +70,11 @@ pub fn apply_source_change(
         args.platform_profile.require_main_write_supported()?;
         require_supported_main_source_cohort(args)?;
         preflight_tail_log(args)?;
+        crate::mssql_main_activation::preflight_interrupt_sessions(
+            activation_mode(args.mode),
+            args.interrupt_sessions,
+        )
+        .map_err(anyhow::Error::new)?;
     }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
@@ -263,6 +271,7 @@ pub fn apply_source_change(
             recovery_token: None,
             staging: None,
             activation: None,
+            live_gate: None,
             timings: MssqlApplySourceChangeTimings {
                 active_export_ms,
                 classification_ms,
@@ -291,6 +300,22 @@ pub fn apply_source_change(
             &own,
         )?;
     }
+    // The live switch is refused, before the stage, when the database has no log backup chain, the tail directory is not there or
+    // not writable, or sessions have open work that the switch would roll back (#409 F-9, F-10). The gate at the head of the
+    // activation script stays the last word.
+    let live_gate = match (
+        args.extension.is_none() && matches!(args.mode, MssqlMainActivationModeArg::Live),
+        args.tail_log_output.as_deref().and_then(Path::to_str),
+    ) {
+        (true, Some(tail)) => crate::mssql_live_gate::preflight_live(
+            &main_read_sql(args)?,
+            &args.database,
+            tail,
+            args.interrupt_sessions,
+            !args.dry_run,
+        )?,
+        _ => None,
+    };
     prepare_compile_tree_for_selected_change(&proposed_root, &selected_path)?;
 
     let path_prefix = owner_prefix(&selected_path)?;
@@ -427,6 +452,7 @@ pub fn apply_source_change(
                 script_output: args.script_output.clone(),
                 recovery_output: args.recovery_output.clone(),
                 tail_log_output: args.tail_log_output.clone(),
+                interrupt_sessions: args.interrupt_sessions,
                 rac: args.rac.clone(),
                 ras_endpoint: args.ras_endpoint.clone(),
                 cluster_id: args.cluster_id,
@@ -507,6 +533,7 @@ pub fn apply_source_change(
         recovery_token,
         staging: Some(staging),
         activation,
+        live_gate,
         timings: MssqlApplySourceChangeTimings {
             active_export_ms,
             classification_ms,
@@ -1442,6 +1469,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,
@@ -1488,6 +1516,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,
