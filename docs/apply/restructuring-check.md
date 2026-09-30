@@ -766,6 +766,7 @@ pub enum S1Operation {                    // every variant carries `object: Obje
     WidenString { attribute, from: u32, to: u32 },
     SwitchIndex { attribute, from: IndexMode, to: IndexMode },   // DontIndex <-> Index or IndexWithAdditionalOrder
     AddTabularSection { section },  AddObject,                   // a catalog or a document
+    AddSectionAttribute { section, attribute },                  // a new attribute in a section the object had
 }
 pub struct Refusal { pub code: RefusalCode, pub rule: RuleId, pub reason: String, pub detail: String }
 ```
@@ -790,7 +791,8 @@ match is on `rule`, `kind`, the steps of `path` and `op`, never on words.
 | `attribute-property-not-covered`; ...; `.../Properties/Indexing`; `DontIndex <-> Index` or `DontIndex <-> IndexWithAdditionalOrder` | `SwitchIndex` |
 | the same between `Index` and `IndexWithAdditionalOrder` (not traced), or to or from any other value | refused `index-mode-outside-s1` |
 | `tabular-section-added-dropped-moved`; ...; `ChildObjects/TabularSection[T]`; added | `AddTabularSection` |
-| the same, dropped or moved; any change inside a section (an added column: case h) | refused `tabular-section-outside-s1` |
+| `tabular-section-column-added-dropped-moved`; ...; `ChildObjects/TabularSection[T]/ChildObjects/Attribute[A]`; added | `AddSectionAttribute` |
+| the same, dropped or moved; the section dropped or moved; any other change inside a section | refused `tabular-section-outside-s1` |
 | `object-with-storage-added-or-dropped`; Catalog, Document; no path; added, **and** the same rule on `Configuration`, `ChildObjects/<Kind>[Name]`, added, of the same kind and name | `AddObject` (one operation for the two reasons) |
 | the one without the other | refused `object-list-mismatch` |
 | the same rule, dropped | refused `object-removed` |
@@ -806,8 +808,8 @@ match is on `rule`, `kind`, the steps of `path` and `op`, never on words.
 | a verdict with `incomplete` set (a tree against a database left data out) | refused `incomplete-verdict` |
 
 `exactly_the_operations_of_s1_pass_and_nothing_else_does` holds `classify` to this table from outside: 62 rule ids x
-10 kinds x 12 paths x 10 operations x 3 classes, 223 200 reasons one at a time, and exactly the 12 that the table
-names (six operations on two kinds) come out as operations.
+10 kinds x 12 paths x 10 operations x 3 classes, 223 200 reasons one at a time, and exactly the 14 that the table
+names (seven operations on two kinds) come out as operations.
 
 An operation says what the descriptors changed by, not what a reason cannot see: that a string being widened is
 variable-length (`AllowedLength` is another leaf), that a new object has no predefined items or hierarchy, that a
@@ -840,13 +842,13 @@ each case is what the table below says, and an operation is never given to a cha
 | `p1` catalog properties | 18 | 3 | 15 | 0 | 3 (`property-outside-s1`) |
 | `p2` attribute properties | 16 | 2 | 13 | 2 (`switch-index`, `widen-string`) | 1 (the attribute's `DataHistory`, over-refused) |
 | `p4` children | 10 | 3 | 6 | 1 (`switch-index`) | 3 (`Use`; the enumeration value, `data-change`; a standard attribute's `DataHistory`, over-refused) |
-| `p5` children | 9 | 4 | 5 | 2 (`add-tabular-section`, `delete-attribute`) | 2 (`tabular-section-outside-s1`, `kind-outside-s1`) |
+| `p5` children | 9 | 4 | 5 | 3 (`add-tabular-section`, `add-section-attribute`, `delete-attribute`) | 1 (`kind-outside-s1`) |
 | `p6` configuration, jobs, comments | 19 | 3 | 16 | 0 | 3 (`data-change`, the scheduled jobs) |
 | `p7a` add a module, a role, a catalog | 3 | 1 | 2 | 1 (`add-object`) | 0 |
 | `p7b` drop them | 3 | 1 | 2 | 0 | 1 (`object-removed`) |
 | `p8` presentation | 9 | 0 | 9 | 0 | 0 |
 | S1's own two (an attribute added to a catalog, to a document) | 2 | 2 | 0 | 2 (`add-attribute`) | 0 |
-| **focused** | **89** | **19** | **68** | **8** | **13** |
+| **focused** | **89** | **19** | **68** | **9** | **12** |
 | the 159 probes of 6.1 | 159 | 20 | 128 | 0 | 31: the 20 the platform acted on, and 11 it left alone |
 
 The 11 over-refusals are the price of failing closed, and they are the properties the platform applied without
