@@ -529,6 +529,161 @@ pub fn remove_field_indexes(table: &mut Brace, field: &str) -> Result<Vec<String
     Ok(removed)
 }
 
+/// A declared index `{"<name>",1,{<n>,"<field>"...},0,0,0,{0},0,0}`.
+fn index_brace(name: &str, fields: &[&str]) -> Brace {
+    let mut names = vec![Brace::atom(fields.len())];
+    names.extend(fields.iter().map(|field| Brace::str(*field)));
+    Brace::List(vec![
+        Brace::str(name),
+        Brace::num(1),
+        Brace::List(names),
+        Brace::num(0),
+        Brace::num(0),
+        Brace::num(0),
+        Brace::List(vec![Brace::num(0)]),
+        Brace::num(0),
+        Brace::num(0),
+    ])
+}
+
+/// Adds the declared indexes the platform makes for an attribute that gets `Indexing = Index` (or
+/// `IndexWithAdditionalOrder` with `additional_order`), fixes the count and returns their names. Traced on the
+/// platform (cases d0 and d1):
+///
+/// * a catalog: `ByFieldFld<n> {2,"Fld<n>","ID"}`; a hierarchical one first gets `ByParentFieldFld<n>
+///   {4,"ParentID","Folder","Fld<n>","ID"}` (the prefix is the one of its own `ParentDescr`);
+/// * a document: `ByFieldFld<n> {2,"Fld<n>","ID"}`;
+/// * with the additional order the key goes on with the order of the object: `Description,ID,Marked` for a
+///   catalog (`{6,"ParentID","Folder","Fld<n>","Description","ID","Marked"}` in the parent index), `Date_Time,ID,Marked`
+///   for a document, whose date index `ByDocDate` also lists the field last.
+///
+/// The entries sit among the attribute indexes in the order of their attributes' fields in the table (not by
+/// number, not by name); the first attribute index of a table goes after the standard ones. A table that
+/// shows anything else is refused: a subordinate catalog, several additional-order attributes in a document,
+/// a hierarchical catalog with no `ParentDescr`.
+pub fn add_field_indexes(
+    table: &mut Brace,
+    field: &str,
+    additional_order: bool,
+) -> Result<Vec<String>> {
+    let view = TableView::new(table)?;
+    let fields: Vec<String> = view.fields()?.into_iter().map(|entry| entry.name).collect();
+    let position_of = |name: &str| fields.iter().position(|candidate| candidate == name);
+    let has = |name: &str| position_of(name).is_some();
+    let own = position_of(field).with_context(|| format!("the table has no field {field}"))?;
+    let existing = view.indexes()?;
+    if let Some(index) = existing
+        .iter()
+        .find(|index| index.fields.iter().any(|name| name == field))
+    {
+        bail!("index {} already names the field {field}", index.name);
+    }
+    if has("OwnerID") {
+        bail!("an index of an attribute of a subordinate catalog is not traced");
+    }
+    let document = has("Date_Time");
+    let hierarchical = has("ParentID");
+    if document && hierarchical {
+        bail!("a table with a date and a parent is neither a catalog nor a document");
+    }
+    let tail: &[&str] = match (document, additional_order) {
+        (_, false) => &["ID"],
+        (false, true) if has("Description") => &["Description", "ID", "Marked"],
+        (false, true) => {
+            bail!("an additional order by a catalog with no description is not traced")
+        }
+        (true, true) => &["Date_Time", "ID", "Marked"],
+    };
+    let plain = format!("ByField{field}");
+    let mut fresh: Vec<(String, Vec<&str>)> = Vec::new();
+    if hierarchical {
+        let parent = existing
+            .iter()
+            .find(|index| index.name == "ParentDescr")
+            .context(
+                "a hierarchical table has no ParentDescr index to take the parent prefix from",
+            )?;
+        let prefix: Vec<&str> = parent
+            .fields
+            .iter()
+            .take_while(|name| name.as_str() != "Description")
+            .map(String::as_str)
+            .collect();
+        if prefix.is_empty() || prefix.len() == parent.fields.len() {
+            bail!("the ParentDescr index has no parent prefix");
+        }
+        let mut keys = prefix;
+        keys.push(field);
+        keys.extend(tail);
+        fresh.push((format!("ByParentField{field}"), keys));
+    }
+    let mut keys = vec![field];
+    keys.extend(tail);
+    fresh.push((plain, keys));
+
+    // Where they go: before the first attribute index whose field sits later in the table.
+    let mut before = None;
+    let mut last_attribute_index = None;
+    for (at, index) in existing.iter().enumerate() {
+        if !index.name.starts_with("By") || !index.name.contains("Field") {
+            continue;
+        }
+        last_attribute_index = Some(at);
+        let owner = index
+            .fields
+            .iter()
+            .filter(|name| name.starts_with("Fld"))
+            .find_map(|name| position_of(name))
+            .with_context(|| format!("index {} names no attribute field", index.name))?;
+        if owner > own && before.is_none() {
+            before = Some(at);
+        }
+    }
+    let at = before
+        .or(last_attribute_index.map(|last| last + 1))
+        .unwrap_or(existing.len());
+
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let indexes = items
+        .get_mut(6)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no index list")?;
+    let mut added = Vec::new();
+    for (offset, (name, keys)) in fresh.iter().enumerate() {
+        indexes.insert(1 + at + offset, index_brace(name, keys));
+        added.push(name.clone());
+    }
+    if document && additional_order {
+        // The date index lists the additional-order attribute last.
+        let date = indexes
+            .iter_mut()
+            .skip(1)
+            .find(|index| {
+                index
+                    .as_list()
+                    .and_then(|items| items.first())
+                    .and_then(Brace::as_str)
+                    == Some("ByDocDate")
+            })
+            .context("a document has no ByDocDate index")?;
+        let names = date
+            .as_list_mut()
+            .and_then(|entry| entry.get_mut(2))
+            .and_then(Brace::as_list_mut)
+            .context("the date index has no field list")?;
+        if names.len() != 4 {
+            bail!(
+                "the date index already lists an additional-order attribute: several are not traced"
+            );
+        }
+        names.push(Brace::str(field));
+        names[0] = Brace::atom(names.len() - 1);
+        added.push(format!("ByDocDate (+ {field})"));
+    }
+    indexes[0] = Brace::atom(indexes.len() - 1);
+    Ok(added)
+}
+
 // ---------------------------------------------------------------------------
 // The SQL a table stands for.
 

@@ -770,7 +770,7 @@ string widening, a plain new catalog or document -- catalogs and documents only.
 
 | question | answer |
 |---|---|
-| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section, switch the index of an attribute, widen a variable string, add a plain object. **Built**: adding attributes of every primitive type (12.8), deleting an attribute and widening a string (12.11). Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
+| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section, switch the index of an attribute, widen a variable string, add a plain object. **Built**: adding attributes of every primitive type (12.8), deleting an attribute and widening a string (12.11), switching the index of an attribute (12.13). Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
 | where the structure work runs | **inside the apply's transaction**: the apply's locks and assertions, then the *structure phase*, then the fold of dynamic generations, the move of the staged rows, the resets and the caches, the postconditions, `COMMIT`. One SERIALIZABLE script; any failed assertion rolls the rebuilt tables back with everything else; no `Status 200/400/500` is ever visible and there is nothing to resume |
 | how the apply asks | the gate it already has (`StructuralGate::check`) plus `take_structure()` and `ScriptInputs.structure_sql`: about 100 lines in `mssql_config_apply` (half of them comments and a test), and no dependency of it on `restructure` (12.4) |
 | which caches | attribute operations change two `Params` rows -- the XDTO model and the object registry -- and `siVersions`; a new object needs three more. **Deleting a stale row is not a cheap route**: with `1a621f0f` or `a07b62f0` absent the server does not start (12.5) |
@@ -806,7 +806,7 @@ the ConfigSave of the twin); the code matches the *property path* and the first 
 | `Catalog.X`, `Document.X`: `ChildObjects/Attribute[A]`: `added (a column is added or dropped)` | add an attribute | **yes** |
 | `...`: `ChildObjects/Attribute[A]`: `removed (a column is added or dropped)` | delete an attribute | **yes** |
 | `...`: `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`: `50 -> 100 (a property of an attribute no rule covers)` | widen a string (the plan judges the direction: a shorter limit is refused) | **yes** |
-| `...`: `ChildObjects/Attribute[A]/Properties/Indexing`: `DontIndex -> Index (a property of an attribute no rule covers)` | switch the index | no |
+| `...`: `ChildObjects/Attribute[A]/Properties/Indexing`: `DontIndex -> Index (a property of an attribute no rule covers)`, and `DontIndex <-> IndexWithAdditionalOrder` | switch the index (`Index <-> IndexWithAdditionalOrder` is refused: not traced) | **yes** |
 | `...`: `ChildObjects/TabularSection[T]`: `added (a tabular section is added, dropped or moved)` | add a tabular section (its attributes are not separate reasons of a new section) | no |
 | `Catalog.X`: (no property): `added (Catalog; an object that owns tables or stored data is added or dropped)` **and** `Configuration`: `ChildObjects/Catalog[X]`: `added (...)` | add an object (the pair) | no |
 
@@ -851,7 +851,7 @@ rebuilds the tables whose `DBSchema` entry differs, and nothing else.
 | **add an attribute** (catalog, document) | the field entry `{"Fld<n>",<nullable>,{<type entries>}}` inserted after the field of the attribute before it (the first after the standard fields) | `Fld` entry appended, `n` = max over the main header and every `DBNames-Ext-*` header + 1, in the objects' order of the configuration's lists and the attributes' metadata order | the object's **main table and all its sub-tables** rebuilt (a2: 3 tables; the types case: 11 tables of 6 objects) | by column name; the new column gets the default of its type: string `''`, fixed string spaces, number `0`, date/time `2001-01-01 00:00:00`, boolean `0x00`, uuid 16 zero bytes, value storage `0x0101...`; nullable (`NULL` for the rows the attribute does not apply to) only for an attribute `Use ForItem` / `ForFolder` of a hierarchical catalog | XDTO model (one `<property>` line), object registry (one record: kind 36 catalog, 41 document), `siVersions` | a2, b, h, types case (T1) | **built** |
 | **delete an attribute** | the field entry removed; the indexes of the attribute go with it (`ByFieldFld<n>`, `ByOwnerFieldFld<n>`, `ByParentFieldFld<n>`); in a document with an additional-order attribute the date index `ByDocDate` **stays** and loses the field from its list (b2); the indexes that stay are **renumbered** (`_Document1564_5` -> `_4`) | unchanged: the entries of the removed attributes stay (b1: the header and the count as they were, plus the new numbers of the attributes the same stage adds) | the main table and **all its sub-tables** rebuilt without the column and its indexes (b1: 8 tables of 6 objects; b2: 4 tables of 2) | by column name; the dropped column's data is not carried | XDTO lines removed, registry records removed and the count decremented, `siVersions` | f, b1, b2 | **built** (S1-B). The stage's `deleted` row lists the removed attributes (12.2.3) and is consumed by the phase |
 | **widen a string** (variable length, `b > a`) | the type entry of the field `{"S",0x80000000\|a}` -> `\|b`; the field keeps its place, the declared indexes stay as they are | unchanged (g, c1) | the object's **main table and all its sub-tables rebuilt** (c1: 5 objects, 10 tables -- the platform rebuilds, it does not `ALTER COLUMN`); the column `nvarchar(a)` -> `nvarchar(b)` | the column copied as it is | **none**: the text of all 16 `.si` rows is the same before and after the platform's apply (c1, measured) | g, c1 | **built** (S1-C). Narrowing, a fixed string, an unlimited one (`nvarchar(max)` is another column type), a change between them and every other type change is data conversion (case k, done by the 1C engine): refuse |
-| **switch the index** (`DontIndex` <-> `Index`) | index entries added / removed for the field: for a catalog with hierarchy two unique indexes `(sep, _ParentIDRRef, _Folder, <field>, _IDRRef)` and `(sep, <field>, _IDRRef)`, numbered after the existing ones | unchanged | rebuilt (g; the flag alone is not traced: whether the platform only creates the index or rebuilds is the first thing the sub-issue measures) | as it is | none expected | g | designed |
+| **switch the index** (`DontIndex` <-> `Index`, `DontIndex` <-> `IndexWithAdditionalOrder`) | the declared indexes of the entry only, the fields are the same: `ByFieldFld<n> {2,"Fld<n>","ID"}` (a hierarchical catalog first gets `ByParentFieldFld<n> {4,"ParentID","Folder","Fld<n>","ID"}`), with the additional order the key goes on with `Description,ID,Marked` (a catalog) or `Date_Time,ID,Marked` (a document, whose date index `ByDocDate` also lists the field last); the entries sit among the attribute indexes in the order of their fields in the table, the physical indexes are renumbered; off is the reverse | unchanged: **no `ByField` entry** for a switch (d0, d1) | the object's **main table and all its sub-tables rebuilt** (d0: `_Reference2598`; d1: 6 objects, 11 tables), the columns as they were | as it is | **none** (the text of all 16 `.si` rows is the same before and after, d0 and d1) | g, d0, d1 | **built** (S1-D). `Index` <-> `IndexWithAdditionalOrder` and several additional-order attributes of one document are not traced: refused |
 | **add a tabular section** (with attributes) | a new sub-table entry in the object's entry: `_<Owner>_IDRRef`, the separator, `_KeyField`, `_LineNo<m>`, one field per attribute; a unique clustered index on the separator, the owner key and `_KeyField`, an index on its first attribute | `VT` and `LineNo` (the section's uuid) and one `Fld` per attribute: h: 11039, 11040, 11041, 11042 | **only the new table is created** (h: `_Reference15_VT11039`), empty; the object's main table is not rebuilt | none | XDTO (a `Row` object type and the property of the section), registry (kind 39 and kind 14 records), the per-class index `2203278d` (its tabular-section group) | h | designed. An attribute added to an *existing* section rebuilds that sub-table alone (h: `_Reference20_VT159`): the same machinery, a separate case |
 | **add an object** (plain catalog or document) | a new table entry before `ConfigChngR` (c: `_Reference11036` with its four indexes) | a `Reference` entry (c: 11036; no `ReferenceChngR` until an exchange plan lists the catalog; a `RefSInf` when the catalog has predefined data: refuse) numbered from the counter | a new table, empty | none | XDTO (three object types), registry, `2203278d`, `a07b62f0` and the rest of the derived rows; the `Config` rows of the object and its registration for the exchange-plan nodes (the apply's own new-object registration) | c | designed. The largest: 12.5 |
 
@@ -1144,7 +1144,9 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
 12. **The alter method** (9.5): kept as a research switch of the direct command; it is not offered to the apply (the physical
     order then differs from native's, and the byte-level twin comparison stops working).
 13. **`ByField` numbers**: an attribute created *with* the index flag gets an extra `DBNames` entry of kind `ByField`
-    (`dbnames-kinds.txt`); switching the flag later did not (g). The planner refuses new indexed attributes until S1-D.
+    (`dbnames-kinds.txt`); switching the flag later does not (g, and d0, d1 on the БСП: `DBNames` did not change). The
+    planner still refuses new indexed attributes (an added attribute with `Index`): that is the addition of an attribute with
+    an index, not a switch, and is not built.
 
 ### 12.10 Evidence
 
@@ -1153,7 +1155,7 @@ types case from the ConfigSave, the other cases from `--tree`, and the whole nat
 checks of 12.6 on the types case, with the numbers of 12.8), `s1-t1-session.txt` (the job output of the cluster session, native and
 ours), `s1-cache-necessity.txt` (the cache experiment of 12.5), `s1-seam-script.sql` (the generated transaction with the
 binary values shortened), and for wave 1 (12.11) `s2-wave1-twin-compare.txt` (the checks of 12.6 for b1, b2, c1) and
-`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal). `s1-port-acceptance.txt` (12.12: the four cases through `mssql-config-apply --allow-restructure s1`). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
+`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal), for S1-D (12.13) `s2-wave2-d-twin-compare.txt`, `s2-d0-session.txt`, `s2-d1-session.txt`. `s1-port-acceptance.txt` (12.12: the four cases through `mssql-config-apply --allow-restructure s1`). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
 `out/except_*`, `out/si_diff_*`, `out/dbschema_cmp_*`, `out/config_cmp_*`, `out/export_diff_*`, `out/session_t1_*`, `logs/cache_bisect*.log`,
 `xe/s1_t1/`, `snap/ibcmd_rs_04_ddl_s1_*`. Tools: `scripts/restructure-lab/` (`compare_tables.ps1`, `compare_config.ps1`,
 `dbschema_cmp.py`, `params_row.ps1`, `cache_variant.ps1`, `edit_cases_s1.py`, `jobs/types_t1.bsl`). Tests: `tests_s1.rs` (the gate),
@@ -1229,3 +1231,44 @@ classification (`apply_check::s1::classify`, #404); the S1 work was ported onto 
   `DbCopies*`, `DBNames` text equal, 16 of 16 `.si` rows, a native `config apply` afterwards «не требуется», native export
   12 198 of 12 198 files identical. Without a backup flag the apply refuses with its own message; with `--recovery-backup` it
   takes the backup (1.5 s for the БСП clone) and applies.
+
+### 12.13 S1-D: the index flag of an attribute (#400)
+
+The trace of one flag alone (case d0: `ЦелевоеВремя` of `КлючевыеОперации`, a number of a flat catalog, `DontIndex` -> `Index`)
+first, then the plan (`add_field_indexes` in `schema.rs`, `IndexSwitch` in `plan.rs`, `SwitchIndex` in the S1 gate). What the
+platform does (`entries_diff.py` on the snapshots of the staged state and of the native result, the XE trace):
+
+* it **rebuilds the object** (d0: `_Reference2598`, the create / index / copy / drop / rename story of every other rebuild); the
+  columns are the same; the new index sits among the others in the order of the fields, so the physical names are renumbered
+  (`_Reference2598_4` is now the new one);
+* the `DBSchema` entry gets or loses the declared indexes of the attribute and nothing else; `DBNames` does not change (no
+  `ByField` number for a switch); **no cache row changes** (all 16 `.si` rows have the same text after the native apply).
+
+Case d1 (six objects, 12 switches: on -- numbers of two flat catalogs, a string of a hierarchical catalog, two attributes of
+a document; with the additional order an attribute of the hierarchical catalog and one of the document; off -- indexed
+attributes of a flat catalog, of a document and the additional order of a flat catalog and of a document): the index entries are what 12.3 says; `ByDocDate` of a document keeps its place and lists the attribute
+last while the additional order is on (removed again when it goes off, the same code as b2).
+
+The twin protocol (12.6) through `mssql-config-apply --allow-restructure s1 --i-have-a-backup`, ours against the native apply
+of the same stage (`s2-wave2-d-twin-compare.txt`, `s2-d0-session.txt`, `s2-d1-session.txt`):
+
+| check | d0 | d1 |
+|---|---|---|
+| 1. the plan offline from the staged snapshot equals native's | `corpus_plan_of_the_index_flag_alone_equals_the_native_result` | `corpus_plan_of_the_index_flags_on_and_off_equals_the_native_result` (12 switches in 6 objects; no cache; the 16 `.si` rows unchanged natively) |
+| 2. tables, columns, indexes | identical but the drift list | the same |
+| 3. data of the rebuilt tables, `EXCEPT` both ways | 0 rows (1 table) | 0 rows (11 tables) |
+| 4. `Config` | 0 rows on either side | the same |
+| 5. `DBSchema`, `DBNames` | equal but `DbCopies*`; the `DBNames` text equal | the same |
+| 6. the `.si` rows | 16 of 16 | 16 of 16 |
+| 7. native `config apply` afterwards | «не требуется» | «не требуется» |
+| 8. native export of both, `source-diff` | 12 198 of 12 198 identical | 12 198 of 12 198 |
+| 9. cluster session (the indexing the metadata reports, every switched attribute read in the order of its own index, rows with a digest, XDTO, write and read back) | identical, 8 lines | identical, 60 lines |
+| 10. a rehearsal changes nothing | `snapdiff` empty | empty |
+| 11. refusals on a real stage | (unit tests) | `Index` -> `IndexWithAdditionalOrder` of a stored `Index`: `S1: index-mode-outside-s1` (the classification's); the `root` row changed: `the service row root changes` |
+| 12. `THROW` before `COMMIT` on a fresh twin | -- | the digest of the whole database unchanged |
+
+Not traced, therefore refused: `Index` <-> `IndexWithAdditionalOrder` (the classification refuses it; the plan refuses it too),
+a second additional-order attribute of one document (the date index would list two), an index of an attribute of a subordinate
+catalog (`ByOwnerField...`), a hierarchical catalog without its `ParentDescr` index, an additional order of a catalog with no
+description. The gate takes `DontIndex` <-> `IndexWithAdditionalOrder` since `apply_check::s1` was widened by one variant for it
+(a separate commit).
