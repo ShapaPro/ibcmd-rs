@@ -1,7 +1,8 @@
 # The drop-in `config apply` serves S1: acceptance on БСП 8.3.27 twins (rcheck dn, on #391)
 
-Debug build of `feat/0.4-dropin-s1` (feat/0.4 at ee651602 merged: S1 waves 1, the index flag, the S1 gate on the apply's
-seam). The drop-in is `ibcmd-rs infobase config apply` (the program under the platform's command line). Platform
+Debug build of `feat/0.4-dropin-s1` (feat/0.4 at 847f581a merged: S1 waves 1, the index flag, the S1 gate on the apply's
+seam, the extension refusal). `b1`, `c1` and the controls ran on the build before the last merge (ee651602), `d1` again on the
+final build with the same result. The drop-in is `ibcmd-rs infobase config apply` (the program under the platform's command line). Platform
 8.3.27.2214, `--user=Администратор`, SQL Server on localhost, every native write under the lab's `native` lock.
 
 ## The protocol
