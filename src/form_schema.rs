@@ -7235,10 +7235,16 @@ impl FormSpecialFieldSchema {
     /// 8.5.1.1150 BSP bar written `<MaxWidth>40</MaxWidth>`, `0` on the 20
     /// others (the member beside `AutoMaxWidth`, as on the other kinds).
     pub(crate) fn max_width(self, options: &[&str]) -> Option<String> {
-        if self.kind != FormSpecialFieldKind::ProgressBar {
-            return None;
-        }
-        let value = options.get(12)?.trim();
+        // The track bar keeps its cap in member 14, behind the `AutoMaxWidth`
+        // flag at 13 (1C:Документооборот `ТочностьПоискаРегулирование`:
+        // `...,{3,4,{0}},0,20,0,1,0}` writes `<AutoMaxWidth>false` and
+        // `<MaxWidth>20`); `0` is unwritten.
+        let slot = match self.kind {
+            FormSpecialFieldKind::ProgressBar => 12,
+            FormSpecialFieldKind::TrackBar => 14,
+            _ => return None,
+        };
+        let value = options.get(slot)?.trim();
         (value != "0" && value.parse::<u32>().is_ok()).then(|| value.to_string())
     }
 
@@ -9832,5 +9838,32 @@ mod table_tail_property_tests {
         fields[FormTableSlot::RowInputMode.index()] = "1";
         let schema = FormTableSchema::from_raw_layout("55", "Table", &fields).unwrap();
         assert_eq!(schema.row_input_mode(&fields), Some("EndOfWindow"));
+    }
+}
+
+#[cfg(test)]
+mod track_bar_extent_tests {
+    use super::*;
+
+    /// Evidence: `DataProcessors/СопоставлениеНоменклатурыБЭД/Forms/Форма`
+    /// `ТочностьПоискаРегулирование` of 1C:Документооборот 3.0.17, whose option
+    /// tuple is `{2,1,1,1,0,30,100,1,0,10,5,1,{3,4,{0}},0,20,0,1,0}` and whose
+    /// native item writes `<MaxWidth>20</MaxWidth>`.
+    #[test]
+    fn a_track_bar_reads_its_max_width_from_member_14() {
+        let options = [
+            "2", "1", "1", "1", "0", "30", "100", "1", "0", "10", "5", "1", "{3,4,{0}}", "0",
+            "20", "0", "1", "0",
+        ];
+        let schema = FormSpecialFieldSchema::from_raw_layout(
+            "37",
+            59,
+            Some("10"),
+            0,
+            &options,
+            Some("2"),
+        )
+        .unwrap();
+        assert_eq!(schema.max_width(&options).as_deref(), Some("20"));
     }
 }

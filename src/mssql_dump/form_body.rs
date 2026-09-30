@@ -832,6 +832,7 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     } else {
         with_no_main_table_default_picture_unmarked(xml, &attributes)
     };
+    let xml = with_excluded_help_command_unresolved(xml, &properties.command_set_excluded_commands);
     let xml = if context.dcs_target_profile.as_str() == "xml-2.20" {
         with_v85_only_events_by_identifier(xml)
     } else {
@@ -989,6 +990,23 @@ pub(super) fn with_no_main_table_default_picture_unmarked(
         }
     }
     xml
+}
+
+/// The form with its Help buttons' command spelled as the raw id when the
+/// form excludes `Help`: the button no longer resolves to the standard command
+/// and 8.3.27.2214 writes `0:<id>` (nine forms of 1C:Документооборот 3.0 and
+/// SSL that exclude Help and keep a Help button; none resolves it).
+pub(super) fn with_excluded_help_command_unresolved(
+    xml: String,
+    excluded_commands: &[&str],
+) -> String {
+    if !excluded_commands.contains(&"Help") {
+        return xml;
+    }
+    xml.replace(
+        "<CommandName>Form.StandardCommand.Help</CommandName>",
+        "<CommandName>0:39bb0fe9-771d-4dd5-8a6e-2d16984523af</CommandName>",
+    )
 }
 
 const ROOT_DCS_SCHEMA_NAMESPACE: &str =
@@ -15155,6 +15173,8 @@ fn parse_form_child_item_with_metadata_owners(
                 .and_then(|options| options.horizontal_stretch)
         } else if tag == "Page" {
             page_properties.and_then(|properties| properties.horizontal_stretch())
+        } else if tag == "ViewStatusAddition" {
+            parse_form_view_status_addition_horizontal_stretch(&fields)
         } else if let Some(value) = special_field_layout
             .as_ref()
             .and_then(|(schema, options)| schema.horizontal_stretch(options))
@@ -19054,7 +19074,22 @@ pub(super) fn parse_form_view_status_addition_horizontal_location(
     fields: &[&str],
 ) -> Option<&'static str> {
     let options = split_1c_braced_fields(fields.get(13)?.trim(), 0)?;
-    (options.get(11).map(|field| field.trim()) == Some("0")).then_some("Left")
+    // Member 11: `0` is `Left` (527 additions), `1` is `Center` (both
+    // `ViewStatusAddition`s of a `PDFDocumentField` in 1C:Документооборот
+    // 3.0.14 and 3.0.17, which also write `<HorizontalStretch>false`).
+    match options.get(11).map(|field| field.trim())? {
+        "0" => Some("Left"),
+        "1" => Some("Center"),
+        _ => None,
+    }
+}
+
+/// `<HorizontalStretch>false</HorizontalStretch>` of a `ViewStatusAddition`:
+/// member 2 of the option tuple reads `0` on exactly the two additions that
+/// write it, and `2` on the 527 that write only a `Left` location.
+pub(super) fn parse_form_view_status_addition_horizontal_stretch(fields: &[&str]) -> Option<bool> {
+    let options = split_1c_braced_fields(fields.get(13)?.trim(), 0)?;
+    (options.get(2).map(|field| field.trim()) == Some("0")).then_some(false)
 }
 
 /// A `ViewStatusAddition` keeps its width cap in member 13 of the same option

@@ -79370,3 +79370,40 @@ fn old_compatibility_unmarks_the_default_picture_of_an_enum_list() {
         "<RowPictureDataPath>Список.DefaultPicture</RowPictureDataPath>"
     );
 }
+
+#[test]
+fn a_form_that_excludes_help_writes_its_help_button_as_the_raw_id() {
+    let xml = "<CommandName>Form.StandardCommand.Help</CommandName>".to_owned();
+    assert_eq!(
+        with_excluded_help_command_unresolved(xml.clone(), &["Help"]),
+        "<CommandName>0:39bb0fe9-771d-4dd5-8a6e-2d16984523af</CommandName>"
+    );
+    assert_eq!(with_excluded_help_command_unresolved(xml.clone(), &["Refresh"]), xml);
+}
+
+/// Evidence: `ТекущийДокументPDFСостояниеПросмотра` of 1C:Документооборот
+/// (`DataProcessors/ИнтерфейсДокументовЭДО/Forms/ТекущиеДелаПоЭДО`), whose
+/// option tuple `{1,0,0,...,1,{0,1,0},0,0,0}` the platform writes as
+/// `HorizontalStretch` false and `HorizontalLocation` Center.
+#[test]
+fn a_view_status_addition_reads_center_and_a_lowered_stretch() {
+    let tuple = "{1,0,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{7,3,0,1,100},{3,0,{0},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e},1,{0,1,0},0,0,0}";
+    let mut fields = vec!["0"; 13];
+    fields.push(tuple);
+    assert_eq!(
+        parse_form_view_status_addition_horizontal_location(&fields),
+        Some("Center")
+    );
+    assert_eq!(
+        parse_form_view_status_addition_horizontal_stretch(&fields),
+        Some(false)
+    );
+    let left = tuple.replacen("{1,0,0,", "{1,0,2,", 1).replacen("48312c09-257f-4b29-b280-284dd89efc1e},1,", "48312c09-257f-4b29-b280-284dd89efc1e},0,", 1);
+    let mut fields = vec!["0"; 13];
+    fields.push(&left);
+    assert_eq!(
+        parse_form_view_status_addition_horizontal_location(&fields),
+        Some("Left")
+    );
+    assert_eq!(parse_form_view_status_addition_horizontal_stretch(&fields), None);
+}
