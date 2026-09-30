@@ -2461,6 +2461,22 @@ fn fetch_all_config_rows(
     Ok(rows)
 }
 
+/// One row of the Config table whole (its parts assembled), or `None` when
+/// the table has no row of that name.
+pub(crate) fn fetch_config_row_whole(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    file_name: &str,
+) -> Result<Option<Vec<u8>>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let selected = BTreeSet::from([file_name.to_string()]);
+    let rows = fetch_binary_rows(sql, database, table, &selected, false)?;
+    Ok(rows
+        .into_iter()
+        .find(|row| row.file_name == file_name)
+        .map(|row| row.binary))
+}
+
 /// The rows of the Config table that are stored in more than one part, each
 /// assembled from all its parts.
 fn fetch_multi_part_config_rows(

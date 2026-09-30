@@ -5410,6 +5410,8 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_parent_configuration_rows(
+        sql,
+        database,
         &configuration_uuid,
         xml_path,
     )?);
@@ -5426,7 +5428,16 @@ fn prepare_configuration_asset_body_rows(
 /// level 9, memLevel 9 inside and again outside). A list naming more than
 /// one parent is refused, as the exporter leaves it: where the next entry
 /// starts is not on record.
+///
+/// The stream this deflates is another stream than the platform's (the
+/// library cannot set memLevel 9: on that row 99 663 207 bytes inside against
+/// the stored 99 664 295), so a stage against a database keeps the stored row
+/// itself while it holds this very file
+/// ([`stored_parent_configuration_row`]): a check of the stage against the
+/// target compares the bytes, and reads a re-deflated row as a change.
 fn prepare_parent_configuration_rows(
+    sql: &SqlExec,
+    database: &str,
     configuration_uuid: &str,
     xml_path: &Path,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
@@ -5476,16 +5487,54 @@ fn prepare_parent_configuration_rows(
                 )
             })?;
         let cf = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let inner = crate::module_blob::deflate_raw(&cf)?;
-        let blob = crate::module_blob::deflate_raw(&inner)?;
+        let body_id = format!("{configuration_uuid}.{uuid}");
+        let blob = match stored_parent_configuration_row(sql, database, &body_id, &cf) {
+            Some(stored) => stored,
+            None => {
+                let inner = crate::module_blob::deflate_raw(&cf)?;
+                crate::module_blob::deflate_raw(&inner)?
+            }
+        };
         rows.push(PreparedMetadataBodyStage {
-            body_id: format!("{configuration_uuid}.{uuid}"),
+            body_id,
             path,
             blob_sha256: hex_sha256(&blob),
             blob,
         });
     }
     Ok(rows)
+}
+
+/// The row a target stores for the parent configuration `body_id` (all its
+/// parts, under the name the storage publishes it by), when the two streams
+/// inflate to `cf`. `None` in a base-free or offline stage, when the target
+/// has no such row, cannot be read, or holds another file: the caller
+/// deflates `cf` itself then.
+fn stored_parent_configuration_row(
+    sql: &SqlExec,
+    database: &str,
+    body_id: &str,
+    cf: &[u8],
+) -> Option<Vec<u8>> {
+    if base_free(sql) || OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let stored_name = BASE_ROW_ALIASES
+        .get()
+        .filter(|(aliased_database, _)| aliased_database == database)
+        .and_then(|(_, aliases)| aliases.get(body_id))
+        .map_or(body_id, String::as_str);
+    let stored = crate::mssql_dump::fetch_config_row_whole(sql, database, stored_name)
+        .ok()
+        .flatten()?;
+    stored_row_holds_parent_configuration(&stored, cf).then_some(stored)
+}
+
+/// Whether a stored parent configuration row (deflated twice) holds `cf`.
+fn stored_row_holds_parent_configuration(stored: &[u8], cf: &[u8]) -> bool {
+    crate::module_blob::inflate_raw(stored)
+        .and_then(|inner| crate::module_blob::inflate_raw(&inner))
+        .is_ok_and(|plain| plain == cf)
 }
 
 /// `(parent uuid, name)` of every parent `Ext/ParentConfigurations.bin`
@@ -16395,6 +16444,34 @@ mod tests {
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(diff.changed[0].before.sha256, "bbb");
         assert_eq!(diff.changed[0].after.sha256, "ccc");
+    }
+
+    #[test]
+    fn a_stored_parent_configuration_row_holds_the_file_however_it_was_deflated() {
+        use flate2::Compression;
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+
+        let deflate = |bytes: &[u8], level: u32| {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
+            encoder.write_all(bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        let cf: Vec<u8> = (0..20_000u32).flat_map(|n| (n % 251).to_le_bytes()).collect();
+        // The platform's stream and this program's differ in bytes (levels
+        // stand for the two libraries), and hold the same file.
+        let stored = deflate(&deflate(&cf, 9), 9);
+        let ours = deflate(&deflate(&cf, 1), 1);
+        assert_ne!(stored, ours);
+        assert!(super::stored_row_holds_parent_configuration(&stored, &cf));
+        assert!(super::stored_row_holds_parent_configuration(&ours, &cf));
+
+        let mut other = cf.clone();
+        other[100] ^= 1;
+        assert!(!super::stored_row_holds_parent_configuration(&stored, &other));
+        assert!(!super::stored_row_holds_parent_configuration(b"not deflate", &cf));
+        // One deflate only is not the shape of the row.
+        assert!(!super::stored_row_holds_parent_configuration(&deflate(&cf, 9), &cf));
     }
 
     #[test]
