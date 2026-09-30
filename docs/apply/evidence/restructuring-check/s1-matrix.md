@@ -52,7 +52,7 @@ Every case of the probe runs of `restructuring-check.md` (6.1, 6.2) through the 
 | p5 attribute added to a DataProcessor | no | harmless | - |
 | p5 tabular section FillChecking | no | harmless | - |
 | p5 tabular section attribute MultiLine | no | harmless | - |
-| p5 attribute added to a tabular section | yes | refused tabular-section-outside-s1 | tabular-section-column-added-dropped-moved |
+| p5 attribute added to a tabular section | yes | operation add-section-attribute | tabular-section-column-added-dropped-moved |
 | p5 tabular section added | yes | operation add-tabular-section | tabular-section-added-dropped-moved |
 | p5 dimension DenyIncompleteValues | no | harmless | - |
 | p5 dimension added to an accumulation register | yes | refused kind-outside-s1 | column-added-or-dropped |

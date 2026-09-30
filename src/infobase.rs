@@ -80,6 +80,8 @@ pub struct InfobaseConfigImportReport {
     /// (absent when it did not run: a stage compiled from the tree, or
     /// `--no-verify`).
     pub verification: Option<crate::mssql::StageVerification>,
+    /// What a patch stage built from the tree in place of the target's rows.
+    pub overrides: Option<crate::mssql::StageOverrides>,
 }
 
 /// The export refuses a directory that already holds files, as the
@@ -452,13 +454,10 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         }
     };
     stage_args.base_free = base_free;
-    // A patch stage starts from the target's own rows and can leave a change
-    // of the tree out without a word: the guard checks it unless asked not to.
-    stage_args.verify = match args.verify {
-        InfobaseImportVerify::On => true,
-        InfobaseImportVerify::Off => false,
-        InfobaseImportVerify::Auto => !base_free,
-    };
+    // A stage can leave a change of the tree out without a word (a patch stage
+    // takes the target's own rows; a compiled one can carry a slip of the
+    // compiler): the guard checks every stage unless asked not to.
+    stage_args.verify = !matches!(args.verify, InfobaseImportVerify::Off);
     let report = crate::mssql::stage_source_objects(&stage_args)?;
 
     Ok(InfobaseConfigImportReport {
@@ -482,6 +481,7 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         staged_rows_after: report.after.row_count,
         scripts: report.scripts,
         verification: report.verification,
+        overrides: report.overrides,
     })
 }
 

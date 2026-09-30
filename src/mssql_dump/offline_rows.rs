@@ -223,10 +223,12 @@ impl OfflineRows {
     /// [`dynamic_generation`]), with each staged row in place of the stored
     /// row of its name. The apply drops the aliases of what it replaces, so a
     /// staged row is never shadowed by one; the generation history itself is
-    /// left out, since nothing is aliased any more.
+    /// left out, since nothing is aliased any more. `removed` are the names the
+    /// stage's `deleted` row lists: the apply removes those rows.
     pub(super) fn with_staged(
         self,
         staged: impl IntoIterator<Item = (String, Arc<Vec<u8>>)>,
+        removed: &[String],
     ) -> Result<Self> {
         let mut rows = self.rows;
         if let Some(marker) = rows.remove(super::DYNAMIC_UPDATE_MARKER_ROW) {
@@ -247,8 +249,24 @@ impl OfflineRows {
             }
             rows = published;
         }
+        for file_name in removed {
+            rows.remove(file_name);
+        }
         for (file_name, bytes) in staged {
             rows.insert(file_name, vec![StoredPart::memory(bytes)]);
+        }
+        // What the `versions` row of the state does not list is not part of
+        // the configuration: the rows an online update that removed an object
+        // left behind, as the export of a table leaves them out.
+        if let Some(versions) = rows.get("versions")
+            && let Ok(unlisted) = super::config_dump_info::unlisted_entries(
+                &read_parts(versions)?,
+                rows.keys().map(String::as_str),
+            )
+        {
+            for file_name in unlisted {
+                rows.remove(&file_name);
+            }
         }
         Ok(Self {
             rows,
@@ -267,11 +285,11 @@ impl OfflineRows {
         }
     }
 
-    /// The view a query on `table` reads: the stored rows as they are, or the
-    /// published view of the overlay installed for the table, built once per
-    /// overlay and kept until another one is installed.
-    fn view(&self, table: &str) -> View {
-        let Some(overlay) = storage_generation_overlay_for(table) else {
+    /// The view a query on `table` of `database` reads: the stored rows as
+    /// they are, or the published view of the overlay installed for the table,
+    /// built once per overlay and kept until another one is installed.
+    fn view(&self, database: &str, table: &str) -> View {
+        let Some(overlay) = storage_generation_overlay_for(database, table) else {
             return View::Plain;
         };
         let mut cached = self
@@ -365,11 +383,12 @@ impl OfflineRows {
     /// `SELECT FileName, PartNo, DataSize ... ORDER BY FileName, PartNo`.
     pub(super) fn headers(
         &self,
+        database: &str,
         table: &str,
         selected: &BTreeSet<String>,
     ) -> Result<Vec<ConfigRowHeader>> {
         self.check_table(table)?;
-        let view = self.view(table);
+        let view = self.view(database, table);
         let rows = if selected.is_empty() {
             self.select(&view, |_| true)
         } else {
@@ -393,11 +412,12 @@ impl OfflineRows {
     /// `keep`, in file name order.
     pub(super) fn rows(
         &self,
+        database: &str,
         table: &str,
         keep: impl Fn(&str) -> bool,
     ) -> Result<Vec<BinaryConfigRow>> {
         self.check_table(table)?;
-        let view = self.view(table);
+        let view = self.view(database, table);
         Self::read(self.select(&view, keep))
     }
 
@@ -405,11 +425,12 @@ impl OfflineRows {
     /// lacks is skipped, as `WHERE FileName IN (...)` skips it.
     pub(super) fn rows_named(
         &self,
+        database: &str,
         table: &str,
         names: &BTreeSet<String>,
     ) -> Result<Vec<BinaryConfigRow>> {
         self.check_table(table)?;
-        let view = self.view(table);
+        let view = self.view(database, table);
         if names.is_empty() {
             return Self::read(self.select(&view, |_| true));
         }
@@ -507,13 +528,13 @@ mod tests {
         ]);
         assert_eq!(rows.len(), 2);
         let read = rows
-            .rows_named("Config", &names(&["b.0", "missing"]))
+            .rows_named("", "Config", &names(&["b.0", "missing"]))
             .unwrap();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].file_name, "b.0");
         assert_eq!(read[0].binary, b"second");
         assert_eq!(read[0].data_size, 6);
-        let headers = rows.headers("Config", &BTreeSet::new()).unwrap();
+        let headers = rows.headers("", "Config", &BTreeSet::new()).unwrap();
         assert_eq!(
             headers
                 .iter()
@@ -521,7 +542,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("a", 0, 5), ("b.0", 0, 6)]
         );
-        let metadata = rows.rows("Config", |name| !name.contains('.')).unwrap();
+        let metadata = rows.rows("", "Config", |name| !name.contains('.')).unwrap();
         assert_eq!(metadata.len(), 1);
         assert_eq!(metadata[0].file_name, "a");
         assert_eq!(
@@ -529,7 +550,7 @@ mod tests {
             Some(&b"first"[..])
         );
         assert!(
-            rows.rows_named("ConfigSave", &names(&["a"])).is_err(),
+            rows.rows_named("", "ConfigSave", &names(&["a"])).is_err(),
             "only the Config table is served"
         );
     }
@@ -537,11 +558,14 @@ mod tests {
     #[test]
     fn a_staged_row_takes_the_place_of_the_row_and_of_its_alias() {
         let state = generation_rows()
-            .with_staged([
-                ("a.0".to_string(), row(b"a.0 staged")),
-                ("versions".to_string(), row(b"versions staged")),
-                ("new.0".to_string(), row(b"a row the storage lacked")),
-            ])
+            .with_staged(
+                [
+                    ("a.0".to_string(), row(b"a.0 staged")),
+                    ("versions".to_string(), row(b"versions staged")),
+                    ("new.0".to_string(), row(b"a row the storage lacked")),
+                ],
+                &[],
+            )
             .unwrap();
         let got = contents(&state);
         assert_eq!(got["a.0"], b"a.0 staged");
@@ -565,11 +589,62 @@ mod tests {
             ("a".to_string(), row(b"old")),
             ("b".to_string(), row(b"kept")),
         ]);
-        let state = rows.with_staged([("a".to_string(), row(b"new"))]).unwrap();
+        let state = rows
+            .with_staged([("a".to_string(), row(b"new"))], &[])
+            .unwrap();
         let got = contents(&state);
         assert_eq!(got["a"], b"new");
         assert_eq!(got["b"], b"kept");
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn rows_the_versions_of_the_state_does_not_list_are_left_out() {
+        // The generation and the two listed names; `stale` is a row an online
+        // update that removed its object left behind.
+        let generation = uuid::Uuid::new_v4().hyphenated().to_string();
+        let a = uuid::Uuid::new_v4().hyphenated().to_string();
+        let b = uuid::Uuid::new_v4().hyphenated().to_string();
+        let versions = format!("\u{feff}{{1,3,\"\",{generation},\"a\",{a},\"a.0\",{b}}}");
+        let versions = crate::module_blob::deflate_raw(versions.as_bytes()).unwrap();
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"a")),
+            ("a.0".to_string(), row(b"a.0")),
+            ("stale".to_string(), row(b"left behind")),
+        ]);
+        let state = rows
+            .with_staged([("versions".to_string(), Arc::new(versions))], &[])
+            .unwrap();
+        let got = contents(&state);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "a.0", "versions"]
+        );
+    }
+
+    #[test]
+    fn the_rows_a_stage_deletes_are_not_in_the_state() {
+        let rows = OfflineRows::from_memory([
+            ("a".to_string(), row(b"old")),
+            ("gone".to_string(), row(b"removed by the tree")),
+            ("gone.0".to_string(), row(b"removed with it")),
+            ("z".to_string(), row(b"kept")),
+        ]);
+        let state = rows
+            .with_staged(
+                [("a".to_string(), row(b"new"))],
+                &[
+                    "gone".to_string(),
+                    "gone.0".to_string(),
+                    "never there".to_string(),
+                ],
+            )
+            .unwrap();
+        let got = contents(&state);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
     }
 
     #[test]
@@ -579,7 +654,7 @@ mod tests {
             row(b"{1,2,not-a-uuid}"),
         )]);
         let error = rows
-            .with_staged(Vec::<(String, Arc<Vec<u8>>)>::new())
+            .with_staged(Vec::<(String, Arc<Vec<u8>>)>::new(), &[])
             .unwrap_err();
         assert!(
             error.to_string().contains("generation history"),
@@ -705,5 +780,169 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The rows of an object an online update changed: the plain rows keep the
+    /// text before it, the aliases hold the text the infobase reads.
+    fn aliased_object_folder() -> std::path::PathBuf {
+        let object = "a627e390-8fad-4a95-afe6-674f54813188";
+        folder_of(&owned_rows(&[
+            (object, vec![1]),
+            (&format!("{object}.0"), vec![1, 1]),
+            (&format!("{object}_dynupdate_{GENERATION}"), vec![2, 2, 2]),
+            (
+                &format!("{object}_dynupdate_{GENERATION}.0"),
+                vec![2, 2, 2, 2],
+            ),
+            ("other", vec![5]),
+            (
+                "versions",
+                versions_row(&[object, &format!("{object}.0"), "other"], BASE_GENERATION),
+            ),
+            (
+                &format!("versions_dynupdate_{GENERATION}"),
+                versions_row(&[object, &format!("{object}.0"), "other"], GENERATION),
+            ),
+            (
+                "DynamicallyUpdated",
+                format!("\u{feff}{{1,1,{GENERATION}}}").into_bytes(),
+            ),
+        ]))
+    }
+
+    /// #409 F-1: a run that selects an object by name gets the object's alias
+    /// rows under its published names, not nothing.
+    #[test]
+    fn a_selected_run_lists_the_alias_rows_of_an_aliased_object() {
+        let _one = FOLDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let object = "a627e390-8fad-4a95-afe6-674f54813188";
+        let dir = aliased_object_folder();
+        let active = super::activate(&dir).unwrap();
+        let sql = crate::sql::SqlExec::detached("the rows come from a folder");
+        let selected = names(&[object, &format!("{object}.0")]);
+        let headers =
+            crate::mssql_dump::fetch::fetch_row_headers(&sql, "f1_selected", "Config", &selected)
+                .unwrap();
+        let (_, published) = crate::mssql_dump::resolve_storage_overlay(
+            &sql,
+            "f1_selected",
+            "Config",
+            &selected,
+            headers,
+            false,
+        )
+        .unwrap();
+        let mut got = published
+            .iter()
+            .map(|header| (header.file_name.clone(), header.data_size))
+            .collect::<Vec<_>>();
+        got.sort();
+        drop(active);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            got,
+            vec![(object.to_owned(), 3), (format!("{object}.0"), 4)],
+            "the selected object is published from its alias rows"
+        );
+    }
+
+    /// #409 F-2: the overlay one database installs is not the view of another
+    /// database that has the same table.
+    #[test]
+    fn an_installed_overlay_is_the_view_of_its_database_only() {
+        let _one = FOLDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = aliased_object_folder();
+        let active = super::activate(&dir).unwrap();
+        let views = crate::mssql_dump::dynamic_generation::StorageViewScope::begin("f2_installed");
+        let sql = crate::sql::SqlExec::detached("the rows come from a folder");
+        let headers = crate::mssql_dump::fetch::fetch_row_headers(
+            &sql,
+            "f2_installed",
+            "Config",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        crate::mssql_dump::install_storage_overlay(
+            &sql,
+            "f2_installed",
+            "Config",
+            &BTreeSet::new(),
+            headers,
+            false,
+        )
+        .unwrap();
+        let own = crate::mssql_dump::qualified_storage_table("f2_installed", "Config");
+        let other = crate::mssql_dump::qualified_storage_table("f2_other", "Config");
+        drop(views);
+        drop(active);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            own.contains("_dynupdate_"),
+            "its own view reads the generation: {own}"
+        );
+        assert_eq!(
+            other, "[f2_other].dbo.[Config]",
+            "another database reads its plain table"
+        );
+    }
+
+    /// #409 F-2: an export does not leave its overlay behind for the reads
+    /// that follow it in the same process (the activation's among them).
+    #[test]
+    fn an_export_leaves_no_overlay_behind() {
+        let _one = FOLDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = aliased_object_folder();
+        let out = std::env::temp_dir().join(format!(
+            "ibcmd-rs-f2-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = crate::mssql_dump::dump_config(&crate::cli::MssqlDumpConfigArgs {
+            sqlcmd: None,
+            bcp_executable: None,
+            runtime_journal: None,
+            server: "localhost".to_owned(),
+            sql_user: None,
+            sql_pwd: None,
+            sql_pwd_env: "IBCMD_DB_PSW".to_owned(),
+            database: "f2_export".to_owned(),
+            rows_dir: Some(dir.clone()),
+            model_export: false,
+            legacy_export: false,
+            output_dir: out.clone(),
+            overwrite: false,
+            include_config_save: false,
+            main_configuration: false,
+            file_names: Vec::new(),
+            file_name_lists: Vec::new(),
+            inflate: false,
+            extract_module_text: false,
+            extract_metadata_xml: false,
+            require_complete_root_metadata: false,
+            require_complete_source_assets: false,
+            collect_all_source_asset_diagnostics: false,
+            platform: None,
+            source_version: crate::legacy_version::InfobaseConfigSourceVersion::V2_20,
+            no_binary_rows: true,
+            write_binary_rows: false,
+            write_manifest: false,
+        });
+        let after = crate::mssql_dump::qualified_storage_table("f2_export", "Config");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        result.unwrap();
+        assert_eq!(
+            after, "[f2_export].dbo.[Config]",
+            "the export's overlay must not outlive the export"
+        );
     }
 }
