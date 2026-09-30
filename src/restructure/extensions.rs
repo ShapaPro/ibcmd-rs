@@ -632,4 +632,76 @@ mod tests {
             ]
         );
     }
+
+    /// The four extensions of the БСП 8.3.27 corpus clone, as `mssql-restructure --extensions-report` read them
+    /// (`tests/fixtures/native-evidence/extension-adoptions/bsp8327.json`): the three catalogs of the twin
+    /// experiments (`docs/apply/restructuring-extensions.md`, section 3).
+    #[test]
+    fn the_corpus_extensions_refuse_the_adopted_catalogs_and_let_the_others_pass() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native-evidence/extension-adoptions/bsp8327.json"
+        ))
+        .unwrap();
+        let text = |value: &serde_json::Value, key: &str| value[key].as_str().unwrap().to_owned();
+        let adoptions = fixture["adoptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| Adoption {
+                extension: text(entry, "extension"),
+                image: "active",
+                object: AdoptedObject {
+                    row: text(&entry["object"], "row"),
+                    uuid: text(&entry["object"], "uuid"),
+                    name: text(&entry["object"], "name"),
+                    extends: entry["object"]["extends"].as_str().map(str::to_owned),
+                },
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(adoptions.len(), 75);
+        let inputs = ExtensionInputs {
+            registered: 4,
+            adoptions_read: true,
+            adoptions,
+            tables: fixture["tables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|table| table.as_str().unwrap().to_owned())
+                .collect(),
+            schema_busy: None,
+        };
+        let catalog = |name, uuid, table| ChangedObject {
+            kind: "Catalog",
+            name,
+            uuid,
+            table,
+        };
+        // adopted by `_ДемоРасширение`, which keeps no table of its own for it
+        let partners = catalog("_ДемоПартнеры", PARTNERS, "Reference20");
+        let text = check(&inputs, &[partners]).unwrap_err().to_string();
+        assert!(
+            text.contains("adopted by the extension _ДемоРасширение"),
+            "{text}"
+        );
+        assert!(text.contains("keeps no table of its own"), "{text}");
+        // adopted, and extended with data: `_Reference18X1`
+        let nomenclature = catalog(
+            "_ДемоНоменклатура",
+            "bb3d8c09-0a16-47ae-a113-d33038c15948",
+            "Reference18",
+        );
+        let text = check(&inputs, &[nomenclature]).unwrap_err().to_string();
+        assert!(
+            text.contains("keeps tables of its own for it (_Reference18X1"),
+            "{text}"
+        );
+        // adopted by nobody
+        let vat = catalog(
+            "_ДемоСтавкиНДС",
+            "b78a9e4c-2486-4e73-81ed-3ee6ad7e3055",
+            "Reference23",
+        );
+        assert_eq!(check(&inputs, &[vat]), Ok(()));
+    }
 }
