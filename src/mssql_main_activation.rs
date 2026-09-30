@@ -768,8 +768,15 @@ fn mode_name(mode: MainActivationMode) -> &'static str {
 }
 
 fn online_history_refusal(mode: MainActivationMode, evidence: &str) -> String {
+    // The exclusive mode is carried out by that apply where the built-in SQL client is (#408 step 2); it reaches
+    // this refusal only through `--sqlcmd`.
+    let hint = if mode == MainActivationMode::Exclusive {
+        " (the exclusive mode of this command does the same on the built-in SQL client: leave out --sqlcmd)"
+    } else {
+        ""
+    };
     format!(
-        "{} promotion refused before any write: this database holds online (dynamic) generations ({evidence}).          A {} promotion replaces only the staged rows and deletes the markers, so the earlier online changes          would be lost. Use `mssql-config-apply`, which folds them as the native apply does, or the native          apply; the staged ConfigSave is left as it is",
+        "{} promotion refused before any write: this database holds online (dynamic) generations ({evidence}).          A {} promotion replaces only the staged rows and deletes the markers, so the earlier online changes          would be lost. Use `mssql-config-apply`, which folds them as the native apply does, or the native          apply{hint}; the staged ConfigSave is left as it is",
         mode_name(mode),
         mode_name(mode)
     )
@@ -1923,6 +1930,12 @@ mod tests {
             );
             assert!(message.contains("native"), "{mode:?}: {message}");
             assert!(message.contains(mode_name(mode)), "{mode:?}: {message}");
+            // only the exclusive mode has another way: the config apply on the built-in SQL client
+            assert_eq!(
+                message.contains("leave out --sqlcmd"),
+                mode == MainActivationMode::Exclusive,
+                "{mode:?}: {message}"
+            );
         }
     }
 

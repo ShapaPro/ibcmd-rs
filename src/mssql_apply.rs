@@ -475,17 +475,10 @@ pub fn apply_source_change(
             "ConfigCAS".to_owned(),
             "_ExtensionsInfo".to_owned(),
         ]
-    } else if matches!(
-        args.mode,
-        MssqlMainActivationModeArg::Online
-            | MssqlMainActivationModeArg::Live
-            | MssqlMainActivationModeArg::Worker
-    ) {
-        vec![
-            "ConfigSave".to_owned(),
-            "Config".to_owned(),
-            "Params".to_owned(),
-        ]
+    } else if let Some(touched) = tables_touched_by_config_apply(activation.as_ref()) {
+        // the exclusive mode is carried out by the own apply (#408 step 2), which also writes the change
+        // registrations and `Files`; the tables are the ones it names
+        touched
     } else {
         vec![
             "ConfigSave".to_owned(),
@@ -1219,6 +1212,21 @@ fn preflight_main_publication(args: &MssqlApplySourceChangeArgs) -> Result<()> {
     .map_err(anyhow::Error::new)
 }
 
+/// The tables the own apply wrote, when it carried out the activation (`config_apply` of the report of
+/// `mssql-activate-staged-main`, #408 step 2).
+fn tables_touched_by_config_apply(activation: Option<&Value>) -> Option<Vec<String>> {
+    let touched = activation?
+        .pointer("/config_apply/tables_touched")?
+        .as_array()?;
+    Some(
+        touched
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
 /// The generation an online update left active in the database, if it holds
 /// one: the last of the history the two markers record.
 ///
@@ -1390,6 +1398,26 @@ impl Drop for TemporaryApplyRoot {
 mod tests {
     use super::*;
     use crate::mssql_platform_profile::MssqlNativePlatformProfile;
+
+    #[test]
+    fn the_tables_of_an_exclusive_promotion_are_the_ones_the_own_apply_wrote() {
+        let carried_out_by_the_apply = serde_json::json!({
+            "activation": {"executor": "config_apply"},
+            "config_apply": {"tables_touched": ["Config", "ConfigSave", "Params", "_ConfigChngR", "Files"]}
+        });
+        assert_eq!(
+            tables_touched_by_config_apply(Some(&carried_out_by_the_apply)),
+            Some(
+                ["Config", "ConfigSave", "Params", "_ConfigChngR", "Files"]
+                    .map(str::to_owned)
+                    .to_vec()
+            )
+        );
+        // the script of mssql_main_activation writes no report of the apply
+        let script = serde_json::json!({"activation": {"executor": "script"}});
+        assert_eq!(tables_touched_by_config_apply(Some(&script)), None);
+        assert_eq!(tables_touched_by_config_apply(None), None);
+    }
 
     #[test]
     fn runtime_profile_verification_fails_before_active_export() {
