@@ -117,29 +117,6 @@ impl Upgrade {
             reversed: self.reversed || other.reversed,
         }
     }
-
-    /// `2 record versions, 1 counter, 3 inserted defaults`
-    pub fn describe(&self) -> String {
-        let mut parts = Vec::new();
-        for (count, what) in [
-            (self.head_bumps, "record version"),
-            (self.counter_bumps, "counter"),
-            (self.inserted, "inserted default"),
-            (self.filled, "filled field"),
-            (self.compatibility_moves, "extension compatibility mode"),
-        ] {
-            if count > 0 {
-                parts.push(format!(
-                    "{count} {what}{}",
-                    if count == 1 { "" } else { "s" }
-                ));
-            }
-        }
-        if self.reversed {
-            parts.push("the staged row is the older format".to_string());
-        }
-        parts.join(", ")
-    }
 }
 
 /// The first place the rows differ in a way no rule of the upgrade explains.
@@ -441,7 +418,7 @@ mod tests {
     fn a_record_version_one_greater_is_an_upgrade() {
         let upgrade = proof("{56,\"a\",{7,x}}", "{57,\"a\",{8,x}}").unwrap();
         assert_eq!(upgrade.head_bumps, 2);
-        assert_eq!(upgrade.describe(), "2 record versions");
+        assert_eq!((upgrade.head_bumps, upgrade.counter_bumps), (2, 0));
     }
 
     #[test]
@@ -521,7 +498,6 @@ mod tests {
         let upgrade = proof("{57,\"a\",0,{3,x}}", "{56,\"a\",{3,x}}").unwrap();
         assert!(upgrade.reversed);
         assert_eq!(upgrade.inserted, 1);
-        assert!(upgrade.describe().contains("older format"));
         // Not a licence for anything: an entry the older row has and the
         // newer lacks, or a value that is not a default, is still refused.
         assert!(proof("{57,\"a\",{3,x}}", "{56,\"a\",{3,y}}").is_err());
