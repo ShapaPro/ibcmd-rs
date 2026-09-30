@@ -217,6 +217,31 @@ Catalog._ДемоПартнеры ChildObjects/Attribute[ДемоНовыйРе�
 Configuration row); the `deleted` row `0` accepted. The same image with one default entry changed by one digit is
 refused by name for that row and no other, and a `deleted` row that lists a file is refused.
 
+### 3.7 The active row can be in the newer format too
+
+A native `config apply` promotes the staged rows into `Config` as the import wrote them. So an object that was
+restructured natively once is stored from then on in the record format of that platform: on the twin of the
+`rcheck-6` finding (a БСП 8.3.27 clone, compatibility mode 8.3.24, an attribute added to
+`Catalog._ДемоПартнеры` by a native `import files --partial` and a native `apply`) the row `5eab8a1b-...` of `Config`
+went from `{56,...}` to the very bytes of the staged row, `{57,...}`. The second change staged for the same catalog
+was then compared against a row that the decoder, reading in the compatibility mode, refuses ("record version 57,
+the compatibility mode stores 56"): a reason `row-undecodable`, class `unknown`, and S1 refused it as `unknown-step`.
+The stored side now goes through the same fallback as the staged one (`Decoder::decode_stored`, `Describe::
+describe_stored`; the export of `--tree` mode too): the compatibility mode first, else the newest mode the model
+knows. Result on the twin, three second changes to the same catalog, each staged by the native `import files
+--partial`:
+
+| second change | before | after |
+|---|---|---|
+| another attribute | `unknown`, `row-undecodable` | `structure`, `column-added-or-dropped`, S1 `add-attribute` |
+| `Length` 30 -> 60 of the attribute the first apply added | `unknown` | `structure`, S1 `widen-string` |
+| `CodeLength` 9 -> 12 | `unknown` | `structure`, S1 refusal `property-outside-s1` |
+
+The proof of 3.6 reads both ways (`Upgrade::reversed`): the staged row may be the older format over a promoted newer
+one (a stage that an importer writes for the compatibility mode), with the same table of defaults. Unit tests:
+`record_format_tests` (rows compiled by the model's writer from a small synthetic catalog in the two compatibility
+modes; four of the six fail without the fix), evidence: `evidence/restructuring-check/second-change-after-native-apply.md`.
+
 ## 4. The rules
 
 `rules::decide(kind, change)` gives every change of a descriptor one of `safe`, `structure`, `data`, and the rule

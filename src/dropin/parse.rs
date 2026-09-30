@@ -17,6 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::cli::InfobaseConfigSourceVersion;
+use crate::mssql_config_apply::BackupPolicy;
 use crate::platform::PlatformSpec;
 
 /// One option of the grammar.
@@ -77,6 +78,8 @@ pub enum Opt {
     DbPwdEnv,
     BaseFree,
     Exclusivity,
+    RecoveryBackup,
+    IHaveABackup,
     Verify,
     NoVerify,
 }
@@ -189,6 +192,8 @@ const APPLY_OPTIONS: &[OptSpec] = &[
         None,
     ),
     valued(Opt::Exclusivity, &["exclusivity"], None),
+    valued(Opt::RecoveryBackup, &["recovery-backup"], None),
+    flag(Opt::IHaveABackup, &["i-have-a-backup"], None),
 ];
 
 /// What a command word leads to.
@@ -497,6 +502,11 @@ pub struct ApplyRequest {
     /// `--session-terminate-message`: the text a terminated session shows.
     pub session_terminate_message: Option<String>,
     pub exclusivity: ExclusivityMode,
+    /// `--recovery-backup <file>` / `--i-have-a-backup` (ibcmd-rs's own): what
+    /// the operator says about a way back before a restructuring. The
+    /// platform has no such thing; it matters only for a stage the own apply
+    /// restructures.
+    pub backup: BackupPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,6 +811,18 @@ fn parse_apply(scan: &Scan) -> Result<Invocation, Refusal> {
             });
         }
     };
+    // A file names the way back; the word alone only says there is one.
+    let backup = match (scan.value(Opt::RecoveryBackup), scan.has(Opt::IHaveABackup)) {
+        (Some(""), _) => {
+            return Err(Refusal::InvalidValue {
+                option: "--recovery-backup".to_string(),
+                value: String::new(),
+            });
+        }
+        (Some(file), _) => BackupPolicy::File(PathBuf::from(file)),
+        (None, true) => BackupPolicy::Acknowledged,
+        (None, false) => BackupPolicy::None,
+    };
     for opt in [Opt::Pid, Opt::Remote] {
         if let Some(spelled) = scan.spelled(opt) {
             return Err(Refusal::UnsupportedServer(spelled.to_string()));
@@ -831,6 +853,7 @@ fn parse_apply(scan: &Scan) -> Result<Invocation, Refusal> {
         session_terminate,
         session_terminate_message: scan.value(Opt::SessionTerminateMessage).map(str::to_string),
         exclusivity,
+        backup,
     }))
 }
 
@@ -1587,6 +1610,7 @@ mod tests {
         assert_eq!(request.session_terminate, SessionTerminate::Disable);
         assert_eq!(request.session_terminate_message, None);
         assert_eq!(request.exclusivity, ExclusivityMode::Sql);
+        assert_eq!(request.backup, BackupPolicy::None);
         for (word, mode) in [
             ("auto", DynamicMode::Auto),
             ("disable", DynamicMode::Disable),
@@ -1630,6 +1654,54 @@ mod tests {
         assert_eq!(
             parse(&["config", "--force", "apply", "--db-name=b"]),
             Err(Refusal::Parse("--force".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_backup_options_are_the_own_applys() {
+        // a file: the apply takes the backup itself
+        let request = apply(&[
+            "config",
+            "apply",
+            "--recovery-backup",
+            r"F:\backups\before.bak",
+        ]);
+        assert_eq!(
+            request.backup,
+            BackupPolicy::File(PathBuf::from(r"F:\backups\before.bak"))
+        );
+        // the word alone: the operator has one
+        assert_eq!(
+            apply(&["config", "apply", "--i-have-a-backup"]).backup,
+            BackupPolicy::Acknowledged
+        );
+        // both: the file wins, as it does in `mssql-config-apply`
+        assert_eq!(
+            apply(&[
+                "config",
+                "apply",
+                "--i-have-a-backup",
+                "--recovery-backup=x.bak"
+            ])
+            .backup,
+            BackupPolicy::File(PathBuf::from("x.bak"))
+        );
+        // a file that is not named is a malformed line, not a backup
+        assert_eq!(
+            parse(&["config", "apply", "--recovery-backup="]),
+            Err(Refusal::InvalidValue {
+                option: "--recovery-backup".to_string(),
+                value: String::new()
+            })
+        );
+        assert!(matches!(
+            parse(&["config", "apply", "--recovery-backup"]),
+            Err(Refusal::MissingValue(_))
+        ));
+        // they belong to `apply`
+        assert_eq!(
+            parse(&["config", "export", "--i-have-a-backup", "dir"]),
+            Err(Refusal::Parse("--i-have-a-backup".to_string()))
         );
     }
 
