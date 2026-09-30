@@ -1106,7 +1106,7 @@ pub fn activate_staged_main(
     })
 }
 
-fn exactly_one_optional_marker(
+pub(crate) fn exactly_one_optional_marker(
     table: &str,
     mut rows: Vec<MainStorageRow>,
 ) -> Result<Option<MainStorageRow>> {
