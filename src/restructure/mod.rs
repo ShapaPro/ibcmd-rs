@@ -47,6 +47,8 @@ pub mod xdto;
 #[cfg(test)]
 mod tests_corpus;
 #[cfg(test)]
+mod tests_create;
+#[cfg(test)]
 mod tests_entry;
 #[cfg(test)]
 mod tests_plan;

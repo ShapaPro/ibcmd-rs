@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 
 use crate::metadata_model::brace::{Brace, parse_row};
 use crate::restructure::catalog::{AttributeFacts, type_entries};
+use crate::restructure::create;
 use crate::restructure::extensions::{ChangedObject, ExtensionInputs};
 use crate::restructure::names::{DbNames, deflate, inflate, next_number, version_row};
 use crate::restructure::object::{ObjectFacts, ObjectKind};
@@ -958,9 +959,13 @@ impl Running {
 
 /// Builds the plan.
 pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
-    check_files(&inputs.staged)?;
-    let changes = find_changes(&inputs.staged)?;
-    if changes.is_empty() {
+    // The catalogs and documents the stage creates (S1-F) are planned apart from the changed objects: the rest
+    // of the image is what the scan for changed attributes looks at.
+    let created = create::find_created(&inputs.staged)?;
+    let rest = create::without_created(&inputs.staged, &created);
+    check_files(&rest)?;
+    let changes = find_changes(&rest)?;
+    if changes.is_empty() && created.is_empty() {
         bail!(
             "the staged image adds no attribute, removes none, retypes none and switches no index: nothing this prototype restructures"
         );
@@ -1062,12 +1067,33 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         entries.push((object.object.clone(), entry));
         objects.push(object);
     }
+    // The created objects come after the changed ones (their numbers too), every table created empty.
+    let mut created_entries = Vec::new();
+    let mut created_in_order = Vec::new();
+    let mut create_context = None;
+    if !created.is_empty() {
+        if options.method != Method::Rebuild {
+            bail!("a new object is created through the new generation, not by ALTER TABLE");
+        }
+        let context = create::context(inputs)?;
+        created_in_order = create::in_platform_order(created, &context)?;
+        for item in &created_in_order {
+            let (object, entry) =
+                create::plan_created(&mut running, &schema, inputs, &context, item)?;
+            created_entries.push(entry);
+            objects.push(object);
+        }
+        create_context = Some(context);
+    }
 
     // Publish: the schema with the entries moved before ConfigChngR (rebuilt tables sit at the end of the
     // list in the order they were rebuilt, ConfigChngR last), the names with the new numbers.
     let mut new_schema = schema.clone();
     for (object, entry) in entries {
         new_schema.remove(&object)?;
+        new_schema.insert_before("ConfigChngR", entry);
+    }
+    for entry in created_entries {
         new_schema.insert_before("ConfigChngR", entry);
     }
     let new_names_text = running.names_after.to_text();
@@ -1086,6 +1112,16 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     }
     if lists_change && !options.skip_registry {
         caches.push(registry_update(inputs, &prepared, &objects)?);
+    }
+    if let Some(context) = &create_context {
+        create::extend_caches(
+            inputs,
+            context,
+            &created_in_order,
+            &running.names_after,
+            options,
+            &mut caches,
+        )?;
     }
     if !caches.is_empty() {
         let names: Vec<&str> = caches.iter().map(|cache| cache.row_name.as_str()).collect();

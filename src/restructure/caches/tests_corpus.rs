@@ -33,6 +33,7 @@ pub(crate) struct Snap {
     root: PathBuf,
     params: Parts,
     config: Parts,
+    save: Parts,
     /// The blob of `SchemaStorage.CurrentSchema` of `SchemaID 0`.
     schema: Option<String>,
 }
@@ -89,6 +90,7 @@ impl Snap {
             root,
             params: parts_of(&svc, "Params"),
             config: parts_of(&svc, "Config"),
+            save: parts_of(&svc, "ConfigSave"),
             schema,
         })
     }
@@ -100,6 +102,28 @@ impl Snap {
             bytes.extend(std::fs::read(self.root.join("blobs").join(sha)).unwrap());
         }
         Some(bytes)
+    }
+
+    /// The names of the rows of `Params`, `Config` or `ConfigSave`.
+    pub(crate) fn names(&self, table: &str) -> Vec<String> {
+        let parts = match table {
+            "Params" => &self.params,
+            "Config" => &self.config,
+            "ConfigSave" => &self.save,
+            other => panic!("no table {other}"),
+        };
+        parts.keys().cloned().collect()
+    }
+
+    /// The row as stored (the parts joined, not inflated).
+    pub(crate) fn stored_row(&self, table: &str, name: &str) -> Option<Vec<u8>> {
+        let parts = match table {
+            "Params" => &self.params,
+            "Config" => &self.config,
+            "ConfigSave" => &self.save,
+            other => panic!("no table {other}"),
+        };
+        self.stored(parts, name)
     }
 
     /// The inflated text of a `Params` row (raw when it is not deflated).

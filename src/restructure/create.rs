@@ -22,7 +22,9 @@ use crate::restructure::common::{COMMON_ATTRIBUTE_CLASS, CommonAttributes};
 use crate::restructure::entry::{EntryInput, Kind, RefTables, main_entry};
 use crate::restructure::names::inflate;
 use crate::restructure::object::ObjectKind;
-use crate::restructure::plan::{Inputs, ObjectPlan, Running, StagedImage, TablePlan, configuration_uuid};
+use crate::restructure::plan::{
+    Inputs, ObjectPlan, Running, StagedImage, TablePlan, configuration_uuid,
+};
 use crate::restructure::schema::{DbSchema, TableView, physical_tables};
 
 /// The root collections whose descriptors the plan of a created object reads.
@@ -99,7 +101,8 @@ pub fn find_created(image: &StagedImage) -> Result<Vec<Created>> {
         let Some(stored) = image.new_descriptors.get(&uuid) else {
             continue;
         };
-        let row = parse_row(&row_text(stored)).with_context(|| format!("staged descriptor {uuid}"))?;
+        let row =
+            parse_row(&row_text(stored)).with_context(|| format!("staged descriptor {uuid}"))?;
         let tag = row
             .as_list()
             .and_then(|root| root.get(1))
@@ -181,7 +184,8 @@ pub fn context(inputs: &Inputs) -> Result<Context> {
     let configuration = descriptors
         .get(&configuration)
         .with_context(|| format!("the configuration's descriptor {configuration} was not read"))?;
-    let configuration = parse_row(&row_text(configuration)).context("the configuration's descriptor")?;
+    let configuration =
+        parse_row(&row_text(configuration)).context("the configuration's descriptor")?;
     let all = collections(&configuration);
 
     let names_row = inputs
@@ -258,7 +262,11 @@ pub fn plan_created(
             item.members.others
         );
     }
-    if item.files.iter().any(|file| file.to_ascii_lowercase().ends_with(".1c")) {
+    if item
+        .files
+        .iter()
+        .any(|file| file.to_ascii_lowercase().ends_with(".1c"))
+    {
         bail!("the new {label} {name} has predefined items: not built");
     }
     if item.facts.number("DataHistory")? != 0 {
@@ -337,4 +345,94 @@ pub fn plan_created(
         },
         entry,
     ))
+}
+
+/// The cache rows of the created objects, on top of the rows the changed objects' updates left (`caches`):
+/// `caches::change::rewrite` over the created objects, its rows replacing or joining the plan's cache updates.
+pub fn extend_caches(
+    inputs: &Inputs,
+    context: &Context,
+    created: &[Created],
+    names_after: &crate::restructure::names::DbNames,
+    options: &crate::restructure::plan::PlanOptions,
+    caches: &mut Vec<crate::restructure::plan::CacheUpdate>,
+) -> Result<()> {
+    use crate::restructure::caches::change::{ChangedObject, Staged, rewrite};
+    use crate::restructure::caches::plan::rows;
+    use crate::restructure::names::deflate;
+    use crate::restructure::plan::CacheUpdate;
+
+    let changed = created
+        .iter()
+        .map(|item| {
+            Ok(ChangedObject {
+                kind: kind_name(item.kind),
+                uuid: item.uuid.clone(),
+                table_number: Some(
+                    names_after
+                        .number_of(&item.uuid, entry_kind(item.kind).table_kind())
+                        .with_context(|| format!("{} has no table number", item.facts.name))?,
+                ),
+                has_help: item
+                    .files
+                    .iter()
+                    .any(|file| file.to_ascii_lowercase() == format!("{}.1", item.uuid)),
+                has_predefined: false,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let made = {
+        let cache = |name: &str| -> Option<Vec<u8>> {
+            if let Some(update) = caches.iter().find(|update| update.row_name == name) {
+                return inflate(&update.row).ok();
+            }
+            inputs
+                .cache_rows
+                .iter()
+                .find(|(row, _)| row == name)
+                .map(|(_, stored)| row_text(stored))
+        };
+        let none = |_: &str| -> Option<Brace> { None };
+        let after = |uuid: &str| context.descriptor(uuid);
+        rewrite(&Staged {
+            root: &context.configuration,
+            before: &none,
+            after: &after,
+            changed: &changed,
+            cache: &cache,
+        })?
+    };
+    for row in made {
+        if (options.skip_xdto && row.name == rows::XDTO)
+            || (options.skip_registry && row.name == rows::REGISTRY)
+        {
+            continue;
+        }
+        let update = CacheUpdate {
+            row_name: row.name.to_owned(),
+            row: deflate(&row.text)?,
+            what: format!(
+                "rows of the new {}{}",
+                created
+                    .iter()
+                    .map(|item| item.facts.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if row.exact {
+                    ""
+                } else {
+                    " (the order of some entries is approximate)"
+                }
+            ),
+            set_creation: true,
+        };
+        match caches
+            .iter_mut()
+            .find(|other| other.row_name == update.row_name)
+        {
+            Some(slot) => *slot = update,
+            None => caches.push(update),
+        }
+    }
+    Ok(())
 }
