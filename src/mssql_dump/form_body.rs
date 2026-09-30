@@ -16672,6 +16672,9 @@ pub(super) fn form_control_system_color_name(code: i32) -> Option<&'static str> 
 fn form_control_window_color_name(code: i32) -> Option<&'static str> {
     match code {
         4 => Some("win:MenuBar"),       // 12
+        // 1C:Документооборот `CommonForms/РедактированиеТабличногоДокумента`
+        // `ИмяОбласти` holds `{3,1,{5}}` and writes `win:WindowBackground`.
+        5 => Some("win:WindowBackground"),
         17 => Some("win:DisabledText"), // 2
         18 => Some("win:ButtonText"),   // 10
         // Read off the platform's own element the same way the other three
@@ -16738,6 +16741,9 @@ fn form_control_web_color_name(code: i32) -> Option<&'static str> {
         70 => Some("web:LightGreen"),     // 15
         75 => Some("web:LightSkyBlue"),   // 1
         91 => Some("web:MediumSeaGreen"), // 6
+        // 1C:Документооборот `Documents/Отсутствие/Forms/ФормаДокумента`
+        // `ЗаместителиТекст` holds `{3,2,{125}}` and writes `web:Seagreen`.
+        125 => Some("web:Seagreen"),
         100 => Some("web:NavajoWhite"),   // 2
         106 => Some("web:OrangeRed"),     // 2
         109 => Some("web:PaleGreen"),     // 5
@@ -19585,6 +19591,9 @@ fn parse_form_input_field_auto_show_clear_button_mode(
         .input_field_option(options, InputFieldSlot::AutoShowClearButtonMode)?
         .trim()
     {
+        // 1C:Документооборот `DocumentJournals/ЭлектроннаяПочта/Forms/
+        // МК_ФормаСписка` `ОтборПрочтено` holds `1` and writes `Always`.
+        "1" => Some("Always"),
         "2" => Some("FilledOnly"),
         _ => None,
     }
