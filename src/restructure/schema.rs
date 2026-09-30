@@ -722,6 +722,71 @@ pub fn subtable_entry(
     ])
 }
 
+/// The entry of the sub-table `name` in the sub-table list of an object's table entry, to edit in place
+/// (`insert_field` and `add_subtable_field_index` work on it as on a table entry).
+pub fn subtable_mut<'a>(table: &'a mut Brace, name: &str) -> Result<&'a mut Brace> {
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let list = items
+        .get_mut(5)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no sub-table list")?;
+    list.iter_mut()
+        .skip(1)
+        .find(|sub| {
+            sub.as_list()
+                .and_then(|items| items.first())
+                .and_then(Brace::as_str)
+                == Some(name)
+        })
+        .with_context(|| format!("the table has no sub-table {name}"))
+}
+
+/// Adds the declared index the platform makes for an indexed attribute of a tabular section, fixes the count and
+/// returns its name: `ByField<field> {2,"<field>","ID"}`, not unique whatever the object is (measured on the
+/// 72 sub-tables of the БСП that have indexes: every one is `ByField*`, never unique, keyed by the field and the
+/// owner's `ID`; traced on catalogs, hierarchical catalogs and documents, cases e1 and e3). The entries sit in
+/// the order of their fields in the sub-table. A sub-table that has an index of another kind is refused.
+pub fn add_subtable_field_index(table: &mut Brace, field: &str) -> Result<String> {
+    let view = TableView::new(table)?;
+    if !view.is_subtable() {
+        bail!("{} is not a sub-table", view.name());
+    }
+    let fields: Vec<String> = view.fields()?.into_iter().map(|entry| entry.name).collect();
+    let position_of = |name: &str| fields.iter().position(|candidate| candidate == name);
+    let own = position_of(field).with_context(|| format!("the sub-table has no field {field}"))?;
+    let existing = view.indexes()?;
+    let mut at = existing.len();
+    for (position, index) in existing.iter().enumerate() {
+        if index.fields.iter().any(|name| name == field) {
+            bail!("index {} already names the field {field}", index.name);
+        }
+        let plain = index.name.starts_with("ByFieldFld")
+            && index.fields.len() == 2
+            && index.fields[1] == "ID";
+        if !plain {
+            bail!(
+                "the sub-table {} has the index {}, which is not the index of an attribute: not traced",
+                view.name(),
+                index.name
+            );
+        }
+        let indexed = position_of(&index.fields[0])
+            .with_context(|| format!("index {} names no field of the sub-table", index.name))?;
+        if indexed > own && at == existing.len() {
+            at = position;
+        }
+    }
+    let name = format!("ByField{field}");
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let indexes = items
+        .get_mut(6)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no index list")?;
+    indexes.insert(1 + at, index_brace(&name, false, &[field, "ID"]));
+    indexes[0] = Brace::atom(indexes.len() - 1);
+    Ok(name)
+}
+
 /// Appends a sub-table entry to the sub-table list of an object's table entry (element 5) and fixes the count.
 pub fn push_subtable(table: &mut Brace, subtable: Brace) -> Result<()> {
     let items = table.as_list_mut().context("a table entry is not a list")?;

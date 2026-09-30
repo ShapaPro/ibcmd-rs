@@ -46,3 +46,5 @@ mod tests_plan;
 mod tests_s1;
 #[cfg(test)]
 mod tests_schema;
+#[cfg(test)]
+mod tests_sections;

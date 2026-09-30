@@ -124,12 +124,28 @@ pub struct SwitchReport {
     pub removed: Vec<String>,
 }
 
+/// A tabular section that is new or got new attributes.
+#[derive(Debug, Serialize)]
+pub struct SectionReport {
+    pub section: String,
+    pub uuid: String,
+    /// The sub-table, `VT155`.
+    pub table: String,
+    /// A new section: the numbers of its `VT` and `LineNo` entries.
+    pub table_number: Option<u64>,
+    pub line_no: Option<u64>,
+    pub attributes: Vec<AdditionReport>,
+    pub indexes: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TableReport {
     pub table: String,
     pub columns: usize,
     pub indexes: Vec<String>,
     pub copy_columns: usize,
+    /// The table is created (a new section's), not copied.
+    pub created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +165,7 @@ pub struct ObjectReport {
     pub removals: Vec<RemovalReport>,
     pub widenings: Vec<WideningReport>,
     pub switches: Vec<SwitchReport>,
+    pub sections: Vec<SectionReport>,
     pub tables: Vec<TableReport>,
 }
 
@@ -439,10 +456,34 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
                         removed: switch.removed.clone(),
                     })
                     .collect(),
+                sections: object
+                    .sections
+                    .iter()
+                    .map(|section| SectionReport {
+                        section: section.name.clone(),
+                        uuid: section.uuid.clone(),
+                        table: section.table.clone(),
+                        table_number: section.created.map(|created| created.table_number),
+                        line_no: section.created.map(|created| created.line_no),
+                        attributes: section
+                            .additions
+                            .iter()
+                            .map(|addition| AdditionReport {
+                                attribute: addition.name.clone(),
+                                uuid: addition.uuid.clone(),
+                                field: addition.field.name.clone(),
+                                number: addition.number,
+                                position: addition.position,
+                            })
+                            .collect(),
+                        indexes: section.indexes.clone(),
+                    })
+                    .collect(),
                 tables: object
                     .tables
                     .iter()
                     .map(|table| TableReport {
+                        created: table.create,
                         table: table.table.name.clone(),
                         columns: table.table.columns.len(),
                         indexes: table

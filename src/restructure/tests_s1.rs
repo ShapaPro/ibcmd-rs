@@ -279,21 +279,27 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
         "ffffffff-0000-4000-8000-000000000000"
     );
 
-    // An operation of S1 that is designed but not built (a tabular section, an object).
-    let section = check_of(vec![structure(
-        RuleId::TabularSectionAddedDroppedMoved,
-        "Catalog",
-        OBJECT,
-        vec![
-            seg("ChildObjects", None),
-            seg("TabularSection", Some("ДемоНоваяТЧ")),
-        ],
-        Some(ChangeOp::Added),
-    )]);
-    let (verdict, phase) = decide(conservative(&[CATALOG]), &section, &base, &options());
+    // An operation of S1 that is designed but not built (an object).
+    let object = check_of(vec![
+        structure(
+            RuleId::ObjectWithStorageAddedOrDropped,
+            "Catalog",
+            "Catalog.Новый",
+            vec![],
+            Some(ChangeOp::Added),
+        ),
+        structure(
+            RuleId::ObjectWithStorageAddedOrDropped,
+            "Configuration",
+            "Configuration",
+            vec![seg("ChildObjects", None), seg("Catalog", Some("Новый"))],
+            Some(ChangeOp::Added),
+        ),
+    ]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &object, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        blocked_with(&verdict, "add-tabular-section"),
+        blocked_with(&verdict, "add-object"),
         "{:?}",
         verdict.blockers
     );
@@ -422,6 +428,138 @@ fn an_index_switch_is_let_through_and_the_untraced_ones_are_not() {
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
         blocked_with(&verdict, "only DontIndex <-> Index"),
+        "{:?}",
+        verdict.blockers
+    );
+}
+
+fn section_reason(name: &str) -> Reason {
+    structure(
+        RuleId::TabularSectionAddedDroppedMoved,
+        "Catalog",
+        OBJECT,
+        vec![seg("ChildObjects", None), seg("TabularSection", Some(name))],
+        Some(ChangeOp::Added),
+    )
+}
+
+fn section_attribute(section: &str, name: &str) -> Reason {
+    structure(
+        RuleId::TabularSectionColumnAddedDroppedMoved,
+        "Catalog",
+        OBJECT,
+        vec![
+            seg("ChildObjects", None),
+            seg("TabularSection", Some(section)),
+            seg("ChildObjects", None),
+            seg("Attribute", Some(name)),
+        ],
+        Some(ChangeOp::Added),
+    )
+}
+
+#[test]
+fn a_new_section_and_a_new_attribute_of_an_old_one_are_let_through_and_the_decoders_must_agree() {
+    use super::tests_sections::{
+        SECTIONS, attributes_of, collection, fresh, recount, rename, staged, with_new_section,
+    };
+    use crate::restructure::object::ObjectFacts;
+
+    // The new section НоваяТЧ of the helper, and a new attribute in the second stored section.
+    let mut root = with_new_section();
+    let stored = ObjectFacts::parse(&super::tests_sections::tree()).unwrap();
+    let old_section = stored.sections()[1].name.clone();
+    let template = stored.sections()[1].attributes[0].name.clone();
+    let sections = collection(&mut root, SECTIONS);
+    let attributes = attributes_of(&mut sections[3]);
+    let mut added = fresh(&attributes[2], 7, true);
+    rename(&mut added, &template, "ДемоРеквизитТЧ");
+    attributes.push(added);
+    recount(attributes);
+    let inputs = staged(&root);
+
+    let check = check_of(vec![
+        section_reason("НоваяТЧ"),
+        section_attribute(&old_section, "ДемоРеквизитТЧ"),
+    ]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &inputs, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert_eq!(
+        phase.tables,
+        [
+            "_Reference20",
+            "_Reference20_VT155",
+            "_Reference20_VT159",
+            "_Reference20_VT11035"
+        ]
+    );
+    assert!(phase.objects[0].contains("new tabular sections VT11035 = НоваяТЧ"));
+    assert!(phase.objects[0].contains("new attributes of tabular sections"));
+    assert!(
+        phase
+            .sql
+            .contains("create table dbo._Reference20_VT11035NG")
+    );
+    assert!(
+        phase
+            .sql
+            .contains("the created table _Reference20_VT11035 is not empty")
+    );
+    assert!(!phase.sql.contains("drop table dbo._Reference20_VT11035;"));
+    assert!(phase.params_rewrites.is_empty());
+
+    // The check names the section but not the attribute, or another section, or another attribute.
+    for (what, reasons) in [
+        ("without the attribute", vec![section_reason("НоваяТЧ")]),
+        (
+            "another section",
+            vec![
+                section_reason("Другая"),
+                section_attribute(&old_section, "ДемоРеквизитТЧ"),
+            ],
+        ),
+        (
+            "another attribute",
+            vec![
+                section_reason("НоваяТЧ"),
+                section_attribute(&old_section, "Другой"),
+            ],
+        ),
+        (
+            "another section of the attribute",
+            vec![
+                section_reason("НоваяТЧ"),
+                section_attribute("Другая", "ДемоРеквизитТЧ"),
+            ],
+        ),
+    ] {
+        let (verdict, phase) = decide(
+            conservative(&[CATALOG]),
+            &check_of(reasons),
+            &inputs,
+            &options(),
+        );
+        assert!(verdict.restructuring_required && phase.is_none(), "{what}");
+        assert!(
+            blocked_with(&verdict, "disagree"),
+            "{what}: {:?}",
+            verdict.blockers
+        );
+    }
+
+    // A section attribute dropped or moved is the classification's refusal, however the plan reads it.
+    let mut dropped = section_attribute(&old_section, "ДемоРеквизитТЧ");
+    dropped.op = Some(ChangeOp::Removed);
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check_of(vec![section_reason("НоваяТЧ"), dropped]),
+        &inputs,
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "tabular-section-outside-s1"),
         "{:?}",
         verdict.blockers
     );

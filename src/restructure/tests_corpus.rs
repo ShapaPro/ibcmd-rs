@@ -298,7 +298,8 @@ fn inputs_of(staged: &Snapshot) -> Inputs {
 /// object registry -- as text (only the deflate stream differs).
 fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot) {
     // The derived caches (a plan that writes none -- a stage that only widens strings -- is checked by the
-    // test itself against the rows before).
+    // test itself against the rows before): every row the plan rewrites is the platform's text, and the XDTO
+    // model and the object registry are among them whenever the plan rewrites anything.
     let cache = |name: &str| {
         plan.caches
             .iter()
@@ -312,7 +313,14 @@ fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot)
     .into_iter()
     .filter(|_| !plan.caches.is_empty())
     {
-        let update = cache(name);
+        cache(name);
+    }
+    for update in plan
+        .caches
+        .iter()
+        .filter(|cache| cache.row_name != "siVersions")
+    {
+        let name = update.row_name.as_str();
         let native_row = inflate(&after.row("Params", name).unwrap()).unwrap();
         let ours_row = inflate(&update.row).unwrap();
         if ours_row != native_row {
@@ -326,7 +334,9 @@ fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot)
                     .into_owned()
             };
             panic!(
-                "{name} differs from the platform's at byte {at} ({} vs {} bytes):\nours:   {:?}\nnative: {:?}",
+                "{name} differs from the platform's at byte {at} ({} vs {} bytes):
+ours:   {:?}
+native: {:?}",
                 ours_row.len(),
                 native_row.len(),
                 show(&ours_row),
@@ -620,5 +630,64 @@ fn corpus_plan_of_the_index_flags_on_and_off_equals_the_native_result() {
     assert_eq!(switches.iter().filter(|switch| switch.to == 0).count(), 6);
     assert_eq!(switches.iter().filter(|switch| switch.to == 2).count(), 2);
     assert_no_cache_change(&plan, &staged, &after);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-E: new attributes in tabular sections that were there -- a document's section (two attributes, one first
+/// and one last, one indexed), a catalog's sections in a flat and a hierarchical catalog (declared indexes
+/// already there) -- against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_attributes_of_existing_sections_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e3_base", "e3_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e3_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the section attributes case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{}", plan.summary());
+    assert_eq!(plan.objects.len(), 4);
+    assert!(plan.objects.iter().all(|object| {
+        object
+            .sections
+            .iter()
+            .all(|section| section.created.is_none())
+    }));
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-E: new tabular sections -- a catalog and a document, a hierarchical catalog, a flat one, sections with
+/// indexed attributes, a section in an object that also gets a new own attribute and a new attribute in a
+/// section it had -- against the native apply of the same stage (case e4: a catalog with one new section and a
+/// document with two).
+#[test]
+fn corpus_plan_of_new_sections_in_a_catalog_and_a_document_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e4_base", "e4_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e4_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the new sections case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{}", plan.summary());
+    assert_eq!(plan.objects.len(), 2);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-E: five new tabular sections in one stage -- three catalogs (one hierarchical) and two documents.
+#[test]
+fn corpus_plan_of_five_new_sections_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e1_base", "e1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the five sections case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{}", plan.summary());
+    assert_eq!(plan.objects.len(), 5);
     assert_equals_native(&plan, &after);
 }
