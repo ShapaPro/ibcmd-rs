@@ -275,13 +275,20 @@ pub fn apply_source_change(
         preflight_main_publication(args)?;
     }
     // An exclusive activation is refused on the cluster's word when the infobase has
-    // clients (#409 F-3); asking before the stage keeps `ConfigSave` untouched.
+    // clients (#409 F-3), and on the database's when a session other than the tool's
+    // own RAS verification is on it; asking before the stage keeps `ConfigSave`
+    // untouched. The gate inside the activation's transaction stays the last word.
     if matches!(args.mode, MssqlMainActivationModeArg::Exclusive) {
-        crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+        let own = crate::mssql_platform_profile::own_ras_processes_for_exclusive(
             &args.rac,
             &args.ras_endpoint,
             profile_verification.verified_cluster_id,
             profile_verification.verified_infobase_id,
+        )?;
+        crate::mssql_platform_profile::refuse_foreign_sessions(
+            &main_read_sql(args)?,
+            &args.database,
+            &own,
         )?;
     }
     prepare_compile_tree_for_selected_change(&proposed_root, &selected_path)?;

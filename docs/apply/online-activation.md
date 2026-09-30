@@ -347,7 +347,7 @@ of F-1 were measured under the load of the other runs; the unfixed binary needed
 untouched: a bounded read of an object with an alias is still a scan of the table under a derived table (the export took 3.0 s
 cold and 0.7 s warm here), and would take longer under load.
 
-**Found while proving F-1, not changed here.** The stage reads its base rows and the `versions` blob with its own SQL on the
+**Found while proving F-1; fixed in section 6.4 (#416).** The stage reads its base rows and the `versions` blob with its own SQL on the
 ordinary `Config` rows (`fetch_config_blob`, `fetch_config_blobs_for_files`), never through the overlay. On a base with earlier
 generations the new `versions_dynupdate_<g>` is therefore built on the ordinary `versions`, not on the active generation's:
 in the clone, `versions_dynupdate_<native g1>` lists the form `a627e390-...` at `226957a7-...` and its body at `9fab40a2-...`,
@@ -408,6 +408,81 @@ against the native platform, with the fixed binary (merged with feat/0.4 5e146f0
 - БСП 8.3.27 from rows (`mssql-dump-config --rows-dir`), the binary before (feat/0.4 e672908c) against the binary after:
   **12 199 of 12 199 identical**.
 - Tests: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries): 3 643 passed, 0 failed, 12 ignored; the lib alone 3 435, the import guard's `mssql::stage_guard` tests among them.
+
+### 6.4 Fixed in 0.5 (#409 follow-up, #416): the pre-stage session count and the stage's base rows
+
+**An exclusive apply is refused on a foreign SQL session before the stage.** The gate inside the activation's transaction refuses a
+session of another program or process, but after the stage, and left `ConfigSave` filled. The apply now runs the gate's own condition
+as a query before the stage (`foreign_sessions_query`, with the same exemption for the tool's RAS-held sessions) and names what it
+found; the gate in the transaction stays the last word, and a `--sqlcmd` connection, which cannot ask, is left to it. Measured on a
+marker-free clone with one idle non-1C session on the database: unfixed, refused after the stage (7.1 s, `ConfigSave` 5 rows); now
+refused in 3.4 s with the session named (login, host, program) and the row counts and checksums of `Config`, `ConfigSave` and `Params`
+identical to before. Without that session the same apply goes through (3.4 s).
+
+**F-18 (#416): the stage built `versions` on the plain row.** Found while proving F-1 (section 6.1). The stage reads the base rows it
+patches with its own SQL on the ordinary `Config` rows, so the `versions_dynupdate_<g>` it writes carried the ordinary stamp of every
+object an earlier generation had changed. Nothing else was wrong with the rows: the bodies stay in their aliases.
+
+*What a client saw, measured before the fix* (the observer client of the #344 kit, extended to read the title of the common form
+`_ДемоПримечание`, which the native generation changed, next to the client and server value of the module marker):
+
+- Marker-free clone. A client warmed on the ordinary configuration and killed (so its disk cache holds the ordinary stamps);
+  generation 1 of ours (module A marker `v1`); generation 2 of ours (module B), whose `versions` had A back at its ordinary stamp
+  (`151cc9e7`, generation 1 had `3ac2adf7`). A new session: A `ibcmd-online-v1` on the client **and** the server, B present. Correct.
+- Native generation, then ours (the native rows taken out while a session was opened on the ordinary configuration and put back,
+  then generation 2 of ours over them). The old session stays alive with the ordinary form; a new session shows the form title of the
+  native generation and A `v1`, while the old one keeps the ordinary title, as an old session should. Correct.
+
+So no visible effect on the content a session gets, in these two runs. The row is wrong all the same: in the second run
+`versions_dynupdate_<ours>` differs from `versions_dynupdate_<native>` in 9 stamps, four of them (the form and its body, the module
+`_ДемоЗаметки` and its body) only because they went back. Whatever compares version stamps -- the `ConfigDumpInfo.xml` an export
+writes lists them -- takes those objects for unchanged since before the native generation. Not tested with a native tool.
+
+*The fix.* `fetch_config_blob` and `fetch_config_blobs_for_files` (the stage's base-row readers) ask for the generation history once
+per process and database; when generations are active they read the row the platform reads: the plain row and every alias of it in
+one seek (`FileName = @name OR FileName LIKE '<stem>\_dynupdate\_<36 wildcards><suffix>' ESCAPE '\'`), and the alias of the newest
+generation in the history wins (`mssql_effective_row`, the rule the export's overlay applies). It covers every base row of the
+per-row stage -- headers, bodies, `versions`, `root`, the constants.
+
+*One rule with the import's stage (#388 step 2).* The import's stage reads the whole table first (the bulk prefetch) and bases its
+rows on the aliases of a pending online update (`dynamic_generation_aliases`, `docs/import/override.md` section 1, item 6); the
+apply's stage asks row by row. Both apply the export's rule (`StorageGenerationOverlay`: the alias of the newest generation of the
+history that carries the name, an unlisted generation ignored, the plain row when none does). The row-by-row reader reaches it
+through `mssql_dump::stored_row_name` and adds only the seek that finds the candidates (`mssql_effective_row`); it does not keep a
+rule of its own, and a test gives both readers the same stored names and asserts that they name the same row for every name (an
+object the update added, an unlisted generation and a missing name included). Which one runs is decided by the prefetch:
+`fetch_config_blob` answers from the prefetched rows first (the import), and asks the database only when there are none (the
+apply); the two never read the same row in one process.
+
+Measured on a clone restored from the corpus (native generation of two objects), then generation 2 of ours (module A) and generation
+3 of ours (module B), with the fixed binary:
+
+| comparison of `versions` rows | stamps that differ |
+|---|---|
+| native generation -> ours (unfixed binary) | 9: A, A.0, the form, its body, `_ДемоЗаметки`, its body, `root`, `version`, `versions` |
+| native generation -> ours (fixed binary) | 5: A, A.0, `root`, `version`, `versions` |
+| ours 2 -> ours 3 (fixed) | 5: B, B.0, `root`, `version`, `versions` |
+| native generation -> ours 3 (fixed) | 7: A, A.0, B, B.0 and the three service rows |
+
+The export of that clone against the native platform: **12 198 of 12 198 identical**. A new session shows A `v1`, B `v2` and the form
+title of the native generation. The reproducing test is a live test (`the_stage_reads_the_versions_row_the_platform_reads`,
+`IBCMD_RS_DYNGEN_DB=<lab database>`, feature `mssql-live-tests`): on the commit before the fix it fails ("the stage reads the plain
+`versions` row"), on the fix it passes; the rest is pure (`mssql_effective_row`: alias names, the `LIKE` pattern, which row wins).
+
+*After the reconciliation with the import (feat/0.4 029b4a2b merged).* The import track's kit writes into its own lab folder, takes the
+native lock as `import` and accepts only its own databases, so the same steps were run with a script of this lab: the drop-in
+`infobase config import`, the drop-in `infobase config apply`, the platform's `config export`, `source-diff` of the tree against the
+export. Clones of the corpus backup, which carries the native generation:
+
+| case | result |
+|---|---|
+| F-18 proof again, on the merged binary: native generation, ours 2 (module A), ours 3 (module B) | stamps that differ: 5, 5 and 7, as before; export against the native platform **12 198 of 12 198** |
+| import on the marker base: a comment appended to `CommonModule._ДемоЗаметки` (the object of the native generation), our import 39.8 s, our apply 130 s (folds the generation: no dynamic row left, Config 9 841, ConfigSave empty), native export | **the export equals the tree** (12 197 files identical; `ConfigDumpInfo.xml` differs, as it does for the native import) |
+| the same after our own online generation (module A, `v1`) was put on top of the native one, then the import of the same tree | the same: 12 197 identical; the import overwrote A with the tree's text and its stage was based on our alias rows |
+| the import of `rem2` (a form and a template removed): our import 53.5 s | our apply refuses ("требуется штатный config apply": the removals need the platform's), as the import's own acceptance applies that case natively; a descriptor-changing tree (`syn`, `prop`, `confver`, rights, command interface, predefined) is refused the same way ("possibly structural") |
+
+Tests, on the merged tree: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries)
+**3 699 passed, 0 failed, 12 ignored**.
 
 ## 7. Recovery
 

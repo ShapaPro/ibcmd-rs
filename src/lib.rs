@@ -26,6 +26,7 @@ pub mod mssql;
 pub mod mssql_apply;
 pub mod mssql_config_apply;
 pub mod mssql_dump;
+pub mod mssql_effective_row;
 pub mod mssql_extension_activation;
 pub mod mssql_extension_export;
 pub mod mssql_extension_load;
