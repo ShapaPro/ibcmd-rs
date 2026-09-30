@@ -7,12 +7,13 @@ and files.txt, for `stage_case.ps1`:
   n1  a flat catalog: string, number, date, boolean, a reference, an indexed string, one attribute with an additional order
   n2  a hierarchical catalog of folders and items: attributes ForItem / ForFolder / ForFolderAndItem, an indexed one,
       and a tabular section with a reference and an indexed attribute
-  n3  a flat catalog that the configuration lists BEFORE _ДемоПартнеры, and a new attribute of _ДемоПартнеры
+  n3  a flat catalog that the configuration lists BEFORE _ДемоСтавкиНДС, and a new attribute of _ДемоСтавкиНДС
   n4  a document with a periodic numeric number, an indexed attribute and one with an additional order
   n5  a catalog and a document together
 """
 import os
 import re
+import shutil
 import sys
 import uuid
 
@@ -195,7 +196,12 @@ def configuration(kind, names, before=None):
     return text, bom, crlf
 
 
+ONLY = set(sys.argv[1:])   # the cases to write (the uuids are new at every run: the others keep the ones the platform has seen)
+
+
 def emit(case, files, listing_edits):
+    if ONLY and case not in ONLY:
+        return
     stage = os.path.join(OUT, case, 'stage')
     for rel, (text, bom, crlf) in files.items():
         write(os.path.join(stage, rel), text, bom, crlf)
@@ -265,15 +271,22 @@ def main():
     config_for('n2', [('Catalog', [n2], None)])
     emit('n2', {'Catalogs/%s.xml' % n2: catalog_from(flat, n2, 'Демо: каталог Н2', a2, ts, hierarchical=True)}, [])
 
-    # n3: a new catalog listed before _ДемоПартнеры and a new attribute of _ДемоПартнеры
+    # n3: a new catalog listed before _ДемоСтавкиНДС and a new attribute of _ДемоСтавкиНДС (the natural choices are refused, and a refusal test each:
+    # the extension adopts _ДемоПартнеры; _ДемоКассы is subordinate to owners)
     n3 = 'ДемоКатН3'
     a3 = LF.join([attribute('Наименование3', 'Наименование 3', TYPES['string'](35), 3)])
-    partners, pbom, pcrlf = read(os.path.join(TREE, 'Catalogs', '_ДемоПартнеры.xml'))
-    at = partners.index('\t\t\t<TabularSection uuid=')
-    partners = partners[:at] + attribute('ДемоН3Реквизит', 'Демо Н3 реквизит', TYPES['string'](45), 3, use='ForItem') + LF + partners[at:]
-    config_for('n3', [('Catalog', [n3], {n3: '_ДемоПартнеры'})])
+    partners, pbom, pcrlf = read(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС.xml'))
+    extra3 = attribute('ДемоН3Реквизит', 'Демо Н3 реквизит', TYPES['string'](45), 3)
+    end = '\t\t\t</Attribute>'   # _ДемоСтавкиНДС: flat, no owners, one attribute, no tabular sections
+    at = partners.rindex(end) + len(end)
+    partners = partners[:at] + LF + extra3 + partners[at:]
+    config_for('n3', [('Catalog', [n3], {n3: '_ДемоСтавкиНДС'})])
     emit('n3', {'Catalogs/%s.xml' % n3: catalog_from(flat, n3, 'Демо: каталог Н3', a3),
-                'Catalogs/_ДемоПартнеры.xml': (partners, pbom, pcrlf)}, [])
+                'Catalogs/_ДемоСтавкиНДС.xml': (partners, pbom, pcrlf)}, [])
+    # the partial import checks that the forms the changed catalog names exist (it stages only the listed files)
+    if (not ONLY or 'n3' in ONLY) and os.path.isdir(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС')):
+        shutil.copytree(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС'),
+                        os.path.join(OUT, 'n3', 'stage', 'Catalogs', '_ДемоСтавкиНДС'), dirs_exist_ok=True)
 
     # n4: a document with a periodic numeric number
     d4 = 'ДемоДокН4'
@@ -294,6 +307,32 @@ def main():
     config_for('n5', [('Catalog', [c5], None), ('Document', [d5], None)])
     emit('n5', {'Catalogs/%s.xml' % c5: catalog_from(flat, c5, 'Демо: каталог Н5', a5),
                 'Documents/%s.xml' % d5: (dtext, dbom, dcrlf)}, [])
+
+    # n6: like n3, but the new catalog is listed AFTER the changed one (the alphabetical place): does the platform number the
+    # created objects first, or in the configuration's order?
+    n6 = 'ДемоКатН6'
+    a6 = LF.join([attribute('Наименование6', 'Наименование 6', TYPES['string'](35), 3)])
+    changed, cbom, ccrlf = read(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС.xml'))
+    end = '\t\t\t</Attribute>'
+    at = changed.rindex(end) + len(end)
+    changed6 = changed[:at] + LF + attribute('ДемоН6Реквизит', 'Демо Н6 реквизит', TYPES['string'](45), 3) + changed[at:]
+    config_for('n6', [('Catalog', [n6], None)])
+    emit('n6', {'Catalogs/%s.xml' % n6: catalog_from(flat, n6, 'Демо: каталог Н6', a6),
+                'Catalogs/_ДемоСтавкиНДС.xml': (changed6, cbom, ccrlf)}, [])
+    if not ONLY or 'n6' in ONLY:
+        shutil.copytree(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС'),
+                        os.path.join(OUT, 'n6', 'stage', 'Catalogs', '_ДемоСтавкиНДС'), dirs_exist_ok=True)
+
+    # n7: a new document and a changed catalog (a new attribute): the kinds across created and changed objects
+    d7 = 'ДемоДокН7'
+    dtext7, dbom7, dcrlf7 = document_from('_ДемоОприходованиеТоваров', d7, 'Демо: документ Н7')
+    changed7 = changed[:at] + LF + attribute('ДемоН7Реквизит', 'Демо Н7 реквизит', TYPES['string'](45), 3) + changed[at:]
+    config_for('n7', [('Document', [d7], None)])
+    emit('n7', {'Documents/%s.xml' % d7: (dtext7, dbom7, dcrlf7),
+                'Catalogs/_ДемоСтавкиНДС.xml': (changed7, cbom, ccrlf)}, [])
+    if not ONLY or 'n7' in ONLY:
+        shutil.copytree(os.path.join(TREE, 'Catalogs', '_ДемоСтавкиНДС'),
+                        os.path.join(OUT, 'n7', 'stage', 'Catalogs', '_ДемоСтавкиНДС'), dirs_exist_ok=True)
 
 
 main()
