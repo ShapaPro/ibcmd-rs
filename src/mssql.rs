@@ -79,8 +79,8 @@ use crate::module_blob::{
 };
 use crate::module_blob::{HtmlPageOwner, html_page_storage_bytes};
 use crate::mssql_main_activation::{
-    MainActivationDryRunReport, MainActivationMode,
-    MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation,
+    MainActivationDryRunReport, MainActivationExecutor, MainActivationMode, MainActivationPlan,
+    MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation_for,
     render_main_activation_sql,
 };
 use crate::parallel;
@@ -354,6 +354,10 @@ pub struct MssqlActivateStagedMainReport {
     pub tail_log_output: Option<PathBuf>,
     pub live_recovery_command: Option<String>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
+    /// The report of the own apply (`mssql_config_apply`) that carried the promotion out: the `exclusive` mode of
+    /// the built-in SQL client (#408 step 2). Absent when the transaction of this module did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_apply: Option<crate::mssql_config_apply::ConfigApplyReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1014,7 +1018,14 @@ pub fn activate_staged_main(
         MssqlMainActivationModeArg::Live => MainActivationMode::Live,
         MssqlMainActivationModeArg::Worker => MainActivationMode::Worker,
     };
-    let plan = prepare_main_activation(
+    // The exclusive mode is carried out by the own apply (`mssql_config_apply`), which folds the rows of the
+    // online generations the way the native apply does (#408 step 2). It needs the built-in SQL client; with
+    // `--sqlcmd` the script of this module carries the promotion out and refuses such a database (step 1), as
+    // do the live and worker modes.
+    let executor =
+        MainActivationExecutor::for_mode(mode, matches!(sql.backend(), SqlBackend::Client(_)));
+    let plan = prepare_main_activation_for(
+        executor,
         mode,
         staged,
         MainPublicationSnapshot {
@@ -1042,6 +1053,9 @@ pub fn activate_staged_main(
     } else {
         plan
     };
+    if plan.is_carried_out_by_config_apply() {
+        return activate_by_config_apply(args, &sql, &plan, profile_verification);
+    }
     if matches!(args.mode, MssqlMainActivationModeArg::Live)
         && args
             .tail_log_output
@@ -1138,7 +1152,139 @@ pub fn activate_staged_main(
             None
         },
         worker_switch,
+        config_apply: None,
     })
+}
+
+/// The exclusive promotion of the staged ConfigSave, carried out by the own apply (#408 step 2, F-4 of #344).
+///
+/// The transaction of [`render_main_activation_sql`] replaces the staged rows and deletes the two markers, which
+/// leaves the `_dynupdate_` rows of earlier online generations behind; the own apply folds them into the ordinary
+/// rows as the native one does, and does what the native apply does besides (`_MessageNo`, the registration for
+/// the exchange-plan nodes, `MobileVersions.dat`, its own recovery artifact). What this module keeps: the
+/// verification of the platform profile and of the cluster, the plan (the refusal of a stage of another shape, the
+/// generations, the recovery snapshot of the rows of the staged objects) and the report's shape.
+fn activate_by_config_apply(
+    args: &MssqlActivateStagedMainArgs,
+    sql: &SqlExec,
+    plan: &MainActivationPlan,
+    profile_verification: crate::mssql_platform_profile::MssqlNativeProfileVerification,
+) -> Result<MssqlActivateStagedMainReport> {
+    let report = plan.dry_run_report();
+    let artifact_root = std::env::temp_dir().join("ibcmd-rs");
+    fs::create_dir_all(&artifact_root)
+        .with_context(|| format!("failed to create {}", artifact_root.display()))?;
+    let token = &report.recovery_token[..16];
+    let script = args.script_output.clone().unwrap_or_else(|| {
+        artifact_root.join(format!(
+            "activate_{}_{}.sql",
+            safe_file_stem(&args.database),
+            token
+        ))
+    });
+    let recovery = args.recovery_output.clone().unwrap_or_else(|| {
+        artifact_root.join(format!(
+            "recovery_{}_{}.json",
+            safe_file_stem(&args.database),
+            token
+        ))
+    });
+    // The snapshot of the rows the stage replaces, as before: written ahead of the run, so it is there when the
+    // run stops half way (the apply's own artifact, under `config_apply.recovery_dir`, is written by the apply).
+    let recovery_json = serde_json::to_vec_pretty(plan.recovery())?;
+    write_new_or_identical(&recovery, &recovery_json)?;
+
+    let options = config_apply_options(
+        &args.database,
+        args.platform_profile,
+        args.dry_run,
+        &script,
+        plan.own_ras_processes(),
+    );
+    let applied = crate::mssql_config_apply::apply_staged_configuration(sql, &options)?;
+    Ok(MssqlActivateStagedMainReport {
+        database: args.database.clone(),
+        claimed_platform_profile: profile_verification.claimed_platform_profile,
+        verified_platform_profile: profile_verification.verified_platform_profile,
+        storage_schema_sha256: profile_verification.storage_schema_sha256,
+        dry_run: args.dry_run,
+        executed: applied.executed,
+        activation: report,
+        script,
+        recovery,
+        tail_log_output: None,
+        live_recovery_command: None,
+        worker_switch: None,
+        config_apply: Some(applied),
+    })
+}
+
+/// The options of the own apply for an exclusive promotion of the old commands: the default gate (the apply check,
+/// which reads an aliased object's descriptor the way the platform does), no restructuring, the exclusivity proved by
+/// the sessions SQL Server shows -- less the idle sessions of the tool's own RAS verification (#409 F-3) -- and the
+/// script written where the command's `--script-output` names it.
+fn config_apply_options(
+    database: &str,
+    profile: crate::mssql_platform_profile::MssqlNativePlatformProfile,
+    dry_run: bool,
+    script: &Path,
+    own_ras_processes: &[crate::mssql_platform_profile::OwnRasProcess],
+) -> crate::mssql_config_apply::ConfigApplyOptions {
+    let mut options = crate::mssql_config_apply::ConfigApplyOptions::new(database, profile);
+    options.dry_run = dry_run;
+    options.exclusivity = crate::mssql_config_apply::Exclusivity::SqlSessions;
+    options.script_output = Some(script.to_path_buf());
+    options.own_ras_processes = own_ras_processes.to_vec();
+    options
+}
+
+#[cfg(test)]
+mod config_apply_options_tests {
+    use super::config_apply_options;
+    use crate::mssql_config_apply::{BackupPolicy, Exclusivity, GateChoice};
+    use crate::mssql_platform_profile::{MssqlNativePlatformProfile, OwnRasProcess};
+    use std::path::Path;
+
+    #[test]
+    fn the_old_exclusive_commands_hand_the_own_apply_its_default_gate_and_their_own_ras_sessions() {
+        let own = [OwnRasProcess {
+            host: "wks".to_owned(),
+            pid: 4711,
+        }];
+        let options = config_apply_options(
+            "ibcmd_rs_04_apply_x",
+            MssqlNativePlatformProfile::Platform8_3_27_2214,
+            false,
+            Path::new("activate.sql"),
+            &own,
+        );
+        assert_eq!(options.database, "ibcmd_rs_04_apply_x");
+        assert_eq!(
+            options.platform_profile,
+            MssqlNativePlatformProfile::Platform8_3_27_2214
+        );
+        assert!(!options.dry_run && !options.rehearse);
+        assert_eq!(options.exclusivity, Exclusivity::SqlSessions);
+        assert_eq!(
+            options.script_output.as_deref(),
+            Some(Path::new("activate.sql"))
+        );
+        assert_eq!(options.own_ras_processes, own);
+        // the default gate, no restructuring, no backup asked for
+        assert_eq!(options.gate, GateChoice::ApplyCheck);
+        assert!(options.allow_restructure.is_none());
+        assert!(matches!(options.backup, BackupPolicy::None));
+        // a dry run is a dry run of the apply
+        let dry = config_apply_options(
+            "db",
+            MssqlNativePlatformProfile::Platform8_5_1_1150,
+            true,
+            Path::new("a.sql"),
+            &[],
+        );
+        assert!(dry.dry_run);
+        assert!(dry.own_ras_processes.is_empty());
+    }
 }
 
 pub(crate) fn exactly_one_optional_marker(

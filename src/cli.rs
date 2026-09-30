@@ -2071,7 +2071,10 @@ pub struct MssqlActivateStagedMainArgs {
     /// Target MSSQL database.
     #[arg(long)]
     pub database: String,
-    /// Publication mode.
+    /// Publication mode. `exclusive` is carried out by the own config apply
+    /// (built-in SQL client), which folds the rows of earlier online
+    /// generations as the native apply does; with `--sqlcmd`, and for `live`
+    /// and `worker`, a database that holds online generations is refused.
     #[arg(long, value_enum)]
     pub mode: MssqlMainActivationModeArg,
     /// Render and validate the exact transition without executing it.
