@@ -670,11 +670,6 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
         .chain(retyped.keys())
         .chain(reindexed.keys())
         .collect();
-    if owners.is_empty() {
-        bail!(
-            "the staged image adds no attribute, removes none, retypes none and switches no index: nothing this prototype restructures"
-        );
-    }
     Ok(owners
         .into_iter()
         .map(|owner| Change {
@@ -965,6 +960,11 @@ impl Running {
 pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     check_files(&inputs.staged)?;
     let changes = find_changes(&inputs.staged)?;
+    if changes.is_empty() {
+        bail!(
+            "the staged image adds no attribute, removes none, retypes none and switches no index: nothing this prototype restructures"
+        );
+    }
     let removed_everywhere: BTreeSet<String> = changes
         .iter()
         .flat_map(|change| change.removed.iter().cloned())
