@@ -28,6 +28,20 @@ import lab with the form `ВсеЗаметки` and the template `ДатыПас
 
 | Script | What |
 |---|---|
-| `f4_repro.ps1` | the F-4 repro: a clone of the corpus (it carries a native online generation), our `online` generation, then `mssql-apply-source-change --mode exclusive` of another module; the checks of the acceptance (no marker, no alias row, the aliases' bytes in the ordinary rows, a new session sees both online changes and the promoted one). Red until step 2 |
+| `f4_repro.ps1` | the F-4 repro and its acceptance (green since #408 step 2, `docs/apply/evidence/online-activation/f4-repro-green.txt`): clones of the corpus (it carries a native online generation), our `online` generation, a byte-equal copy, then route 2 (`mssql-apply-source-change --mode exclusive`) and route 1 (`mssql-stage-source-objects` + `mssql-activate-staged-main --mode exclusive`) of another module, the native twin (the platform's `config apply` of the same stage), the native exports compared, and a native apply after ours ("не требуется"); `-Steps` continues a stopped run |
 | `f4_session.ps1` | a NEW external-connection session (COM, Windows PowerShell 5.1) that reads `ТипыВнешнихСистем().Telegram` and `ПроверкаIbcmdRsF4()` |
 | `f4_trees.py` | the two source trees of the repro (one common module each, ExternalConnection = true) |
+
+## The worker lab cluster (0.5; `docs/apply/worker-lab.md`)
+
+`cluster/`: a separate console `ragent` + `rmngr` + `ras` of platform 8.3.27.2214 on the ports 5540/5541/5545 and 5560-5591, its registry in
+`F:\ibcmd\lab\05\cluster`, started for a run and stopped after it (no Windows service, no existing cluster touched).
+
+| Script | What |
+|---|---|
+| `cluster/start.ps1 -Track <t>` | start it (about a minute on a fresh registry); refuses when it already runs or a port is taken |
+| `cluster/stop.ps1 [-Purge]` | stop every process of it and show that none is left and no port listens |
+| `cluster/status.ps1` | state, processes, listeners, cluster, infobases, working processes, sessions |
+| `cluster/with-cluster.ps1 -Track <t> -Run <script>` | start, run a script, stop whatever happens |
+| `cluster/session.ps1` | one COM session of a clone, held until a release file appears |
+| `cluster/smoke.ps1` | start, register one clone (`register-ib.ps1 -Cluster worker`), one COM session and one 1cv8c session listed by `rac session list`, unregister, stop, no process left, the other clusters unchanged |
