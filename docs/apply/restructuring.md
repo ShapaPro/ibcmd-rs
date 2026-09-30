@@ -1349,6 +1349,9 @@ same stage, with the binary of the branch after the merge of feat/0.4 (`s2-wave2
 | 11. refusals on a real stage (a fresh twin of e4, `refusals_e.ps1`) | a stored section renamed: `S1: tabular-section-outside-s1` (its generated types change); a composite type in the attribute of a new section: `S1: attribute ДемоДата of tabular section ДемоТЧ2: a composite type (2 items) is not mapped to fields yet`; the precision of a stored section's attribute changed: `S1: tabular-section-outside-s1 ... Attribute[КоличествоДней]/Properties/Type/NumberQualifiers/Digits: 3 -> 4` | -- | -- |
 | 12. `THROW` before `COMMIT` on a fresh twin | the digest of the whole database (rows of `Config`, `ConfigSave`, `Params`, the schema storage, `DBSchema`, `DBNames`, the checksums of all columns and indexes, 2 234 tables, no `*NG`) unchanged | -- | -- |
 
+Case e5 was run once more with the binary of the last commit of the branch (feat/0.4 at 5e146f00 merged, `s2-e5-final-binary-run.txt`):
+the same result in every check (16 of 16 rows, `DBNames` text equal, «не требуется», 12 198 of 12 198 files, the session identical, 90 lines).
+
 Cases e1 and e3 ran the same twelve checks first, with the binary of commit `ad58c54d` (before S1-I was merged; `s2-e1-e3-twin-compare.txt`):
 e1 12 rebuilt tables, session 90 lines, e3 9 tables, session 69 lines, all checks equal; their plans equal native's in
 the offline tests of the merged code as well.
