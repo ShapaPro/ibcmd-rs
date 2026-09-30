@@ -1248,33 +1248,16 @@ impl FormPageSchema {
         ) {
             return None;
         }
+        // Every member the canonical bag is read at sits in the same slot
+        // here: ERP WE 2.5.8 (4 271 short pages, compatibility 8.3.17) makes
+        // option members 3, 10, 11, 12, 13 and 15 and top-level slots 9, 14
+        // and 15 total functions of `ChildItemsWidth`, the spacing pair, the
+        // alignment pair, `ScrollOnCompress`, `EnableContentChange` and the
+        // stretch pair under the canonical tables. The grouping keeps its own
+        // short reader.
         Some(FormPageProperties {
-            enable_content_change: None,
-            horizontal_stretch: match fields.get(14).map(|field| field.trim()) {
-                Some("0") => Some(false),
-                Some("1") => Some(true),
-                _ => None,
-            },
-            vertical_stretch: match fields.get(15).map(|field| field.trim()) {
-                Some("0") => Some(false),
-                Some("1") => Some(true),
-                _ => None,
-            },
             group: None,
-            horizontal_align: None,
-            vertical_align: match options.get(13).map(|field| field.trim()) {
-                Some("0") => Some("Top"),
-                Some("1") => Some("Center"),
-                Some("2") => Some("Bottom"),
-                _ => None,
-            },
-            children_align: None,
-            child_items_width: None,
-            horizontal_spacing: None,
-            vertical_spacing: options
-                .get(Self::VERTICAL_SPACING_OPTION_SLOT)
-                .and_then(|field| form_item_spacing_xml(field)),
-            scroll_on_compress: None,
+            ..Self.properties(fields, options)
         })
     }
 
