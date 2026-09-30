@@ -273,63 +273,9 @@ fn the_plan_of_a_new_document_equals_the_native_result_of_case_d() {
     );
 }
 
-/// A stage made of the rows the platform stored after a case: what differs from `before`'s `Config`.
-fn stage_of(before: &Snap, after: &Snap) -> Inputs {
-    let mut inputs = inputs_of(before);
-    let old_files: BTreeSet<String> = before.names("Config").into_iter().collect();
-    let mut image = StagedImage {
-        old_files: old_files.clone(),
-        old_descriptors: inputs.staged.old_descriptors.clone(),
-        ..StagedImage::default()
-    };
-    for name in after.names("Config") {
-        let now = after.stored_row("Config", &name).unwrap();
-        let unchanged = before.stored_row("Config", &name).as_ref() == Some(&now);
-        if unchanged {
-            continue;
-        }
-        image.new_files.insert(name.clone());
-        if bare(&name) {
-            image.new_descriptors.insert(name.clone(), now);
-        }
-    }
-    inputs.staged = image;
-    inputs
-}
-
-#[test]
-fn the_plan_of_a_new_catalog_and_two_attributes_equals_the_native_result_of_case_c() {
-    let (before, after) = (lab_snap!("pristine"), lab_snap!("c2"));
-    let inputs = stage_of(&before, &after);
-    assert_eq!(new_descriptor_names(&inputs.staged).len(), 1);
-    let plan = plan(&inputs, &options()).unwrap();
-    // the two rebuilt objects first (a catalog, a document), then the created catalog
-    let objects: Vec<(&str, bool)> = plan
-        .objects
-        .iter()
-        .map(|object| (object.object.as_str(), object.created))
-        .collect();
-    assert_eq!(
-        objects,
-        [
-            ("Reference20", false),
-            ("Document39", false),
-            ("Reference11036", true)
-        ]
-    );
-    assert_names_equal(&plan, &before, &after);
-    assert_schema_equal(&plan, &after);
-    assert_caches_equal(
-        &plan,
-        &before,
-        &after,
-        &[
-            "1a621f0f", "2203278d", "42ed49cc", "a07b62f0", "c4629235", "ea13a2c9", "facbfffe",
-            "fe8acd6a",
-        ],
-    );
-    let _ = ROOT_ROW;
-}
+// Case c (a new catalog and two attributes) is not a case of one stage: its "native result" (`c2`) is the state after three
+// native applies (a catalog's attribute, a document's attribute, the new catalog), so the platform's numbers in it follow the
+// order of the applies. N3, N6 and N7 are the one-stage cases of a created object beside a changed one.
 
 #[test]
 fn a_stage_that_creates_two_objects_of_one_kind_is_refused() {
@@ -570,7 +516,17 @@ fn n2_a_hierarchical_catalog_with_a_tabular_section() {
 
 #[test]
 fn n3_a_new_catalog_listed_before_a_changed_one() {
-    assert_native_case("n3", &["Reference15"]);
+    assert_native_case("n3", &["Reference23"]);
+}
+
+#[test]
+fn n6_a_new_catalog_listed_after_a_changed_one() {
+    assert_native_case("n6", &["Reference23"]);
+}
+
+#[test]
+fn n7_a_new_document_beside_a_changed_catalog() {
+    assert_native_case("n7", &["Reference23"]);
 }
 
 #[test]

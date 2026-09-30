@@ -292,17 +292,28 @@ pub(crate) fn allocate(running: &mut Running, created: &[Created]) -> Result<()>
             }
         }
     }
-    // A stage that creates a catalog leaves the header one above the last entry: the platform hands out one more
-    // number, which no entry records (traced: n1, n2, n5 and the base of n1; a stage of a document alone does not:
-    // n4, d). The next number of a later change comes after it.
-    if created
-        .iter()
-        .any(|item| matches!(item.kind, ObjectKind::Catalog))
-    {
-        running.names_after.max += 1;
-        running.next += 1;
-    }
     Ok(())
+}
+
+/// The place of every catalog and document in the platform's walk of the staged configuration: the kind, then the
+/// place in the configuration's own list. A changed object takes the numbers of its new attributes in this walk, and
+/// a created catalog takes one number that no entry records (`Running::reserve`): traced on N1-N7, where a catalog
+/// created before a changed one takes it before the changed one's attribute and a catalog created after takes it
+/// after. The created objects' own numbers come before the walk (`allocate`).
+pub(crate) fn walk_positions(
+    context: &Context,
+) -> Result<std::collections::HashMap<String, (ObjectKind, usize)>> {
+    let all = collections(&context.configuration);
+    let mut places = std::collections::HashMap::new();
+    for (class, kind) in [
+        (CONTEXT_CLASSES[0], ObjectKind::Catalog),
+        (CONTEXT_CLASSES[1], ObjectKind::Document),
+    ] {
+        for (position, uuid) in collection_of(&all, class)?.objects.iter().enumerate() {
+            places.insert(uuid.to_ascii_lowercase(), (kind, position));
+        }
+    }
+    Ok(places)
 }
 
 /// Plans one created object whose numbers [`allocate`] has handed out: its schema entry and its tables.

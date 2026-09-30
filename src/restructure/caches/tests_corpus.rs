@@ -65,29 +65,43 @@ impl Snap {
     /// (the `trace` store).
     pub(crate) fn open(name: &str) -> Option<Self> {
         let (db, label) = match name {
-            "pristine" => ("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
-            "c2" => ("ibcmd_rs_04_ddl_bsp8327_c2", "c2_now"),
-            "m" => ("ibcmd_rs_04_ddl_bsp8327_m", "m_now"),
-            "t1_before" => ("ibcmd_rs_04_ddl_s1_base", "t1_staged"),
-            "t1_nat" => ("ibcmd_rs_04_ddl_s1_t1_nat", "nat_after"),
-            "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base", name),
-            // the native cases of S1-F: `n1_staged`, `n1_after`, ... in the databases `..._n1`
+            "pristine" => (
+                "ibcmd_rs_04_ddl_bsp8327_a".to_owned(),
+                "a2_staged".to_owned(),
+            ),
+            "c2" => ("ibcmd_rs_04_ddl_bsp8327_c2".to_owned(), "c2_now".to_owned()),
+            "m" => ("ibcmd_rs_04_ddl_bsp8327_m".to_owned(), "m_now".to_owned()),
+            "t1_before" => ("ibcmd_rs_04_ddl_s1_base".to_owned(), "t1_staged".to_owned()),
+            "t1_nat" => (
+                "ibcmd_rs_04_ddl_s1_t1_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base".to_owned(), name.to_owned()),
+            // the native cases of S1-F: the staged state `n1_staged` of the database `..._tw1_st` and the platform's
+            // result `n1_after` (the snapshot `nat_after` of `..._tw1_nat`), from the twin runs of `twin_stage.ps1`
             other
                 if other.len() > 3
                     && other.starts_with('n')
                     && other[1..2].chars().all(|c| c.is_ascii_digit()) =>
             {
-                (
-                    match &other[..2] {
-                        "n1" => "ibcmd_rs_05_trace_n1",
-                        "n2" => "ibcmd_rs_05_trace_n2",
-                        "n3" => "ibcmd_rs_05_trace_n3",
-                        "n4" => "ibcmd_rs_05_trace_n4",
-                        "n5" => "ibcmd_rs_05_trace_n5",
-                        _ => panic!("unknown snapshot {other}"),
-                    },
-                    other,
-                )
+                let tag = match &other[..2] {
+                    "n1" => "tw1",
+                    "n2" => "tw2",
+                    "n3" => "tw3c",
+                    "n4" => "tw4",
+                    "n5" => "tw5",
+                    "n6" => "tw6",
+                    "n7" => "tw7",
+                    _ => panic!("unknown snapshot {other}"),
+                };
+                if other.ends_with("_staged") {
+                    (format!("ibcmd_rs_05_trace_{tag}_st"), other.to_owned())
+                } else {
+                    (
+                        format!("ibcmd_rs_05_trace_{tag}_nat"),
+                        "nat_after".to_owned(),
+                    )
+                }
             }
             other => panic!("unknown snapshot {other}"),
         };

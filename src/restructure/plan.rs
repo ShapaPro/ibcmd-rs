@@ -955,6 +955,13 @@ impl Running {
         self.next += 1;
         Ok(number)
     }
+
+    /// Takes the next number of the shared counter and records no entry for it: the header moves to it (the
+    /// platform hands one out for every catalog a stage creates, `create::allocate`).
+    pub(crate) fn reserve(&mut self) {
+        self.names_after.max = self.next;
+        self.next += 1;
+    }
 }
 
 /// Builds the plan.
@@ -1061,17 +1068,15 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         predefined: &inputs.predefined_tables,
     };
 
-    let mut objects = Vec::new();
-    let mut entries = Vec::new();
-    for item in &prepared {
-        let (object, entry) = plan_object(&stored, &mut running, item, options.method)?;
-        entries.push((object.object.clone(), entry));
-        objects.push(object);
-    }
-    // The created objects come after the changed ones (their numbers too), every table created empty.
+    // The created objects take their numbers first, all of them (`create::allocate`: the main tables, then the
+    // attributes, then the sections). Then the platform walks the kinds and the objects of a kind in the
+    // configuration's order: a changed object takes the numbers of its new attributes, a created catalog one number
+    // no entry records (`create::walk_positions`; traced on N3, N6 and N7, which put a created catalog before and
+    // after a changed one, and a created document beside a changed catalog). Every created table is empty.
     let mut created_entries = Vec::new();
     let mut created_in_order = Vec::new();
     let mut create_context = None;
+    let mut reserves: Vec<usize> = Vec::new();
     if !created.is_empty() {
         if options.method != Method::Rebuild {
             bail!("a new object is created through the new generation, not by ALTER TABLE");
@@ -1079,22 +1084,65 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         let context = create::context(inputs)?;
         created_in_order = create::in_platform_order(created, &context)?;
         create::allocate(&mut running, &created_in_order)?;
+        let places = create::walk_positions(&context)?;
         for item in &created_in_order {
-            let (object, entry) = create::plan_created(&running, &schema, inputs, &context, item)?;
+            if !matches!(item.kind, crate::restructure::object::ObjectKind::Catalog) {
+                continue;
+            }
+            let key = *places
+                .get(&item.uuid.to_ascii_lowercase())
+                .with_context(|| {
+                    format!(
+                        "the configuration does not list the new catalog {}",
+                        item.facts.name
+                    )
+                })?;
+            reserves.push(
+                prepared
+                    .iter()
+                    .filter(|other| {
+                        places
+                            .get(&other.new.uuid().to_ascii_lowercase())
+                            .is_some_and(|place| *place < key)
+                    })
+                    .count(),
+            );
+        }
+        reserves.sort_unstable();
+        create_context = Some(context);
+    }
+    let mut objects = Vec::new();
+    let mut entries = Vec::new();
+    for (index, item) in prepared.iter().enumerate() {
+        while reserves.first() == Some(&index) {
+            reserves.remove(0);
+            running.reserve();
+        }
+        let (object, entry) = plan_object(&stored, &mut running, item, options.method)?;
+        entries.push((object.object.clone(), entry));
+        objects.push(object);
+    }
+    for _ in reserves {
+        running.reserve();
+    }
+    if let Some(context) = &create_context {
+        for item in &created_in_order {
+            let (object, entry) = create::plan_created(&running, &schema, inputs, context, item)?;
             created_entries.push(entry);
             objects.push(object);
         }
-        create_context = Some(context);
     }
 
     // Publish: the schema with the entries moved before ConfigChngR (rebuilt tables sit at the end of the
     // list in the order they were rebuilt, ConfigChngR last), the names with the new numbers.
+    // The tables of the created objects come first (the platform makes them before it rebuilds the changed ones:
+    // N3, N6, N7).
     let mut new_schema = schema.clone();
-    for (object, entry) in entries {
-        new_schema.remove(&object)?;
+    for entry in created_entries {
         new_schema.insert_before("ConfigChngR", entry);
     }
-    for entry in created_entries {
+    for (object, entry) in entries {
+        new_schema.remove(&object)?;
         new_schema.insert_before("ConfigChngR", entry);
     }
     let new_names_text = running.names_after.to_text();
