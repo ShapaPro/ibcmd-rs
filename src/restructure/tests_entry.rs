@@ -163,3 +163,105 @@ fn the_entry_of_every_catalog_and_document_is_rebuilt_from_its_descriptor() {
 fn row_of(snap: &Snap, short: &str) -> Vec<u8> {
     snap.params(row_name(short)).unwrap()
 }
+
+// ---------------------------------------------------------------------------------------------
+// synthetic: what the builder refuses (no lab)
+// ---------------------------------------------------------------------------------------------
+
+mod synthetic {
+    use super::*;
+    use crate::metadata_model::brace::Brace;
+    use crate::restructure::caches::members::{Member, SectionMember};
+    use crate::restructure::entry::subtable;
+
+    const SECTION: &str = "11111111-1111-1111-1111-111111111111";
+    const ATTRIBUTE: &str = "22222222-2222-2222-2222-222222222222";
+    const DOCUMENT_REF: &str = "33333333-3333-3333-3333-333333333333";
+    const CATALOG_REF: &str = "44444444-4444-4444-4444-444444444444";
+
+    fn names() -> DbNames {
+        DbNames::parse(
+            format!(
+                "{{12,{{3,{{{SECTION},\"VT\",10}},{{{SECTION},\"LineNo\",11}},{{{ATTRIBUTE},\"Fld\",12}}}}}}"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn refs() -> RefTables {
+        RefTables::default()
+            .with_table(
+                "a1111111-0000-0000-0000-000000000001",
+                DOCUMENT_REF,
+                "Document41",
+            )
+            .with_table(
+                "a1111111-0000-0000-0000-000000000002",
+                CATALOG_REF,
+                "Reference7",
+            )
+    }
+
+    fn section(type_id: &str) -> SectionMember {
+        SectionMember {
+            uuid: SECTION.to_owned(),
+            name: "Товары".to_owned(),
+            synonyms: Vec::new(),
+            attributes: vec![Member {
+                uuid: ATTRIBUTE.to_owned(),
+                name: "Основание".to_owned(),
+                synonyms: Vec::new(),
+                pattern: Brace::List(vec![
+                    Brace::str("Pattern"),
+                    Brace::List(vec![Brace::str("#"), Brace::atom(type_id)]),
+                ]),
+                usage: None,
+                indexing: Some(0),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_document_reference_in_the_section_of_a_document_is_refused() {
+        let error = subtable(
+            &names(),
+            &refs(),
+            Kind::Document,
+            "Document5",
+            &section(DOCUMENT_REF),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("refers to a document"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_same_reference_in_a_catalog_and_a_catalog_reference_in_a_document_are_built() {
+        let built = subtable(
+            &names(),
+            &refs(),
+            Kind::Catalog,
+            "Reference5",
+            &section(DOCUMENT_REF),
+        )
+        .unwrap();
+        assert!(serialize(&built).contains("\"Document41\""));
+        let built = subtable(
+            &names(),
+            &refs(),
+            Kind::Document,
+            "Document5",
+            &section(CATALOG_REF),
+        )
+        .unwrap();
+        let text = serialize(&built);
+        assert!(
+            text.contains("\"VT10\"")
+                && text.contains("\"LineNo11\"")
+                && text.contains("\"Reference7\"")
+        );
+    }
+}

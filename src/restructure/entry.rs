@@ -138,6 +138,15 @@ impl RefTables {
         Ok(out)
     }
 
+    /// Adds a table by hand (the object, its `Ref` type id and its table).
+    pub fn with_table(mut self, object: &str, type_id: &str, table: &str) -> Self {
+        self.by_type
+            .insert(type_id.to_ascii_lowercase(), table.to_owned());
+        self.by_object
+            .insert(object.to_ascii_lowercase(), table.to_owned());
+        self
+    }
+
     pub fn of_object(&self, uuid: &str) -> Option<&str> {
         self.by_object
             .get(&uuid.to_ascii_lowercase())
@@ -570,7 +579,7 @@ pub fn main_entry(input: &EntryInput<'_>) -> Result<Brace> {
     // the sub-tables
     let mut subtables: Vec<Brace> = Vec::new();
     for section in &members.sections {
-        subtables.push(subtable(input, &table, section)?);
+        subtables.push(subtable(input.names, input.refs, kind, &table, section)?);
     }
 
     Ok(Brace::List(vec![
@@ -592,8 +601,13 @@ pub fn main_entry(input: &EntryInput<'_>) -> Result<Brace> {
 }
 
 /// A tabular section's sub-table.
-fn subtable(input: &EntryInput<'_>, owner: &str, section: &SectionMember) -> Result<Brace> {
-    let names = input.names;
+pub(crate) fn subtable(
+    names: &DbNames,
+    refs: &RefTables,
+    kind: Kind,
+    owner: &str,
+    section: &SectionMember,
+) -> Result<Brace> {
     let number = names
         .number_of(&section.uuid, "VT")
         .with_context(|| format!("DBNames has no VT number for section {}", section.name))?;
@@ -612,13 +626,13 @@ fn subtable(input: &EntryInput<'_>, owner: &str, section: &SectionMember) -> Res
             &attribute.uuid,
             &format!("attribute {} of {}", attribute.name, section.name),
         )?;
-        let types = attribute_types(attribute, input.refs)?;
+        let types = attribute_types(attribute, refs)?;
         // The platform indexes some references to documents in a document's tabular section although the
         // flag says `DontIndex` (two attributes of the БСП demo): what decides it is not known.
         if types
             .iter()
             .any(|entry| entry.tag == "R" && entry.reference.starts_with("Document"))
-            && input.kind == Kind::Document
+            && kind == Kind::Document
         {
             bail!(
                 "attribute {} of section {} refers to a document: whether the platform indexes it is not known",
