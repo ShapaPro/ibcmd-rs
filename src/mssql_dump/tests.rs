@@ -40847,6 +40847,29 @@ fn exchange_plan_content_drops_unresolved_metadata_id() {
     assert!(items.is_empty());
 }
 
+/// Evidence: exchange plans stored by an older platform (1C:Документооборот
+/// r6 and DO, 21 plans) keep their content as marker `1`, the same
+/// `<count>,(<id>,<auto record>)*` run without the trailing member; re-saved
+/// by 8.3.27 an empty one comes back `{1,0}` -> `{2,0,0}`.
+#[test]
+fn exchange_plan_content_reads_the_older_marker() {
+    let constant_uuid = "ff76e85a-6d29-41d3-a83e-f4a34139c6b2";
+    let object_refs = BTreeMap::from([(
+        constant_uuid.to_string(),
+        "Constant.UseInternalBarcodes".to_string(),
+    )]);
+    let content = deflate_for_test(format!("{{1,1,{constant_uuid},1}}").as_bytes());
+    let items = parse_exchange_plan_content_blob(
+        &content,
+        &object_refs,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].metadata, "Constant.UseInternalBarcodes");
+}
+
 #[test]
 fn exchange_plan_content_resolves_constant_metadata_refs() {
     let constant_uuid = "ff76e85a-6d29-41d3-a83e-f4a34139c6b2";

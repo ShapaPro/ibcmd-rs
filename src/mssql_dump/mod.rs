@@ -6760,7 +6760,9 @@ fn parse_exchange_plan_content_blob(
         .first()
         .map(|field| field.trim())
         .context("ExchangePlanContent body is empty")?;
-    if marker != "2" {
+    // Marker `1` (an older platform's) keeps the same item run without the
+    // trailing member.
+    if marker != "2" && marker != "1" {
         bail!("unsupported ExchangePlanContent marker {marker}, expected 2");
     }
     let count = fields
