@@ -834,3 +834,80 @@ fn a_switch_the_platform_was_not_traced_on_is_refused() {
         .into_bytes();
     assert!(error_of(&bare).contains("ParentDescr"));
 }
+
+#[test]
+fn a_created_table_is_made_in_the_new_generation_and_never_copied_or_dropped() {
+    let mut planned = plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    // The last sub-table of case a2 stands for a table that does not exist yet.
+    let name = {
+        let object = &mut planned.objects[0];
+        let last = object.tables.pop().unwrap();
+        let name = last.table.name.clone();
+        object
+            .tables
+            .push(crate::restructure::plan::TablePlan::created(last.table));
+        name
+    };
+    assert!(planned.objects[0].tables.last().unwrap().create);
+    assert!(
+        planned.objects[0]
+            .tables
+            .last()
+            .unwrap()
+            .insert_columns
+            .is_empty()
+    );
+
+    let statements = planned.statements();
+    let labels: Vec<&str> = statements.iter().map(|s| s.label.as_str()).collect();
+    assert!(labels.contains(&format!("create {name}NG").as_str()));
+    assert!(labels.contains(&format!("rename {name}NG").as_str()));
+    assert!(!labels.contains(&format!("copy {name} into {name}NG").as_str()));
+    assert!(!labels.contains(&format!("drop {name}").as_str()));
+    // The other two tables are copied and dropped as before.
+    assert_eq!(
+        statements.iter().filter(|s| s.phase == Phase::Load).count(),
+        2
+    );
+    assert_eq!(
+        statements
+            .iter()
+            .filter(|s| s.phase == Phase::DropOld)
+            .count(),
+        2
+    );
+
+    let sql = planned.phase_sql("@now").unwrap();
+    assert!(sql.contains(&format!("create table dbo.{name}NG")));
+    assert!(!sql.contains(&format!("INSERT INTO dbo.{name}NG")));
+    assert!(!sql.contains(&format!("drop table dbo.{name};")));
+    assert!(sql.contains(&format!("EXEC sp_rename N'{name}NG', N'{name}', 'OBJECT';")));
+    assert!(sql.contains(&format!("the table {name} to create exists already")));
+    assert!(sql.contains(&format!("the created table {name} is not empty")));
+    assert!(!sql.contains(&format!("the copy of {name} has another number of rows")));
+}
+
+#[test]
+fn the_counter_hands_out_numbers_to_the_names_the_plan_publishes() {
+    let mut running = crate::restructure::plan::Running {
+        next: 20000,
+        names_after: DbNames::parse(NAMES).unwrap(),
+    };
+    let section = "11111111-2222-4333-8444-555555555555";
+    assert_eq!(running.allocate(section, "VT").unwrap(), 20000);
+    assert_eq!(running.allocate(section, "LineNo").unwrap(), 20001);
+    assert_eq!(
+        running
+            .allocate("66666666-2222-4333-8444-555555555555", "Fld")
+            .unwrap(),
+        20002
+    );
+    assert_eq!(running.next, 20003);
+    assert_eq!(running.names_after.number_of(section, "VT"), Some(20000));
+    assert_eq!(
+        running.names_after.number_of(section, "LineNo"),
+        Some(20001)
+    );
+    // An entry of the same uuid and kind twice is the names' refusal, not a second number.
+    assert!(running.allocate(section, "VT").is_err());
+}

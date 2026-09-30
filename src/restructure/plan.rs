@@ -202,6 +202,22 @@ pub struct TablePlan {
     /// The column list and the select list of the copy.
     pub insert_columns: Vec<String>,
     pub insert_values: Vec<String>,
+    /// The table has no old table: it is created empty in the new generation (a new sub-table, the tables of a
+    /// new object), never copied and never dropped. `old_columns` and the copy lists are empty.
+    pub create: bool,
+}
+
+impl TablePlan {
+    /// A table the plan creates from nothing.
+    pub fn created(table: PhysicalTable) -> Self {
+        Self {
+            old_columns: Vec::new(),
+            table,
+            insert_columns: Vec::new(),
+            insert_values: Vec::new(),
+            create: true,
+        }
+    }
 }
 
 /// One rebuilt object.
@@ -903,10 +919,24 @@ struct Stored<'a> {
 }
 
 /// What the objects share while they are planned one after another.
-struct Running {
+pub(crate) struct Running {
     /// The next number of the counter shared with the extensions.
-    next: u64,
-    names_after: DbNames,
+    pub(crate) next: u64,
+    pub(crate) names_after: DbNames,
+}
+
+impl Running {
+    /// Hands out the next number of the shared counter to `uuid` as an entry of `kind` (`Fld`, `VT`, `LineNo`,
+    /// `Reference`, ...) and records the entry in the names the plan publishes.
+    pub(crate) fn allocate(&mut self, uuid: &str, kind: &str) -> Result<u64> {
+        if self.names_after.number_of(uuid, kind).is_some() {
+            bail!("{uuid} has an entry of kind {kind} in DBNames already");
+        }
+        let number = self.next;
+        self.names_after.append(uuid, kind, number)?;
+        self.next += 1;
+        Ok(number)
+    }
 }
 
 /// Builds the plan.
@@ -1194,7 +1224,8 @@ fn plan_object(
         let entries = type_entries(&attribute.pattern_node)
             .with_context(|| format!("attribute {}", attribute.name))?;
         let nullable = new_facts.nullable(attribute, has_folder);
-        let field = FieldEntry::new(&format!("Fld{}", running.next), nullable, entries);
+        let number = running.allocate(&attribute.uuid, "Fld")?;
+        let field = FieldEntry::new(&format!("Fld{number}"), nullable, entries);
         // After the field of the attribute before it; the first attribute goes after the
         // standard fields.
         let position = match index.checked_sub(1).map(|before| &attributes[before]) {
@@ -1217,18 +1248,14 @@ fn plan_object(
                 .map_or(0, |last| last + 1),
         };
         fields_now.insert(position, field.clone());
-        running
-            .names_after
-            .append(&attribute.uuid, "Fld", running.next)?;
         additions.push(Addition {
             uuid: attribute.uuid.clone(),
             name: attribute.name.clone(),
-            number: running.next,
+            number,
             field,
             position,
             usage: attribute.usage,
         });
-        running.next += 1;
     }
     if additions.len() != item.change.added.len() {
         bail!(
@@ -1367,6 +1394,7 @@ fn plan_object(
             table: after,
             insert_columns,
             insert_values,
+            create: false,
         });
     }
 
@@ -1803,6 +1831,9 @@ impl Plan {
             }
             for object in &self.objects {
                 for (index, table) in object.tables.iter().enumerate() {
+                    if table.create {
+                        continue;
+                    }
                     push(
                         Phase::Load,
                         format!("copy {} into {}NG", table.table.name, table.table.name),
@@ -1829,7 +1860,7 @@ impl Plan {
                     );
                 }
             }
-            for table in self.tables() {
+            for table in self.tables().filter(|table| !table.create) {
                 push(
                     Phase::DropOld,
                     format!("drop {}", table.table.name),

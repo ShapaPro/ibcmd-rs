@@ -473,3 +473,94 @@ fn an_index_that_the_platform_was_not_traced_on_is_refused() {
             .contains("subordinate")
     );
 }
+
+#[test]
+fn a_subtable_entry_is_the_one_the_platform_stores() {
+    // Both sub-tables of the fixture's catalog are rebuilt from their parts: the line number field, the fields,
+    // the declared indexes (not unique).
+    let schema = DbSchema::parse(STAGED).unwrap();
+    let object = schema.tables()[schema.position("Reference20").unwrap()].clone();
+    let view = TableView::new(&object).unwrap();
+    for stored in view.subtables().unwrap() {
+        let fields = stored.fields().unwrap();
+        let line = fields[0].name.clone();
+        let indexes: Vec<(String, Vec<String>)> = stored
+            .indexes()
+            .unwrap()
+            .into_iter()
+            .map(|index| {
+                assert!(!index.unique && !index.clustered);
+                (index.name, index.fields)
+            })
+            .collect();
+        let built = subtable_entry(stored.name(), "Reference20", &line, &fields[1..], &indexes);
+        let position = view
+            .subtables()
+            .unwrap()
+            .iter()
+            .position(|other| other.name() == stored.name())
+            .unwrap();
+        let original = object.as_list().unwrap()[5].as_list().unwrap()[1 + position].clone();
+        assert_eq!(built, original, "{}", stored.name());
+    }
+}
+
+#[test]
+fn a_subtable_is_pushed_to_the_list_and_counted() {
+    let schema = DbSchema::parse(STAGED).unwrap();
+    let mut object = schema.tables()[schema.position("Reference20").unwrap()].clone();
+    let before = TableView::new(&object).unwrap().subtables().unwrap().len();
+    let fields = [FieldEntry::new(
+        "Fld9001",
+        false,
+        vec![TypeEntry::new("S", 0x8000_0000 | 10, 0, "", 0)],
+    )];
+    let indexes = [(
+        "ByFieldFld9001".to_owned(),
+        vec!["Fld9001".to_owned(), "ID".to_owned()],
+    )];
+    push_subtable(
+        &mut object,
+        subtable_entry("VT9000", "Reference20", "LineNo9002", &fields, &indexes),
+    )
+    .unwrap();
+    let view = TableView::new(&object).unwrap();
+    let subtables = view.subtables().unwrap();
+    assert_eq!(subtables.len(), before + 1);
+    let added = subtables.last().unwrap();
+    assert_eq!(
+        (added.name(), added.kind(), added.owner_name()),
+        ("VT9000", "I", "Reference20")
+    );
+    assert_eq!(
+        added
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        ["LineNo9002", "Fld9001"]
+    );
+    assert_eq!(added.indexes().unwrap()[0].fields, ["Fld9001", "ID"]);
+    // The physical table follows: the owner key and the separator first, the line number last of the keys.
+    let tables = physical_tables(&view).unwrap();
+    let created = tables.last().unwrap();
+    assert_eq!(created.name, "_Reference20_VT9000");
+    let columns: Vec<&str> = created.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        columns,
+        [
+            "_Reference20_IDRRef",
+            "_Fld2683",
+            "_KeyField",
+            "_LineNo9002",
+            "_Fld9001"
+        ]
+    );
+    assert!(
+        created
+            .indexes
+            .iter()
+            .any(|index| index.columns == ["_Fld2683", "_Fld9001", "_Reference20_IDRRef"])
+    );
+}
