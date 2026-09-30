@@ -53,7 +53,7 @@ function Compare-WithNative($db, $label, $tag) {
         python si_diff.py $nat nat_after $db $label > "$o\${tag}_si.txt"
     } finally { Pop-Location }
     foreach ($f in "${tag}_diff", "${tag}_dbschema", "${tag}_si") {
-        Get-Content "$o\$f.txt" | Select-String -Pattern '^(changed|16 of|DBNames text|entries that differ|only in|added|removed)' | ForEach-Object { Note "${tag}: $($_.Line)" }
+        Get-Content "$o\$f.txt" | Select-String -Pattern '^(changed|\d+ of 16|DBNames text|entries that differ|only in|added|removed)' | ForEach-Object { Note "${tag}: $($_.Line)" }
     }
 }
 

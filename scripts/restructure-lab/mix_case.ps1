@@ -119,7 +119,9 @@ if ($Refused) {
     Log 'checks 2-6'
     $env:TWIN_OUT = "$lab\out"
     pwsh -NoProfile -File "$kit\twin_check.ps1" -Case $Case -Nat $nat -Own $own -Report "$o\dry.json" -NatLabel nat_after *> "$o\twin_check.txt"
-    Get-Content "$o\twin_check.txt" | Select-String -Pattern '^(rebuilt|changed|16 of|DBNames text|entries that differ|only in)' | ForEach-Object { Note $_.Line }
+    Get-Content "$o\twin_check.txt" | Select-String -Pattern '^(rebuilt|changed|\d+ of 16|DBNames text|entries that differ|only in)' | ForEach-Object { Note $_.Line }
+    # twin_check prints the first lines of the .si comparison only; its own file has the count (S1-F: 15 of 16, c4629235 in the approximate order)
+    Get-Content "$lab\out\${Case}_twin\si.txt" -ErrorAction SilentlyContinue | Select-String -Pattern '\d+ of \d+ `\.si` rows' | ForEach-Object { Note $_.Line }
     $except = Get-Content "$o\twin_check.txt" | Select-String -Pattern 'only in A [1-9]|only in B [1-9]'
     Note ("check 3 (EXCEPT both ways): " + $(if ($except) { "DIFFERENCES: $($except.Count) tables" } else { 'no row differs' }))
     $config = Get-Content "$o\twin_check.txt" | Select-String -Pattern '^== only in [AB] \(([1-9]\d*) rows\)'

@@ -905,3 +905,35 @@ fn corpus_mix_one_large_stage_on_seventeen_objects_equals_the_native_result() {
     assert_eq!(operations(&plan), [4, 4, 6, 8, 4, 4]);
     assert_eq!(plan.objects.len(), 17);
 }
+
+/// Mix f1 (S1-F): a new flat catalog next to two widened strings and three switched indexes of other objects (a catalog, a
+/// hierarchical one, a document twice).
+#[test]
+fn corpus_mix_a_new_catalog_next_to_widenings_and_index_switches_equals_the_native_result() {
+    let Some(plan) = corpus_mix("f1") else {
+        eprintln!("skipped: no lab snapshots of mix f1");
+        return;
+    };
+    assert_eq!(operations(&plan), [0, 0, 2, 3, 0, 0]);
+    assert_eq!(plan.objects.len(), 5);
+    assert_eq!(
+        plan.objects.iter().filter(|object| object.created).count(),
+        1
+    );
+}
+
+/// Mix f3 (S1-F): a new catalog and a new document next to two new own attributes, a widened string and two switched indexes.
+#[test]
+fn corpus_mix_a_new_catalog_and_document_next_to_every_attribute_operation_equals_the_native_result()
+ {
+    let Some(plan) = corpus_mix("f3") else {
+        eprintln!("skipped: no lab snapshots of mix f3");
+        return;
+    };
+    assert_eq!(operations(&plan), [2, 0, 1, 2, 0, 0]);
+    assert_eq!(plan.objects.len(), 7);
+    assert_eq!(
+        plan.objects.iter().filter(|object| object.created).count(),
+        2
+    );
+}

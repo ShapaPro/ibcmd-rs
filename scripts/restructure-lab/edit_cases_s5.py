@@ -84,6 +84,19 @@ if __name__ == "__main__":
     tree.extra = []
     CASES[case](tree)
     tree.save()
+    # The platform's partial import wants the files an object refers to (its forms, templates) in the base dir when the stage carries
+    # Configuration.xml: they go into the stage and stay out of files.txt.
+    for rel in sorted(tree.files):
+        folder = os.path.join(os.environ["DDL_NATIVE_TREE"], rel[: -len(".xml")])
+        if not os.path.isdir(folder):
+            continue
+        for root, _dirs, names in os.walk(folder):
+            for name in names:
+                source = os.path.join(root, name)
+                target = os.path.join(out, "stage", os.path.relpath(source, os.environ["DDL_NATIVE_TREE"]))
+                if not os.path.exists(target):
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copyfile(source, target)
     # files.txt lists the new objects' files too
     path = os.path.join(out, "files.txt")
     with open(path, encoding="utf-8") as f:

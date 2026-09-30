@@ -7,8 +7,8 @@ usage: python assemble_mix_evidence.py <out dir of the lab> <evidence file>
 import os
 import sys
 
-MUST_WORK = ["m1", "m2", "m3", "m4", "m5", "m6", "m7"]
-REFUSED = ["r1", "r2", "r3", "r4", "r5", "r6"]
+MUST_WORK = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "f1", "f3"]
+REFUSED = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]
 CUT = 700
 
 
