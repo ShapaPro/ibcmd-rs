@@ -24,7 +24,7 @@ use ibcmd_core::{
     version::XmlDialect,
 };
 
-mod compiled;
+pub(crate) mod compiled;
 mod external;
 pub(crate) mod index;
 

@@ -68,7 +68,7 @@ if (Test-Path $outFile) {
         $stream.Read($bytes, 0, $take) | Out-Null
         $tail = [Text.Encoding]::UTF8.GetString($bytes)
     } finally { $stream.Dispose() }
-    if ($tail -match '(?s)"verification":\s*(\{.*?\})\s*\}\s*$') { $verification = $Matches[1] | ConvertFrom-Json }
+    if ($tail -match '(?s)"verification":\s*(\{[^{}]*\})') { $verification = $Matches[1] | ConvertFrom-Json }
     if ((Get-Item $outFile).Length -gt 20MB) { Remove-Item $outFile -Force }
 }
 $timing = @(Get-Content "$outDir\$Tag.err.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match 'stage timing' })

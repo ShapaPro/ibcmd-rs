@@ -1,5 +1,8 @@
 # Import into an existing database: what patch mode loses (#388)
 
+> Checkpoint 1 research. The guard is `docs/import/guard.md` (checkpoint 2); the stage that carries what patch mode
+> lost, and writes `deleted`, the dates of 4026 and rows in parts, is `docs/import/override.md` (step 2).
+
 Research for checkpoint 1 of track `import` (issue #388), 2026-09-29. Branch `feat/0.4-import`, kit
 `scripts/import-lab/`, lab `F:\ibcmd\lab\04\import`. Corpus: БСП 8.3.27 (`bsp_native_20260923.bak`), platform
 8.3.27.2214, the binary of release 0.3.0 (commit `f882224a`, `iter` profile).
