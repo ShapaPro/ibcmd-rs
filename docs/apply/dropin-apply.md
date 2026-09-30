@@ -150,8 +150,8 @@ gate refuses descriptors, the restructuring check names no change in them" where
 
 The platform of the database is `--platform`, else the settings, else 8.3.27 (a release stands
 for the build the apply was measured on, `8.3.27.2214`). The storage layout is verified against
-the database by the apply. 8.5 is served like 8.3.27 (the apply is measured on both, `own-apply.md`); the
-drop-in has no refusal of its own for it.
+the database by the apply. 8.5 is served like 8.3.27 (the apply is measured on both, `own-apply.md`; the S1 restructurings on both
+БСП, `evidence/dropin-apply/s1-acceptance.md` and `s1-acceptance-85.md`); the drop-in has no refusal of its own for it.
 
 ### Refusals
 
@@ -312,6 +312,10 @@ the words used to say `config apply` for an operation that was never finished.
    exit 0; a stage made by the drop-in's own import (a module comment, 9 622 rows in patch mode) reaches the apply and
    is refused by the check for the known reason of the 8.5 stage (`restructuring-check.md`, finding 10: the 99 MB
    body row of the configuration differs), exit 1, in the check's words and not in a refusal of 8.5. A neutral 8.5
-   stage that our importer can make and the apply can take is the import track's.
+   stage that our importer can make and the apply can take is the import track's. **S1 on 8.5 is proven** on the
+   platform's own stages `b1`, `c1`, `d1` of the БСП 8.5.1.1150 (checks 3, 4, 5, 7, 8 equal to the native twin, the `*.si`
+   rows the same up to order): `evidence/dropin-apply/s1-acceptance-85.md`. What it needed was the `root` row: the 8.5
+   platform re-stamps the final block of its payload on every write, and the check reads the row for that. ERP УХ is not
+   measured for S1 on either platform.
 6. **Dynamic update (`--dynamic=force`)** and **ending sessions** are the natural next steps
    (0.5, "смена поколения").

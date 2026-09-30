@@ -31,6 +31,7 @@ use super::descriptor::{self, ObjectRef};
 use super::model::{Note, ObjectOp, Reason, ReasonClass, Verdict};
 use super::plan::{self, Decoder, Plan};
 use super::roles::{BodyRole, Effect, RowName, body_role, parse_row_name};
+use super::root_row;
 use super::rule_id::RuleId;
 use super::upgrade::RowProof;
 
@@ -319,17 +320,30 @@ pub(crate) fn check_planned(
 ) -> Verdict {
     // Service rows: the configuration and its compatibility mode must not
     // change.
-    if let Some(staged) = &inputs.staged_root
-        && inputs.old_root.as_ref() != Some(staged)
-    {
-        verdict.push_reason(reason(
-            ReasonClass::Structure,
-            RuleId::RootRowChanged,
-            "Configuration",
-            "root",
-            "",
-            "the root row differs: another configuration",
-        ));
+    if let Some(staged) = &inputs.staged_root {
+        let relation = match inputs.old_root.as_deref() {
+            Some(old) => root_row::relation(old, staged),
+            None => root_row::RootRelation::Different,
+        };
+        match relation {
+            root_row::RootRelation::Same => {}
+            // The 8.5 platform stamps the last block of the row's payload on every write.
+            root_row::RootRelation::Restamped => verdict.push_note(Note {
+                object: "Configuration".to_string(),
+                file_name: "root".to_string(),
+                property: String::new(),
+                change: "the root row differs in the final block of its payload only: the 8.5 platform re-stamps it on every write"
+                    .to_string(),
+            }),
+            root_row::RootRelation::Different => verdict.push_reason(reason(
+                ReasonClass::Structure,
+                RuleId::RootRowChanged,
+                "Configuration",
+                "root",
+                "",
+                "the root row differs: another configuration",
+            )),
+        }
     }
     if let Some(staged) = &inputs.staged_version
         && inputs.old_version.as_ref() != Some(staged)
@@ -1352,6 +1366,33 @@ mod tests {
         let verdict = run(&inputs, &Rows::default());
         assert_eq!(verdict.reasons.len(), 1);
         assert_eq!(verdict.reasons[0].file_name, "version");
+    }
+
+    #[test]
+    fn a_root_row_that_the_8_5_platform_only_re_stamped_is_a_note() {
+        // 32 bytes of payload (two blocks); the character at `at` sits in the second block for 36, in the first for 4
+        let row = |at: usize, with: &str| {
+            let mut payload = format!("{}=", "A".repeat(43));
+            payload.replace_range(at..at + 1, with);
+            format!("{{2,66193438-abc5-410b-a1f1-a204102d1a62,{payload}}}").into_bytes()
+        };
+        let mut inputs = base_inputs();
+        inputs.old_root = Some(row(36, "A"));
+        stage(&mut inputs, "root");
+
+        inputs.staged_root = Some(row(36, "B"));
+        let verdict = run(&inputs, &Rows::default());
+        assert!(!verdict.needs_restructuring, "{:?}", verdict.reasons);
+        assert!(verdict.reasons.is_empty());
+        assert_eq!(verdict.notes.len(), 1);
+        assert_eq!(verdict.notes[0].file_name, "root");
+
+        // the first block differs: another configuration
+        inputs.staged_root = Some(row(4, "B"));
+        let verdict = run(&inputs, &Rows::default());
+        assert!(verdict.needs_restructuring);
+        assert_eq!(verdict.reasons.len(), 1);
+        assert_eq!(verdict.reasons[0].rule, RuleId::RootRowChanged);
     }
 
     #[test]
