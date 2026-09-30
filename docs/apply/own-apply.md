@@ -498,7 +498,11 @@ neither importer of this repository writes yet.
 
 **Evidence: twins on the same stage** (`tools\native_twin.ps1`, `native_cmd.ps1`, `deleted_cmp.py`, `removals` tests). The stage is
 what this repository's import writes for the tree (`import-override` build, 9 516 rows, the row of 11 names); native and this apply
-run on byte-equal copies of it (a COPY_ONLY backup restored twice).
+run on byte-equal copies of it (a COPY_ONLY backup restored twice). The same acceptance on the build that has the import merged
+(`feat/0.4` 029b4a2b), through the drop-in commands `infobase config import` and `infobase config apply`
+(`scripts/apply-lab/final_acceptance.ps1`, `evidence/own-apply/removals-393-final-acceptance.txt`): `Config` 9 836 of 9 836 equal to the
+platform's apply of the same stage, 15 of 16 `.si` texts equal, the platform's export equal to the tree (12 190 of 12 190 files,
+`ConfigDumpInfo.xml` aside), the platform's second apply «не требуется».
 
 | Check | Form and template (`fdp` native, `fdo` ours) | Form, template and an attribute, gate S1 (`mxp`, `mxo`) |
 |---|---|---|
