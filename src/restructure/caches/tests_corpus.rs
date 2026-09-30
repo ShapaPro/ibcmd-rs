@@ -71,9 +71,27 @@ impl Snap {
             "t1_before" => ("ibcmd_rs_04_ddl_s1_base", "t1_staged"),
             "t1_nat" => ("ibcmd_rs_04_ddl_s1_t1_nat", "nat_after"),
             "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base", name),
+            // the native cases of S1-F: `n1_staged`, `n1_after`, ... in the databases `..._n1`
+            other
+                if other.len() > 3
+                    && other.starts_with('n')
+                    && other[1..2].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                (
+                    match &other[..2] {
+                        "n1" => "ibcmd_rs_05_trace_n1",
+                        "n2" => "ibcmd_rs_05_trace_n2",
+                        "n3" => "ibcmd_rs_05_trace_n3",
+                        "n4" => "ibcmd_rs_05_trace_n4",
+                        "n5" => "ibcmd_rs_05_trace_n5",
+                        _ => panic!("unknown snapshot {other}"),
+                    },
+                    other,
+                )
+            }
             other => panic!("unknown snapshot {other}"),
         };
-        let root = if name.starts_with("d_") {
+        let root = if name.starts_with("d_") || (name.starts_with('n') && name.len() > 3) {
             trace_store()?
         } else {
             lab()?

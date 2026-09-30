@@ -83,8 +83,9 @@ fn options() -> PlanOptions {
     }
 }
 
-/// The native `DBNames` without the entries the platform adds for its own new system tables.
-fn without_upgrade(names: &DbNames) -> DbNames {
+/// The native `DBNames` without the entries the platform adds for its own new system tables (the three
+/// `DbCopies*` names of a base that has not had a native apply yet).
+fn without_upgrade(names: &DbNames, before: &DbNames) -> DbNames {
     let mut names = names.clone();
     names.entries.retain(|entry| {
         ![
@@ -93,6 +94,7 @@ fn without_upgrade(names: &DbNames) -> DbNames {
             "DbCopiesUpdateStat",
         ]
         .contains(&entry.kind.as_str())
+            || before.entries.contains(entry)
     });
     names.max = names
         .entries
@@ -103,9 +105,12 @@ fn without_upgrade(names: &DbNames) -> DbNames {
     names
 }
 
-fn assert_names_equal(plan: &Plan, after: &Snap) {
+fn assert_names_equal(plan: &Plan, before: &Snap, after: &Snap) {
     let native = DbNames::parse(&after.params("DBNames").unwrap()).unwrap();
-    let native = without_upgrade(&native);
+    let native = without_upgrade(
+        &native,
+        &DbNames::parse(&before.params("DBNames").unwrap()).unwrap(),
+    );
     let ours = DbNames::parse(&plan.new_names_text).unwrap();
     assert_eq!(ours.max, native.max, "the header");
     let only = |a: &DbNames, b: &DbNames| -> Vec<String> {
@@ -232,7 +237,7 @@ fn the_plan_of_a_new_document_equals_the_native_result_of_case_d() {
     assert_eq!(tables, ["_Document11034", "_Document11034_VT11036"]);
     assert!(plan.tables().all(|table| table.create));
 
-    assert_names_equal(&plan, &after);
+    assert_names_equal(&plan, &before, &after);
     assert_schema_equal(&plan, &after);
     assert_caches_equal(
         &plan,
@@ -315,7 +320,7 @@ fn the_plan_of_a_new_catalog_and_two_attributes_equals_the_native_result_of_case
             ("Reference11036", true)
         ]
     );
-    assert_names_equal(&plan, &after);
+    assert_names_equal(&plan, &before, &after);
     assert_schema_equal(&plan, &after);
     assert_caches_equal(
         &plan,
@@ -435,4 +440,85 @@ mod gate {
         assert!(phase.is_none());
         assert!(verdict.restructuring_required);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// the native cases N1-N5 of S1-F
+// ---------------------------------------------------------------------------------------------
+
+/// The plan of a stage against the native result of the same stage: the rebuilt objects, then the created
+/// ones (the platform's numbers), `DBNames`, every `DBSchema` entry and the rows of the caches the platform
+/// changed.
+fn assert_native_case(case: &str, rebuilt: &[&str]) {
+    let (Some(before), Some(after)) = (
+        Snap::open(&format!("{case}_staged")),
+        Snap::open(&format!("{case}_after")),
+    ) else {
+        eprintln!("skipped: no lab snapshots of case {case}");
+        return;
+    };
+    let inputs = inputs_of(&before);
+    let plan = plan(&inputs, &options()).unwrap();
+    // the tables of the created objects are the new `Reference` / `Document` entries of the platform's DBNames
+    let names_before = DbNames::parse(&before.params("DBNames").unwrap()).unwrap();
+    let names_after = DbNames::parse(&after.params("DBNames").unwrap()).unwrap();
+    let created_natively: Vec<String> = names_after
+        .entries
+        .iter()
+        .filter(|entry| !names_before.entries.contains(entry))
+        .filter(|entry| entry.kind == "Reference" || entry.kind == "Document")
+        .map(|entry| format!("{}{}", entry.kind, entry.number))
+        .collect();
+    let objects: Vec<String> = plan.objects.iter().map(|o| o.object.clone()).collect();
+    let created: Vec<String> = plan
+        .objects
+        .iter()
+        .filter(|o| o.created)
+        .map(|o| o.object.clone())
+        .collect();
+    assert_eq!(created, created_natively, "{case}: the created objects");
+    let changed: Vec<&str> = objects
+        .iter()
+        .filter(|o| !created.contains(o))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(changed, rebuilt, "{case}: the rebuilt objects");
+    assert_names_equal(&plan, &before, &after);
+    assert_schema_equal(&plan, &after);
+    let rows: Vec<&str> = crate::restructure::caches::tests_corpus::CACHE_ROWS
+        .iter()
+        .map(|(short, _)| *short)
+        .filter(|short| before.params(row_name(short)) != after.params(row_name(short)))
+        .collect();
+    assert_caches_equal(&plan, &before, &after, &rows);
+    eprintln!(
+        "{case}: {} created, {} rebuilt, rows {rows:?}",
+        created.len(),
+        changed.len()
+    );
+}
+
+#[test]
+fn n1_a_flat_catalog_with_attributes_of_every_kind() {
+    assert_native_case("n1", &[]);
+}
+
+#[test]
+fn n2_a_hierarchical_catalog_with_a_tabular_section() {
+    assert_native_case("n2", &[]);
+}
+
+#[test]
+fn n3_a_new_catalog_listed_before_a_changed_one() {
+    assert_native_case("n3", &["Reference15"]);
+}
+
+#[test]
+fn n4_a_document_with_a_periodic_numeric_number() {
+    assert_native_case("n4", &[]);
+}
+
+#[test]
+fn n5_a_catalog_and_a_document_together() {
+    assert_native_case("n5", &[]);
 }

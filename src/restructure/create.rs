@@ -245,10 +245,34 @@ pub fn in_platform_order(created: Vec<Created>, context: &Context) -> Result<Vec
     Ok(keyed.into_iter().map(|(_, item)| item).collect())
 }
 
-/// Plans one created object: its numbers, its schema entry and its tables. Returns the plan of the object and
-/// the entry to put before `ConfigChngR`.
-pub fn plan_created(
-    running: &mut Running,
+/// Hands out the numbers of the created objects in the platform's order (traced: cases c, d, n1-n5): first the
+/// main tables of all of them (kinds in the configuration's order), then the attributes of each, then the tabular
+/// sections of each with their line number and attributes.
+pub(crate) fn allocate(running: &mut Running, created: &[Created]) -> Result<()> {
+    for item in created {
+        running.allocate(&item.uuid, entry_kind(item.kind).table_kind())?;
+    }
+    for item in created {
+        for attribute in &item.members.attributes {
+            running.allocate(&attribute.uuid, "Fld")?;
+        }
+    }
+    for item in created {
+        for section in &item.members.sections {
+            running.allocate(&section.uuid, "VT")?;
+            running.allocate(&section.uuid, "LineNo")?;
+            for attribute in &section.attributes {
+                running.allocate(&attribute.uuid, "Fld")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plans one created object whose numbers [`allocate`] has handed out: its schema entry and its tables.
+/// Returns the plan of the object and the entry to put before `ConfigChngR`.
+pub(crate) fn plan_created(
+    running: &Running,
     schema: &DbSchema,
     inputs: &Inputs,
     context: &Context,
@@ -296,19 +320,6 @@ pub fn plan_created(
                 "the stage changes the common attribute {}: a new object is not planned with it",
                 attribute.name
             );
-        }
-    }
-
-    // the numbers, in the platform's order
-    running.allocate(&item.uuid, entry_kind(item.kind).table_kind())?;
-    for attribute in &item.members.attributes {
-        running.allocate(&attribute.uuid, "Fld")?;
-    }
-    for section in &item.members.sections {
-        running.allocate(&section.uuid, "VT")?;
-        running.allocate(&section.uuid, "LineNo")?;
-        for attribute in &section.attributes {
-            running.allocate(&attribute.uuid, "Fld")?;
         }
     }
 

@@ -1077,9 +1077,9 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         }
         let context = create::context(inputs)?;
         created_in_order = create::in_platform_order(created, &context)?;
+        create::allocate(&mut running, &created_in_order)?;
         for item in &created_in_order {
-            let (object, entry) =
-                create::plan_created(&mut running, &schema, inputs, &context, item)?;
+            let (object, entry) = create::plan_created(&running, &schema, inputs, &context, item)?;
             created_entries.push(entry);
             objects.push(object);
         }
