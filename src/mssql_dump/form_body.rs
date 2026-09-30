@@ -32269,7 +32269,12 @@ pub(super) fn format_form_child_item_xml(
             escape_xml_text(representation)
         ));
     }
+    // A `ViewStatusAddition` that lowers its stretch writes the location
+    // behind it (native: AutoMaxWidth, HorizontalStretch, HorizontalLocation).
+    let location_after_stretch =
+        item.tag == "ViewStatusAddition" && item.horizontal_stretch.is_some();
     if item.tag != "CommandBar"
+        && !location_after_stretch
         && let Some(horizontal_location) = item.horizontal_location
     {
         xml.push_str(&format!(
@@ -33247,6 +33252,14 @@ pub(super) fn format_form_child_item_xml(
             "{tab}\t<HorizontalStretch>{}</HorizontalStretch>\r\n",
             if horizontal_stretch { "true" } else { "false" }
         ));
+        if item.tag == "ViewStatusAddition"
+            && let Some(horizontal_location) = item.horizontal_location
+        {
+            xml.push_str(&format!(
+                "{tab}\t<HorizontalLocation>{}</HorizontalLocation>\r\n",
+                escape_xml_text(horizontal_location)
+            ));
+        }
     }
     if !matches!(item.tag, "Table" | "InputField")
         && let Some(choice_folders_and_items) = item.choice_folders_and_items
