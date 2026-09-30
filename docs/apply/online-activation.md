@@ -288,7 +288,7 @@ Review findings (2026-09-29, "report, do not fix"; severity = effect on a user o
 | F-6 | low | The platform-profile verification (two `rac` calls, RAS authentication, SQL schema probe) runs **twice** in one high-level apply and also for `--dry-run` and before the `--allow-non-lab` check; each `rac infobase info --infobase-user` opens a cluster connection and SQL sessions on the infobase (1.7 s each under load). | `mssql_apply.rs:70-95`; `mssql.rs:910-931` | `online/online-v1.trace-summary.md` (statements of `1CV83 Server` sessions before the staging) |
 | F-9 | medium-high | The `live` preflight checks the recovery model, the state and the tail-file name, not the log chain or the destination directory. With `FULL` but no full backup the transaction commits and `BACKUP LOG` then fails with `4214`; the database is online with the new generation in the ordinary rows and no session switch. The design says a failure before a successful tail backup "leaves the database online and returns the bounded row recovery artifact"; the artifact path is not in the error. | `mssql_main_activation.rs:342-348`, `402-406` | `live/live-v6-nochain.err`, `live/break-log-chain.sql` |
 | F-10 | medium | `live` kills every connection of the database with `ROLLBACK IMMEDIATE`: no session preflight, no warning. In-flight server transactions are rolled back and their clients get an unrecoverable error; a client that touches the database in the window shows a modal error and loses unsaved data on restart. It is the documented design, but the command has no `--force`-style acknowledgement beyond `--allow-non-lab`. | `mssql_main_activation.rs:595-599`, `610-614` | section 4.3 |
-| F-15 | medium | With an active generation every read of `Config` is a derived table over the **whole** table (`CASE` over the file name), so a bounded read costs a full scan and a memory grant: 4 762 logical reads and 34.5 s elapsed under load against 3 reads and 1 ms for the plain read (`RESOURCE_SEMAPHORE` wait); the bounded export of one object took 250-300 s instead of 2 s. | `mssql_dump/dynamic_generation.rs:167-190` | `online/overlay-query.sql`, `online/online-v2-dry.meta.txt` |
+| F-15 | medium | **Fixed in 0.5 (#409), section 6.5.** With an active generation every read of `Config` is a derived table over the **whole** table (`CASE` over the file name), so a bounded read costs a full scan and a memory grant: 4 762 logical reads and 34.5 s elapsed under load against 3 reads and 1 ms for the plain read (`RESOURCE_SEMAPHORE` wait); the bounded export of one object took 250-300 s instead of 2 s. | `mssql_dump/dynamic_generation.rs:167-190` | `online/overlay-query.sql`, `online/online-v2-dry.meta.txt` |
 | F-8 | low-medium | The recovery artifact does not keep `Creation`/`Modified`/`Attributes` of the overwritten rows (empty strings, `0`) and stores bytes as a JSON array of numbers; it is written non-atomically with a read-then-write check, so a crash leaves a truncated file that a repeat refuses to overwrite. For `online` it lists the ordinary rows that were *not* overwritten and has no script that removes the aliases and markers. | `mssql_dump/mod.rs:1016-1021`; `mssql.rs:1123-1136` | `online/online-v1.recovery-summary.txt` |
 | F-7 | low | Rows the tool writes carry `2026-...` timestamps (the staging copy, the markers via `SYSUTCDATETIME()`), native rows `4026-...` (year offset 2000). Sessions accepted the rows, so it is not shown to matter. | `mssql_main_activation.rs:515-523`; staging | `online/online-v1.diff.md` |
 | F-11 | low | Worker: "dedicated" is decided from `rac connection list` only; an idle infobase loaded by the process but without a connection is invisible. `rac process turn-off` inherits stdout/stderr, so its output can enter the JSON stream. 10 s timeout, 100 ms poll of a call that takes 1.7-5.4 s under load. | `mssql_worker_switch.rs:130-150`, `79-88`, `91-116` | code, section 4.4 |
@@ -483,6 +483,45 @@ export. Clones of the corpus backup, which carries the native generation:
 
 Tests, on the merged tree: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries)
 **3 699 passed, 0 failed, 12 ignored**.
+
+### 6.5 Fixed in 0.5 (#409): F-15, a bounded read through the overlay seeks
+
+**The query.** With an active generation every read of `Config` goes through the derived table of `storage_table_expression`: the scan
+computes the published name of every stored row, the aggregate keeps the newest generation per name, and only then does the
+caller's filter (`FileName IN (...)`, the owner `LIKE`) run. A filter on the aggregated name cannot go below the aggregate, so a read
+of one module scanned the whole table and asked for a memory grant of about 6 MB. (The evidence query of the review, a `CASE` per
+alias, was an older shape of the same thing.)
+
+**The change.** The builders that keep a known set of names say so (`Selection::Names` for `IN`, `Selection::Owners` for the owner
+`LIKE`; `qualified_storage_table_for`), and the scan under the aggregate is limited to the stored rows that can publish them: the
+names themselves and, per stem (what precedes the first dot), the prefix range `<stem>\_dynupdate\_%` of the clustered key. That is
+a narrowing only, the outer filter is unchanged, so the rows are the same. Not narrowed: an unbounded read (the whole table is the
+point), a range filter (the batches of a full export), a list of more than 64 names (it is read as before), a table whose overlay has
+no alias (no aggregate to narrow). The only places that build such a query are `fetch.rs`'s five builders.
+
+**Measured** on a clone restored from the corpus backup (native generation of two objects, 9 847 rows), five dry-run applies of the
+aliased module `_ДемоЗаметки` per binary, cost of the statements that read the overlay (`sys.dm_exec_query_stats`, per execution):
+
+| statement | before | after |
+|---|---|---|
+| the rows of the selected module (`IN`) | 5 118 logical reads, 921 ms (first execution cold), grant 6 064 KB (2 792 used) | **12** reads, 1.1 ms, grant 1 024 KB (24 used) |
+| the two other bounded reads of a run (two executions per run) | 5 122 reads, 79 ms, grant 5 776 KB | **20** reads, 1.7 ms, grant 1 024 KB (24 used) |
+| the read of every metadata row (the name index of the model export; unbounded by nature) | 28 729 reads, 291 ms, grant 11 000 KB | unchanged (28 472 reads, 318 ms; the same rows read from the plain table took 174-242 ms) |
+
+The bounded reads of one apply cost about 15 400 logical reads before and 44 after. On an idle machine the whole `active_export_ms`
+hardly moves (median 1 055 ms before, 743 ms after; the first process of the "before" series took 6.5 s on a cold database; the
+"after" series ran second, on a warm one, and its first took 1.0 s), because the name index and the model export take most of it. What the change removes is the part that
+grows with the table and needs a memory grant, which is what waited (`RESOURCE_SEMAPHORE`, 34.5 s) in the review's run on a loaded
+machine. **That wait was not reproduced here**: the server was not loaded and its resource governor is not this issue's to change;
+the reads and the grant are the measurable part.
+
+The rows are unchanged, proven three ways: the unit tests give the text of every selection (names, owners, a long list, an empty
+one, a wildcard in a name); the live test of the overlay now also reads the same rows through a selection and without one on the
+clone (`IBCMD_RS_DYNGEN_DB=<lab db>`, feature `mssql-live-tests`: 11 rows through 12 names and 7 owners, identical); and two real
+online applies of the module with the new binary (2.5 s and 1.7 s) leave a base whose export equals the native platform's,
+**12 198 of 12 198 files**.
+
+Tests, on this tree: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries): 3 703 passed, 0 failed, 12 ignored; the lib alone 3 495.
 
 ## 7. Recovery
 

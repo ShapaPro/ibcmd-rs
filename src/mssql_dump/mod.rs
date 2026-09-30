@@ -46100,10 +46100,23 @@ const DYNAMIC_UPDATE_MARKER_ROW: &str = "DynamicallyUpdated";
 /// it always was. With one, it is a derived table that reads the configuration
 /// that generation publishes -- see [`dynamic_generation`].
 fn qualified_storage_table(database: &str, table: &str) -> String {
+    qualified_storage_table_for(database, table, dynamic_generation::Selection::All)
+}
+
+/// [`qualified_storage_table`] for a query that keeps only `selection`: with an
+/// active dynamic generation the scan under the derived table is limited to the
+/// stored rows that can publish it, so a bounded read seeks instead of reading
+/// the whole table (#409 F-15).
+fn qualified_storage_table_for(
+    database: &str,
+    table: &str,
+    selection: dynamic_generation::Selection<'_>,
+) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
-    dynamic_generation::storage_table_expression(
+    dynamic_generation::storage_table_expression_for(
         &qualified,
         dynamic_generation::storage_generation_overlay_for(database, table).as_deref(),
+        selection,
     )
 }
 

@@ -9,12 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
+use super::dynamic_generation::Selection;
 #[cfg(test)]
 use super::encode_hex_lower;
 use super::offline_rows;
 use super::{
     BinaryConfigRow, ConfigChunkRow, ConfigRow, ConfigRowHeader, qualified_storage_table,
-    quote_string,
+    qualified_storage_table_for, quote_string,
 };
 use crate::runtime_evidence_schema::{SanitizedRuntimeArgumentKind, SubprocessJournalSchema};
 use crate::sql::{SqlBackend, SqlClient, SqlExec, SqlTools};
@@ -971,12 +972,17 @@ pub(super) fn build_fetch_binary_rows_query(
         format!("WHERE FileName IN ({values})\n")
     };
 
+    let selection = if use_range_filter {
+        Selection::All
+    } else {
+        Selection::Names(selected_file_names)
+    };
     format!(
         "SELECT FileName, PartNo, DataSize, BinaryData\n\
          FROM {qualified_table}\n\
          {filter}\
          ORDER BY FileName, PartNo",
-        qualified_table = qualified_storage_table(database, table),
+        qualified_table = qualified_storage_table_for(database, table, selection),
         filter = filter,
     )
 }
@@ -1055,7 +1061,8 @@ pub(super) fn build_fetch_metadata_owner_rows_bcp_query(
          FROM {qualified_table}\n\
          WHERE {filter}\n\
          ORDER BY FileName, PartNo",
-        qualified_table = qualified_storage_table(database, table),
+        qualified_table =
+            qualified_storage_table_for(database, table, Selection::Owners(metadata_file_names)),
         filter = filter,
     )
 }
@@ -1223,7 +1230,8 @@ pub(super) fn build_fetch_row_headers_sql(
          {filter}\
          ORDER BY FileName, PartNo\n\
          ;",
-        qualified_table = qualified_storage_table(database, table),
+        qualified_table =
+            qualified_storage_table_for(database, table, Selection::Names(selected_file_names)),
         filter = filter,
     )
 }
@@ -1340,7 +1348,8 @@ pub(super) fn build_fetch_rows_sql(
          ORDER BY rows.FileName, rows.PartNo, chunks.chunk_index\n\
          ;",
         chunk_size = SQLCMD_BINARY_CHUNK_SIZE,
-        qualified_table = qualified_storage_table(database, table),
+        qualified_table =
+            qualified_storage_table_for(database, table, Selection::Names(selected_file_names)),
         filter = filter,
     )
 }
@@ -1371,7 +1380,8 @@ pub(super) fn build_fetch_rows_direct_hex_sql(
          {filter}\
          ORDER BY FileName, PartNo\n\
          ;",
-        qualified_table = qualified_storage_table(database, table),
+        qualified_table =
+            qualified_storage_table_for(database, table, Selection::Names(selected_file_names)),
         filter = filter,
     )
 }
