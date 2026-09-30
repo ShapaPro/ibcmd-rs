@@ -343,6 +343,48 @@ pub(super) fn extract_form_body_xml_from_body(
     )
 }
 
+/// Numbers the items a form stores with id `0`.
+///
+/// A Gantt chart's nested `Table` keeps `id="0"` in the platform's dump, but
+/// the service items under it -- its context menu, command bar, tooltip and
+/// the three additions with their own menus and tooltips -- are stored with
+/// `0` too and published with fresh ids, one after another in document order,
+/// counting on from the highest id the form's items carry.
+/// Документооборот 3.0 `Catalogs/ПроектныеЗадачи/Forms/ФормаПланаПроекта`:
+/// items reach `474`, and the twelve service items read `475`..`486`.
+/// Attributes and commands number their own ids and are left alone.
+fn renumber_form_zero_item_ids(xml: String) -> String {
+    const ZERO: &str = " id=\"0\"";
+    let items_end = xml.find("\n\t<Attributes>").unwrap_or(xml.len());
+    if !xml[..items_end].contains(ZERO) {
+        return xml;
+    }
+    let mut max_id = 0u64;
+    for (at, _) in xml[..items_end].match_indices(" id=\"") {
+        let digits = &xml[at + 5..];
+        let end = digits.find('"').unwrap_or(0);
+        if let Ok(id) = digits[..end].parse::<u64>() {
+            max_id = max_id.max(id);
+        }
+    }
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = &xml[..items_end];
+    while let Some(at) = rest.find(ZERO) {
+        let tag_start = rest[..at].rfind('<').unwrap_or(0);
+        out.push_str(&rest[..at]);
+        if rest[tag_start..].starts_with("<Table ") {
+            out.push_str(ZERO);
+        } else {
+            max_id += 1;
+            out.push_str(&format!(" id=\"{max_id}\""));
+        }
+        rest = &rest[at + ZERO.len()..];
+    }
+    out.push_str(rest);
+    out.push_str(&xml[items_end..]);
+    out
+}
+
 pub(super) fn extract_form_body_xml_from_body_timed(
     body: &ParsedFormBodyBlob,
     context: &FormParseContext<'_>,
@@ -833,6 +875,7 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         with_no_main_table_default_picture_unmarked(xml, &attributes)
     };
     let xml = with_excluded_help_command_unresolved(xml, &properties.command_set_excluded_commands);
+    let xml = renumber_form_zero_item_ids(xml);
     let xml = if context.dcs_target_profile.as_str() == "xml-2.20" {
         with_v85_only_events_by_identifier(xml)
     } else {
@@ -12792,7 +12835,15 @@ fn parse_form_child_item_with_metadata_owners(
     // 3.0 `Catalogs/ПроектныеЗадачи/Forms/ФормаПланаПроекта` (three trees) has
     // `<Table name="Table" id="0">` in the platform's dump. Anywhere else
     // `0` is the absent item.
-    if id == "0" && !(parent_tag == Some("GanttChartField") && wrapper == "55") {
+    // Its service items store `0` as well and the platform numbers them on
+    // dump (`renumber_form_zero_item_ids`).
+    if id == "0"
+        && !(parent_tag == Some("GanttChartField") && wrapper == "55")
+        && !matches!(
+            parent_tag,
+            Some("Table" | "SearchStringAddition" | "ViewStatusAddition" | "SearchControlAddition")
+        )
+    {
         return None;
     }
     let tag = form_child_item_tag(wrapper, fields)?;
@@ -21849,23 +21900,49 @@ pub(super) fn form_child_item_tag(wrapper: &str, fields: &[&str]) -> Option<&'st
     }
 }
 
-fn parse_form_special_field_layout<'a>(
+pub(super) fn parse_form_special_field_layout<'a>(
     wrapper: &str,
     fields: &'a [&'a str],
 ) -> Option<(FormSpecialFieldSchema, Vec<&'a str>)> {
     let top_level_offset = form_input_field_top_level_offset(fields);
-    let options = fields
+    let mut options = fields
         .get(FormSpecialFieldSchema::OPTIONS_SLOT + top_level_offset)
         .and_then(|field| split_1c_braced_fields(field.trim(), 0))?;
+    // The Gantt chart's oldest option revision `1` is the first eleven
+    // members of revision `3` under its own leading member; the five members
+    // revision `3` adds hold what the platform publishes nothing for on every
+    // revision-`3` bag of the stand (`0,0,0,2,2`). ERP 2.5 carries it on all
+    // eight of its Gantt fields (e.g. `Reports/ДиаграммаПроизводстваЗаказа`).
+    //
+    // Revision `2` is the first twelve members of `3` the same way:
+    // Документооборот 3.0 `Catalogs/ПроектныеЗадачи/Forms/ФормаПланаПроекта`
+    // declares `2` with `Width` 80 in member 1 and the platform publishes
+    // `<Width>80</Width>`, exactly as revision `3` reads it.
+    if fields.get(5 + top_level_offset).map(|field| field.trim()) == Some("12") {
+        const REVISION_3_TAIL: [&str; 5] = ["0", "0", "0", "2", "2"];
+        let revision = options.first().map(|field| field.trim());
+        let short = match (revision, options.len()) {
+            (Some("1"), 11) => Some(0),
+            (Some("2"), 12) => Some(1),
+            _ => None,
+        };
+        if let Some(skip) = short {
+            options[0] = "3";
+            options.extend(REVISION_3_TAIL.iter().skip(skip).copied());
+        }
+    }
     let schema = FormSpecialFieldSchema::from_raw_layout(
         wrapper,
         fields.len(),
         fields.get(5 + top_level_offset).map(|field| field.trim()),
         top_level_offset,
         &options,
+        // An older revision that stops short of the count declares no
+        // trailing member.
         fields
             .get(FormSpecialFieldSchema::NESTED_ITEM_COUNT_SLOT + top_level_offset)
-            .map(|field| field.trim()),
+            .map(|field| field.trim())
+            .map(|field| if field == FORM_ITEM_ABSENT_MEMBER { "0" } else { field }),
     )?;
     Some((schema, options))
 }
@@ -22217,10 +22294,13 @@ fn form_child_item_extended_tooltip_identity(fields: &[&str]) -> Option<(String,
         }
         let identity = split_1c_braced_fields(nested.get(1)?.trim(), 0)?;
         let id = identity.first()?.trim();
-        if id == "0" {
+        let name = nested.get(6).and_then(|value| parse_1c_string(value))?;
+        // `0` is the absent tooltip, except for the service tooltip of a Gantt
+        // chart's nested table and its additions, which the platform numbers
+        // on dump (`renumber_form_zero_item_ids`).
+        if id == "0" && name != "ExtendedTooltip" {
             return None;
         }
-        let name = nested.get(6).and_then(|value| parse_1c_string(value))?;
         is_form_extended_tooltip_name(&name).then(|| (id.to_string(), name))
     })
 }
@@ -22271,10 +22351,13 @@ pub(super) fn parse_form_child_item_extended_tooltip(
         }
         let identity = split_1c_braced_fields(nested.get(1)?.trim(), 0)?;
         let id = identity.first()?.trim();
-        if id == "0" {
+        let name = nested.get(6).and_then(|value| parse_1c_string(value))?;
+        // `0` is the absent tooltip, except for the service tooltip of a Gantt
+        // chart's nested table and its additions, which the platform numbers
+        // on dump (`renumber_form_zero_item_ids`).
+        if id == "0" && name != "ExtendedTooltip" {
             return None;
         }
-        let name = nested.get(6).and_then(|value| parse_1c_string(value))?;
         if !is_form_extended_tooltip_name(&name) {
             return None;
         }
@@ -38611,6 +38694,22 @@ fn format_form_gantt_chart_settings_xml(
     // `<d4p1:textPlacement>Auto</d4p1:textPlacement>` -- what the eighteen
     // revision-`19` records publish when their member 31 stores `0`. Members
     // 0..=30 line up slot for slot in both revisions.
+    // Revision `17` stops four members short of `18`: ERP 2.5 carries it on
+    // all eight of its Gantt attributes (e.g. `Reports/
+    // ДиаграммаПроизводстваЗаказа/Forms/ФормаОтчета`), members 0..=26 line
+    // up with `18` slot for slot, and the platform publishes for the missing
+    // 27..=30 exactly what the `18`/`19` records publish for their fixed
+    // `{0,0,0}`, `0`, `0`, `1` -- `showPointsText` and `showData` `Auto`.
+    let padded;
+    let wrapper = if wrapper.first()?.trim() == "17" && wrapper.len() == 27 {
+        let mut members = wrapper.to_vec();
+        members[0] = "18";
+        members.extend(["{0,0,0}", "0", "0", "1"]);
+        padded = members;
+        padded.as_slice()
+    } else {
+        wrapper
+    };
     let member_count = match wrapper.first()?.trim() {
         "18" => 31usize,
         "19" => 33,
@@ -38636,7 +38735,7 @@ fn format_form_gantt_chart_settings_xml(
         || form_chart_compact(wrapper.get(23)?) != "{3,{0,{1,0,0},0},{0,0}}"
         || wrapper.get(24)?.trim() != "0"
         || form_chart_compact(wrapper.get(27)?) != "{0,0,0}"
-        || wrapper.get(30)?.trim() != "1"
+        || !matches!(wrapper.get(30)?.trim(), "0" | "1")
     {
         return None;
     }
