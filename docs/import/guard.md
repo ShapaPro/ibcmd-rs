@@ -64,6 +64,7 @@ The message names, per file, the first three differing leaves; an element only o
 | `--no-verify` | off for any stage |
 | `--verify` | on (the default; for scripts that want it written down) |
 | `IBCMD_RS_STAGE_VERIFY=0\|1` | off / on for any stage, over the command line (for scripts) |
+| `IBCMD_RS_STAGE_ALL_ROWS=1` | a patch stage against a database stages every row of the tree, as before #395 (`docs/import/delta.md`) |
 | `mssql-stage-source-objects` (the research command) | off; `--verify` turns it on |
 
 Every stage is checked: the project fails closed, and a stage compiled from the tree can carry a slip of the
