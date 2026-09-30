@@ -105,6 +105,37 @@ three files, each an inconsistency of the edits and not of the stage: the role w
 predefined item `predefdel` removed while the forms' queries still name it (the platform marks their data paths
 `~`).
 
+### 3.1 Platform 8.5 (dialect 2.21) and the parent configuration row
+
+The same kit on the 8.5 БСП (3.2.1.356; `run_override_acceptance.ps1 -Platform 8.5`, which runs the native ibcmd of
+8.5.1.1150 as "Администратор (обычное приложение)"; `-ApplyWith ours` applies with the drop-in `infobase config apply`
+instead of the platform's). The trees are the 8.5 native export with the same edits of `edits.py`.
+
+| tree | ours import | apply | native export against the tree |
+|---|---|---|---|
+| one module comment | exit 0, 9 635 rows, 26 s, guard 12 336 files 4.7 s | ours: exit 0, 61 s | 12 336 of 12 336 files identical, `ConfigDumpInfo.xml` aside |
+| the same, a twin clone | exit 0, 84 s (busy machine), guard 12.9 s | native: exit 0, 178 s | 12 336 of 12 336 |
+| `add5` | exit 0; 2 objects built, 4 descriptors compiled, guard 12 339 files | native: exit 0, 113 s, Config 9 951 rows | 12 339 of 12 339 |
+| `rem2` | exit 0; 2 descriptors compiled, 5 rows removed, 5 names in `deleted`, guard 12 329 files | native: exit 0, 127 s, Config 9 943 rows (9 948 - 5) | 12 329 of 12 329 |
+
+The 8.5 БСП is a configuration on vendor support: it stores its parent configuration whole in one row,
+`<configuration uuid>.<parent uuid>` (99 678 751 bytes in 10 parts, the file `Ext/ParentConfigurations/<name>.cf` of
+the tree, 103 199 340 bytes, deflated twice with zlib level 9 and memLevel 9; Python's zlib reproduces both streams
+byte for byte). The library the program deflates with cannot set memLevel 9 (flate2's C backend fixes it at 8), so a
+stage used to write another stream for it (99 663 207 bytes inside, against the stored 99 664 295) that inflates to the
+same file. The check of a stage against the target (`apply_check`, finding 10 of `docs/apply/restructuring-check.md`)
+compares the row after one inflation and read this as a change ("Configuration: row .81401d17-...: content
+changed"): the drop-in apply refused a stage of one module comment on 8.5, and the finding counted the row among the
+differences of a base-free stage of an unchanged БСП.
+
+A stage against a database now keeps the stored row (`stored_parent_configuration_row` in `src/mssql.rs`): it reads
+the row with all its parts, inflates it twice and, when that is the tree's file, stages the row as it is (all 10
+parts byte-identical to Config). Only a file that differs from the stored one is deflated again. What is not
+changed: a base-free stage has no row to keep, so its parent row is still another stream of the same file. To make
+that row equal to the platform's, the check must compare it after two inflations (it knows the row by its name:
+the configuration's uuid and the parent's) or the deflate must set memLevel 9 (zlib-rs or libz-sys directly; flate2
+does not offer it).
+
 ## 4. Cost
 
 The comparison of the tree with the target is the new work of every patch stage, the build of the objects is the new
@@ -163,9 +194,10 @@ why it is detached, which is how a writer knows it works for a base-free object 
 - **Every row is still staged** (9 521 rows for an unchanged tree on БСП, 116 717 on УХ), as before: only a row
   that differs from Config needs to be written (#395). The plan of this stage - which objects are new, changed or
   removed - is the input that change needs.
-- **Not run:** platform 8.5 (dialect 2.21) with builds; ERP УХ with real changes (a second copy of the tree is not
-  allowed in the lab; the run is of the unchanged tree, so the build path costs there are the setup of the
-  base-free stage: about 64 s for the walk, the descriptor reads and the context).
+- **Not run:** the whole matrix on platform 8.5 (dialect 2.21: a module comment, `add5` and `rem2` ran, section
+  3.1); ERP УХ 8.5; ERP УХ with real changes (a second copy of the tree is not allowed in the lab; the run is of the
+  unchanged tree, so the build path costs there are the setup of the base-free stage: about 64 s for the walk, the
+  descriptor reads and the context).
 - **Edits that contradict themselves** are not the stage's to repair. The native export of a tree where a role
   right was set to `false` drops it, and of a tree where a form's query names a predefined item the tree removed
   marks the data paths with `~`; both showed in the tree with all 21 edits (section 3).
