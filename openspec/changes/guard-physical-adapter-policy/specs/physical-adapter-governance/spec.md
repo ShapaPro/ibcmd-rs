@@ -18,6 +18,28 @@ while allowing removal of existing inventory entries.
 - **WHEN** a baseline fingerprint is no longer found in the source
 - **THEN** the offline validator succeeds
 
+### Requirement: Test-only modules are outside the guarded slice
+
+The validator SHALL leave out of the guarded slice every source file the
+compiler reads only for tests: the module a scoped file declares as
+`#[cfg(test)] mod name;` and every file below that module's directory. It SHALL
+NOT need a list of test file names, and SHALL keep guarded a module whose cfg
+predicate can be true in a production build and a module named by a `#[path]`
+attribute.
+
+#### Scenario: A new out-of-line test module is added
+
+- **WHEN** a scoped file gains `#[cfg(test)] mod new_tests;` and the file
+  `new_tests.rs` holds UUID literals
+- **THEN** the offline validator passes without a baseline change
+
+#### Scenario: A module that is not test-only is added
+
+- **WHEN** a scoped file declares `mod plain_tests;` or
+  `#[cfg(any(test, feature = "x"))] mod partly_tests;` and the file holds a
+  UUID literal not present in the baseline
+- **THEN** the offline validator fails without printing the literal
+
 ### Requirement: The gate is portable and privacy-preserving
 
 The validator and its self-tests SHALL run on Windows and Linux PowerShell
