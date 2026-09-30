@@ -138,6 +138,31 @@ pub fn find_created(image: &StagedImage) -> Result<Vec<Created>> {
     Ok(out)
 }
 
+/// A stage creates at most one catalog and one document: how the platform numbers several of a kind, and whether
+/// its header then moves once or more, is not traced (n5 has one of each). Fails closed.
+pub fn check_count(created: &[Created]) -> Result<()> {
+    for kind in [ObjectKind::Catalog, ObjectKind::Document] {
+        let names: Vec<&str> = created
+            .iter()
+            .filter(|item| item.kind == kind)
+            .map(|item| item.facts.name.as_str())
+            .collect();
+        if names.len() > 1 {
+            bail!(
+                "the stage creates {} new {} ({}): the numbering of several is not traced, one catalog and one document at a time",
+                names.len(),
+                if matches!(kind, ObjectKind::Catalog) {
+                    "catalogs"
+                } else {
+                    "documents"
+                },
+                names.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The staged image without the created objects' descriptors and files: what the planner of changed objects
 /// looks at.
 pub fn without_created(image: &StagedImage, created: &[Created]) -> StagedImage {
@@ -266,6 +291,16 @@ pub(crate) fn allocate(running: &mut Running, created: &[Created]) -> Result<()>
                 running.allocate(&attribute.uuid, "Fld")?;
             }
         }
+    }
+    // A stage that creates a catalog leaves the header one above the last entry: the platform hands out one more
+    // number, which no entry records (traced: n1, n2, n5 and the base of n1; a stage of a document alone does not:
+    // n4, d). The next number of a later change comes after it.
+    if created
+        .iter()
+        .any(|item| matches!(item.kind, ObjectKind::Catalog))
+    {
+        running.names_after.max += 1;
+        running.next += 1;
     }
     Ok(())
 }

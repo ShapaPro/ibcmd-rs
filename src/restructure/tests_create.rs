@@ -87,6 +87,7 @@ fn options() -> PlanOptions {
 /// `DbCopies*` names of a base that has not had a native apply yet).
 fn without_upgrade(names: &DbNames, before: &DbNames) -> DbNames {
     let mut names = names.clone();
+    let listed = names.entries.len();
     names.entries.retain(|entry| {
         ![
             "DbCopiesInfoBaseUse",
@@ -96,12 +97,8 @@ fn without_upgrade(names: &DbNames, before: &DbNames) -> DbNames {
         .contains(&entry.kind.as_str())
             || before.entries.contains(entry)
     });
-    names.max = names
-        .entries
-        .iter()
-        .map(|entry| entry.number)
-        .max()
-        .unwrap();
+    // the header is the platform's own, less the numbers it took for the new system tables
+    names.max -= (listed - names.entries.len()) as u64;
     names
 }
 
@@ -334,6 +331,23 @@ fn the_plan_of_a_new_catalog_and_two_attributes_equals_the_native_result_of_case
     let _ = ROOT_ROW;
 }
 
+#[test]
+fn a_stage_that_creates_two_objects_of_one_kind_is_refused() {
+    let Some(before) = Snap::open("d_staged") else {
+        eprintln!("skipped: no lab snapshots of case d");
+        return;
+    };
+    let inputs = inputs_of(&before);
+    let mut created = crate::restructure::create::find_created(&inputs.staged).unwrap();
+    assert_eq!(created.len(), 1);
+    crate::restructure::create::check_count(&created).unwrap();
+    created.push(created[0].clone());
+    let error = crate::restructure::create::check_count(&created).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("2 new documents"),
+        "{error:#}"
+    );
+}
 // ---------------------------------------------------------------------------------------------
 // the gate
 // ---------------------------------------------------------------------------------------------
@@ -422,6 +436,7 @@ mod gate {
         assert_eq!(phase.created.len(), 1);
         assert_eq!(phase.created[0].uuid, NEW_DOCUMENT);
         assert_eq!(phase.created[0].kind, "Document");
+        assert_eq!(phase.answered_rows, [ROOT_ROW]);
         eprintln!("created: {:?}", phase.created);
     }
 

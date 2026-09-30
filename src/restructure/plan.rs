@@ -962,6 +962,7 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     // The catalogs and documents the stage creates (S1-F) are planned apart from the changed objects: the rest
     // of the image is what the scan for changed attributes looks at.
     let created = create::find_created(&inputs.staged)?;
+    create::check_count(&created)?;
     let rest = create::without_created(&inputs.staged, &created);
     check_files(&rest)?;
     let changes = find_changes(&rest)?;
