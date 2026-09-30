@@ -5,11 +5,16 @@
 //! `<base>_dynupdate_<generation><suffix>` and leaves the plain rows as they
 //! were; the history in the table's `DynamicallyUpdated` row lists the
 //! generations, oldest first, and for a published name the newest generation
-//! that carries it wins (`mssql_dump::dynamic_generation` describes the same
-//! rule for the export). A stage that patches a base row -- and above all the
+//! that carries it wins. A stage that patches a base row -- and above all the
 //! `versions` row it builds the next generation's from -- has to start from the
 //! row the platform reads, not from the plain one, or everything the earlier
 //! generations changed goes back to what it was before them.
+//!
+//! The rule itself is the export's (`mssql_dump::dynamic_generation`, reached
+//! through `mssql_dump::stored_row_name`); the stage that reads the whole table
+//! applies it through `mssql_dump::dynamic_generation_aliases`. This module adds
+//! what the row-by-row stage needs and the other readers do not: the `LIKE`
+//! pattern that finds the candidates with one seek.
 
 /// The infix an online update inserts before the storage suffix.
 const DYNAMIC_UPDATE_INFIX: &str = "_dynupdate_";
@@ -19,7 +24,8 @@ const GENERATION_LEN: usize = 36;
 
 /// The name `published` is stored under in `generation`: the storage suffix
 /// (`.0`, `.1`, ...) stays last.
-pub fn alias_name(published: &str, generation: &str) -> String {
+#[cfg(test)]
+fn alias_name(published: &str, generation: &str) -> String {
     match published.split_once('.') {
         Some((base, suffix)) => format!("{base}{DYNAMIC_UPDATE_INFIX}{generation}.{suffix}"),
         None => format!("{published}{DYNAMIC_UPDATE_INFIX}{generation}"),
@@ -61,23 +67,13 @@ pub fn pick<T>(
     history: &[String],
     rows: impl IntoIterator<Item = (String, T)>,
 ) -> Option<(String, T)> {
-    let mut plain = None;
-    let mut best: Option<(usize, String, T)> = None;
-    for (stored, value) in rows {
-        if stored == published {
-            plain = Some((stored, value));
-            continue;
-        }
-        let Some(rank) = history.iter().rposition(|generation| {
-            generation.len() == GENERATION_LEN && stored == alias_name(published, generation)
-        }) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(current, _, _)| *current < rank) {
-            best = Some((rank, stored, value));
-        }
-    }
-    best.map(|(_, stored, value)| (stored, value)).or(plain)
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let stored = crate::mssql_dump::stored_row_name(
+        history,
+        published,
+        rows.iter().map(|(name, _)| name.as_str()),
+    );
+    rows.into_iter().find(|(name, _)| *name == stored)
 }
 
 #[cfg(test)]
@@ -164,5 +160,39 @@ mod tests {
             alias_name("other", G1),
         ];
         assert!(pick("versions", &history, rows(&names)).is_none());
+    }
+
+    #[test]
+    fn the_row_by_row_pick_and_the_whole_table_aliases_are_one_rule() {
+        let history = vec![G1.to_owned(), G2.to_owned(), G3.to_owned()];
+        let marker = format!("\u{feff}{{1,3,{G1},{G2},{G3}}}");
+        let unlisted = "99999999-9999-4999-8999-999999999999";
+        let stored = vec![
+            "a".to_owned(),
+            alias_name("a", G1),
+            alias_name("a", G3),
+            "a.0".to_owned(),
+            alias_name("a.0", G2),
+            "b".to_owned(),
+            alias_name("b", unlisted),
+            "versions".to_owned(),
+            alias_name("versions", G2),
+            // An object an update added: no plain row.
+            alias_name("added", G2),
+            alias_name("added.0", G3),
+        ];
+        let aliases = crate::mssql_dump::dynamic_generation_aliases(
+            Some(marker.as_bytes()),
+            stored.iter().map(String::as_str),
+        )
+        .unwrap();
+        for published in ["a", "a.0", "b", "versions", "added", "added.0", "missing"] {
+            let picked = pick(published, &history, rows(&stored)).map(|(name, _)| name);
+            let expected = aliases
+                .get(published)
+                .cloned()
+                .or_else(|| stored.iter().find(|name| *name == published).cloned());
+            assert_eq!(picked, expected, "{published}");
+        }
     }
 }
