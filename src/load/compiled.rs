@@ -609,7 +609,7 @@ fn with_configinfo(
 }
 
 /// `key` is a dropped entry or one of its bodies (`<key>.<n>`).
-fn is_dropped(dropped: &BTreeSet<String>, key: &str) -> bool {
+pub(crate) fn is_dropped(dropped: &BTreeSet<String>, key: &str) -> bool {
     dropped.contains(key)
         || key
             .split_once('.')
@@ -652,7 +652,7 @@ fn payloads(packed: &[u8]) -> Result<StoragePayloads> {
     StoragePayloads::new(packed.to_vec(), unpacked).context("compiled row payloads")
 }
 
-fn with_payload(entry: &StorageEntry, packed: &[u8]) -> Result<StorageEntry> {
+pub(crate) fn with_payload(entry: &StorageEntry, packed: &[u8]) -> Result<StorageEntry> {
     StorageEntry::new(
         entry.logical_name().clone(),
         entry.logical_key().clone(),
@@ -667,7 +667,7 @@ fn with_payload(entry: &StorageEntry, packed: &[u8]) -> Result<StorageEntry> {
 
 /// A new entry named `key`: the template's attributes and element-header
 /// prefix (its timestamps) with the new name.
-fn new_entry(template: &StorageEntry, key: &str, packed: &[u8]) -> Result<StorageEntry> {
+pub(crate) fn new_entry(template: &StorageEntry, key: &str, packed: &[u8]) -> Result<StorageEntry> {
     let header = template.raw_header();
     let prefix = ibcmd_v8::format15::ELEMENT_HEADER_PREFIX_SIZE.min(header.len());
     let mut raw_header = header[..prefix].to_vec();

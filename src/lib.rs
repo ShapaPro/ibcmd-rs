@@ -30,6 +30,7 @@ pub mod mssql_extension_activation;
 pub mod mssql_extension_export;
 pub mod mssql_extension_load;
 pub mod mssql_extension_stage;
+pub mod mssql_extension_tree_load;
 pub mod mssql_extensions;
 pub mod mssql_main_activation;
 pub mod mssql_platform_profile;
