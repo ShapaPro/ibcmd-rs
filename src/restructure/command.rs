@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::restructure::exec::{ExecOptions, ExecReport, run as run_plan};
 use crate::restructure::plan::{Inputs, Method, Plan, PlanOptions, indexing_word, plan};
 use crate::restructure::reader::{database_name, read_inputs};
+use crate::restructure::size_guard::{self, LimitSetting};
 use crate::restructure::storage::STATUS_IDLE;
 use crate::sql::mssql::TdsPool;
 use crate::sql::{SqlLogin, SqlTarget};
@@ -76,6 +77,16 @@ pub struct MssqlRestructureArgs {
     /// With --through-apply: write the T-SQL of the transaction here.
     #[arg(long)]
     pub script_output: Option<PathBuf>,
+    /// The most rows of tables the rebuild may copy in its transaction (the sum); above it the stage is
+    /// refused and goes to the native apply. Default: IBCMD_RS_RESTRUCTURE_LIMIT_ROWS,
+    /// `restructure-limit-rows` of ibcmd-rs.toml, the measured default.
+    #[arg(long)]
+    pub restructure_limit_rows: Option<u64>,
+    /// The most bytes the rebuild may write to the log under full recovery (the data of the rebuilt tables
+    /// twice, their other indexes once; the sum; `2GB`, `512MB`, a number of bytes). Default:
+    /// IBCMD_RS_RESTRUCTURE_LIMIT_BYTES, `restructure-limit-bytes` of ibcmd-rs.toml, the measured default.
+    #[arg(long)]
+    pub restructure_limit_bytes: Option<String>,
     /// With --through-apply: the folder of the apply's recovery artifact.
     #[arg(long)]
     pub recovery_dir: Option<PathBuf>,
@@ -168,6 +179,9 @@ pub struct RestructureReport {
     pub new_names_sha256: String,
     pub statements: Vec<StatementReport>,
     pub execution: Option<ExecReport>,
+    /// The size guard's verdict on the tables the plan rebuilds (S1-J): the limit, the totals, the largest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_check: Option<serde_json::Value>,
     /// `--through-apply`: the apply's report (its structure phase, gate verdict, timings).
     pub through_apply: Option<serde_json::Value>,
 }
@@ -251,6 +265,20 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
     }
     debug_assert_eq!(main.status, STATUS_IDLE);
     let plan = make_plan(&inputs, args)?;
+    // S1-J: a rebuild copies the tables in one transaction; above the limit nothing is written.
+    let size = if plan.method == Method::Rebuild {
+        let tables: Vec<String> = plan
+            .tables()
+            .map(|table| table.table.name.clone())
+            .collect();
+        Some(size_guard::check_tables(
+            &mut connection,
+            &tables,
+            &limit_of(args)?,
+        )?)
+    } else {
+        None
+    };
 
     let mode = if args.dry_run {
         "dry-run"
@@ -260,6 +288,14 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
         "apply"
     };
     let mut report = describe(&plan, &args.database, mode);
+    report.size_check = size.as_ref().map(size_guard::SizeCheck::to_json);
+    if let Some(reason) = size.as_ref().and_then(size_guard::SizeCheck::refusal) {
+        if let Some(path) = &args.report {
+            std::fs::write(path, serde_json::to_string_pretty(&report)?)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        bail!("S1: {reason}");
+    }
     if let Some(folder) = &args.dump_plan {
         dump(&plan, folder)?;
     }
@@ -278,6 +314,15 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(report)
+}
+
+/// The limit of the run: the flags, else the settings chain, else the default.
+fn limit_of(args: &MssqlRestructureArgs) -> Result<LimitSetting> {
+    size_guard::resolve_limit(
+        &crate::settings::Settings::load(None)?,
+        args.restructure_limit_rows,
+        args.restructure_limit_bytes.as_deref(),
+    )
 }
 
 fn plan_options(args: &MssqlRestructureArgs) -> PlanOptions {
@@ -342,8 +387,10 @@ fn run_through_apply(
         (None, true) => BackupPolicy::Acknowledged,
         (None, false) => BackupPolicy::None,
     };
+    options.restructure_limit = limit_of(args)?;
     let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args))
-        .xml_version(Some("2.20"));
+        .xml_version(Some("2.20"))
+        .size_limit(options.restructure_limit.clone());
     let mode = if args.dry_run {
         "through-apply, dry-run"
     } else if args.rehearse {
@@ -501,6 +548,7 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
             })
             .collect(),
         execution: None,
+        size_check: None,
         through_apply: None,
     }
 }

@@ -17,6 +17,10 @@ struct FileDocument {
     platform: Option<Spanned<String>>,
     db_server: Option<Spanned<String>>,
     db_user: Option<Spanned<String>>,
+    /// A whole number of rows, or a string of digits (S1-J).
+    restructure_limit_rows: Option<Spanned<toml::Value>>,
+    /// A number of bytes, or a string with a unit (`"4GB"`).
+    restructure_limit_bytes: Option<Spanned<toml::Value>>,
     #[serde(default)]
     database: Vec<DatabaseDocument>,
 }
@@ -80,6 +84,43 @@ pub(super) fn read_settings_file(path: &Path, layer: SettingsLayer) -> Result<Se
         };
     let db_server = text_value(document.db_server, "db-server")?;
     let db_user = text_value(document.db_user, "db-user")?;
+    let limit = |value: Option<Spanned<toml::Value>>,
+                 key: &str,
+                 bytes: bool|
+     -> Result<Option<Located<u64>>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let parsed = match value.get_ref() {
+            toml::Value::Integer(number) if *number > 0 => Ok(*number as u64),
+            toml::Value::String(text) if bytes => {
+                crate::restructure::size_guard::parse_byte_size(text)
+            }
+            toml::Value::String(text) => super::restructure::parse_count(text),
+            other => Err(anyhow!(
+                "expected a positive number, found a {}",
+                other.type_str()
+            )),
+        }
+        .with_context(|| format!("{}: {key}", at(value.span())))?;
+        if parsed == 0 {
+            bail!("{}: {key} is 0", at(value.span()));
+        }
+        Ok(Some(Located {
+            value: parsed,
+            line: line_of(&text, value.span()),
+        }))
+    };
+    let restructure_limit_rows = limit(
+        document.restructure_limit_rows,
+        "restructure-limit-rows",
+        false,
+    )?;
+    let restructure_limit_bytes = limit(
+        document.restructure_limit_bytes,
+        "restructure-limit-bytes",
+        true,
+    )?;
 
     let mut databases = Vec::with_capacity(document.database.len());
     for entry in document.database {
@@ -115,6 +156,8 @@ pub(super) fn read_settings_file(path: &Path, layer: SettingsLayer) -> Result<Se
         platform,
         db_server,
         db_user,
+        restructure_limit_rows,
+        restructure_limit_bytes,
         databases,
     })
 }

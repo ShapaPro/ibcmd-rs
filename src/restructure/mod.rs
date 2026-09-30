@@ -38,6 +38,7 @@ pub mod registry;
 pub mod s1;
 pub mod schema;
 pub mod script;
+pub mod size_guard;
 pub mod storage;
 pub mod xdto;
 
@@ -49,3 +50,5 @@ mod tests_plan;
 mod tests_s1;
 #[cfg(test)]
 mod tests_schema;
+#[cfg(test)]
+mod tests_size_guard;
