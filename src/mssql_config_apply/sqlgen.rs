@@ -1175,6 +1175,36 @@ mod tests {
     }
 
     #[test]
+    fn the_exclusivity_check_leaves_out_the_idle_sessions_of_the_own_ras_processes() {
+        // #408 step 2: the old activation commands hand their exclusive mode to this apply, and the tool's own RAS
+        // verification made the cluster open idle SQL sessions on the database (#409 F-3).
+        let plain = render_apply_script(&inputs()).unwrap();
+        assert!(
+            !plain.contains("1CV83 Server"),
+            "no own process, no exemption"
+        );
+        let mut own = inputs();
+        own.session_exemption = crate::mssql_platform_profile::session_exemption(&[
+            crate::mssql_platform_profile::OwnRasProcess {
+                host: "wks".to_owned(),
+                pid: 4711,
+            },
+        ]);
+        let sql = render_apply_script(&own).unwrap();
+        let throw = sql.find("THROW 57302").unwrap();
+        let condition = &sql[..throw];
+        let start = condition
+            .rfind("EXISTS (SELECT 1 FROM sys.dm_exec_sessions")
+            .unwrap();
+        let condition = &condition[start..];
+        assert!(condition.contains("ISNULL(host_process_id, -1) <> 4242"));
+        assert!(condition.contains("program_name,N'')=N'1CV83 Server'"));
+        assert!(condition.contains("status=N'sleeping'"));
+        assert!(condition.contains("open_transaction_count=0"));
+        assert!(condition.contains("N'wks' AND ISNULL(host_process_id,-1) IN (4711)"));
+    }
+
+    #[test]
     fn the_script_is_one_guarded_transaction() {
         let sql = render_apply_script(&inputs()).unwrap();
         assert!(sql.contains("USE [db]]x];"));

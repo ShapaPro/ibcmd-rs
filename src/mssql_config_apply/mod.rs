@@ -642,6 +642,16 @@ pub struct OtherSession {
     pub last_request_end: String,
 }
 
+/// The query of [`other_sessions`]: `@P1` the database, `@P2` this process's id. The idle `1CV83 Server` sessions
+/// of `own_ras_processes` are left out ([`session_exemption`]).
+fn other_sessions_query(own_ras_processes: &[OwnRasProcess]) -> String {
+    format!(
+        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
+         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2{} ORDER BY session_id",
+        session_exemption(own_ras_processes)
+    )
+}
+
 pub fn other_sessions(
     client: &dyn SqlClient,
     database: &str,
@@ -659,13 +669,8 @@ pub fn other_sessions(
     }
     let pid = i64::from(std::process::id());
     let mut sessions = Vec::new();
-    let query = format!(
-        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
-         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2{} ORDER BY session_id",
-        session_exemption(own_ras_processes)
-    );
     client.read_rows(
-        &query,
+        &other_sessions_query(own_ras_processes),
         &[SqlParam::Text(database), SqlParam::I64(pid)],
         &mut |row| {
             sessions.push(OtherSession {
@@ -1925,6 +1930,28 @@ fn write_artifact(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sessions_query_leaves_out_only_the_idle_sessions_of_the_own_ras_processes() {
+        // no own process (the default of every caller but the old activation commands): every session but ours counts
+        let plain = other_sessions_query(&[]);
+        assert!(plain.contains("ISNULL(host_process_id, -1) <> @P2 ORDER BY session_id"));
+        assert!(!plain.contains("1CV83 Server"));
+        assert!(
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214)
+                .own_ras_processes
+                .is_empty()
+        );
+        let own = [OwnRasProcess {
+            host: "wks".to_owned(),
+            pid: 4711,
+        }];
+        let query = other_sessions_query(&own);
+        assert!(query.contains("<> @P2 AND NOT (ISNULL(program_name,N'')=N'1CV83 Server'"));
+        assert!(query.contains("status=N'sleeping' AND open_transaction_count=0"));
+        assert!(query.contains("N'wks' AND ISNULL(host_process_id,-1) IN (4711)"));
+        assert!(query.ends_with(" ORDER BY session_id"));
+    }
 
     #[test]
     fn the_8_5_profile_is_planned_like_any_other() {
