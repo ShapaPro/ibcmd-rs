@@ -3,8 +3,9 @@
 Part of #391 (the minimal own restructuring, S1), sub-issue S1-I, track "ext". Everything below is **measured**
 on the БСП 8.3.27 corpus clone (four extensions, platform 8.3.27.2214, SQL Server 2025) unless it says
 **inference**. Code: `src/restructure/extensions.rs`, `mssql_dump::extension::adopted_objects`; the hooks in
-`plan.rs`, `reader.rs`, `exec.rs`, `command.rs`. Evidence: `docs/apply/evidence/restructuring/s1i-*.txt`.
-The design of S1 itself is `docs/apply/restructuring.md`, section 12 (branch `feat/0.4-restructure-s1`).
+`plan.rs`, `reader.rs`, `s1.rs`, `script.rs`, `exec.rs`, `command.rs`. Evidence:
+`docs/apply/evidence/restructuring/s1i-*.txt`. The design of S1 itself is `docs/apply/restructuring.md`,
+section 12; the route is `mssql-config-apply --allow-restructure s1` (12.12).
 
 ## 1. Summary
 
@@ -26,16 +27,18 @@ The design of S1 itself is `docs/apply/restructuring.md`, section 12 (branch `fe
    - an object **adopted and extended with data** (the extension keeps `_Reference18X1` for it): the platform
      rebuilds the main table **and** the extension's table, adds the new field to the extension's schema entry
      and rewrites `SchemaStorage(1)` (case c). A rebuild of the main table alone leaves the extension out of step.
-4. **What S1-I does**: the plan reads the objects the extensions adopt and **refuses** a change of an object an
-   extension adopts (whatever the case above: the acceptance criterion is a refusal, section 4); it refuses when
-   the extension schema is not idle or when the objects were not read; and the executor **proves** inside its
-   transaction that nothing the extensions keep changed, and rolls back otherwise.
-5. **On a twin of the БСП clone with four extensions** (section 5): an object no extension adopts passes and the
-   result equals the native apply (tables, data, `Config`, `DBNames`, `DBSchema`, 14 of 16 `.si` rows, native
-   export 12 198 / 12 198, native apply afterwards "не требуется", a cluster session), and the four extensions
-   are as they were (243 `X1` tables, `SchemaStorage(1)`, `DBNames-Ext-*`, `_ExtensionsInfo`,
-   `_ExtensionsRestruct`, and their native export 737 / 737); an adopted object is refused, dry run, trial and
-   apply alike, and the database is exactly as it was.
+4. **What S1-I does**: the S1 gate reads the objects the extensions adopt and the plan **refuses** a change of an
+   object an extension adopts (whatever the case above: the acceptance criterion is a refusal, section 4); it
+   refuses when the extension schema is not idle or when the objects were not read; and the structure phase
+   **proves** inside the apply's transaction that nothing the extensions keep changed, and rolls back otherwise
+   (`THROW 57406`).
+5. **On a twin of the БСП clone with four extensions** (section 5), through `mssql-config-apply
+   --allow-restructure s1 --i-have-a-backup`: an object no extension adopts passes and the result equals the
+   native apply (tables, data, `Config`, `DBNames`, `DBSchema`, 16 of 16 `.si` rows, native export 12 198 / 12 198,
+   native apply afterwards "не требуется"), and the four extensions are as they were (243 `X1` tables,
+   `SchemaStorage(1)`, `DBNames-Ext-*`, `_ExtensionsInfo`, `_ExtensionsRestruct`, and their native export
+   737 / 737); an adopted object is refused, dry run, rehearsal and real run alike, and the database is exactly
+   as it was; an injected failure in the script takes everything back.
 
 ## 2. The storage of the extensions
 
@@ -73,61 +76,72 @@ extension adopts, a change of the type, and every other operation are **not trac
 
 ## 4. What S1-I does
 
-- **Refuse** (`extensions::check`, called by `plan` right after the changed object is known): the object is
-  adopted when an extension's adopted header has its uuid, names its uuid as the base object, or has its name
-  (kind-agnostic: the kind is not read off an extension row, so a same-named object of another kind refuses
-  too, which is the safe side). Staged images of the extensions count as well as the active ones. The message
-  names the extension, the adopted object and image, and the tables of its own the extension keeps for the object
-  (`_Reference18X1`, sub-tables included), because those are what a rebuild would leave out of step.
-- **Refuse** when the infobase has extensions and the plan was given none of their objects (a reader that fills
-  `Inputs` must fill `extensions.adoptions` too: `read_adoptions`), and when `SchemaStorage(1)` is not idle.
-- **Prove** (`exec::run_inside`): before its first statement and after its last, in the same transaction, the
-  executor reads `fingerprint`: `SchemaStorage` but the main row, the `Params` rows `DBNames*-Ext-*`, count and
-  checksum of `_ExtensionsInfo`, `_ExtensionsRestruct`, `_ExtensionsRestructNGS`, and the row count of every
-  table of the extension schema (253 parts on the clone). A difference rolls the transaction back and names
-  the parts.
+- **Refuse** (`extensions::check`, called by `plan` for every changed object): the object is adopted when an
+  extension's adopted header has its uuid, names its uuid as the base object, or has its name (kind-agnostic:
+  the kind is not read off an extension row, so a same-named object of another kind refuses too, which is the
+  safe side). Staged images of the extensions count as well as the active ones. The message names the extension,
+  the adopted object and image, and the tables of its own the extension keeps for the object (`_Reference18X1`,
+  sub-tables included), because those are what a rebuild would leave out of step.
+- **Refuse** when the infobase has extensions and the plan was given none of their objects, and when
+  `SchemaStorage(1)` is not idle.
+- **On the real route** the S1 gate (`S1Gate::check`) reads the state of the extensions with the rest of the
+  plan's input (`reader::read_inputs`: `read_state`) and, when the infobase has extensions, the objects they
+  adopt (`read_adoptions`, through the apply's own SQL client; a read that fails is a blocker
+  `S1: the objects the extensions adopt could not be read`). The plan's error is the gate's blocker
+  `S1: catalog X is adopted by the extension ...`; the apply answers with its `StructuralRefusal` (exit 1), and
+  the drop-in `ibcmd infobase config apply` words it `требуется штатный config apply: <blockers>` as it does for
+  every refusal of the gate.
+- **Prove, inside the transaction.** The structure phase (`Plan::phase_sql`) computes a fingerprint of everything
+  the extensions keep before its guards, and again after its publication, and compares them (`THROW 57406`,
+  "the restructure changed what the extensions keep"). The fingerprint (T-SQL, `script::extension_state_sql`;
+  the same in Rust, `extensions::fingerprint`, for the standalone executor): the `SchemaStorage` rows but the
+  main one, the `Params` rows `DBNames*-Ext-*`, count and checksum of `_ExtensionsInfo`, `_ExtensionsRestruct`,
+  `_ExtensionsRestructNGS` (when they exist), and the row count of every table whose name ends in `X1`. It runs
+  inside the apply's SERIALIZABLE transaction with the rest of the phase, so the apply's `CATCH` takes back
+  everything.
 - **The criterion is a refusal for every adopted object**, as the issue states; the measured harmlessness of
-  cases n and a is recorded, not used. **Proposal**: an option that lets an object pass when its only adoption
-  is one with no table of its own (`extension_tables` empty), for the operations traced (add an attribute), once
-  the deletion and the widening are traced on such an object.
+  cases n and a is recorded, not used (the coordinator decided: not in 0.4).
 
-Contract for the S1 gate and the apply seam (the code that builds `restructure::plan::Inputs`): call
-`extensions::read_state(connection, &storage)` (done by `reader::read_inputs`) and `extensions::read_adoptions(target,
-database)` when `registered > 0`; set `adoptions_read`. `plan` returns the `Refusal` as its error, so a gate that
-turns a plan error into a blocker (`S1: <reason>`) needs nothing more. The executor's `fingerprint` belongs to
-whichever code runs the statements: the seam's `structure_sql` should carry the same before/after assertions
-(hashes of the same parts) as `THROW`s.
+## 5. The twin protocol (12.6) through `mssql-config-apply --allow-restructure s1 --i-have-a-backup`
 
-## 5. The twin protocol (12.6) for the two cases
+The clone after a native baseline apply (an unchanged file staged and applied); one string attribute added to a
+catalog by a native `config import files --partial`; twins from one backup of the staged state. Case n:
+`n3_nat` (native `config apply`) and `n3_own` (dry run, rehearsal and real run of `mssql-config-apply`); case c:
+`c3_own` (refused).
 
-The twins of case n: `n2_nat` (native apply) and `n2_own` (dry run, trial, apply of `ibcmd-rs mssql-restructure`
-of this branch). Case a and c twins: refused, checks 11 and 10.
-
-| # | check | case n | cases a, c |
+| # | check | case n (`_ДемоСтавкиНДС`, adopted by nobody) | case c (`_ДемоНоменклатура`, adopted, `_Reference18X1`) |
 |---|---|---|---|
 | 1 | the plan made offline equals the native result | `DBNames` inflated equal (347 223 bytes both); the `DBSchema` entry `Reference23` equal | the plan is not made |
 | 2 | tables, columns, indexes | identical but `_DbCopies*` (build drift) and the auto-named primary key of `_ConfigChngR` | unchanged: 0 tables changed |
 | 3 | the data of every rebuilt table, EXCEPT both ways | `_Reference23`, `Config` and the 243 `X1` tables, `_ExtensionsInfo`, `_ExtensionsRestruct`, `_ExtensionsRestructNGS`: 248 tables, 0 differing | - |
-| 4 | `Config` rows | equal (9 841 rows; the standalone command does not fold the `_dynupdate_` rows a fresh corpus clone carries, which is why the twins start after a native baseline apply) | unchanged |
+| 4 | `Config` rows | equal (9 841 rows, EXCEPT both ways 0) | unchanged |
 | 5 | `DBSchema` entries, `DBNames` | 1 761 entries, equal but `DbCopies`, `DbCopiesUpdates` | unchanged |
-| 6 | the 16 `.si` rows | 14 of 16 have the same text; the two others are known to this version of the prototype: the object registry row (`1a621f0f`, left unwritten) and the XDTO row, in which the wave-0 prototype writes `lowerBound="0"` for an attribute that is not nullable (native does not; the S1 branch of the ddl track reports equal XDTO for 23 attributes, 12.8) | unchanged |
-| 7 | a native apply afterwards | "Обновление конфигурации базы данных не требуется", 0 tables and rows changed | - |
-| 8 | native export | 12 198 / 12 198 identical; the four extensions 737 / 737 identical to the reference exports | - |
-| 9 | a session in the cluster | identical output on both twins (metadata, read, XDTO serialization of an item, write, change of an existing item) | - |
-| 10 | a rehearsal changes nothing | `--trial`: everything runs, "extensions: 253 parts as they were", rolled back; the real run followed on the same database | dry run, trial and apply: nothing written (0 tables, all service rows equal) |
-| 11 | refusals | - | Catalog `_ДемоПартнеры`: "adopted by the extension _ДемоРасширение ... keeps no table of its own"; Catalog `_ДемоНоменклатура`: "... keeps tables of its own for it (_Reference18X1)" (`s1i-refusals.txt`) |
-| 12 | a failure inside the transaction takes everything back | **not run** for this command: the standalone executor rolls back on any error (`XACT_ABORT`, rollback on the first failed verification, the same path as the new extension assertion); the injected `THROW` of 12.6 belongs to the seam's script. The assertion itself is unit-tested (`Fingerprint::differences`) | - |
+| 6 | the 16 `.si` rows | **16 of 16 have the same text** (the registry row `1a621f0f` and the XDTO row included; the XDTO property of the non-nullable attribute has no `lowerBound`, as native's) | unchanged |
+| 7 | a native apply afterwards | "Обновление конфигурации базы данных не требуется" | - |
+| 8 | native export | main configuration 12 198 / 12 198 identical; the four extensions 737 / 737 identical to the reference exports | - |
+| 9 | a session in the cluster | identical output on both twins in the earlier run of this case (wave 0), not repeated | - |
+| 10 | a rehearsal changes nothing | `--rehearse` runs the script and rolls it back; the real run followed on the same database | dry run, rehearsal and real run: nothing written (0 tables, all service rows equal) |
+| 11 | refusals | - | dry run, rehearsal and real run refuse with `S1: catalog _ДемоНоменклатура is adopted by the extension _ДемоРасширение (...); the extension keeps tables of its own for it (_Reference18X1): ...`, exit 1 |
+| 12 | a failure inside the transaction takes everything back | on a fresh twin, the generated script with (a) an `UPDATE dbo._ExtensionsInfo SET _ExtName = _ExtName` between the phase and its extension check: `THROW 57406` "the restructure changed what the extensions keep"; (b) a `THROW` as the last statement before `COMMIT`: 0 tables changed, no `*NG` table, no new column, `SchemaStorage` and every service row as they were, `ConfigSave` 4 rows | - |
 
-One native export of the extension `_ДемоРасширение` ended with exit code 1 after 172 of 185 files on the own twin
-and did not repeat (exit 0, 185 files, in the next attempt and in the next run of all four); the same export on the
-native twin never failed. Not reproduced, not explained; recorded.
+The drop-in `ibcmd infobase config apply` at this base does not choose the S1 gate yet (the restructure-check
+track is wiring it: a backup option is the consent). With that wiring made locally (not committed), the drop-in
+refuses case c with `требуется штатный config apply: bb3d8c09-...: the descriptor's text differs ...; : S1:
+catalog _ДемоНоменклатура is adopted by the extension _ДемоРасширение ...` (exit 1; the blocker of the plan has no
+row, so the wording shows `; : S1:`), and applies case n (exit 0) with a result equal to the native twin's
+(248 tables EXCEPT 0, 16 of 16 `.si` rows).
+
+The earlier run of case n with the standalone `mssql-restructure` (wave 0) is in `s1i-case-n-twins.txt`.
 
 ## 6. Not covered
 
-- other kinds than catalogs (the prototype is catalogs only; the check is by name, so it works for any kind the
-  gate will hand it: `ChangedObject::kind`), the deletion of an attribute or a widening of an adopted object;
+- other kinds than catalogs and documents (the check is by name and works for any kind the gate hands it:
+  `ChangedObject::kind`; the gate builds catalogs and documents only), the deletion of an attribute or a widening
+  of an object an extension adopts (both are refused with the rest);
 - the platform's behaviour for an object the extension adopts when the **extension** carries an attribute of the
   same name, or the extension's form uses the deleted attribute (extension consistency checks of the apply);
 - 8.5 (the S1 gate refuses it); an extension whose staged image adopts an object its active image does not is
   read (the union), but no such case was traced;
-- a live failure injection (check 12) and the seam's script assertions: they wait for S1-A.
+- the drop-in `ibcmd infobase config apply` on the S1 gate: the wiring is the restructure-check track's; the
+  refusal was checked with a local, uncommitted wiring (section 5);
+- a cluster session on the result of the route (check 9): equal on the wave-0 twins, not repeated here.
