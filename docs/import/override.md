@@ -136,6 +136,45 @@ that row equal to the platform's, the check must compare it after two inflations
 the configuration's uuid and the parent's) or the deflate must set memLevel 9 (zlib-rs or libz-sys directly; flate2
 does not offer it).
 
+### 3.2 Our import and the drop-in S1 apply, against the platform's twin
+
+The cases of the ddl track (`restructure-check\dn`: `b1` attributes deleted, `c1` strings widened, `d1` indexes
+switched) and `attrdel` of `edits.py` (the first attribute of a catalog removed), on the БСП 8.3.27 base tree.
+`scripts/import-lab/run_s1_case.ps1` (feat/0.4 at df27d983 and later: the drop-in `config apply --recovery-backup`
+serves S1): a native twin (the platform's `import files --partial` of the edited descriptors, the platform's apply) and
+an own twin (our `config import` of the whole tree, default flags, then `config apply --recovery-backup=<file>`), then
+rcheck's checks against the native twin.
+
+| case | our import | our apply | check 7 (the platform applies) | check 8 (exports) | check 3 (rebuilt tables) |
+|---|---|---|---|---|---|
+| `c1`: 6 strings widened in 5 objects | exit 0, 5 descriptors compiled, guard 12 197 files | exit 0, gate `s1`, backup file, 117 s | `не требуется` | native twin against ours and the tree against ours: 12 197 of 12 197 identical | 10 tables equal |
+| `d1`: 12 indexes switched in 6 objects | exit 0, 6 descriptors compiled | exit 0, 106 s | `не требуется` | 12 197 of 12 197 | 11 tables equal |
+| `attrdel`: an attribute removed | exit 0, 1 descriptor compiled | exit 0, 151 s | `не требуется` | 12 197 of 12 197 | `_Reference3347` equal |
+| `b1`: 11 attributes removed, 2 added | refused | - | - | - | - |
+
+Check 4 (every `Config` row by content, `compare_config_content.py`): the names are the same 9 838 in both twins and
+the service rows are equal, but about 3 060 rows differ in content: the descriptors and bodies our patch stage
+compiles from the tree are the same in meaning (the exports are identical) and not in layout (the gate counts 4 404
+descriptors that differ only in layout), because a patch stage writes every row of the tree. The platform's twin keeps
+the rows it did not stage. Rows equal to the platform's need the stage to write only what changed (#395).
+
+**The S1 plan and the `deleted` row.** `restructure::plan::check_deleted` accepted only the removed attributes in the
+stage's `deleted` row, so every import into a target that carries a pending online update (the lab's БСП clone does)
+was refused: "the staged image deletes ..._dynupdate_..., which is not an attribute it removes". The platform's own
+import lists those rows there (flag 0), and so does this program's (section 2). The plan now lets a flag-0 name with the
+mark of an update row through (`DynamicallyUpdated`, `versions_dynupdate_<g>`, `<uuid>_dynupdate_<g>[.0]`), and refuses
+anything else as before. That is a change to the ddl track's module, made here because the acceptance needs it.
+
+**`b1` is not a tree the platform imports.** The case edits the descriptors only; nine forms of the tree still bind
+the removed attributes (`Объект.Ставка`, `Список.КоррСчет`, ...). The platform's `import files --partial` of those forms
+and descriptors is refused: `Неверный путь к данным: "Объект.Ставка"` for every one of them (the native twin of the
+case does not stage the forms, so it never meets this), and after its apply the platform exports those forms with
+`<DataPath>1/0:<uuid of the attribute></DataPath>`, not the tree's text. This program refuses the tree as well: the
+native form writer says "`<InputField>` binds to Объект.Ставка, which the writer cannot place" for each form, and
+the patch of the target's layout that follows fails ("cannot patch Form UseForFoldersAndItems without an existing
+property bag"). Both refusals stop the import before ConfigSave is written. A consistent `b1` must drop the bindings
+from the forms too.
+
 ## 4. Cost
 
 The comparison of the tree with the target is the new work of every patch stage, the build of the objects is the new
@@ -177,8 +216,11 @@ why it is detached, which is how a writer knows it works for a base-free object 
   keeps for an emptied part (`ConfigDumpInfo.xml` lists them, the XML has no file), which the row roles of
   `apply_check::roles` describe; not done.
 - **Removed children** of an object (an attribute, a tabular section): the platform's import writes them in
-  `deleted` as `<uuid>,1`. Ours does not, and the native apply removes the column anyway (see section 3), so no
-  effect was observed; a twin of the native import for this case was not made.
+  `deleted` as `<uuid>,1`. Ours does not, and neither the platform's apply (section 3) nor the drop-in S1 apply
+  (`attrdel`, section 3.2) needs them: the S1 plan takes the removed attributes from the descriptors and checks only
+  that the row names nothing else.
+- **A form that binds a removed attribute** is refused (section 3.2); the message names the native writer's refusal
+  (the binding) and the failed patch of the target's layout that follows it.
 - **State the XML does not carry** stays only for rows the stage does not rebuild: a compiled descriptor takes the
   compiler's values for it, except the always-used flag of a constant, which is copied. On ERP УХ 9 of the 56 758
   descriptors differ from what the XML gives (six of them are those flags); an object of that kind that the tree

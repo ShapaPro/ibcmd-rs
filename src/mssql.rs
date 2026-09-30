@@ -6126,7 +6126,24 @@ fn prepare_form_body_row(
         source,
         Some(&form_item_assets_root),
     )
-    .with_context(|| format!("failed to pack Form body {}", form_path.display()))?;
+    .with_context(|| {
+        // The patch of the target's layout is the last resort after the native
+        // writer; its own refusal (a binding to a removed attribute, ...) is
+        // the reason worth naming.
+        let refusal = match pack_native_form_body_blob(
+            &form_xml,
+            module_text.as_deref(),
+            source,
+            Some(native_items_root.as_path()),
+        ) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => "it accepts the form on a second run".to_string(),
+        };
+        format!(
+            "failed to pack Form body {}: the native form writer refuses the form ({refusal}) and the target's layout cannot be patched",
+            form_path.display()
+        )
+    })?;
     Ok(vec![PreparedMetadataBodyStage {
         body_id,
         path: if source_listing::exists(&form_path) {
