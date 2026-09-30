@@ -177,6 +177,45 @@ pub trait StructuralGate {
     }
 }
 
+/// Two gates in a row: what the first passes goes through as it is; what it refuses is handed to the
+/// second, which may refuse it again (with its own words) or let it through with a structure phase. The
+/// second gate is asked only when the first refuses, so a gate that can do more (the S1 gate) never
+/// makes a stage that the first passes harder to pass: the conservative rule under the S1 gate refuses
+/// every descriptor whose text differs, harmless or not, and the restructure check does not.
+pub struct FirstThen<'a> {
+    first: Box<dyn StructuralGate + 'a>,
+    then: Box<dyn StructuralGate + 'a>,
+}
+
+impl<'a> FirstThen<'a> {
+    pub fn new(first: Box<dyn StructuralGate + 'a>, then: Box<dyn StructuralGate + 'a>) -> Self {
+        Self { first, then }
+    }
+}
+
+impl StructuralGate for FirstThen<'_> {
+    /// The gate that answers for a restructuring.
+    fn name(&self) -> &'static str {
+        self.then.name()
+    }
+
+    fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict> {
+        let first = self.first.check(input)?;
+        if !first.restructuring_required {
+            return Ok(first);
+        }
+        self.then.check(input)
+    }
+
+    fn take_structure(&self) -> Option<StructurePhase> {
+        self.then.take_structure()
+    }
+
+    fn judges_deleted_row(&self) -> bool {
+        self.then.judges_deleted_row()
+    }
+}
+
 /// The rule above.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConservativeGate {

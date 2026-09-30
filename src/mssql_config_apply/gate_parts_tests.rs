@@ -282,3 +282,120 @@ fn a_descriptor_has_one_part() {
             .any(|reason| reason.contains("a part number other than 0"))
     );
 }
+
+/// A gate that answers what it was told, counts its questions and hands over a phase when it has one.
+struct Scripted {
+    name: &'static str,
+    refuses: bool,
+    judges: bool,
+    asked: std::rc::Rc<std::cell::Cell<usize>>,
+    phase: std::cell::RefCell<Option<StructurePhase>>,
+}
+
+impl Scripted {
+    fn new(name: &'static str, refuses: bool) -> Self {
+        Self {
+            name,
+            refuses,
+            judges: false,
+            asked: Default::default(),
+            phase: Default::default(),
+        }
+    }
+}
+
+impl StructuralGate for Scripted {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn check(&self, _input: &GateInput<'_>) -> Result<GateVerdict> {
+        self.asked.set(self.asked.get() + 1);
+        let mut verdict = GateVerdict {
+            gate: self.name.to_owned(),
+            ..GateVerdict::default()
+        };
+        if self.refuses {
+            verdict.block("row", format!("{} refuses", self.name));
+        }
+        Ok(verdict)
+    }
+    fn take_structure(&self) -> Option<StructurePhase> {
+        self.phase.borrow_mut().take()
+    }
+    fn judges_deleted_row(&self) -> bool {
+        self.judges
+    }
+}
+
+fn ask(gate: &dyn StructuralGate) -> GateVerdict {
+    let client = Canned::default();
+    let none = HashSet::new();
+    gate.check(&GateInput {
+        client: &client,
+        database: "testdb",
+        staged: &[],
+        active: &HashMap::new(),
+        accepted_new_rows: &none,
+        accepted_owner_descriptors: &none,
+        new_object_kinds: &HashMap::new(),
+        consumed_rows: &none,
+    })
+    .unwrap()
+}
+
+#[test]
+fn what_the_first_gate_passes_never_reaches_the_second() {
+    let second = Scripted::new("s1", true);
+    let asked = second.asked.clone();
+    let pair = FirstThen::new(
+        Box::new(Scripted::new("apply-check", false)),
+        Box::new(second),
+    );
+    let verdict = ask(&pair);
+    assert!(!verdict.restructuring_required);
+    assert_eq!(verdict.gate, "apply-check");
+    // the second gate is not asked, and there is no phase to take
+    assert_eq!(asked.get(), 0);
+    assert!(pair.take_structure().is_none());
+    // the pair is named for the gate that answers for a restructuring
+    assert_eq!(pair.name(), "s1");
+}
+
+#[test]
+fn what_the_first_gate_refuses_is_the_seconds_to_pass_with_its_phase() {
+    let mut second = Scripted::new("s1", false);
+    second.judges = true;
+    *second.phase.borrow_mut() = Some(StructurePhase {
+        consumed_staged_rows: 1,
+        tables: vec!["_Reference1".to_owned()],
+        ..StructurePhase::default()
+    });
+    let asked = second.asked.clone();
+    let pair = FirstThen::new(
+        Box::new(Scripted::new("apply-check", true)),
+        Box::new(second),
+    );
+    let verdict = ask(&pair);
+    assert!(!verdict.restructuring_required);
+    assert_eq!(verdict.gate, "s1");
+    assert_eq!(asked.get(), 1);
+    let phase = pair.take_structure().expect("the second gate's phase");
+    assert_eq!(phase.tables, ["_Reference1"]);
+    // taken once
+    assert!(pair.take_structure().is_none());
+    // the pair judges the `deleted` row as the second gate does
+    assert!(pair.judges_deleted_row());
+}
+
+#[test]
+fn what_both_refuse_is_refused_in_the_seconds_words() {
+    let pair = FirstThen::new(
+        Box::new(Scripted::new("apply-check", true)),
+        Box::new(Scripted::new("s1", true)),
+    );
+    let verdict = ask(&pair);
+    assert!(verdict.restructuring_required);
+    assert_eq!(blocker_reasons(&verdict), ["row: s1 refuses"]);
+    assert!(pair.take_structure().is_none());
+    assert!(!pair.judges_deleted_row());
+}

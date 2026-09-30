@@ -177,20 +177,31 @@ pub fn structural_gate<'a>(
 /// S1 gate (`restructure::s1::S1Gate`, #391) starts from the same checks, prepares
 /// the structure phase and hands it over through [`StructuralGate::take_structure`];
 /// it is built here, in the one place that builds gates.
+///
+/// Behind the default gate: the restructure check judges the stage first and what it passes (a
+/// harmless change of a descriptor, a body of any role it knows) goes as it always did. Only what the
+/// check refuses reaches the S1 gate, whose conservative rule alone would refuse every changed
+/// descriptor, so a stage that needs no restructuring is not made harder by asking for S1.
 fn restructure_gate<'a>(
     kind: AllowRestructure,
     sql: &'a SqlExec,
     options: &ConfigApplyOptions,
 ) -> Result<Box<dyn StructuralGate + 'a>> {
     match kind {
-        AllowRestructure::S1 => Ok(Box::new(
-            crate::restructure::s1::S1Gate::new(
+        AllowRestructure::S1 => Ok(Box::new(gate::FirstThen::new(
+            Box::new(ApplyCheckGate::new(
                 sql,
-                options.conservative_gate(),
-                crate::restructure::plan::PlanOptions::default(),
-            )
-            .xml_version(xml_version_of(options.platform_profile)),
-        )),
+                xml_version_of(options.platform_profile),
+            )),
+            Box::new(
+                crate::restructure::s1::S1Gate::new(
+                    sql,
+                    options.conservative_gate(),
+                    crate::restructure::plan::PlanOptions::default(),
+                )
+                .xml_version(xml_version_of(options.platform_profile)),
+            ),
+        ))),
     }
 }
 
