@@ -5,12 +5,15 @@
 //! See `docs/apply/derived-caches.md` for the measurements behind every rule here; the lab kit of the
 //! proofs is `scripts/apply-trace/lab/s1g-caches/`.
 
+pub mod change;
 pub mod facts;
 pub mod help_props;
+pub mod members;
 pub mod names_tables;
 pub mod order;
 pub mod owner_map;
 pub mod plan;
+pub mod registry;
 pub mod root;
 pub mod slots;
 pub mod synonyms;
@@ -21,6 +24,12 @@ pub mod xdto_types;
 #[cfg(test)]
 mod tests_cases;
 #[cfg(test)]
+mod tests_change;
+#[cfg(test)]
 mod tests_corpus;
 #[cfg(test)]
+mod tests_registry;
+#[cfg(test)]
 mod tests_unit;
+#[cfg(test)]
+mod tests_xdto_lines;

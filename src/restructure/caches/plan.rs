@@ -11,15 +11,20 @@ use anyhow::{Context, Result, bail};
 use crate::metadata_model::brace::Brace;
 use crate::restructure::caches::facts::{ObjectFacts, SectionFacts, tabular_class};
 use crate::restructure::caches::help_props::HelpProps;
+use crate::restructure::caches::members::{Members, SectionMember, catalog_attribute_nullable};
 use crate::restructure::caches::names_tables::{NamesTables, NewTable};
 use crate::restructure::caches::owner_map::OwnerMap;
+use crate::restructure::caches::registry;
 use crate::restructure::caches::root::{
     Collection, class_of_kind, collection_of, collections, kind_of_class,
 };
 use crate::restructure::caches::synonyms::Synonyms;
 use crate::restructure::caches::type_index::{Entry, TypeIndex, TypeSlot};
 use crate::restructure::caches::type_sets::TypeSets;
-use crate::restructure::caches::xdto_types::{CatalogShape, DocumentShape, XdtoModel};
+use crate::restructure::caches::xdto_types::{
+    CatalogShape, DocumentShape, Family, RefNames, XdtoModel, attribute_property,
+    section_property_line, section_row_block,
+};
 
 /// The names of the cache rows (`Params` `FileName`).
 pub mod rows {
@@ -30,6 +35,7 @@ pub mod rows {
     pub const TYPE_SETS: &str = "fe8acd6a-22c9-4b5a-aeae-232a1c8324cb.si";
     pub const HELP_PROPS: &str = "c4629235-4823-4320-b8b5-1d08f4c6d612.si";
     pub const XDTO: &str = "ea13a2c9-0c2f-40fa-b855-710387e3271d.si";
+    pub const REGISTRY: &str = crate::restructure::caches::registry::REGISTRY_ROW;
 }
 
 /// One rewritten cache row.
@@ -79,11 +85,9 @@ pub struct NewObject<'a> {
     pub table_number: u64,
     /// Whether the object has a help page (a `Config` row `<uuid>.1`).
     pub has_help: bool,
-    /// The property lines of the object's attributes in the XDTO model (see
-    /// [`crate::restructure::caches::xdto_types::primitive_property`]), and the row types of its
-    /// tabular sections.
-    pub xdto_attribute_lines: &'a [String],
-    pub xdto_section_blocks: &'a [String],
+    /// Whether the object has predefined items (a `Config` row `<uuid>.1c`). Not built: the platform
+    /// adds a service property to the XDTO type of such an object.
+    pub has_predefined: bool,
     /// The inflated cache rows by name.
     pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
     /// The name of an object of the kind by its uuid (the neighbours of the new one in the root).
@@ -98,8 +102,12 @@ fn cached(cache: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> Result<Vec<u8>
     cache(name).with_context(|| format!("Params has no row {name}"))
 }
 
-/// The rows a new catalog or document rewrites: `2203278d`, `a07b62f0`, `42ed49cc` (catalogs),
-/// `facbfffe`, `fe8acd6a`, `c4629235` and the XDTO model `ea13a2c9`.
+/// The rows a new catalog or document rewrites: the object registry `1a621f0f`, `2203278d`, `a07b62f0`,
+/// `42ed49cc` (catalogs), `facbfffe`, `fe8acd6a`, `c4629235` and the XDTO model `ea13a2c9`.
+///
+/// Refused (nothing is built): another kind; an object with predefined items; an object that lists
+/// forms, templates, commands or any collection beyond its attributes and tabular sections (their
+/// records reach rows this module does not build); an attribute of a defined or characteristic type.
 pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
     let kind = input.kind;
     if !["Catalog", "Document"].contains(&kind) {
@@ -107,6 +115,20 @@ pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
     }
     let class = class_of_kind(kind).context("no root class for the kind")?;
     let facts = ObjectFacts::parse(kind, input.descriptor)?;
+    let listed = Members::parse(kind, input.descriptor)?;
+    if input.has_predefined {
+        bail!(
+            "{kind} {} has predefined items: the properties the platform adds to its XDTO type are not built",
+            facts.name
+        );
+    }
+    if !listed.others.is_empty() {
+        bail!(
+            "{kind} {} lists collections beyond its attributes and tabular sections {:?}: the registry records of forms, templates and commands are not built",
+            facts.name,
+            listed.others
+        );
+    }
     let collections = collections(input.root);
     let members = collection_of(&collections, class)?;
     let position = members
@@ -119,6 +141,20 @@ pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
         .map(|index| members.objects[index].as_str());
     let successor = members.objects.get(position + 1).map(String::as_str);
     let mut out = Vec::new();
+
+    // 1a621f0f: the object registry
+    out.push(CacheRow {
+        name: rows::REGISTRY,
+        text: registry::add_object(
+            &cached(input.cache, rows::REGISTRY)?,
+            kind,
+            &facts,
+            &listed,
+            predecessor,
+            successor,
+        )?,
+        exact: true,
+    });
 
     // 2203278d: the type index
     let mut index = TypeIndex::parse(&cached(input.cache, rows::TYPE_INDEX)?)?;
@@ -232,24 +268,54 @@ pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
     let predecessor_name = neighbour(predecessor)?;
     let successor_name = neighbour(successor)?;
     let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
-    if kind == "Catalog" {
-        model.add_catalog(
+    let family = if kind == "Catalog" {
+        Family::Catalog
+    } else {
+        Family::Document
+    };
+    let refs = RefNames::build(&names);
+    let shape = (kind == "Catalog")
+        .then(|| catalog_shape(&facts))
+        .transpose()?;
+    let mut attribute_lines = Vec::new();
+    for attribute in &listed.attributes {
+        let nullable = shape.is_some_and(|shape| {
+            catalog_attribute_nullable(shape.hierarchical, shape.hierarchy_type, attribute.usage)
+        });
+        attribute_lines.push(attribute_property(
+            &attribute.name,
+            &attribute.pattern,
+            nullable,
+            &refs,
+        )?);
+    }
+    let mut section_blocks = Vec::new();
+    for section in &listed.sections {
+        attribute_lines.push(section_property_line(family, &facts.name, &section.name));
+        section_blocks.push(section_row_block(
+            family,
             &facts.name,
-            catalog_shape(&facts)?,
+            &section.name,
+            &section_lines(section, &refs)?,
+        ));
+    }
+    match shape {
+        Some(shape) => model.add_catalog(
+            &facts.name,
+            shape,
             predecessor_name.as_deref(),
             successor_name.as_deref(),
-            input.xdto_attribute_lines,
-            input.xdto_section_blocks,
-        )?;
-    } else {
-        model.add_document(
+            &attribute_lines,
+            &section_blocks,
+        )?,
+        None => model.add_document(
             &facts.name,
             document_shape(&facts)?,
             predecessor_name.as_deref(),
             successor_name.as_deref(),
-            input.xdto_attribute_lines,
-            input.xdto_section_blocks,
-        )?;
+            &attribute_lines,
+            &section_blocks,
+        )?,
     }
     out.push(CacheRow {
         name: rows::XDTO,
@@ -257,6 +323,15 @@ pub fn new_object(input: &NewObject<'_>) -> Result<Vec<CacheRow>> {
         exact: true,
     });
     Ok(out)
+}
+
+/// The property lines of the attributes of a tabular section's row type (never nullable).
+fn section_lines(section: &SectionMember, refs: &RefNames) -> Result<Vec<String>> {
+    section
+        .attributes
+        .iter()
+        .map(|attribute| attribute_property(&attribute.name, &attribute.pattern, false, refs))
+        .collect()
 }
 
 /// The shape of a catalog for the XDTO standard properties.
@@ -337,12 +412,10 @@ pub struct NewSection<'a> {
     /// The object that gets the section, and the section (uuid).
     pub owner: &'a str,
     pub section: &'a str,
-    /// The property lines of the section's attributes in the XDTO model.
-    pub xdto_row_lines: &'a [String],
     pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
-/// The rows a new tabular section rewrites: `2203278d` and the XDTO model.
+/// The rows a new tabular section rewrites: the object registry, `2203278d` and the XDTO model.
 pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
     let kind = input.kind;
     let class =
@@ -361,21 +434,45 @@ pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
     let after = position
         .checked_sub(1)
         .map(|index| owner.sections[index].name.as_str());
+    let listed = Members::parse(kind, &row)?;
+    let member = listed
+        .sections
+        .get(position)
+        .filter(|member| member.uuid == input.section)
+        .context("the attribute lists and the section list of the descriptor disagree")?;
 
     let traversal = section_traversal(&collections, class, input.descriptor)?;
     let mut index = TypeIndex::parse(&cached(input.cache, rows::TYPE_INDEX)?)?;
     index.refill_section(section_class, &traversal, vec![section_entry(section)])?;
-    let mut out = vec![CacheRow {
-        name: rows::TYPE_INDEX,
-        text: index.render(),
-        exact: true,
-    }];
+    let mut out = vec![
+        CacheRow {
+            name: rows::REGISTRY,
+            text: registry::add_section(
+                &cached(input.cache, rows::REGISTRY)?,
+                kind,
+                input.owner,
+                &listed.sections,
+                position,
+            )?,
+            exact: true,
+        },
+        CacheRow {
+            name: rows::TYPE_INDEX,
+            text: index.render(),
+            exact: true,
+        },
+    ];
+    let refs = RefNames::build(&NamesTables::parse(&cached(
+        input.cache,
+        rows::NAMES_TABLES,
+    )?)?);
+    let row_lines = section_lines(member, &refs)?;
 
     let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
     if kind == "Catalog" {
-        model.add_tabular_section(&owner.name, &section.name, after, input.xdto_row_lines)?;
+        model.add_tabular_section(&owner.name, &section.name, after, &row_lines)?;
     } else {
-        model.add_document_section(&owner.name, &section.name, after, input.xdto_row_lines)?;
+        model.add_document_section(&owner.name, &section.name, after, &row_lines)?;
     }
     out.push(CacheRow {
         name: rows::XDTO,
