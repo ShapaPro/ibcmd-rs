@@ -2196,6 +2196,17 @@ pub struct MssqlConfigApplyArgs {
     /// Server service can write) before a restructuring.
     #[arg(long)]
     pub recovery_backup: Option<PathBuf>,
+    /// With --allow-restructure: the most rows of tables a stage may rebuild in the transaction (the sum);
+    /// above it the stage is refused and goes to the native apply. Without the flag:
+    /// IBCMD_RS_RESTRUCTURE_LIMIT_ROWS, `restructure-limit-rows` of ibcmd-rs.toml, the measured default.
+    #[arg(long)]
+    pub restructure_limit_rows: Option<u64>,
+    /// With --allow-restructure: the most bytes the rebuild may write to the log under full recovery (the
+    /// data of the rebuilt tables twice, their other indexes once; the sum; `2GB`, `512MB`, a number of
+    /// bytes). Without the flag: IBCMD_RS_RESTRUCTURE_LIMIT_BYTES, `restructure-limit-bytes` of
+    /// ibcmd-rs.toml, the measured default. A raised limit still needs --i-have-a-backup or --recovery-backup.
+    #[arg(long)]
+    pub restructure_limit_bytes: Option<String>,
     /// The structural gate: the restructure check of `mssql-apply-check`
     /// (default), or the conservative rule.
     #[arg(long, value_enum, default_value_t = MssqlConfigApplyGateArg::ApplyCheck)]

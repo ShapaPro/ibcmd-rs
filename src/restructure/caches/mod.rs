@@ -28,7 +28,7 @@ mod tests_cases;
 #[cfg(test)]
 mod tests_change;
 #[cfg(test)]
-mod tests_corpus;
+pub(crate) mod tests_corpus;
 #[cfg(test)]
 mod tests_registry;
 #[cfg(test)]
