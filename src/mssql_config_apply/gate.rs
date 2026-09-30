@@ -155,6 +155,21 @@ pub struct StructurePhase {
     pub objects: Vec<String>,
     /// One line per cache row the phase rewrites (`Params.<row>: what`).
     pub caches: Vec<String>,
+    /// The catalogs and documents the phase creates. The apply moves their staged rows like any staged row and
+    /// registers them at the exchange-plan nodes (the phase answers for the objects, not for their rows).
+    pub created: Vec<CreatedObject>,
+}
+
+/// A catalog or a document a structure phase creates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreatedObject {
+    /// The uuid of its descriptor row.
+    pub uuid: String,
+    /// `Catalog` or `Document`.
+    pub kind: String,
+    /// The staged rows of the object besides its descriptor (`<uuid>.0`, `<uuid>.1`, ...), in the order
+    /// their files are registered.
+    pub files: Vec<String>,
 }
 
 pub trait StructuralGate {

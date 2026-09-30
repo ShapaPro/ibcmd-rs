@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::apply_check::s1::{S1Operation, classify};
 use crate::apply_check::{RuleId, Verdict, check_staged};
 use crate::mssql_config_apply::gate::{
-    ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase,
+    ConservativeGate, CreatedObject, GateInput, GateVerdict, StructuralGate, StructurePhase,
 };
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
 use crate::restructure::extensions::read_adoptions;
@@ -99,6 +99,29 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             .iter()
             .map(|cache| format!("Params.{}: {}", cache.row_name, cache.what))
             .collect(),
+        created: plan
+            .objects
+            .iter()
+            .filter(|object| object.created)
+            .map(|object| {
+                let prefix = format!("{}.", object.object_uuid.to_ascii_lowercase());
+                CreatedObject {
+                    uuid: object.object_uuid.clone(),
+                    kind: match object.kind {
+                        crate::restructure::object::ObjectKind::Catalog => "Catalog",
+                        crate::restructure::object::ObjectKind::Document => "Document",
+                    }
+                    .to_owned(),
+                    files: inputs
+                        .staged
+                        .new_files
+                        .iter()
+                        .filter(|name| name.to_ascii_lowercase().starts_with(&prefix))
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect(),
     })
 }
 
@@ -142,6 +165,7 @@ pub fn decide(
                 | S1Operation::DeleteAttribute { .. }
                 | S1Operation::WidenString { .. }
                 | S1Operation::SwitchIndex { .. }
+                | S1Operation::AddObject { .. }
         ) {
             unbuilt = true;
             verdict.block(
@@ -248,9 +272,18 @@ pub fn decide(
     // `deleted` row (the plan checked that it names removed attributes only); another blocker is a
     // change this gate does not cover.
     let has_deleted = inputs.staged.deleted.is_some();
+    // A created object is listed by the configuration's descriptor, which the stage changes for it (the check
+    // paired the two reasons): the plan answers for that row when it creates something.
+    let listing = if plan.objects.iter().any(|object| object.created) {
+        crate::restructure::plan::configuration_uuid(&inputs.root_row).ok()
+    } else {
+        None
+    };
     verdict.blockers.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
-        !planned.contains_key(&row) && !(has_deleted && row == "deleted")
+        !planned.contains_key(&row)
+            && !(has_deleted && row == "deleted")
+            && listing.as_deref() != Some(row.as_str())
     });
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;
     if verdict.restructuring_required {
