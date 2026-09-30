@@ -11,13 +11,34 @@ $script:Lock = 'F:\ibcmd\lab\04\tools\heavy-lock.ps1'
 
 # The platform the native ibcmd of the next calls belongs to: '8.3.27' (the default) or '8.5'. The 8.5 БСП clones keep
 # the administrator as "Администратор (обычное приложение)" with an empty password.
-function Set-NativePlatform([string]$Platform) {
+function Set-NativePlatform([string]$Platform, [switch]$NoUser) {
     if ($Platform -eq '8.5') {
         $script:Ibcmd = 'C:\Program Files\1cv8\8.5.1.1150\bin\ibcmd.exe'
         $script:NativeUser = '"Администратор (обычное приложение)"'   # quoted: it holds spaces and Start-Process does not quote
     } else {
         $script:Ibcmd = 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe'
         $script:NativeUser = 'Администратор'
+    }
+    # The ERP УХ clones have no users: no --user at all.
+    if ($NoUser) { $script:NativeUser = '' }
+}
+
+# The command line without an empty --user=.
+function Drop-EmptyUser([string[]]$Arguments) { @($Arguments | Where-Object { $_ -ne '--user=' }) }
+
+# ERP УХ commands run under the heavy lock (README of the lab): every command of a УХ case holds it for that one command,
+# a native write holds it and then the native lock. Off by default (the БСП cases hold the native lock only).
+$script:UseHeavy = $false
+$script:HeavyHeld = $false
+function Use-HeavyLab([bool]$On = $true) { $script:UseHeavy = $On }
+function Invoke-WithHeavyLock([scriptblock]$Body, [int]$TimeoutMin = 240) {
+    if (-not $script:UseHeavy -or $script:HeavyHeld) { & $Body; return }
+    $out = & pwsh -NoProfile -File $script:Lock acquire import -TimeoutMin $TimeoutMin
+    if ($LASTEXITCODE -ne 0) { throw "heavy lock: $out" }
+    $script:HeavyHeld = $true
+    try { & $Body } finally {
+        $script:HeavyHeld = $false
+        & pwsh -NoProfile -File $script:Lock release import | Out-Null
     }
 }
 
@@ -31,12 +52,14 @@ $script:NativeLockHeld = $false
 # that follows it on the same clone wraps both in one call and holds the lock once.
 function Invoke-WithNativeLock([scriptblock]$Body, [int]$TimeoutMin = 180) {
     if ($script:NativeLockHeld) { & $Body; return }
-    $out = & pwsh -NoProfile -File $script:Lock acquire import -Name native -TimeoutMin $TimeoutMin
-    if ($LASTEXITCODE -ne 0) { throw "native lock: $out" }
-    $script:NativeLockHeld = $true
-    try { & $Body } finally {
-        $script:NativeLockHeld = $false
-        & pwsh -NoProfile -File $script:Lock release import -Name native | Out-Null
+    Invoke-WithHeavyLock {
+        $out = & pwsh -NoProfile -File $script:Lock acquire import -Name native -TimeoutMin $TimeoutMin
+        if ($LASTEXITCODE -ne 0) { throw "native lock: $out" }
+        $script:NativeLockHeld = $true
+        try { & $Body } finally {
+            $script:NativeLockHeld = $false
+            & pwsh -NoProfile -File $script:Lock release import -Name native | Out-Null
+        }
     }
 }
 
@@ -55,7 +78,7 @@ function Invoke-NativeImport([string]$Db, [string]$Tree, [string]$Tag = 'x', [in
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $args = @('infobase', 'config', 'import', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
                   "--data=$data", "--user=$($script:NativeUser)", $Tree)
-        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
+        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList (Drop-EmptyUser $args) -NoNewWindow -PassThru `
             -RedirectStandardOutput "$($script:Lab)\logs\native-import-$Tag.out.txt" `
             -RedirectStandardError "$($script:Lab)\logs\native-import-$Tag.err.txt" `
             -RedirectStandardInput "$($script:Lab)\logs\empty.txt"
@@ -78,7 +101,7 @@ function Invoke-NativeImportFiles([string]$Db, [string]$BaseDir, [string[]]$File
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $args = @('infobase', 'config', 'import', 'files', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
                   "--data=$data", "--user=$($script:NativeUser)", "--base-dir=$BaseDir", '--partial') + $Files
-        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
+        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList (Drop-EmptyUser $args) -NoNewWindow -PassThru `
             -RedirectStandardOutput "$($script:Lab)\logs\native-importfiles-$Tag.out.txt" `
             -RedirectStandardError "$($script:Lab)\logs\native-importfiles-$Tag.err.txt" `
             -RedirectStandardInput "$($script:Lab)\logs\empty.txt"
@@ -101,7 +124,7 @@ function Invoke-NativeApply([string]$Db, [string]$Dynamic = 'disable', [string]$
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $args = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
                   "--data=$data", "--user=$($script:NativeUser)", '--force', "--dynamic=$Dynamic")
-        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
+        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList (Drop-EmptyUser $args) -NoNewWindow -PassThru `
             -RedirectStandardOutput "$($script:Lab)\logs\native-apply-$Tag.out.txt" `
             -RedirectStandardError "$($script:Lab)\logs\native-apply-$Tag.err.txt" `
             -RedirectStandardInput "$($script:Lab)\logs\empty.txt"
@@ -121,7 +144,7 @@ function Invoke-NativeExport([string]$Db, [string]$OutDir, [string]$Tag = 'x', [
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $args = @('infobase', 'config', 'export', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
               "--data=$data", "--user=$($script:NativeUser)", $OutDir)
-    $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
+    $p = Start-Process -FilePath $script:Ibcmd -ArgumentList (Drop-EmptyUser $args) -NoNewWindow -PassThru `
         -RedirectStandardOutput "$($script:Lab)\logs\native-export-$Tag.out.txt" `
         -RedirectStandardError "$($script:Lab)\logs\native-export-$Tag.err.txt" `
         -RedirectStandardInput "$($script:Lab)\logs\empty.txt"
