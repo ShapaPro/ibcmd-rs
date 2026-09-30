@@ -93,10 +93,10 @@ pub fn files_by_object(
 ) -> BTreeMap<String, Vec<String>> {
     let mut files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for name in staged.iter().chain(dropped.iter()) {
-        if is_body_file(name) {
-            if let Some(object) = object_of(name) {
-                files.entry(object).or_default().insert(name.clone());
-            }
+        if is_body_file(name)
+            && let Some(object) = object_of(name)
+        {
+            files.entry(object).or_default().insert(name.clone());
         }
     }
     for (object, file) in listed {
@@ -190,15 +190,14 @@ pub fn plan(
     };
     // The bodies a `deleted` list names are appended to the lists that exist.
     for name in dropped {
-        if is_body_file(name) {
-            if let Some(object) = object_of(name) {
-                if known.contains(&object) {
-                    plan.dropped_files.push(AppendedFile {
-                        object_hex: object,
-                        file_name: name.clone(),
-                    });
-                }
-            }
+        if is_body_file(name)
+            && let Some(object) = object_of(name)
+            && known.contains(&object)
+        {
+            plan.dropped_files.push(AppendedFile {
+                object_hex: object,
+                file_name: name.clone(),
+            });
         }
     }
     if changed.is_empty() {

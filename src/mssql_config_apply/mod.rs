@@ -1145,7 +1145,7 @@ pub fn plan_with_gate(
             ),
         )? as usize
     };
-    report.registrations = has_change_registrations.then(|| RegistrationSummary {
+    report.registrations = has_change_registrations.then_some(RegistrationSummary {
         nodes: registration.nodes.len(),
         changed_objects: registration.changed_objects,
         rows_added: registration.added_rows,
