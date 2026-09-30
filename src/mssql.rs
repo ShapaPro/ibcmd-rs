@@ -16457,7 +16457,9 @@ mod tests {
             encoder.write_all(bytes).unwrap();
             encoder.finish().unwrap()
         };
-        let cf: Vec<u8> = (0..20_000u32).flat_map(|n| (n % 251).to_le_bytes()).collect();
+        let cf: Vec<u8> = (0..20_000u32)
+            .flat_map(|n| (n % 251).to_le_bytes())
+            .collect();
         // The platform's stream and this program's differ in bytes (levels
         // stand for the two libraries), and hold the same file.
         let stored = deflate(&deflate(&cf, 9), 9);
@@ -16468,10 +16470,18 @@ mod tests {
 
         let mut other = cf.clone();
         other[100] ^= 1;
-        assert!(!super::stored_row_holds_parent_configuration(&stored, &other));
-        assert!(!super::stored_row_holds_parent_configuration(b"not deflate", &cf));
+        assert!(!super::stored_row_holds_parent_configuration(
+            &stored, &other
+        ));
+        assert!(!super::stored_row_holds_parent_configuration(
+            b"not deflate",
+            &cf
+        ));
         // One deflate only is not the shape of the row.
-        assert!(!super::stored_row_holds_parent_configuration(&deflate(&cf, 9), &cf));
+        assert!(!super::stored_row_holds_parent_configuration(
+            &deflate(&cf, 9),
+            &cf
+        ));
     }
 
     #[test]
