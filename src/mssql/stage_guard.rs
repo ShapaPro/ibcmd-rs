@@ -25,10 +25,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
+use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -38,7 +40,8 @@ use crate::plan::{
     SourceDiffLeafDifference, SourceDiffLeafDifferenceKind, diff_indexed_xml_values,
     parse_indexed_xml_values,
 };
-use crate::source::{SourceManifest, is_metadata_collection, scan_sources};
+use crate::source::{SourceManifest, is_metadata_collection};
+use crate::source_listing;
 use crate::sql::SqlExec;
 
 /// Environment switch for scripts: `0`/`off` skips the guard, `1`/`on` runs
@@ -115,12 +118,24 @@ impl fmt::Display for StageRefused {
 
 impl std::error::Error for StageRefused {}
 
+/// What the stage already knows of the tree's files.
+pub(crate) enum TreeFiles<'a> {
+    /// The stage scanned the tree: every file with its sha256, so a file the
+    /// export reproduces to the byte is not read again.
+    Scanned(&'a SourceManifest),
+    /// The stage only listed the tree (a base-free stage reads what its rows
+    /// need): the files are hashed beside the export, which needs the model
+    /// and not the disk for most of its time.
+    Listed(&'a [PathBuf]),
+    /// The stage knows nothing: the guard lists the tree itself.
+    Unlisted,
+}
+
 /// The guard's input beyond the rows.
 pub(crate) struct GuardRequest<'a> {
     pub kind: StageKind,
     pub source_root: &'a Path,
-    /// The tree as the stage scanned it; scanned here when the stage did not.
-    pub manifest: Option<&'a SourceManifest>,
+    pub tree: TreeFiles<'a>,
     /// The path prefixes the stage was asked to import (empty: all).
     pub path_prefix: &'a [String],
     /// The XML version asked for; the tree's own when absent.
@@ -168,7 +183,7 @@ pub(super) fn verify_patch_stage(
         &GuardRequest {
             kind: StageKind::Patch,
             source_root: &args.source_root,
-            manifest: Some(manifest),
+            tree: TreeFiles::Scanned(manifest),
             path_prefix: &args.path_prefix,
             source_version: args.source_version,
         },
@@ -179,18 +194,19 @@ pub(super) fn verify_patch_stage(
 
 /// The guard for a base-free stage: its rows over what the target holds (an
 /// empty infobase's few rows), or over nothing when the stage reaches no
-/// database.
+/// database. `tree_files` is the list of files the stage walked.
 pub(super) fn verify_base_free_stage(
     args: &MssqlStageSourceObjectsArgs,
     sql: Option<&SqlExec>,
     rows: &[super::BulkStageRow<'_>],
+    tree_files: &[PathBuf],
 ) -> Result<StageVerification> {
     let base_dir = std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").map(PathBuf::from);
     verify_staged_state(
         &GuardRequest {
             kind: StageKind::BaseFree,
             source_root: &args.source_root,
-            manifest: None,
+            tree: TreeFiles::Listed(tree_files),
             path_prefix: &args.path_prefix,
             source_version: args.source_version,
         },
@@ -219,15 +235,31 @@ pub(crate) fn verify_staged_state(
     staged: &[StagedRow<'_>],
 ) -> Result<StageVerification> {
     let started = Instant::now();
-    let scanned;
-    let manifest = match request.manifest {
-        Some(manifest) => manifest,
-        None => {
-            scanned = scan_sources(request.source_root)
-                .with_context(|| "не удалось прочитать дерево файлов для проверки".to_string())?;
-            &scanned
-        }
-    };
+    let output_root = std::env::temp_dir().join("ibcmd-rs-verified-state");
+    let comparer = Arc::new(match &request.tree {
+        TreeFiles::Scanned(manifest) => TreeComparer::new(
+            &output_root,
+            request.source_root,
+            manifest
+                .files
+                .iter()
+                .map(|file| (file.path.clone(), Some(file.sha256.clone())))
+                .collect(),
+            request.path_prefix,
+        ),
+        TreeFiles::Listed(paths) => TreeComparer::hashing(
+            &output_root,
+            request.source_root,
+            paths.to_vec(),
+            request.path_prefix,
+        ),
+        TreeFiles::Unlisted => TreeComparer::hashing(
+            &output_root,
+            request.source_root,
+            source_listing::walk(request.source_root).files,
+            request.path_prefix,
+        ),
+    });
     let version = request.source_version.unwrap_or_else(|| {
         crate::metadata_model::export::tree_version(request.source_root)
             .and_then(|text| {
@@ -235,13 +267,6 @@ pub(crate) fn verify_staged_state(
             })
             .unwrap_or(InfobaseConfigSourceVersion::V2_20)
     });
-    let output_root = std::env::temp_dir().join("ibcmd-rs-verified-state");
-    let comparer = Arc::new(TreeComparer::new(
-        &output_root,
-        request.source_root,
-        manifest,
-        request.path_prefix,
-    ));
     let export = export_staged_state(base, staged, version, &output_root, comparer.clone())
         .map_err(|error| {
             anyhow!(
@@ -250,7 +275,7 @@ pub(crate) fn verify_staged_state(
                  ключом --no-verify (тогда расхождения с деревом не обнаруживаются)."
             )
         })?;
-    let outcome = comparer.finish();
+    let outcome = comparer.finish()?;
     let total_seconds = started.elapsed().as_secs_f64();
     if !outcome.differences.is_empty() {
         let message = refusal_text(
@@ -276,7 +301,50 @@ pub(crate) fn verify_staged_state(
 
 /// What the tree holds of one file.
 struct TreeFile {
-    sha256: String,
+    /// Its sha256, when the stage scanned it; else the comparer reads the file.
+    sha256: Option<String>,
+}
+
+/// The configuration files of a walk, in scope, keyed as the comparer keys
+/// them (relative to the root, `/`-separated), each with its sha256 -- read on
+/// the file-bound pool, which is where a tree of 140 thousand files spends
+/// its time. A file that cannot be read has no hash, and is read again (with
+/// the error) when the export produces it.
+fn hash_tree(
+    root: &Path,
+    paths: Vec<PathBuf>,
+    scope: &[String],
+) -> std::result::Result<HashMap<String, TreeFile>, String> {
+    let entries = paths
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .ok()?
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            (is_configuration_file(&relative) && in_scope(scope, &relative))
+                .then_some((relative, path))
+        })
+        .collect::<Vec<_>>();
+    let hashed = crate::parallel::install_io_bound(|| {
+        entries
+            .par_iter()
+            .map(|(relative, path)| {
+                (
+                    relative.clone(),
+                    fs::read(path).ok().map(|bytes| sha256_hex(&bytes)),
+                )
+            })
+            .collect::<Vec<_>>()
+    })
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(hashed
+        .into_iter()
+        .map(|(relative, sha256)| (relative, TreeFile { sha256 }))
+        .collect())
 }
 
 #[derive(Default)]
@@ -294,7 +362,11 @@ struct TreeComparer {
     output_root: PathBuf,
     tree_root: PathBuf,
     scope: Vec<String>,
-    tree: HashMap<String, TreeFile>,
+    /// The tree's files: known at once, or read by a thread that was started
+    /// with the export (`pending`) and is waited for by the first file that
+    /// needs it.
+    tree: OnceLock<std::result::Result<HashMap<String, TreeFile>, String>>,
+    pending: Mutex<Option<JoinHandle<std::result::Result<HashMap<String, TreeFile>, String>>>>,
     outcome: Mutex<Outcome>,
 }
 
@@ -309,7 +381,7 @@ impl TreeComparer {
     fn new(
         output_root: &Path,
         tree_root: &Path,
-        manifest: &SourceManifest,
+        files: Vec<(String, Option<String>)>,
         path_prefix: &[String],
     ) -> Self {
         let scope = path_prefix
@@ -317,26 +389,67 @@ impl TreeComparer {
             .map(|prefix| normalize_prefix(prefix))
             .filter(|prefix| !prefix.is_empty())
             .collect::<Vec<_>>();
-        let tree = manifest
-            .files
-            .iter()
-            .filter(|file| in_scope(&scope, &file.path))
-            .map(|file| {
-                (
-                    file.path.clone(),
-                    TreeFile {
-                        sha256: file.sha256.clone(),
-                    },
-                )
-            })
+        let tree = files
+            .into_iter()
+            .filter(|(path, _)| in_scope(&scope, path))
+            .map(|(path, sha256)| (path, TreeFile { sha256 }))
             .collect();
         Self {
             output_root: output_root.to_path_buf(),
             tree_root: tree_root.to_path_buf(),
             scope,
-            tree,
+            tree: OnceLock::from(Ok(tree)),
+            pending: Mutex::new(None),
             outcome: Mutex::new(Outcome::default()),
         }
+    }
+
+    /// As [`TreeComparer::new`], for the files of a walk: their hashes are
+    /// read on a thread of their own, beside whatever the caller does next.
+    fn hashing(
+        output_root: &Path,
+        tree_root: &Path,
+        paths: Vec<PathBuf>,
+        path_prefix: &[String],
+    ) -> Self {
+        let scope = path_prefix
+            .iter()
+            .map(|prefix| normalize_prefix(prefix))
+            .filter(|prefix| !prefix.is_empty())
+            .collect::<Vec<_>>();
+        let handle = {
+            let root = tree_root.to_path_buf();
+            let scope = scope.clone();
+            std::thread::spawn(move || hash_tree(&root, paths, &scope))
+        };
+        Self {
+            output_root: output_root.to_path_buf(),
+            tree_root: tree_root.to_path_buf(),
+            scope,
+            tree: OnceLock::new(),
+            pending: Mutex::new(Some(handle)),
+            outcome: Mutex::new(Outcome::default()),
+        }
+    }
+
+    /// The tree's files, once they are known.
+    fn tree(&self) -> Result<&HashMap<String, TreeFile>> {
+        self.tree
+            .get_or_init(|| {
+                let handle = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                match handle {
+                    Some(handle) => handle.join().unwrap_or_else(|_| {
+                        Err("the thread that reads the tree panicked".to_string())
+                    }),
+                    None => Err("the tree's files were not read".to_string()),
+                }
+            })
+            .as_ref()
+            .map_err(|error| anyhow!("не удалось прочитать дерево файлов для проверки: {error}"))
     }
 
     /// The path of a produced file relative to the output root, `/`-separated.
@@ -354,13 +467,13 @@ impl TreeComparer {
     /// The differences, sorted by path, once the export is over: what the
     /// export produced and compared, and what the tree holds that it did not
     /// produce.
-    fn finish(&self) -> Compared {
+    fn finish(&self) -> Result<Compared> {
+        let tree = self.tree()?;
         let mut outcome = self
             .outcome
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut only_in_tree = self
-            .tree
+        let mut only_in_tree = tree
             .keys()
             .filter(|path| !outcome.seen.contains(*path) && is_configuration_file(path))
             .cloned()
@@ -374,11 +487,11 @@ impl TreeComparer {
         }
         let mut differences = std::mem::take(&mut outcome.differences);
         differences.sort_by(|left, right| left.path.cmp(&right.path));
-        Compared {
+        Ok(Compared {
             compared: outcome.compared,
             identical: outcome.identical,
             differences,
-        }
+        })
     }
 }
 
@@ -390,10 +503,11 @@ impl FileSink for TreeComparer {
         if is_generation_file(&relative) || !in_scope(&self.scope, &relative) {
             return Ok(());
         }
-        let hash = sha256_hex(bytes);
-        let difference = match self.tree.get(&relative) {
+        let difference = match self.tree()?.get(&relative) {
             None => Some(Difference::OnlyInState),
-            Some(file) if file.sha256 == hash => None,
+            Some(TreeFile {
+                sha256: Some(known),
+            }) if *known == sha256_hex(bytes) => None,
             Some(_) => {
                 let tree_path = relative
                     .split('/')
@@ -1142,7 +1256,12 @@ mod tests {
             .iter()
             .map(|prefix| prefix.to_string())
             .collect::<Vec<_>>();
-        let comparer = TreeComparer::new(&root.join("virtual"), &root, &manifest, &scope);
+        let listed = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), Some(file.sha256.clone())))
+            .collect();
+        let comparer = TreeComparer::new(&root.join("virtual"), &root, listed, &scope);
         (comparer, root)
     }
 
@@ -1171,7 +1290,7 @@ mod tests {
         produce(&comparer, "Catalogs/B.xml", b"<b/>");
         produce(&comparer, "Catalogs/New.xml", b"<new/>");
         produce(&comparer, "ConfigDumpInfo.xml", b"<ids new/>");
-        let result = comparer.finish();
+        let result = comparer.finish().unwrap();
         assert_eq!(result.compared, 4);
         assert_eq!(result.identical, 2);
         let listed = result
@@ -1198,6 +1317,59 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_a_known_hash_is_read_and_compared() {
+        let (_, root) = comparer(
+            &[
+                ("Catalogs/A.xml", b"<a><x>1</x></a>"),
+                ("Catalogs/B.xml", b"<b/>"),
+            ],
+            &[],
+        );
+        // The stage only listed the tree: no hashes.
+        let listed = ["Catalogs/A.xml", "Catalogs/B.xml"]
+            .iter()
+            .map(|relative| (relative.to_string(), None))
+            .collect();
+        let comparer = TreeComparer::new(&root.join("virtual"), &root, listed, &[]);
+        produce(&comparer, "Catalogs/A.xml", b"<a><x>2</x></a>");
+        produce(&comparer, "Catalogs/B.xml", b"<b/>");
+        let result = comparer.finish().unwrap();
+        assert_eq!(result.compared, 2);
+        assert_eq!(result.identical, 1);
+        assert_eq!(result.differences.len(), 1);
+        assert_eq!(result.differences[0].path, "Catalogs/A.xml");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_walked_tree_is_hashed_beside_the_export_and_compared() {
+        let (_, root) = comparer(
+            &[
+                ("Configuration.xml", b"<a/>"),
+                ("Catalogs/A.xml", b"<a><x>1</x></a>"),
+                ("Catalogs/Gone.xml", b"<gone/>"),
+                ("README.md", b"not part of the configuration"),
+            ],
+            &[],
+        );
+        let walked = source_listing::walk(&root);
+        let comparer = TreeComparer::hashing(&root.join("virtual"), &root, walked.files, &[]);
+        produce(&comparer, "Configuration.xml", b"<a/>");
+        produce(&comparer, "Catalogs/A.xml", b"<a><x>2</x></a>");
+        let result = comparer.finish().unwrap();
+        assert_eq!(result.compared, 2);
+        assert_eq!(result.identical, 1);
+        let listed = result
+            .differences
+            .iter()
+            .map(|difference| difference.path.as_str())
+            .collect::<Vec<_>>();
+        // The readme is not a file of the configuration, the missing one is.
+        assert_eq!(listed, ["Catalogs/A.xml", "Catalogs/Gone.xml"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_path_prefix_limits_the_comparison() {
         let (comparer, root) = comparer(
             &[
@@ -1211,7 +1383,7 @@ mod tests {
         produce(&comparer, "Catalogs/A/Ext/ObjectModule.bsl", b"new");
         // Outside the prefix: neither compared nor missed.
         produce(&comparer, "Documents/D.xml", b"<other/>");
-        let result = comparer.finish();
+        let result = comparer.finish().unwrap();
         assert_eq!(result.compared, 2);
         assert_eq!(result.differences.len(), 1);
         assert_eq!(
@@ -1378,7 +1550,7 @@ mod tests {
         GuardRequest {
             kind,
             source_root: tree,
-            manifest: None,
+            tree: TreeFiles::Unlisted,
             path_prefix: &[],
             source_version: Some(InfobaseConfigSourceVersion::V2_20),
         }

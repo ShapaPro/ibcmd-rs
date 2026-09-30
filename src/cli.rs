@@ -678,11 +678,11 @@ pub enum InfobaseImportStageMode {
 /// against the tree before it writes anything (`--verify`, `--no-verify`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InfobaseImportVerify {
-    /// Check a patch stage, which starts from the target's own rows and can
-    /// leave a change of the tree out; trust a stage compiled from the tree.
+    /// Check every stage: a patch stage can leave a change of the tree out,
+    /// and a stage compiled from the tree can carry a slip of the compiler.
     #[default]
     Auto,
-    /// Check every stage (`--verify`).
+    /// Check every stage (`--verify`, the same as the default).
     On,
     /// Check nothing (`--no-verify`).
     Off,

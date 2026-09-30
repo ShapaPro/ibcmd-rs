@@ -159,14 +159,15 @@ impl EmptyStageContext {
 /// 25-75 s, and a stage used to walk the tree twice (once for the index, once
 /// for the objects); the walk lists every folder on a task of its own, once,
 /// and its list also answers the existence probes of every object's writers.
-fn descriptor_xmls_of(root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
+fn descriptor_xmls_of(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = files
-        .into_iter()
+        .iter()
         .filter(|path| {
             path.strip_prefix(root)
                 .map(|relative| is_descriptor_xml(&relative.to_string_lossy()))
                 .unwrap_or(false)
         })
+        .cloned()
         .collect::<Vec<_>>();
     paths.sort();
     paths
@@ -589,6 +590,9 @@ pub(crate) struct EmptyStage {
     pub objects: Vec<EmptyStageObject>,
     pub stubs: StubRows,
     pub service: Vec<EmptyStageRow>,
+    /// Every file of the tree, as the stage walked it: what the guard compares
+    /// with the export without walking the tree again.
+    pub tree_files: Vec<PathBuf>,
 }
 
 impl EmptyStage {
@@ -617,7 +621,7 @@ pub(crate) fn prepare_empty_objects(
     selected: &[PathBuf],
 ) -> Result<Vec<EmptyStageObject>> {
     let walked = source_listing::walk(root);
-    let paths = descriptor_xmls_of(root, walked.files);
+    let paths = descriptor_xmls_of(root, &walked.files);
     let files = read_descriptor_xmls(&paths)?;
     let context = EmptyStageContext::new(root, None, &files, walked.listing)?;
     drop(files);
@@ -631,7 +635,7 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
     stage_timing::reset_from_env();
     let setup = stage_timing::start();
     let walked = source_listing::walk(root);
-    let paths = descriptor_xmls_of(root, walked.files);
+    let paths = descriptor_xmls_of(root, &walked.files);
     stage_timing::record(setup, "setup: tree walk", "", "");
     let setup = stage_timing::start();
     let files = read_descriptor_xmls(&paths)?;
@@ -670,6 +674,7 @@ pub(crate) fn prepare_empty_stage(root: &Path, version: Option<&str>) -> Result<
         objects,
         stubs,
         service,
+        tree_files: walked.files,
     })
 }
 
@@ -1087,7 +1092,7 @@ pub fn audit_empty_stage(
     stage_timing::record(setup, "setup: stored row list", "", "");
     let setup = stage_timing::start();
     let walked = source_listing::walk(root);
-    let paths = descriptor_xmls_of(root, walked.files);
+    let paths = descriptor_xmls_of(root, &walked.files);
     stage_timing::record(setup, "setup: tree walk", "", "");
     let setup = stage_timing::start();
     let files = read_descriptor_xmls(&paths)?;
@@ -1700,7 +1705,7 @@ pub(super) fn stage_source_objects_base_free(
     // compared with the tree, before anything is written.
     let verification = if super::stage_guard::wanted(args.verify) {
         Some(super::timed_stage_step("verify the staged state", || {
-            super::stage_guard::verify_base_free_stage(args, sql.as_ref(), &bulk)
+            super::stage_guard::verify_base_free_stage(args, sql.as_ref(), &bulk, &stage.tree_files)
         })?)
     } else {
         None
@@ -2075,7 +2080,7 @@ mod tests {
             fs::write(&path, b"x").unwrap();
         }
         let serial = crate::metadata_model::audit::descriptor_xmls(&root);
-        let parallel = descriptor_xmls_of(&root, source_listing::walk(&root).files);
+        let parallel = descriptor_xmls_of(&root, &source_listing::walk(&root).files);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(serial.len(), 7, "{serial:?}");
         assert_eq!(parallel, serial);
