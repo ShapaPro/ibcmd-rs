@@ -78,6 +78,10 @@ impl Snap {
             "e3_nat" => ("ibcmd_rs_04_ddl_s2_e3_nat", "nat_after"),
             "e4_before" => ("ibcmd_rs_04_ddl_s2_e4_base", "e4_staged"),
             "e4_nat" => ("ibcmd_rs_04_ddl_s2_e4_nat", "nat_after"),
+            "e5_before" => ("ibcmd_rs_04_ddl_s2_e5_base", "e5_staged"),
+            "e5_nat" => ("ibcmd_rs_04_ddl_s2_e5_nat", "nat_after"),
+            "e6_before" => ("ibcmd_rs_04_ddl_s2_e6_base", "e6_staged"),
+            "e6_nat" => ("ibcmd_rs_04_ddl_s2_e6_nat", "nat_after"),
             other => panic!("unknown snapshot {other}"),
         };
         let root = if name.starts_with("d_") {

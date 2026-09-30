@@ -691,3 +691,51 @@ fn corpus_plan_of_five_new_sections_equals_the_native_result() {
     assert_eq!(plan.objects.len(), 5);
     assert_equals_native(&plan, &after);
 }
+
+/// S1-E, the shapes of e1 on objects no extension adopts (the twin runs through the gate refuse an adopted one): a flat
+/// catalog, a hierarchical one that has a section already, a subordinate one, two documents (one has a section already).
+#[test]
+fn corpus_plan_of_new_sections_on_objects_no_extension_adopts_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e5_base", "e5_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e5_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of case e5");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{}", plan.summary());
+    assert_eq!(plan.objects.len(), 5);
+    assert_eq!(
+        plan.objects
+            .iter()
+            .flat_map(|object| &object.sections)
+            .filter(|section| section.created.is_some())
+            .count(),
+        5
+    );
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-E, the shapes of e3 on such objects: a hierarchical catalog, a subordinate catalog whose section has indexed attributes
+/// already (new indexed ones first and in the middle), a document (one first, one indexed last).
+#[test]
+fn corpus_plan_of_section_attributes_on_objects_no_extension_adopts_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e6_base", "e6_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_e6_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of case e6");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{}", plan.summary());
+    assert_eq!(plan.objects.len(), 3);
+    assert!(
+        plan.objects
+            .iter()
+            .flat_map(|object| &object.sections)
+            .all(|section| section.created.is_none())
+    );
+    assert_equals_native(&plan, &after);
+}

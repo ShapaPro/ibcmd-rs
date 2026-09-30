@@ -8,6 +8,10 @@ usage: python edit_cases_s3.py <out dir> <case>
   e1  new tabular sections: a flat catalog, a hierarchical one, a catalog that has a section, a document, a document that has one
   e3  attributes of existing tabular sections: hierarchical and flat catalogs, a document; first / middle / last place; two at once
   e4  nested numbering: own attributes, new sections and attributes of an existing section in the same objects (a document, a catalog)
+  e5  the shapes of e1 on objects no extension of the БСП clone adopts (S1-I refuses an adopted object): a flat catalog, a hierarchical one,
+      a subordinate one, two documents
+  e6  the shapes of e3 on such objects: a hierarchical catalog, a subordinate one with indexed attributes first / in the middle of a section
+      that has indexed attributes already, a document
 """
 import os
 import re
@@ -216,7 +220,33 @@ def run_e4(tree):
     add_section(tree, cat, "ДемоТЧ", "Демо ТЧ", [("ДемоФлаг", "ДемоФлаг", BOOLEAN, "DontIndex")])
 
 
-CASES = {"e1": run_e1, "e3": run_e3, "e4": run_e4}
+def run_e5(tree):
+    add_section(tree, "Catalogs/_ДемоСтавкиНДС.xml", "ДемоТЧ", "Демо ТЧ",
+                [s("ДемоСтрока", 20), n("ДемоЧисло", 10, 2, "Index"), ("ДемоФлаг", "ДемоФлаг", BOOLEAN, "DontIndex"),
+                 ("ДемоТекст", "ДемоТекст", UNLIMITED, "DontIndex")])
+    add_section(tree, "Catalogs/_ДемоПодразделения.xml", "ДемоТЧ", "Демо ТЧ",
+                [("ДемоДата", "ДемоДата", date("Date"), "DontIndex"), s("ДемоСтрока", 50, "Index")])
+    add_section(tree, "Catalogs/_ДемоКонтактныеЛицаПартнеров.xml", "ДемоТЧ2", "Демо ТЧ 2", [s("ДемоСтрока", 10)])
+    add_section(tree, "Documents/_ДемоСчетФактураПолученный.xml", "ДемоТЧ", "Демо ТЧ",
+                [s("ДемоСтрока", 15), n("ДемоЧисло", 15, 2)])
+    add_section(tree, "Documents/_ДемоОприходованиеТоваров.xml", "ДемоТЧ2", "Демо ТЧ 2",
+                [("ДемоФлаг", "ДемоФлаг", BOOLEAN, "DontIndex")])
+
+
+def run_e6(tree):
+    add_section_attribute(tree, "Catalogs/_ДемоПодразделения.xml", "Сотрудники", section_attribute(*s("ДемоСтрока", 30)))
+    contacts = "Catalogs/_ДемоКонтактныеЛицаПартнеров.xml"
+    # the section has Тип and Вид indexed already: a new indexed attribute first, one in the middle, a plain one last
+    add_section_attribute(tree, contacts, "КонтактнаяИнформация", section_attribute(*n("ДемоЧисло", 12, 3, "Index")), after="")
+    add_section_attribute(tree, contacts, "КонтактнаяИнформация", section_attribute(*s("ДемоСтрока15", 15, "Index")), after="Вид")
+    add_section_attribute(tree, contacts, "КонтактнаяИнформация", section_attribute("ДемоФлаг", "ДемоФлаг", BOOLEAN))
+    add_section_attribute(tree, "Documents/_ДемоОприходованиеТоваров.xml", "Товары",
+                          section_attribute(*n("ДемоЧисло", 15, 3)), after="")
+    add_section_attribute(tree, "Documents/_ДемоОприходованиеТоваров.xml", "Товары",
+                          section_attribute(*s("ДемоСтрока", 10, "Index")))
+
+
+CASES = {"e1": run_e1, "e3": run_e3, "e4": run_e4, "e5": run_e5, "e6": run_e6}
 
 if __name__ == "__main__":
     out, case = sys.argv[1], sys.argv[2]

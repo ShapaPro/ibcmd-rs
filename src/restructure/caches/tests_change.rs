@@ -392,6 +392,22 @@ fn case_e4_own_attributes_section_attributes_and_new_sections_together_every_row
     report("e4", &outcome);
 }
 
+#[test]
+fn case_e5_new_tabular_sections_on_objects_no_extension_adopts_every_row_is_native() {
+    let before = lab_snap!("e5_before");
+    let after = lab_snap!("e5_nat");
+    let outcome = compare_case("e5", &before, &after);
+    report("e5", &outcome);
+}
+
+#[test]
+fn case_e6_section_attributes_on_objects_no_extension_adopts_every_row_is_native() {
+    let before = lab_snap!("e6_before");
+    let after = lab_snap!("e6_nat");
+    let outcome = compare_case("e6", &before, &after);
+    report("e6", &outcome);
+}
+
 /// Not a check: with `IBCMD_RS_CACHES_DUMP=<dir>` (and `IBCMD_RS_CACHES_CASE=c|d|h|t1`, default `c`) it
 /// writes the rows our code makes for a case, inflated (`<row>.txt`) and as stored (`<row>.deflated`),
 /// for the platform proofs of `derived-caches.md` (rows swapped into a twin of the native state).
