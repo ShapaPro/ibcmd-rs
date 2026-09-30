@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 
 use crate::metadata_model::brace::{Brace, parse_row};
 use crate::restructure::catalog::{AttributeFacts, type_entries};
+use crate::restructure::extensions::{ChangedObject, ExtensionInputs};
 use crate::restructure::names::{DbNames, deflate, inflate, next_number, version_row};
 use crate::restructure::object::{ObjectFacts, ObjectKind};
 use crate::restructure::registry::{self, ObjectAdditions};
@@ -76,6 +77,9 @@ pub struct Inputs {
     /// objects in the order the platform walks them.
     pub root_row: Vec<u8>,
     pub staged: StagedImage,
+    /// The extensions of the infobase and the objects they adopt (S1-I). The default is an infobase
+    /// without extensions; a reader that fills it must fill `adoptions` too, or the plan refuses.
+    pub extensions: ExtensionInputs,
 }
 
 /// Choices that keep a plan reproducible.
@@ -985,6 +989,22 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
             number,
         });
     }
+    // An object an extension adopts is the platform's to change (S1-I).
+    let tables: Vec<String> = prepared
+        .iter()
+        .map(|item| format!("{}{}", item.new.kind().table_kind(), item.number))
+        .collect();
+    let changed: Vec<ChangedObject<'_>> = prepared
+        .iter()
+        .zip(&tables)
+        .map(|(item, table)| ChangedObject {
+            kind: item.new.kind().label(),
+            name: item.new.name(),
+            uuid: item.new.uuid(),
+            table,
+        })
+        .collect();
+    crate::restructure::extensions::check(&inputs.extensions, &changed)?;
     // The platform walks the kinds in the configuration's order and the objects of a kind in the order
     // the configuration's descriptor lists them (traced: the types case; not by table number, not by name).
     if prepared.len() > 1 {

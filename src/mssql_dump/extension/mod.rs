@@ -843,6 +843,96 @@ fn normalize_row(packed: &[u8]) -> Result<Option<NormalizedRow>> {
     }))
 }
 
+/// One object an extension adopts, as its descriptor row says.
+///
+/// The platform pairs an adopted object with the object it extends by identity
+/// (the kind and the name), and only in the other cases names the base object
+/// in the header: 67 of the 84 adopted headers of the БСП extension
+/// `_ДемоРасширение` carry the nil uuid there, and the object has a uuid of its
+/// own (`Catalog._ДемоПартнеры` is `3014d9c1-...` in the extension and
+/// `5eab8a1b-...` in the configuration).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct AdoptedObject {
+    /// The descriptor row that holds the object (a bare uuid).
+    pub row: String,
+    /// The object's own uuid in the extension.
+    pub uuid: String,
+    /// The object's name.
+    pub name: String,
+    /// The uuid of the object it extends, when the header names it.
+    pub extends: Option<String>,
+}
+
+/// The objects an extension image adopts: for every descriptor row named by the
+/// uuid of its own first header, that header, when it is an adopted one.
+/// Children (attributes, sections) sit in the same rows and are not listed.
+pub fn adopted_objects(image: &StorageImage) -> Result<Vec<AdoptedObject>> {
+    let plan = StorageExportPlan::from_image(image);
+    let mut objects = Vec::new();
+    for record in plan.records() {
+        if record.logical_name().contains('.') {
+            continue;
+        }
+        let payload = record.packed_payload().with_context(|| {
+            format!(
+                "failed to materialize storage record `{}`",
+                record.logical_key()
+            )
+        })?;
+        let Ok(plain) = inflate_raw_deflate(&payload) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(plain) else {
+            continue;
+        };
+        let body = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let normalized = normalize_descriptor(body)
+            .with_context(|| format!("descriptor row {}", record.logical_name()))?;
+        let Some(first) = normalized.adopted.first() else {
+            continue;
+        };
+        if !first.uuid.eq_ignore_ascii_case(record.logical_name()) {
+            continue;
+        }
+        // A header no reader of ours can name is listed without a name: it is
+        // still found by its uuids.
+        let name = header_name(body, &first.uuid).unwrap_or_default();
+        objects.push(AdoptedObject {
+            row: record.logical_name().to_owned(),
+            uuid: first.uuid.clone(),
+            name,
+            extends: first.extended_object.clone(),
+        });
+    }
+    Ok(objects)
+}
+
+/// The quoted name that follows the identity `{1,0,<uuid>}` of a header.
+fn header_name(text: &str, uuid: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let uuid = uuid.to_ascii_lowercase();
+    let at = ["{1,0,", "{0,0,"].iter().find_map(|opening| {
+        let identity = format!("{opening}{uuid}}}");
+        lower.find(&identity).map(|at| at + identity.len())
+    })?;
+    let rest = text[at..].trim_start_matches(|c| c == ',' || WHITESPACE.contains(&c));
+    let rest = rest.strip_prefix('"')?;
+    let mut name = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                name.push('"');
+                continue;
+            }
+            return Some(name);
+        }
+        name.push(c);
+    }
+    None
+}
+
 /// The first packed platform version whose forms declare the
 /// data-composition-schema namespace at the root (`dcssch`). Evidence brackets
 /// it: an extension in the 8.3.14 compatibility mode writes none, the modes
@@ -1176,6 +1266,59 @@ mod tests {
         }
     }
 
+    /// The objects an extension adopts are read off the descriptor rows without
+    /// an export: the upstream case `adopted/catalog_modules` adopts one
+    /// catalog, mapped to the configuration's by uuid; the empty extension
+    /// adopts nothing.
+    #[test]
+    fn the_objects_an_extension_adopts_are_listed_off_its_rows() {
+        let root = std::env::var_os("IBCMD_UPSTREAM_FIXTURES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external")
+            });
+        let dir = root.join("adopted/catalog_modules");
+        if !dir.is_dir() {
+            eprintln!(
+                "upstream extension fixtures are not present at {}",
+                root.display()
+            );
+            return;
+        }
+        let image = upstream_image(&dir).unwrap();
+        let objects = adopted_objects(&image).unwrap();
+        let catalog = objects
+            .iter()
+            .find(|object| object.name == "Справочник")
+            .unwrap_or_else(|| panic!("the catalog is not listed: {objects:?}"));
+        assert_eq!(catalog.uuid, "e0000000-0000-4000-8000-000000000002");
+        assert_eq!(
+            catalog.extends.as_deref(),
+            Some("b0000000-0000-4000-8000-000000000002")
+        );
+        assert_eq!(catalog.row, catalog.uuid);
+    }
+
+    #[test]
+    fn a_header_name_is_read_with_its_quotes() {
+        let text =
+            "{3, {1,0,0B3FA0EF-9968-11F1-8F4F-00E04C680093}, \"Имя \"\"в кавычках\"\"\", {0}";
+        assert_eq!(
+            header_name(text, "0b3fa0ef-9968-11f1-8f4f-00e04c680093").as_deref(),
+            Some("Имя \"в кавычках\"")
+        );
+        assert_eq!(
+            header_name(text, "00000000-0000-0000-0000-000000000000"),
+            None
+        );
+        // the older spelling of a language
+        let older = "{1, {0,0,0b3fa0ef-9968-11f1-8f4f-00e04c680093},\"Русский\",{0}";
+        assert_eq!(
+            header_name(older, "0b3fa0ef-9968-11f1-8f4f-00e04c680093").as_deref(),
+            Some("Русский")
+        );
+    }
+
     /// Platform-made fixtures of upstream PR 387 (`tests/fixtures/external`,
     /// present once that PR is merged, or named by `IBCMD_UPSTREAM_FIXTURES`):
     /// an extension as a `.cfe` container beside the tree the 8.3.27.2214
@@ -1222,17 +1365,12 @@ mod tests {
         "extension_roots/unknown_property",
     ];
 
-    /// The files of the case that our export does not reproduce (an empty list
-    /// when the case matches), or a reason the case could not be run.
-    fn upstream_case_differences(
-        root: &std::path::Path,
-        case: &str,
-    ) -> Result<Vec<String>, String> {
+    /// The storage image of the `.cfe` container of an upstream case.
+    fn upstream_image(dir: &std::path::Path) -> Result<StorageImage, String> {
         use crate::mssql_dump::cas::{CasHash, CasStorageRow, resolve_cas_storage_image};
         use ibcmd_core::artifact::StorageProfileId;
         use ibcmd_core::limits::ResourceLimits;
 
-        let dir = root.join(case);
         let cfe = std::fs::read(dir.join("input.cfe")).map_err(|error| error.to_string())?;
         let archive = ibcmd_cf::archive::decode_packed_archive(
             std::io::Cursor::new(cfe),
@@ -1251,8 +1389,17 @@ mod tests {
             rows.push(CasStorageRow::new(hash, packed));
         }
         let root_hash = root_hash.ok_or("the container has no configinfo")?;
-        let image =
-            resolve_cas_storage_image(root_hash, rows).map_err(|error| error.to_string())?;
+        resolve_cas_storage_image(root_hash, rows).map_err(|error| error.to_string())
+    }
+
+    /// The files of the case that our export does not reproduce (an empty list
+    /// when the case matches), or a reason the case could not be run.
+    fn upstream_case_differences(
+        root: &std::path::Path,
+        case: &str,
+    ) -> Result<Vec<String>, String> {
+        let dir = root.join(case);
+        let image = upstream_image(&dir)?;
 
         // One export at a time: the extension context is process-wide.
         static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());

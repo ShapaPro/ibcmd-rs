@@ -61,6 +61,10 @@ pub struct MssqlRestructureArgs {
     /// Write the new DBSchema text, the new DBNames text and the statements into this folder.
     #[arg(long)]
     pub dump_plan: Option<PathBuf>,
+    /// Write what is known of the extensions (how many, the tables of their schema, the objects they
+    /// adopt) here as JSON, before the plan is made.
+    #[arg(long)]
+    pub extensions_report: Option<PathBuf>,
     /// Run as the structural gate of the own config apply (docs/apply/restructuring.md, section 12): one
     /// SERIALIZABLE transaction rebuilds the tables, publishes the schema and moves the staged rows.
     /// With --dry-run it plans and checks and writes nothing.
@@ -214,14 +218,25 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
         login: SqlLogin::from_user(args.sql_user.as_deref(), password.as_deref()),
         trust_server_certificate: true,
     };
-    let pool = TdsPool::new(target, 1)?;
+    let pool = TdsPool::new(target.clone(), 1)?;
     let mut connection = pool.dedicated()?;
     let connected = database_name(&mut connection)?;
     if !connected.eq_ignore_ascii_case(&args.database) {
         bail!("connected to {connected}, not {}", args.database);
     }
 
-    let (inputs, storage) = read_inputs(&mut connection)?;
+    let (mut inputs, storage) = read_inputs(&mut connection)?;
+    if inputs.extensions.registered > 0 {
+        let sql = crate::sql::SqlExec::sql_server(target)?;
+        inputs.extensions.adoptions =
+            crate::restructure::extensions::read_adoptions(&sql, &args.database)
+                .context("the objects the extensions adopt")?;
+        inputs.extensions.adoptions_read = true;
+    }
+    if let Some(path) = &args.extensions_report {
+        std::fs::write(path, serde_json::to_string_pretty(&inputs.extensions)?)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
     let main = storage
         .iter()
         .find(|row| row.schema_id == 0)

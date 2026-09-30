@@ -34,6 +34,7 @@ use crate::mssql_config_apply::gate::{
     ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase,
 };
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
+use crate::restructure::extensions::read_adoptions;
 use crate::restructure::plan::{Inputs, Plan, PlanOptions, plan};
 use crate::restructure::reader::{ClientSource, read_inputs};
 use crate::sql::SqlExec;
@@ -328,7 +329,27 @@ impl StructuralGate for S1Gate<'_> {
             client: input.client,
             database: input.database,
         };
-        let (inputs, storage) = read_inputs(&mut source)?;
+        let (mut inputs, storage) = read_inputs(&mut source)?;
+        // The objects the extensions adopt (S1-I): the plan refuses to change one. What cannot be read
+        // is a refusal, not an error: the stage is then not one this gate can vouch for.
+        if inputs.extensions.registered > 0 {
+            match read_adoptions(self.sql, input.database) {
+                Ok(adoptions) => {
+                    inputs.extensions.adoptions = adoptions;
+                    inputs.extensions.adoptions_read = true;
+                }
+                Err(error) => {
+                    let mut verdict = verdict;
+                    verdict.block(
+                        "extensions",
+                        format!(
+                            "S1: the objects the extensions adopt could not be read: {error:#}"
+                        ),
+                    );
+                    return Ok(verdict);
+                }
+            }
+        }
         let idle = storage
             .iter()
             .find(|row| row.schema_id == 0)
