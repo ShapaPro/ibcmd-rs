@@ -31,6 +31,7 @@ pub mod registrations;
 pub mod removals;
 pub mod si;
 pub mod sqlgen;
+pub mod synonyms;
 pub mod versions;
 
 use std::collections::HashMap;
@@ -249,6 +250,9 @@ pub struct ApplyTimings {
     pub storage_check_ms: u128,
     pub inventory_ms: u128,
     pub gate_ms: u128,
+    /// The changed synonyms: the descriptors read and compared, the registry rewritten.
+    #[serde(skip_serializing_if = "is_zero_ms")]
+    pub synonyms_ms: u128,
     pub fingerprints_ms: u128,
     pub recovery_ms: u128,
     /// The copy-only backup a structural apply takes before its transaction.
@@ -330,6 +334,14 @@ pub struct RemovalsSummary {
     pub property_entries: usize,
 }
 
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+fn is_zero_ms(millis: &u128) -> bool {
+    *millis == 0
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigApplyReport {
     pub schema_version: u32,
@@ -356,6 +368,9 @@ pub struct ConfigApplyReport {
     pub registrations: Option<RegistrationSummary>,
     pub new_objects: Option<NewObjectsSummary>,
     pub removals: Option<RemovalsSummary>,
+    /// Records of the object registry that took a changed synonym.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub synonym_records: usize,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
     /// (or only in part): the honest gaps.
@@ -750,6 +765,7 @@ pub fn plan_with_gate(
         registrations: None,
         new_objects: None,
         removals: None,
+        synonym_records: 0,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
         warnings: Vec::new(),
@@ -1321,6 +1337,42 @@ pub fn plan_with_gate(
         params_rewrites = rewrites;
         search_info_removal = summary;
     }
+    // A synonym the stage changes goes into the object's record of the registry, on top of the edits above:
+    // the native apply does it for a stage that changes nothing else, and this apply did not.
+    let changed_descriptors: Vec<String> = staged
+        .iter()
+        .filter(|row| {
+            row.part == 0
+                && matches!(
+                    model::classify_name(&row.name),
+                    model::RowName::Descriptor(_)
+                )
+                && !consumed.contains(&row.name.to_ascii_lowercase())
+                && active
+                    .get(&row.key())
+                    .is_some_and(|active_row| active_row.sha256 != row.sha256)
+        })
+        .map(|row| row.name.clone())
+        .collect();
+    let mut synonym_records = 0usize;
+    let synonyms_started = Instant::now();
+    if !changed_descriptors.is_empty() {
+        let synonym_error = |error: anyhow::Error| {
+            anyhow::Error::from(NeedsNativeApply::apply(format!(
+                "the object registry cannot be edited for the changed synonyms: {error:#}; run the native `ibcmd infobase config apply`"
+            )))
+        };
+        let changes = synonyms::read_changes(client, database, &changed_descriptors)
+            .map_err(synonym_error)?;
+        if !changes.is_empty() {
+            let (rewrites, records) =
+                synonyms::plan_search_info(client, database, &changes, params_rewrites)
+                    .map_err(synonym_error)?;
+            params_rewrites = rewrites;
+            synonym_records = records;
+        }
+        timings.synonyms_ms = ms(synonyms_started);
+    }
 
     // The change registrations of the nodes of distributed infobases: the rows a node with no rows gets
     // for the objects this stage changes (docs/apply/own-apply.md, "Exchange plans").
@@ -1475,7 +1527,7 @@ pub fn plan_with_gate(
         );
     }
     report.not_written.extend([
-        "Params .si service-information rows and siVersions, except the main row, the properties row and their versions when a new or removed form or template changes the records, or a restructuring changes a cache (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
+        "Params .si service-information rows and siVersions, except the main row, the properties row and their versions when a new or removed form or template changes the records, a restructuring changes a cache, or a synonym changes (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
         "the extension CAS garbage collection (ConfigCAS, Files CAS_GC_Info, extd_props_cached/gc.mrk)".to_owned(),
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
@@ -1495,6 +1547,7 @@ pub fn plan_with_gate(
         }
         fingerprint
     };
+    report.synonym_records = synonym_records;
     report.removals = (!removals.is_empty()).then(|| RemovalsSummary {
         objects: removals.objects.clone(),
         rows_deleted: removals.rows.len(),
