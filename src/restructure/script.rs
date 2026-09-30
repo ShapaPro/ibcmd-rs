@@ -29,6 +29,8 @@ pub mod code {
     pub const COPY_COUNT: u32 = 57403;
     pub const STRUCTURE: u32 = 57404;
     pub const PUBLISH: u32 = 57405;
+    /// What the extensions keep is not what it was before the restructure (S1-I).
+    pub const EXTENSIONS_CHANGED: u32 = 57406;
 }
 
 fn quote(text: &str) -> String {
@@ -140,6 +142,47 @@ fn assert_structure(sql: &mut String, table: &PhysicalTable, suffix: &str) {
     );
 }
 
+/// T-SQL that assigns to `@ext_<which>` the fingerprint of everything the extensions keep (S1-I,
+/// `restructure::extensions::fingerprint` in T-SQL): the `SchemaStorage` rows but the main one, the
+/// `Params` rows `DBNames*-Ext-*`, count and checksum of `_ExtensionsInfo`, `_ExtensionsRestruct` and
+/// `_ExtensionsRestructNGS` (when they exist), and the row count of every table of the extension schema
+/// (the names that end in `X1`). A restructure of the main configuration leaves it as it was.
+fn extension_state_sql(which: &str) -> String {
+    let mut sql = String::new();
+    writeln!(
+        sql,
+        "SET @ext_{which} = CONCAT(\n\
+         (SELECT CONVERT(nvarchar(max), STRING_AGG(CONVERT(nvarchar(max), CONCAT(SchemaID, N':', Status, N':', \
+         CONVERT(varchar(64), HASHBYTES('SHA2_256', CurrentSchema), 2), N':', \
+         CONVERT(varchar(64), HASHBYTES('SHA2_256', NewGenCreated), 2), N':', \
+         CONVERT(varchar(64), HASHBYTES('SHA2_256', NewGenDropped), 2))), N';') WITHIN GROUP (ORDER BY SchemaID)) \
+         FROM dbo.SchemaStorage WHERE SchemaID <> 0), N'|',\n\
+         (SELECT CONVERT(nvarchar(max), STRING_AGG(CONVERT(nvarchar(max), CONCAT(FileName, N'#', PartNo, N':', \
+         CONVERT(varchar(64), HASHBYTES('SHA2_256', BinaryData), 2))), N';') WITHIN GROUP (ORDER BY FileName, PartNo)) \
+         FROM dbo.Params WHERE FileName LIKE N'DBNames%-Ext-%'), N'|',\n\
+         (SELECT CONVERT(nvarchar(max), STRING_AGG(CONVERT(nvarchar(max), CONCAT(t.name, N'=', s.rows)), N';') \
+         WITHIN GROUP (ORDER BY t.name)) FROM sys.tables t \
+         JOIN (SELECT object_id, SUM(rows) AS rows FROM sys.partitions WHERE index_id IN (0, 1) GROUP BY object_id) s \
+         ON s.object_id = t.object_id WHERE t.name LIKE N'%X1'));"
+    )
+    .unwrap();
+    for table in [
+        "_ExtensionsInfo",
+        "_ExtensionsRestruct",
+        "_ExtensionsRestructNGS",
+    ] {
+        writeln!(
+            sql,
+            "IF OBJECT_ID(N'dbo.{table}', N'U') IS NOT NULL BEGIN EXEC sp_executesql \
+             N'SELECT @r = CONCAT(COUNT_BIG(*), N''/'', ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(*)), 0)) FROM dbo.{table}', \
+             N'@r nvarchar(100) OUTPUT', @r = @ext_part OUTPUT; \
+             SET @ext_{which} = CONCAT(@ext_{which}, N'|{table}=', @ext_part); END"
+        )
+        .unwrap();
+    }
+    sql
+}
+
 impl Plan {
     /// The whole restructure as T-SQL for another transaction: guards, the platform's statements, the
     /// assertions that stand in for the read-back, and the publication of `SchemaStorage`, `DBSchema`
@@ -150,6 +193,13 @@ impl Plan {
             bail!("the alter method is a research switch of the command, not of the apply");
         }
         let mut sql = String::new();
+        writeln!(sql, "-- restructure: what the extensions keep, before").unwrap();
+        writeln!(
+            sql,
+            "DECLARE @ext_before nvarchar(max), @ext_after nvarchar(max), @ext_part nvarchar(100);"
+        )
+        .unwrap();
+        sql.push_str(&extension_state_sql("before"));
         writeln!(sql, "-- restructure: guards").unwrap();
         assert_that(
             &mut sql,
@@ -314,6 +364,14 @@ impl Plan {
             "(SELECT DATALENGTH(SerializedData) FROM dbo.DBSchema) <> DATALENGTH(@ddl_schema)",
             code::PUBLISH,
             "DBSchema and SchemaStorage.CurrentSchema differ",
+        );
+        writeln!(sql, "-- restructure: what the extensions keep, after").unwrap();
+        sql.push_str(&extension_state_sql("after"));
+        assert_that(
+            &mut sql,
+            "@ext_after <> @ext_before",
+            code::EXTENSIONS_CHANGED,
+            "the restructure changed what the extensions keep",
         );
         Ok(sql)
     }

@@ -37,7 +37,7 @@ impl RowSource for ClientSource<'_> {
     }
 }
 
-fn rows(
+pub(crate) fn rows(
     source: &mut dyn RowSource,
     query: &str,
     mut each: impl FnMut(SqlRow) -> Result<()>,
@@ -126,6 +126,8 @@ pub fn read_inputs(connection: &mut dyn RowSource) -> Result<(Inputs, Vec<Schema
     )
     .context("Config root")?;
     inputs.staged = read_staged(connection, &inputs.root_row)?;
+    inputs.extensions = crate::restructure::extensions::read_state(connection, &storage)
+        .context("the extensions")?;
     Ok((inputs, storage))
 }
 
