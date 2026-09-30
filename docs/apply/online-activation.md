@@ -55,12 +55,13 @@ made it are `scripts/apply-trace/lab/online-live/`.
    before any write when a marker or a `_dynupdate_` row exists (`mssql_main_activation.rs`, `online_history_refusal`,
    SQL code `57208`). **Fixed for `exclusive` by #408 step 2 (0.5):** `mssql-activate-staged-main` and `mssql-apply-source-change`
    hand the `exclusive` mode to `mssql_config_apply`, which folds the `_dynupdate_` rows into the ordinary rows as the native apply does (section 6.6).
-   `live`, `worker` and `exclusive` with `--sqlcmd` keep the refusal until the worker lab cluster exists.
+   `live`, `worker` and `exclusive` with `--sqlcmd` keep the refusal (the worker lab cluster now exists, `docs/apply/worker-lab.md`; the fold for `live` and `worker` is still to be done, and their lab runs use a marker-free clone).
 5. **`exclusive` cannot run against an infobase that has users** (F-3; fixed in 0.5, section 6.2): the tool's own RAS
    verification (`rac infobase info --infobase-user=...`, `mssql_platform_profile.rs:211-227`) opens two `1CV83 Server` SQL
    sessions that the gate (`57209`) then refused.
-6. **The `live` preflight does not protect the commit** (F-9): with a broken log chain the promotion is committed and only
-   then `BACKUP LOG` fails (`4214`); the error does not say that the new generation is already in the ordinary rows.
+6. **The `live` preflight did not protect the commit** (F-9) and **`live` interrupted sessions without asking** (F-10): with a broken log chain, a missing or unwritable tail directory the promotion was
+   committed and only then `BACKUP LOG` failed (`4214`, `3201`); sessions with open transactions were rolled back with no word. **Fixed in 0.5 (#409), section 6.7:** the gate of the live mode runs before the
+   stage, before the script's transaction and again before its `COMMIT`; `--interrupt-sessions` is the operator's acceptance.
 7. **Timing (ONLINE, measured):** 10.4 s in the tool (active export 2.0, classification 0.07, staging 1.0, activation
    2.7 s), 11.8 s wall; the activation transaction itself is 190.8 ms; activation alone in a fresh process 2.1 s.
 
@@ -152,7 +153,8 @@ registers of the observer sessions (`_CommonSettings`, `_UsersWorkHistory`) and 
 
 Preflight, before the transaction (rendered lines 3-7 of `live/live-v5.sql`): the database exists (`57230`), recovery model
 FULL or BULK_LOGGED (`57231`), state `ONLINE` (`57232`), the tail-log file does not exist and is not a directory
-(`57233`, through `sys.dm_os_file_exists`, i.e. on the SQL Server host).
+(`57233`, through `sys.dm_os_file_exists`, i.e. on the SQL Server host). Since 0.5 (section 6.7) the same gate also checks the log backup chain (`57235`), the tail directory
+(`57236`), writes and removes a probe backup there, and refuses sessions with open work (`57238`) unless `--interrupt-sessions` was given; it runs before the stage as well.
 
 After the `COMMIT`: `@LiveExpected1cConnections` = number of SQL sessions of program `1CV83 Server` bound to the database
 (line 587); `CHECKPOINT`; then, from `master`: **cycle 1** `ALTER DATABASE SET SINGLE_USER WITH ROLLBACK IMMEDIATE` ->
@@ -288,8 +290,8 @@ Review findings (2026-09-29, "report, do not fix"; severity = effect on a user o
 | F-3 | high | **Fixed in 0.5 (#409), section 6.2.** `exclusive` is refused on every registered infobase that has users: the RAS verification with `--infobase-user` makes the cluster open two `1CV83 Server` SQL sessions (the RAS connection that holds them stayed for the whole observation, 56+ minutes; `rac connection disconnect` with the infobase user just creates another RAS connection, without it is refused) and the gate counts them. | `mssql_platform_profile.rs:211-227`; `mssql_main_activation.rs:427` | `online/baseline-act2.err`, `.sql` |
 | F-5 | high | `live` aborts half-way when the 1C connections do not come back within 4 s (0 of 5 completed here). The promotion and markers are already committed, sessions may be left in a mixed generation or in a modal DB error, and **no command can run the second cycle**: a retry is a no-op (`executed=false`, 2.0 s). The manual second cycle is racy (`924`). The error text does not tell the operator any of this. | `mssql_main_activation.rs:587`, `607-609`; no-op `mssql_apply.rs:246-274`; `mssql.rs:1053-1065` | section 4.3, `live/live-v*.err`, `live/live-v2-retry.json` |
 | F-6 | low | The platform-profile verification (two `rac` calls, RAS authentication, SQL schema probe) runs **twice** in one high-level apply and also for `--dry-run` and before the `--allow-non-lab` check; each `rac infobase info --infobase-user` opens a cluster connection and SQL sessions on the infobase (1.7 s each under load). | `mssql_apply.rs:70-95`; `mssql.rs:910-931` | `online/online-v1.trace-summary.md` (statements of `1CV83 Server` sessions before the staging) |
-| F-9 | medium-high | The `live` preflight checks the recovery model, the state and the tail-file name, not the log chain or the destination directory. With `FULL` but no full backup the transaction commits and `BACKUP LOG` then fails with `4214`; the database is online with the new generation in the ordinary rows and no session switch. The design says a failure before a successful tail backup "leaves the database online and returns the bounded row recovery artifact"; the artifact path is not in the error. | `mssql_main_activation.rs:342-348`, `402-406` | `live/live-v6-nochain.err`, `live/break-log-chain.sql` |
-| F-10 | medium | `live` kills every connection of the database with `ROLLBACK IMMEDIATE`: no session preflight, no warning. In-flight server transactions are rolled back and their clients get an unrecoverable error; a client that touches the database in the window shows a modal error and loses unsaved data on restart. It is the documented design, but the command has no `--force`-style acknowledgement beyond `--allow-non-lab`. | `mssql_main_activation.rs:595-599`, `610-614` | section 4.3 |
+| F-9 | medium-high | The `live` preflight checks the recovery model, the state and the tail-file name, not the log chain or the destination directory. With `FULL` but no full backup the transaction commits and `BACKUP LOG` then fails with `4214`; the database is online with the new generation in the ordinary rows and no session switch. The design says a failure before a successful tail backup "leaves the database online and returns the bounded row recovery artifact"; the artifact path is not in the error. **Fixed in 0.5 (#409), section 6.7:** the log chain, the tail directory and the account's right to write there are checked before the stage, and again at the head of the script. | `mssql_main_activation.rs:342-348`, `402-406`; `mssql_live_gate.rs` | `live/live-v6-nochain.err`, `live/break-log-chain.sql`; `evidence/live-gate/f9f10-red.log`, `f9f10-green.log` |
+| F-10 | medium | `live` kills every connection of the database with `ROLLBACK IMMEDIATE`: no session preflight, no warning. In-flight server transactions are rolled back and their clients get an unrecoverable error; a client that touches the database in the window shows a modal error and loses unsaved data on restart. It is the documented design, but the command has no `--force`-style acknowledgement beyond `--allow-non-lab`. **Fixed in 0.5 (#409), section 6.7:** sessions with an open transaction or a running request are refused (named in the report) unless the operator gives `--interrupt-sessions`; checked again inside the promotion transaction before its `COMMIT`. | `mssql_main_activation.rs:595-599`, `610-614`; `mssql_live_gate.rs` | section 4.3; `evidence/live-gate/f9f10-red.log`, `f9f10-green.log` |
 | F-15 | medium | **Fixed in 0.5 (#409), section 6.5.** With an active generation every read of `Config` is a derived table over the **whole** table (`CASE` over the file name), so a bounded read costs a full scan and a memory grant: 4 762 logical reads and 34.5 s elapsed under load against 3 reads and 1 ms for the plain read (`RESOURCE_SEMAPHORE` wait); the bounded export of one object took 250-300 s instead of 2 s. | `mssql_dump/dynamic_generation.rs:167-190` | `online/overlay-query.sql`, `online/online-v2-dry.meta.txt` |
 | F-8 | low-medium | The recovery artifact does not keep `Creation`/`Modified`/`Attributes` of the overwritten rows (empty strings, `0`) and stores bytes as a JSON array of numbers; it is written non-atomically with a read-then-write check, so a crash leaves a truncated file that a repeat refuses to overwrite. For `online` it lists the ordinary rows that were *not* overwritten and has no script that removes the aliases and markers. | `mssql_dump/mod.rs:1016-1021`; `mssql.rs:1123-1136` | `online/online-v1.recovery-summary.txt` |
 | F-7 | low | Rows the tool writes carry `2026-...` timestamps (the staging copy, the markers via `SYSUTCDATETIME()`), native rows `4026-...` (year offset 2000). Sessions accepted the rows, so it is not shown to matter. | `mssql_main_activation.rs:515-523`; staging | `online/online-v1.diff.md` |
@@ -603,6 +605,62 @@ report (gate, generations folded, registrations, recovery directory); it is abse
 **Measured** (`docs/apply/evidence/online-activation/f4-repro-green.txt`, 2026-09-30): before the step, `f4-repro-red.txt`. After it, on the corpus clone with the native generation (5 alias rows plus the versions row) and our generation: route 2 wall 38 s
 (export, stage and the apply's 11 s; the apply itself: gate 4.8 s, SQL 4.4 s), route 1 12.7 s; each folded 6 alias rows into the ordinary rows (0 of 6 differ), left no marker and no `_dynupdate_` row, and a new session read `telegram=G2MARK probe=F4`.
 
+### 6.7 Fixed in 0.5 (#409): F-9 and F-10, the gate of the live mode
+
+**What was wrong.** `live` commits the promotion and only then interrupts every connection of the database (`SET SINGLE_USER WITH ROLLBACK IMMEDIATE`) and takes the tail-log
+backup. Its preflight (section 3.4) knew the recovery model, the state and the name of the tail file, and nothing else.
+
+- **F-9** With `FULL` recovery but no log backup chain (no full backup since the model was set), a tail directory that does not exist, or one the SQL Server account cannot write to, the promotion
+  was committed and the first `BACKUP LOG` then failed (`4214`, `3201`): the new generation was already in the ordinary rows, the operator had an SQL error.
+- **F-10** Sessions with a transaction open or a request running were rolled back and disconnected with no question asked; their clients got a transport error and lost the work.
+
+**Measured before** (`docs/apply/evidence/live-gate/f9f10-red.log`; the worker lab cluster (`docs/apply/worker-lab.md`), clone `ibcmd_rs_05_apply_wlab1_20260930`, made marker-free
+(`scripts/apply-lab/live/marker_free.ps1`: `live` still refuses a database with online generations, section 6.6), FULL recovery; the old tool):
+
+| Case | What the old tool did |
+|---|---|
+| no log chain (`SIMPLE` -> `FULL`, no full backup) | promotion committed (`versions` changed), then `BACKUP LOG` failed: error 4214 |
+| the tail directory does not exist | promotion committed, then error 3201 (operating system error 3) |
+| the account cannot write (`C:\Windows\System32\config`) | promotion committed, then error 3201 (operating system error 5, access denied) |
+| a session holds an open transaction with one row written | the switch went on; the session got `A transport-level error ...` at its `COMMIT`, its row is gone; no word from the tool |
+
+**The gate.** `mssql_live_gate.rs`. From `master` (never connecting into the database: a connection there could take the single-user slot), in this order, a `THROW` for the first condition
+that does not hold: the database exists (`57230`), FULL or BULK_LOGGED (`57231`), ONLINE (`57232`), the tail file is not there (`57233`) -- these four as before -- then
+
+| Code | Check |
+|---|---|
+| `57235` | a log backup chain exists: `sys.database_recovery_status.last_log_backup_lsn` is not NULL (NULL after a switch through `SIMPLE`, or with no full backup: exactly when `BACKUP LOG` fails with `4214`) |
+| `57236` | the directory of the tail-log path exists on the SQL Server host (`sys.dm_os_file_exists`) |
+| (`3201`) | the account can write there: a `COPY_ONLY` backup of `model` (about 0.5 MB compressed) is written next to the future tail file and removed with `xp_delete_file` by its own extension (`.ibcmdrsprobe`). The SQL error of the backup is left as it is, with the operating system's reason; a hint says that the tail-log backup would fail the same way. Not in a dry run |
+| `57238` | no session of the database has an open transaction (`open_transaction_count > 0`) or a running request (`sys.dm_exec_requests`), unless the operator accepted it with **`--interrupt-sessions`** (live only; refused for the other modes) |
+
+The same gate runs in four places, so that no route skips it: (1) **before the stage** in `mssql-apply-source-change`, from the built-in SQL client (a refusal leaves `ConfigSave` as it was; the probe is skipped in a
+dry run); (2) in `mssql-activate-staged-main` before the script is rendered (the report names the sessions: id, login, host, program, status, open transactions, request); (3) at the head of the
+activation script, before its transaction, which is the last word and the only one on the `--sqlcmd` route; (4) **inside the promotion transaction, just before its `COMMIT`** (`57239`): work that
+started after the gate ran rolls the promotion back instead of being rolled back by the interruption. What is left is the window between the `COMMIT` and the `ALTER DATABASE` (the `CHECKPOINT` between
+them). The report gains `live_gate` (recovery model, chain, tail directory, whether the probe was written, connections, connections of `1CV83 Server`, sessions with open work).
+
+**What the sessions check does not see:** 1C sessions that are inside a server call but have no SQL request at the moment of the sample; the connections that are only idle. The latter are interrupted by design (the 1C
+processes reconnect). `--interrupt-sessions` is the operator's word that the rest may be rolled back.
+
+**Measured after** (`docs/apply/evidence/live-gate/f9f10-green.log`; the same cases, the new tool): 
+
+| Case | What the new tool does |
+|---|---|
+| no log chain | refused in 4.5 s, before the stage: `57235`; `ConfigSave` empty, `versions` unchanged |
+| the tail directory does not exist | refused in 5.5 s: `57236` |
+| the account cannot write | refused in 5.2 s: `3201` with the operating system's error 5 (access denied) and the hint; the probe file is not left behind |
+| a session holds an open transaction | refused in 6.1 s: `57238`, naming session 146 (`ibcmd-lab-writer`, 1 open transaction); the session then commits and its row survives |
+| the same with `--interrupt-sessions` | not refused: the promotion is committed, the session is cut off (`A transport-level error`) and its row is gone, as accepted; the run then ends at the F-5 gate (`57234`) |
+| `mssql-activate-staged-main` (direct route), no chain | refused by the same gate before the script (`57235`); the stage stays where it was put |
+| `--dry-run` | exit 0; the report has `live_gate` (chain, directory, connections, sessions), no probe is written, nothing changes |
+| nothing wrong (`clean`) | the gate passes, the promotion is committed, cycle 1 runs (one tail backup set), and the F-5 gate `57234` ends the run: **the old tool does the same on this idle cluster** (see F-5, next checkpoint) |
+
+**Tests.** `mssql_live_gate` (the order of the checks, the probe and its removal, quoting, the acceptance switching the sessions check off in the gate and in the transaction, the report, the refusal texts with the sessions, the
+probe hint), `mssql_main_activation` (the gate before the transaction, the check before the `COMMIT`, no gate in the other modes, the acceptance is not part of the plan), the CLI (`--interrupt-sessions` for both commands).
+
+**Not fixed here (F-5, next).** On the worker lab cluster the switch ends at the readiness gate (`57234`) even with no user session and no load, in the old tool and in the new one (the `clean` case of both logs; also `sessions` and `accepted`): the gate expects back the `1CV83 Server` connections it counted before cycle 1, that includes the idle ones the working process holds for the infobase (opened by the tool's own RAS verification, F-3), and an idle process does not reconnect without a call. Section 4.3 measured the same abort under load; F-5 gets its own section.
+
 ## 7. Recovery
 
 **ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from
@@ -637,9 +695,9 @@ one generation, measured), or restart the working process (worker: the tool's ow
   `live`/`worker` (and `exclusive` with `--sqlcmd`) are refused before the stage, because their script would discard them.
 - `exclusive` needs an infobase on which the cluster lists no client connection or session; the idle SQL sessions of the tool's
   own RAS verification are left out of its gate (F-3, fixed in 0.5). A session of another program, or a running one, still refuses.
-- `live` needs FULL/BULK_LOGGED recovery, a full backup taken after that, a tail-log path writable by the SQL Server account,
-  and a machine on which the 1C SQL connections return within 4 s (F-5, F-9); it interrupts every database connection
-  (F-10).
+- `live` needs FULL/BULK_LOGGED recovery, a full backup taken after that, a tail-log path writable by the SQL Server account
+  (all three are checked before the stage since 0.5, F-9), and a machine on which the 1C SQL connections return within 4 s (F-5, open); it interrupts every
+  database connection: sessions with open work are refused unless `--interrupt-sessions` is given (F-10).
 - `worker` needs exactly one dedicated `rphost` for the infobase, RAS and `rac` on the same host.
 - The observed BSP client shows a modal message after a lost database connection; nothing here changes that.
 
