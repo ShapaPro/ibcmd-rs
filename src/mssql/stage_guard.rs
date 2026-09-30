@@ -101,12 +101,27 @@ pub struct StageVerification {
 #[derive(Debug)]
 pub struct StageRefused {
     message: String,
+    /// The files of the staged state that differ from the tree, when the guard found them.
+    differences: Vec<FileDifference>,
 }
 
 impl StageRefused {
     /// A refusal with this message: one `[ERROR]` line per line of it.
     pub(super) fn new(message: String) -> Self {
-        Self { message }
+        Self {
+            message,
+            differences: Vec::new(),
+        }
+    }
+
+    fn with_differences(mut self, differences: Vec<FileDifference>) -> Self {
+        self.differences = differences;
+        self
+    }
+
+    /// The files that differ (empty for a refusal that is not the guard's comparison).
+    pub(super) fn differences(&self) -> &[FileDifference] {
+        &self.differences
     }
 }
 
@@ -268,7 +283,9 @@ pub(crate) fn verify_staged_state(
             &outcome.differences,
             outcome.compared,
         );
-        return Err(anyhow::Error::new(StageRefused::new(message)));
+        return Err(anyhow::Error::new(
+            StageRefused::new(message).with_differences(outcome.differences),
+        ));
     }
     Ok(StageVerification {
         checked_files: outcome.compared,

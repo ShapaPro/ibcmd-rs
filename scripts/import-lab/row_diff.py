@@ -47,7 +47,8 @@ def tokens(text):
             index.append(0)
             depth += 1
         elif token == "}":
-            index.pop()
+            if len(index) > 1:
+                index.pop()
             if path:
                 path.pop()
             index[-1] += 1

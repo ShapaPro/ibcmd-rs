@@ -38,7 +38,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use super::override_stage::Plan;
-use super::stage_guard::{Difference, compare_tree_with_target};
+use super::stage_guard::{Difference, FileDifference, compare_tree_with_target};
 use super::{PreparedCommonModuleObjectStage, PreparedMetadataObjectStage};
 use crate::cli::MssqlStageSourceObjectsArgs;
 use crate::module_blob::{hex_sha256, inflate_raw};
@@ -89,6 +89,9 @@ pub(super) struct Delta {
     forced_units: HashSet<String>,
     /// Ids (lower case) of the descriptors the override compiles.
     forced_ids: HashSet<String>,
+    /// Every metadata file the stage prepares, and the ones the guard said to stage whole.
+    units: HashSet<String>,
+    widened_units: HashSet<String>,
     /// Row names (lower case) an online update of the target replaces.
     aliased_rows: HashSet<String>,
     /// Metadata files of the objects with a row in `aliased_rows`.
@@ -264,6 +267,8 @@ pub(super) fn plan(
         dirty_units,
         forced_units,
         forced_ids,
+        units,
+        widened_units: HashSet::new(),
         aliased_rows,
         aliased_units,
     })))
@@ -288,6 +293,38 @@ impl Delta {
         self.dirty_units.contains(&unit)
             || self.forced_units.contains(&unit)
             || self.aliased_units.contains(&unit)
+            || self.widened_units.contains(&unit)
+    }
+
+    /// The metadata file of the object that owns a file of the tree: the file itself, else the
+    /// one named as the deepest folder above it; the configuration owns the files of the root
+    /// `Ext`.
+    fn owner_of(&self, path: &str) -> Option<String> {
+        if self.units.contains(path) {
+            return Some(path.to_string());
+        }
+        let mut folder = path;
+        while let Some(cut) = folder.rfind('/') {
+            folder = &folder[..cut];
+            let candidate = format!("{folder}.xml");
+            if self.units.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+        (path.starts_with("ext/") && self.units.contains("configuration.xml"))
+            .then(|| "configuration.xml".to_string())
+    }
+
+    /// The guard found files of the staged state that differ from the tree: the objects that
+    /// own them are staged whole from the tree from now on. `false` when that adds nothing.
+    pub(super) fn widen(&mut self, differences: &[FileDifference]) -> bool {
+        let before = self.widened_units.len();
+        for difference in differences {
+            if let Some(owner) = self.owner_of(&lower(&difference.path)) {
+                self.widened_units.insert(owner);
+            }
+        }
+        self.widened_units.len() > before
     }
 
     /// Whether a file of the tree under `folder` differs.
@@ -368,6 +405,9 @@ impl Delta {
         built: &HashSet<String>,
         pending: &dyn Fn(&str) -> Pending,
     ) -> bool {
+        if self.widened_units.contains(&relative(root, &object.xml)) {
+            return true;
+        }
         let before = usize::from(!object.metadata_blob.is_empty()) + object.body_rows.len();
         match self.descriptor_fate(root, &object.xml, &object.object_id, built, pending) {
             Fate::Stays => {
@@ -407,6 +447,9 @@ impl Delta {
         built: &HashSet<String>,
         pending: &dyn Fn(&str) -> Pending,
     ) -> bool {
+        if self.widened_units.contains(&relative(root, &module.xml)) {
+            return true;
+        }
         let before = module.row_count();
         match self.descriptor_fate(root, &module.xml, &module.module_id, built, pending) {
             Fate::Stays => {
@@ -440,6 +483,12 @@ impl Delta {
     pub(super) fn count_left_out(&mut self, objects: usize) {
         self.stats.objects_left_out += objects;
     }
+
+    /// Starts the counts of an attempt over.
+    pub(super) fn reset_left_out(&mut self) {
+        self.stats.objects_left_out = 0;
+        self.stats.rows_left_out = 0;
+    }
 }
 
 #[cfg(test)]
@@ -455,10 +504,18 @@ impl Delta {
             dirty_units: HashSet::new(),
             forced_units: forced.iter().map(|p| p.to_string()).collect(),
             forced_ids: HashSet::new(),
+            units: HashSet::new(),
+            widened_units: HashSet::new(),
             aliased_rows: aliased.iter().map(|p| p.to_string()).collect(),
             aliased_units: HashSet::new(),
             stats: DeltaStats::default(),
         }
+    }
+
+    /// The metadata files (lower case, `/`) the stage prepares.
+    pub(super) fn with_units(mut self, units: &[&str]) -> Self {
+        self.units = units.iter().map(|unit| unit.to_string()).collect();
+        self
     }
 }
 
@@ -584,6 +641,49 @@ mod tests {
             delta.body_fate(root, "aaaa.0", &path, &unreadable),
             Fate::Staged
         ));
+    }
+
+    #[test]
+    fn a_file_of_the_tree_belongs_to_the_nearest_object_and_the_guard_widens_it_once() {
+        let mut delta = delta(&[], &[], &[]);
+        delta.units = [
+            "catalogs/x.xml",
+            "catalogs/x/forms/f.xml",
+            "configuration.xml",
+        ]
+        .iter()
+        .map(|unit| unit.to_string())
+        .collect();
+        assert_eq!(
+            delta
+                .owner_of("catalogs/x/forms/f/ext/help/ru.html")
+                .as_deref(),
+            Some("catalogs/x/forms/f.xml")
+        );
+        assert_eq!(
+            delta.owner_of("catalogs/x/ext/help/ru.html").as_deref(),
+            Some("catalogs/x.xml")
+        );
+        assert_eq!(
+            delta.owner_of("catalogs/x.xml").as_deref(),
+            Some("catalogs/x.xml")
+        );
+        assert_eq!(
+            delta.owner_of("ext/homepageworkarea.xml").as_deref(),
+            Some("configuration.xml")
+        );
+        assert_eq!(delta.owner_of("catalogs/y/ext/a.bsl"), None);
+
+        let difference = |path: &str| FileDifference {
+            path: path.to_string(),
+            difference: Difference::OnlyInTree,
+        };
+        // A file nobody owns widens nothing; one that an object owns widens that object, once.
+        assert!(!delta.widen(&[difference("catalogs/y/ext/a.bsl")]));
+        assert!(delta.widen(&[difference("Catalogs/X/Ext/Help/ru.html")]));
+        assert!(!delta.widen(&[difference("Catalogs/X/Ext/Help/ru.html")]));
+        assert!(delta.widened_units.contains("catalogs/x.xml"));
+        assert!(delta.prepares(Path::new("R"), &Path::new("R").join("Catalogs/X.xml")));
     }
 
     #[test]
