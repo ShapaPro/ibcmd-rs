@@ -7257,6 +7257,40 @@ fn form_metadata_owner_declares_direct_member(
     )
 }
 
+/// The upper-cased column names a query selects inside nested tables --
+/// `<alias>.<section>.(<column>, ...)` groups of its selection list.
+fn form_dynamic_list_query_nested_group_columns(query_text: &str) -> BTreeSet<String> {
+    let chars = query_text.chars().collect::<Vec<_>>();
+    let mut names = BTreeSet::new();
+    let mut index = 0;
+    while index + 1 < chars.len() {
+        if chars[index] == '.' && chars[index + 1] == '(' {
+            let mut depth = 1;
+            let mut end = index + 2;
+            while end < chars.len() && depth > 0 {
+                match chars[end] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            let group = chars[index + 2..end.saturating_sub(1).max(index + 2)]
+                .iter()
+                .collect::<String>();
+            for token in group.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                if !token.is_empty() {
+                    names.insert(token.to_uppercase());
+                }
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    names
+}
+
 /// The names a dynamic list can resolve against its data source, or `None` when
 /// the universe cannot be built — in which case no `~` marker is ever written,
 /// which is the pre-existing behavior.
@@ -7295,6 +7329,7 @@ pub(super) fn form_dynamic_list_use_always_universe(
 ) -> Option<BTreeSet<String>> {
     let settings = settings?;
     let mut universe;
+    let mut undeclared_selected = BTreeSet::<String>::new();
     if settings.manual_query {
         let query_text = settings.query_text.as_deref()?;
         if form_dynamic_list_query_names_undeclared_metadata(query_text, declarations)
@@ -7303,6 +7338,21 @@ pub(super) fn form_dynamic_list_use_always_universe(
             universe = BTreeSet::new();
         } else {
             let selection = parse_form_dynamic_list_query_selection(query_text)?;
+            // `Представление` selected at the top level of a query that also
+            // selects a column of that name inside a nested table
+            // (`Адреса.(Ссылка, НомерСтроки, Адрес, Представление)`) names two
+            // fields; the platform resolves it to the nested one and writes the
+            // top-level path `~` (`Catalogs/СпискиАдресовЭлектроннойПочты/Forms/
+            // ФормаСпискаПоУчетнымЗаписям` in dm, DO, z34, DocMngHolding).
+            let nested = form_dynamic_list_query_nested_group_columns(query_text);
+            for result in selection.paths.values() {
+                let upper = result.to_uppercase();
+                if matches!(upper.as_str(), "ПРЕДСТАВЛЕНИЕ" | "PRESENTATION")
+                    && nested.contains(&upper)
+                {
+                    undeclared_selected.insert(result.clone());
+                }
+            }
             if form_dynamic_list_query_source_is_undeclared(&selection, declarations)
                 || form_dynamic_list_query_selects_undeclared_field(&selection, declarations)
             {
@@ -7390,35 +7440,13 @@ pub(super) fn form_dynamic_list_use_always_universe(
             ),
         }
     }
-    // A manual query that selects a standard attribute its main table does not
-    // declare (`СпискиАдресовЭлектроннойПочты.Представление`, a catalog with no
-    // standard presentation) gets no such field: the platform writes the list's
-    // data path onto it marked `~`, in every 1C:Документооборот configuration
-    // that carries the form (dm, DO, z34, DocMngHolding).
-    if settings.manual_query
-        && let Some(main_table) = settings.main_table.as_deref()
-        && let Some(declarations) = declarations
-        && let Some((kind, _)) = main_table.split_once('.')
-        && let Some(pairs) = form_dynamic_list_std_attribute_pairs(kind)
-    {
-        let declared = form_dynamic_list_declared_std_attribute_pairs(pairs, main_table, Some(declarations))
-            .map(|(ru, _)| *ru)
-            .collect::<BTreeSet<_>>();
-        let children = form_dynamic_list_main_table_children(
-            main_table,
-            object_refs,
-            FORM_DYNAMIC_LIST_MAIN_TABLE_CHILD_KINDS,
-            object_ref_index,
-        );
-        for (ru, en) in pairs {
-            if !declared.contains(ru)
-                && !children.contains(*ru)
-                && !children.contains(*en)
-            {
-                universe.remove(*ru);
-                universe.remove(*en);
-            }
-        }
+    // A standard attribute the query selects by a plain path but its main table
+    // does not declare gets no field: the platform writes the list's data path
+    // onto it marked `~` (`СпискиАдресовЭлектроннойПочты.Представление`, a
+    // catalog with no standard presentation -- in every 1C:Документооборот
+    // configuration that carries the form).
+    for name in &undeclared_selected {
+        universe.remove(name);
     }
     if let Some(server_state_xml) = &settings.server_state_xml {
         universe.extend(form_dynamic_list_calculated_field_data_paths(
