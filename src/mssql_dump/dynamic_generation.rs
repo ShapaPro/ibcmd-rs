@@ -294,6 +294,84 @@ pub(super) fn storage_generation_overlay<'a>(
 /// The table of a database an overlay describes: (database, table).
 type StorageKey = (String, String);
 
+/// The most names a bounded read may name for its selection to reach the scan
+/// under the table expression: a longer list is read the way an unbounded read
+/// is.
+const SELECTION_MAX: usize = 64;
+
+/// What a query on the table expression is going to keep, so that the scan under
+/// the aggregate can be limited to the stored rows that can publish it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Selection<'a> {
+    /// Every row: the scan reads the whole table.
+    All,
+    /// Rows with these published names (`FileName IN (...)`).
+    Names(&'a BTreeSet<String>),
+    /// The rows of these owners: the owner's own row and its `<owner>.<n>` rows
+    /// (`FileName = owner OR FileName LIKE 'owner.%'`).
+    Owners(&'a BTreeSet<String>),
+}
+
+/// `LIKE` with the wildcards of `text` escaped (`ESCAPE N'\'`).
+fn like_escaped(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(character, '\\' | '%' | '_' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// The condition on the stored rows (`alias.FileName`) that keeps every row that
+/// can publish a selected name, or `None` when the selection is not limited.
+///
+/// A published name is stored under itself and, in a generation, under
+/// `<stem>_dynupdate_<generation><suffix>` (the storage suffix stays last); the
+/// stem is what precedes the first dot. Each stem is one prefix range of the
+/// clustered key, each name one point of it: the scan seeks, instead of reading
+/// the table to throw most of it away after the aggregate (#409 F-15: 34.5 s
+/// under load against 1 ms for the plain read). The condition is only a
+/// narrowing: the query still filters on the published name.
+fn selection_condition(alias: &str, selection: Selection<'_>) -> Option<String> {
+    let names = match selection {
+        Selection::All => return None,
+        Selection::Names(names) | Selection::Owners(names) => names,
+    };
+    if names.is_empty() || names.len() > SELECTION_MAX {
+        return None;
+    }
+    let mut terms = Vec::new();
+    let mut stems = BTreeSet::new();
+    match selection {
+        Selection::Names(_) => {
+            let list = names.iter().map(|name| quote(name)).collect::<Vec<_>>();
+            terms.push(format!("{alias}.FileName IN ({})", list.join(", ")));
+        }
+        Selection::Owners(_) => {
+            for name in names {
+                terms.push(format!("{alias}.FileName = {}", quote(name)));
+                terms.push(format!(
+                    "{alias}.FileName LIKE {} ESCAPE N'\\'",
+                    quote(&format!("{}.%", like_escaped(name)))
+                ));
+            }
+        }
+        Selection::All => unreachable!("returned above"),
+    }
+    for name in names {
+        stems.insert(name.split('.').next().unwrap_or(name.as_str()));
+    }
+    for stem in stems {
+        terms.push(format!(
+            "{alias}.FileName LIKE {} ESCAPE N'\\'",
+            quote(&format!("{}\\_dynupdate\\_%", like_escaped(stem)))
+        ));
+    }
+    Some(terms.join(" OR "))
+}
+
 /// The overlays are shared, not copied: a query builder asks for the table's
 /// overlay once per statement and an overlay may name a hundred thousand rows.
 ///
@@ -467,6 +545,17 @@ pub(super) fn storage_table_expression(
     qualified_table: &str,
     overlay: Option<&StorageGenerationOverlay>,
 ) -> String {
+    storage_table_expression_for(qualified_table, overlay, Selection::All)
+}
+
+/// [`storage_table_expression`] for a query that keeps only `selection`: the same
+/// rows, and the scan under the aggregate limited to the stored rows that can
+/// publish them.
+pub(super) fn storage_table_expression_for(
+    qualified_table: &str,
+    overlay: Option<&StorageGenerationOverlay>,
+    selection: Selection<'_>,
+) -> String {
     let Some(overlay) = overlay.filter(|overlay| !overlay.is_empty()) else {
         return qualified_table.to_owned();
     };
@@ -494,7 +583,7 @@ pub(super) fn storage_table_expression(
         }
     };
     let own_side = if overlay.aliased {
-        generation_table(qualified_table, overlay, &leaving("w.FileName"))
+        generation_table(qualified_table, overlay, &leaving("w.FileName"), selection)
     } else {
         format!(
             "(SELECT {} FROM {qualified_table} p{})",
@@ -520,7 +609,11 @@ fn generation_table(
     qualified_table: &str,
     overlay: &StorageGenerationOverlay,
     leaving: &str,
+    selection: Selection<'_>,
 ) -> String {
+    let narrowing = selection_condition("c", selection)
+        .map(|condition| format!("\n\x20                         WHERE {condition}"))
+        .unwrap_or_default();
     let infix = quote(DYNAMIC_UPDATE_INFIX);
     let strip = DYNAMIC_UPDATE_INFIX.len() + GENERATION_LEN;
     let after_infix = DYNAMIC_UPDATE_INFIX.len();
@@ -539,7 +632,7 @@ fn generation_table(
          \x20                          FROM {qualified_table} c\n\
          \x20                         CROSS APPLY (SELECT CHARINDEX({infix}, c.FileName {bin}) AS Pos) a\n\
          \x20                          LEFT JOIN ({ranks}) g\n\
-         \x20                            ON a.Pos > 0 AND g.Gen {bin} = SUBSTRING(c.FileName, a.Pos + {after_infix}, {GENERATION_LEN}) {bin}) x\n\
+         \x20                            ON a.Pos > 0 AND g.Gen {bin} = SUBSTRING(c.FileName, a.Pos + {after_infix}, {GENERATION_LEN}) {bin}{narrowing}) x\n\
          \x20                 WHERE x.Rk IS NOT NULL) y\n\
          \x20         GROUP BY y.Pub {bin}) w\n\
          \x20  JOIN {qualified_table} t ON t.FileName = w.Src{leaving})",
@@ -910,6 +1003,94 @@ mod tests {
         );
     }
 
+    fn selecting(names: &[&str], owners: bool) -> String {
+        let overlay = overlay_of(&[G1], &["a".into(), alias("a", G1, "")]);
+        let names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let selection = if owners {
+            Selection::Owners(&names)
+        } else {
+            Selection::Names(&names)
+        };
+        storage_table_expression_for("[db].dbo.[Config]", Some(&overlay), selection)
+    }
+
+    #[test]
+    fn a_selection_narrows_the_scan_under_the_aggregate_to_the_rows_that_can_publish_it() {
+        let text = selecting(
+            &["a627e390-8fad-4a95-afe6-674f54813188.0", "versions"],
+            false,
+        );
+        // The stored names: the published ones, and every alias of their stems.
+        assert!(
+            text.contains(
+                "WHERE c.FileName IN (N'a627e390-8fad-4a95-afe6-674f54813188.0', N'versions') OR c.FileName LIKE N'a627e390-8fad-4a95-afe6-674f54813188\\_dynupdate\\_%' ESCAPE N'\\' OR c.FileName LIKE N'versions\\_dynupdate\\_%' ESCAPE N'\\'"
+            ),
+            "{text}"
+        );
+        // Under the scan (the innermost select), not after the aggregate.
+        let narrowing = text.find("WHERE c.FileName IN").unwrap();
+        assert!(text.find("FROM [db].dbo.[Config] c").unwrap() < narrowing);
+        assert!(narrowing < text.find("GROUP BY").unwrap());
+        assert!(text.ends_with(") AS storage"));
+    }
+
+    #[test]
+    fn an_owner_selection_takes_the_owner_row_its_numbered_rows_and_its_aliases() {
+        let text = selecting(&["ab132638-5188-470d-9432-de85f2b2c7d8"], true);
+        assert!(
+            text.contains(
+                "WHERE c.FileName = N'ab132638-5188-470d-9432-de85f2b2c7d8' OR c.FileName LIKE N'ab132638-5188-470d-9432-de85f2b2c7d8.%' ESCAPE N'\\' OR c.FileName LIKE N'ab132638-5188-470d-9432-de85f2b2c7d8\\_dynupdate\\_%' ESCAPE N'\\'"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_selection_a_long_one_and_a_table_without_aliases_read_as_before() {
+        let plain = storage_table_expression(
+            "[db].dbo.[Config]",
+            Some(&overlay_of(&[G1], &["a".into(), alias("a", G1, "")])),
+        );
+        assert_eq!(
+            selecting(&[], false),
+            plain,
+            "an empty selection is no selection"
+        );
+        let many = (0..=SELECTION_MAX)
+            .map(|n| format!("{n:08x}-0000-0000-0000-000000000000"))
+            .collect::<Vec<_>>();
+        let many = many.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            selecting(&many, false),
+            plain,
+            "a long list is read the way an unbounded read is"
+        );
+        // Without an alias the expression has no aggregate to narrow.
+        let names = BTreeSet::from(["x".to_owned()]);
+        let no_alias =
+            StorageGenerationOverlay::default().dropping(BTreeSet::from(["gone".to_owned()]));
+        assert_eq!(
+            storage_table_expression_for(
+                "[db].dbo.[Config]",
+                Some(&no_alias),
+                Selection::Names(&names)
+            ),
+            storage_table_expression("[db].dbo.[Config]", Some(&no_alias))
+        );
+    }
+
+    #[test]
+    fn a_wildcard_in_a_name_is_escaped_in_the_prefix() {
+        let text = selecting(&["50%_off[1]"], false);
+        assert!(
+            text.contains("LIKE N'50\\%\\_off\\[1]\\_dynupdate\\_%' ESCAPE N'\\'"),
+            "{text}"
+        );
+    }
+
     const SAVED: &str = "[db].dbo.[ConfigSave]";
 
     #[test]
@@ -1180,6 +1361,74 @@ mod live {
         );
         assert_eq!(published.len(), expected.len());
         assert!(published == expected, "the server and the overlay disagree");
+
+        // The same rows through a selection (#409 F-15): a few aliased names, plain
+        // names, and a name that does not exist.
+        if !main {
+            let mut picked = BTreeSet::new();
+            for published in overlay.renames().values().take(6) {
+                picked.insert(published.clone());
+            }
+            for (name, _) in stored
+                .keys()
+                .filter(|(name, _)| !is_dynamic_generation_alias(name))
+                .take(6)
+            {
+                picked.insert(name.clone());
+            }
+            picked.insert("00000000-0000-0000-0000-000000000000.0".to_owned());
+            let read = |selection: Selection<'_>, filter: &str| -> anyhow::Result<Rows> {
+                let expression =
+                    crate::mssql_dump::qualified_storage_table_for(&database, "Config", selection);
+                stored_rows(
+                    client,
+                    &format!("(SELECT * FROM {expression} WHERE {filter}) sel"),
+                )
+            };
+            let values = picked
+                .iter()
+                .map(|name| quote(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let filter = format!("FileName IN ({values})");
+            let by_names = read(Selection::Names(&picked), &filter)?;
+            let unbounded = read(Selection::All, &filter)?;
+            assert!(
+                by_names == unbounded,
+                "a selection changed the rows it keeps"
+            );
+            assert!(!by_names.is_empty());
+            let owners = picked
+                .iter()
+                .filter(|name| !name.contains('.'))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !owners.is_empty() {
+                let filter = owners
+                    .iter()
+                    .map(|owner| {
+                        format!(
+                            "FileName = {} OR FileName LIKE N'{}.%'",
+                            quote(owner),
+                            owner.replace('\'', "''")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let by_owners = read(Selection::Owners(&owners), &filter)?;
+                let all = read(Selection::All, &filter)?;
+                assert!(
+                    by_owners == all,
+                    "an owner selection changed the rows it keeps"
+                );
+            }
+            eprintln!(
+                "{database}: {} rows through a selection of {} names and {} owners",
+                by_names.len(),
+                picked.len(),
+                owners.len()
+            );
+        }
 
         // What the export lists: the same names, parts and sizes.
         let listed = listed
