@@ -77,6 +77,10 @@ pub struct Inputs {
     /// objects in the order the platform walks them.
     pub root_row: Vec<u8>,
     pub staged: StagedImage,
+    /// The stored descriptors (`Config` rows named by a bare uuid) of every catalog, document, common attribute
+    /// and defined type, read when the stage creates an object (S1-F): the traversal of the tabular sections,
+    /// the common attributes that apply and the types an attribute names need them all. Empty otherwise.
+    pub objects: BTreeMap<String, Vec<u8>>,
     /// The extensions of the infobase and the objects they adopt (S1-I). The default is an infobase
     /// without extensions; a reader that fills it must fill `adoptions` too, or the plan refuses.
     pub extensions: ExtensionInputs,

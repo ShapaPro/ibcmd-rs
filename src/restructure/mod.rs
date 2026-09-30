@@ -29,6 +29,7 @@ pub mod caches;
 pub mod catalog;
 pub mod command;
 pub mod common;
+pub mod create;
 pub mod entry;
 pub mod exec;
 pub mod extensions;
