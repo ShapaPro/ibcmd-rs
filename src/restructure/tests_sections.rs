@@ -550,3 +550,35 @@ fn the_stored_sub_tables_are_checked_before_anything_is_trusted() {
     let text = format!("{:#}", plan(&broken, &options()).unwrap_err());
     assert!(text.contains("no sub-table VT159"), "{text}");
 }
+
+/// `Use` of a catalog's section, the element after the record of its wrapper `{v,<record>,<Use>}`.
+fn set_section_use(root: &mut Brace, section: usize, usage: i64) {
+    let sections = collection(root, SECTIONS);
+    sections[section].as_list_mut().unwrap()[0]
+        .as_list_mut()
+        .unwrap()[2] = Brace::num(usage);
+}
+
+#[test]
+fn a_section_of_a_hierarchy_used_for_folders_is_not_built() {
+    // A stored section used for folders that gets an attribute.
+    let mut old = tree();
+    set_section_use(&mut old, 3, 1);
+    let mut new = old.clone();
+    let sections = collection(&mut new, SECTIONS);
+    let attributes = attributes_of(&mut sections[3]);
+    let added = fresh(&attributes[2], 9, true);
+    attributes.push(added);
+    recount(attributes);
+    let text = format!(
+        "{:#}",
+        plan(&inputs(&stage(&old), &stage(&new)), &options()).unwrap_err()
+    );
+    assert!(text.contains("whose use is not ForItem"), "{text}");
+
+    // A new section used for both folders and items.
+    let mut root = with_new_section();
+    set_section_use(&mut root, 4, 2);
+    let text = error_of(&root);
+    assert!(text.contains("another use than ForItem"), "{text}");
+}

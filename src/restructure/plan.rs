@@ -2132,6 +2132,21 @@ fn check_object(old: &ObjectFacts, new: &ObjectFacts, change: &Change) -> Result
                 ))
             );
         }
+        // Not traced: a section of a hierarchy used for folders only, or for both, that gets an attribute.
+        if before.usage.is_some_and(|usage| usage != 0)
+            && after
+                .attributes
+                .iter()
+                .any(|attribute| change.added.contains(&attribute.uuid))
+        {
+            bail!(
+                "{}",
+                label(&format!(
+                    "adds an attribute to the tabular section {}, whose use is not ForItem",
+                    before.name
+                ))
+            );
+        }
     }
     for section in &new_sections[old_sections.len()..] {
         if old_sections.iter().any(|old| old.uuid == section.uuid) {
