@@ -17,9 +17,13 @@
 //! `Code` (a code length; `xs:decimal` for a numeric code), `Description`, `PredefinedDataName` -- and
 //! are checked against all 114 catalogs of the БСП corpus (`tests_corpus.rs`).
 
-use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 
+use anyhow::{Context, Result, bail, ensure};
+
+use crate::metadata_model::brace::Brace;
 use crate::module_blob::{decode_base64_mime, encode_base64};
+use crate::restructure::caches::names_tables::{NamesTables, kind_names};
 use crate::restructure::names::{deflate, inflate};
 
 const PREFIX: &str = "{2,1,\r\n{\r\n{#base64:";
@@ -29,6 +33,14 @@ const SEPARATOR: &str = "\r\r\n";
 
 const CURRENT_CONFIG: &str = "http://v8.1c.ru/8.1/data/enterprise/current-config";
 const ENTERPRISE: &str = "http://v8.1c.ru/8.1/data/enterprise";
+const CORE: &str = "http://v8.1c.ru/8.1/data/core";
+const CRLF: &str = "\r\n";
+/// The closing tag of an object type, with its indent (without the line end).
+const CLOSE_TYPE: &str = "\t\t</objectType>";
+
+/// `v8:ValueStorage` and `v8:UUID`, the platform types an attribute pattern names by a type id.
+const VALUE_STORAGE_TYPE: &str = "e199ca70-93cf-46ce-a54b-6edc88c3a296";
+const UUID_TYPE: &str = "fc01b5df-97fe-449b-83d4-218a090e681e";
 
 /// The decoded model.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +149,55 @@ impl XdtoModel {
         let start = self.xml.find(&needle)?;
         let close = self.xml[start..].find("\t\t</objectType>\r\n")? + start;
         Some((start, close + "\t\t</objectType>\r\n".len()))
+    }
+
+    /// The property lines (with their CRLF) inside `<objectType name="<type_name>">`.
+    pub fn property_lines(&self, type_name: &str) -> Option<Vec<String>> {
+        let (start, end) = self.object_type(type_name)?;
+        let body = &self.xml[start..end];
+        let open = body.find("\r\n")? + 2;
+        let close = body.rfind("\t\t</objectType>")?;
+        Some(
+            body[open..close]
+                .split_inclusive("\r\n")
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
+    /// Inserts `lines` into `<objectType name="<type_name>">` so that the first of them becomes the property
+    /// line number `index` (0 = the first line; the number of lines = at the end).
+    pub fn insert_property_lines(
+        &mut self,
+        type_name: &str,
+        index: usize,
+        lines: &[String],
+    ) -> Result<()> {
+        let (start, end) = self
+            .object_type(type_name)
+            .with_context(|| format!("the model has no {type_name}"))?;
+        let mut at = start
+            + self.xml[start..end]
+                .find(CRLF)
+                .context("an object type without lines")?
+            + 2;
+        let close = start
+            + self.xml[start..end]
+                .rfind(CLOSE_TYPE)
+                .context("an object type is not closed")?;
+        for _ in 0..index {
+            ensure!(
+                at < close,
+                "{type_name} has fewer than {index} property lines"
+            );
+            at = self.line_end(at)?;
+        }
+        ensure!(
+            at <= close,
+            "{type_name} has fewer than {index} property lines"
+        );
+        self.xml.insert_str(at, &lines.concat());
+        Ok(())
     }
 
     // -----------------------------------------------------------------------------------------
@@ -479,6 +540,103 @@ pub fn standard_properties(name: &str, shape: CatalogShape) -> Vec<String> {
     }
     lines.push(primitive_property("PredefinedDataName", "xs:string", true));
     lines
+}
+
+/// The XDTO names of the reference types of the configuration: the `Ref` type of an object -> `CatalogRef.X`,
+/// `EnumRef.X`, ... (the kind's name and `Ref`). The types are the ones `a07b62f0` gives the objects that
+/// have a table.
+#[derive(Clone, Debug, Default)]
+pub struct RefNames {
+    by_type: BTreeMap<String, String>,
+}
+
+impl RefNames {
+    /// From the names and tables row.
+    pub fn build(names: &NamesTables) -> Self {
+        let mut by_type = BTreeMap::new();
+        for entry in &names.entries {
+            let (Some(table), Some((kind, name))) = (&entry.table, entry.name.split_once('.'))
+            else {
+                continue;
+            };
+            if kind_names(kind).is_none() || kind == "DocumentJournal" {
+                continue;
+            }
+            by_type.insert(
+                table.type_id.to_ascii_lowercase(),
+                format!("{kind}Ref.{name}"),
+            );
+        }
+        Self { by_type }
+    }
+
+    pub fn get(&self, type_id: &str) -> Option<&str> {
+        self.by_type
+            .get(&type_id.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+}
+
+/// The property line of an attribute from its type pattern `{"Pattern",<item>...}`. `nullable` is the
+/// field's nullability (`lowerBound="0"`).
+///
+/// One item: `B` `xs:boolean`, `S` `xs:string`, `N` `xs:decimal`, `D` `xs:dateTime`, `{"#",<id>}` the
+/// value storage and the uuid of the core namespace or a reference type of the configuration; several
+/// items (a composite type): no type, `nillable="true"`.
+pub fn attribute_property(
+    name: &str,
+    pattern: &Brace,
+    nullable: bool,
+    refs: &RefNames,
+) -> Result<String> {
+    let items = pattern.as_list().context("a pattern is not a list")?;
+    if items.first().and_then(Brace::as_str) != Some("Pattern") {
+        bail!("not a type pattern");
+    }
+    let lower = if nullable { " lowerBound=\"0\"" } else { "" };
+    let [_, item] = items else {
+        if items.len() < 3 {
+            bail!("the pattern of {name} has no type");
+        }
+        return Ok(format!(
+            "\t\t\t<property name=\"{name}\"{lower} nillable=\"true\"/>\r\n"
+        ));
+    };
+    let fields = item.as_list().context("a pattern item is not a list")?;
+    let tag = fields
+        .first()
+        .and_then(Brace::as_str)
+        .context("a pattern item has no tag")?;
+    Ok(match tag {
+        "B" => primitive_property(name, "xs:boolean", nullable),
+        "S" => primitive_property(name, "xs:string", nullable),
+        "N" => primitive_property(name, "xs:decimal", nullable),
+        "D" => primitive_property(name, "xs:dateTime", nullable),
+        "#" => {
+            let id = fields
+                .get(1)
+                .and_then(Brace::as_atom)
+                .context("a type item has no id")?
+                .to_ascii_lowercase();
+            let core = |type_name: &str| {
+                format!(
+                    "\t\t\t<property xmlns:d4p1=\"{CORE}\" name=\"{name}\" type=\"d4p1:{type_name}\"{lower}/>\r\n"
+                )
+            };
+            if id == VALUE_STORAGE_TYPE {
+                core("ValueStorage")
+            } else if id == UUID_TYPE {
+                core("UUID")
+            } else if let Some(reference) = refs.get(&id) {
+                reference_property(name, reference, nullable)
+            } else {
+                bail!(
+                    "the type {id} of attribute {name} is neither a platform type nor a reference type of the configuration"
+                )
+            }
+        }
+        other => bail!("the pattern item {other:?} of attribute {name} is not mapped to XDTO"),
+    })
 }
 
 /// What decides the standard properties of `DocumentObject.X`.
