@@ -7,7 +7,7 @@ use super::tests_plan::{
 };
 use crate::apply_check::{ChangeOp, Reason, ReasonClass, RuleId, Seg, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
-use crate::restructure::s1::decide;
+use crate::restructure::s1::{decide, own_refusal};
 
 fn seg(name: &str, label: Option<&str>) -> Seg {
     Seg {
@@ -188,6 +188,76 @@ fn a_root_blocker_is_the_checks_to_answer() {
         "{:?}",
         verdict.blockers
     );
+}
+
+#[test]
+fn a_refusal_carries_the_gates_own_reasons_and_not_the_conservative_lines_of_harmless_rows() {
+    // A mixed stage: a predefined-data body (a data change, which S1 does not do) next to descriptors and bodies that the
+    // restructuring check finds harmless. The conservative rule lists every one of them; the check, asked first by the
+    // apply, names the row it refuses, so the gate's refusal is its own reason and the rest is noise.
+    let harmless = [
+        "4a7aa9ca-5e44-4ffa-bebc-26e2685e48f0",
+        "66193438-abc5-410b-a1f1-a204102d1a62",
+        "794f5fb5-3b8f-4f45-9250-7a3b9d1db383.1c",
+        "b68ec95b-64f3-4a2b-9683-231d50f01eeb.0",
+    ];
+    let mut rows = vec![CATALOG];
+    rows.extend(harmless);
+    let mut check = check_of_a2();
+    check.push_reason(Reason {
+        class: ReasonClass::Data,
+        object: "Catalog.СтраныМира".to_owned(),
+        file_name: "794f5fb5-3b8f-4f45-9250-7a3b9d1db383.1c".to_owned(),
+        kind: "Catalog".to_owned(),
+        ..Reason::default()
+    });
+    let (verdict, phase) = decide(
+        conservative(&rows),
+        &check,
+        &inputs(OLD_ROW, NEW_ROW),
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "data-change"),
+        "{:?}",
+        verdict.blockers
+    );
+    assert!(
+        verdict
+            .blockers
+            .iter()
+            .all(|blocker| blocker.reason.starts_with("S1: ")),
+        "{:?}",
+        verdict.blockers
+    );
+    assert_eq!(verdict.blockers_omitted, 0);
+
+    // Many conservative lines do not push the gate's own reason out of the list.
+    let mut crowded = conservative(&rows);
+    crowded.blockers_omitted = 500;
+    let (verdict, _) = decide(crowded, &check, &inputs(OLD_ROW, NEW_ROW), &options());
+    assert!(
+        blocked_with(&verdict, "data-change"),
+        "{:?}",
+        verdict.blockers
+    );
+    assert_eq!(verdict.blockers_omitted, 0);
+}
+
+#[test]
+fn an_early_refusal_of_the_gate_drops_the_conservative_lines_too() {
+    let mut crowded = conservative(&[CATALOG, "ffffffff-0000-4000-8000-000000000000"]);
+    crowded.blockers_omitted = 4;
+    let verdict = own_refusal(
+        crowded,
+        "SchemaStorage",
+        "S1: the schema storage is not idle".to_owned(),
+    );
+    assert!(verdict.restructuring_required);
+    assert_eq!(verdict.blockers.len(), 1);
+    assert_eq!(verdict.blockers[0].row, "SchemaStorage");
+    assert_eq!(verdict.blockers_omitted, 0);
 }
 
 #[test]

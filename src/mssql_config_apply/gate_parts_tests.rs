@@ -388,14 +388,71 @@ fn what_the_first_gate_refuses_is_the_seconds_to_pass_with_its_phase() {
 }
 
 #[test]
-fn what_both_refuse_is_refused_in_the_seconds_words() {
+fn what_both_refuse_is_refused_for_the_reasons_of_both_the_first_gates_first() {
     let pair = FirstThen::new(
         Box::new(Scripted::new("apply-check", true)),
         Box::new(Scripted::new("s1", true)),
     );
     let verdict = ask(&pair);
+    // the decision and the name are the second gate's, the reasons are the two lists
     assert!(verdict.restructuring_required);
-    assert_eq!(blocker_reasons(&verdict), ["row: s1 refuses"]);
+    assert_eq!(verdict.gate, "s1");
+    assert_eq!(
+        blocker_reasons(&verdict),
+        ["row: apply-check refuses", "row: s1 refuses"]
+    );
     assert!(pair.take_structure().is_none());
     assert!(!pair.judges_deleted_row());
+}
+
+/// A gate with a given number of refusals.
+struct Listing {
+    rows: usize,
+    omitted: usize,
+}
+
+impl StructuralGate for Listing {
+    fn name(&self) -> &'static str {
+        "listing"
+    }
+    fn check(&self, _input: &GateInput<'_>) -> Result<GateVerdict> {
+        let mut verdict = GateVerdict {
+            gate: "listing".to_owned(),
+            ..GateVerdict::default()
+        };
+        for row in 0..self.rows {
+            verdict.block(&format!("row{row}"), "listing refuses");
+        }
+        verdict.blockers_omitted += self.omitted;
+        Ok(verdict)
+    }
+}
+
+#[test]
+fn the_two_lists_are_capped_and_the_rest_is_counted() {
+    let pair = FirstThen::new(
+        Box::new(Listing {
+            rows: MAX_LISTED_BLOCKERS - 1,
+            omitted: 7,
+        }),
+        Box::new(Scripted::new("s1", true)),
+    );
+    let verdict = ask(&pair);
+    assert!(verdict.restructuring_required);
+    // the first's 199 lines and the second's one fill the list; nothing is lost silently
+    assert_eq!(verdict.blockers.len(), MAX_LISTED_BLOCKERS);
+    assert_eq!(verdict.blockers[0].row, "row0");
+    assert_eq!(verdict.blockers[MAX_LISTED_BLOCKERS - 1].row, "row");
+    assert_eq!(verdict.blockers_omitted, 7);
+
+    let pair = FirstThen::new(
+        Box::new(Listing {
+            rows: MAX_LISTED_BLOCKERS,
+            omitted: 0,
+        }),
+        Box::new(Scripted::new("s1", true)),
+    );
+    let verdict = ask(&pair);
+    assert_eq!(verdict.blockers.len(), MAX_LISTED_BLOCKERS);
+    assert_eq!(verdict.blockers_omitted, 1);
 }

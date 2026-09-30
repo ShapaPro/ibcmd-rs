@@ -117,6 +117,13 @@ pub fn decide(
         // Nothing the conservative gate refuses: a plain apply.
         return (verdict, None);
     }
+    // The conservative rule's blockers are held apart. It re-lists every descriptor and body that differs,
+    // harmless or not, and the restructuring check, which the apply asks first, names the rows it refuses.
+    // A refusal of this gate therefore carries its own reasons (`S1: ...`) and nothing else; the conservative
+    // lines come back only where they are what refuses the stage (the last step below). The decision is the
+    // same as if they had been kept: every refusal below is a reason of this gate.
+    let mut conservative = std::mem::take(&mut verdict.blockers);
+    let conservative_omitted = std::mem::take(&mut verdict.blockers_omitted);
     let refuse = |mut verdict: GateVerdict, row: &str, reason: String| {
         verdict.block(row, format!("S1: {reason}"));
         (verdict, None)
@@ -252,10 +259,12 @@ pub fn decide(
     // compares its bytes, the check reads it (the 8.5 platform re-stamps the last block of its payload on
     // every write) and a root that really changed is a `service-row-changed` refusal above.
     let has_deleted = inputs.staged.deleted.is_some();
-    verdict.blockers.retain(|blocker| {
+    conservative.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
         !planned.contains_key(&row) && !(has_deleted && row == "deleted") && row != "root"
     });
+    verdict.blockers.extend(conservative);
+    verdict.blockers_omitted = conservative_omitted;
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;
     if verdict.restructuring_required {
         return (verdict, None);
@@ -264,6 +273,15 @@ pub fn decide(
         Ok(phase) => (verdict, Some(phase)),
         Err(error) => refuse(verdict, "", format!("{error:#}")),
     }
+}
+
+/// A refusal of this gate before it decides anything: its own reason, without the conservative rule's lines
+/// (see [`decide`]).
+pub(crate) fn own_refusal(mut verdict: GateVerdict, row: &str, reason: String) -> GateVerdict {
+    verdict.blockers.clear();
+    verdict.blockers_omitted = 0;
+    verdict.block(row, reason);
+    verdict
 }
 
 /// The reasons of the check that name a row the apply consumes without moving it (the stage's `deleted`
@@ -352,14 +370,13 @@ impl StructuralGate for S1Gate<'_> {
                     inputs.extensions.adoptions_read = true;
                 }
                 Err(error) => {
-                    let mut verdict = verdict;
-                    verdict.block(
+                    return Ok(own_refusal(
+                        verdict,
                         "extensions",
                         format!(
                             "S1: the objects the extensions adopt could not be read: {error:#}"
                         ),
-                    );
-                    return Ok(verdict);
+                    ));
                 }
             }
         }
@@ -368,12 +385,12 @@ impl StructuralGate for S1Gate<'_> {
             .find(|row| row.schema_id == 0)
             .is_some_and(|row| row.is_idle());
         if !idle {
-            let mut verdict = verdict;
-            verdict.block(
+            return Ok(own_refusal(
+                verdict,
                 "SchemaStorage",
-                "S1: the schema storage is not idle: an interrupted restructuring has to be finished first",
-            );
-            return Ok(verdict);
+                "S1: the schema storage is not idle: an interrupted restructuring has to be finished first"
+                    .to_owned(),
+            ));
         }
         let (mut verdict, mut phase) = decide(verdict, &check, &inputs, &self.options);
         // S1-J: the tables the plan rebuilds are copied in one transaction; above the limit the stage is
