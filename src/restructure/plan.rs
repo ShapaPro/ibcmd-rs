@@ -539,13 +539,24 @@ pub fn parse_deleted(stored: &[u8]) -> Result<Vec<(String, i64)>> {
     Ok(list)
 }
 
-/// The stage's `deleted` row may name the attributes the stage removes and nothing else: a removed
-/// file or object is not this restructuring's.
+/// A row of an online update the target has pending: `DynamicallyUpdated`, `versions_dynupdate_<g>`,
+/// `<uuid>_dynupdate_<g>` and `<uuid>_dynupdate_<g>.0` (`id` lower-cased, as [`parse_deleted`] gives it).
+/// The platform's import lists them in `deleted` (as Config rows, flag 0) whenever the target carries
+/// such an update, and so does this program's; the apply drops them with the update it makes.
+fn is_pending_update_row(id: &str) -> bool {
+    id == "dynamicallyupdated" || id.contains("_dynupdate_")
+}
+
+/// The stage's `deleted` row may name the attributes the stage removes and the rows of a pending online
+/// update, and nothing else: a removed file or object is not this restructuring's.
 fn check_deleted(image: &StagedImage, removed: &BTreeSet<String>) -> Result<()> {
     let Some(stored) = &image.deleted else {
         return Ok(());
     };
     for (id, flag) in parse_deleted(stored)? {
+        if flag == 0 && is_pending_update_row(&id) {
+            continue;
+        }
         if !removed.contains(&id) {
             bail!(
                 "the staged image deletes {id}, which is not an attribute it removes: not supported"
