@@ -136,6 +136,9 @@ pub(crate) struct GuardRequest<'a> {
     pub kind: StageKind,
     pub source_root: &'a Path,
     pub tree: TreeFiles<'a>,
+    /// The rows of the target the stage deletes (its `deleted` row): not in
+    /// the state the apply leaves.
+    pub removed: &'a [String],
     /// The path prefixes the stage was asked to import (empty: all).
     pub path_prefix: &'a [String],
     /// The XML version asked for; the tree's own when absent.
@@ -158,16 +161,23 @@ fn wanted_with(environment: Option<&str>, verify: bool) -> bool {
 
 /// The rows a stage would leave over: the lab's row folder when the stage
 /// reads its base rows from one (`IBCMD_RS_BASE_ROWS_DIR`), else the
-/// database's Config table when there is one to read, else nothing.
+/// database's Config table when there is one to read -- from the rows the
+/// stage has already read, when it has -- else nothing.
 fn state_base<'a>(
     base_dir: Option<&'a Path>,
     sql: Option<&'a SqlExec>,
     database: &'a str,
+    prefetched: Option<&'a HashMap<String, Arc<Vec<u8>>>>,
 ) -> StateBase<'a> {
-    match (base_dir, sql) {
-        (Some(dir), _) => StateBase::Folder(dir),
-        (None, Some(sql)) => StateBase::Database { sql, database },
-        (None, None) => StateBase::Nothing,
+    match (base_dir, sql, prefetched) {
+        (Some(dir), _, _) => StateBase::Folder(dir),
+        (None, Some(sql), Some(part0)) => StateBase::Prefetched {
+            part0,
+            sql,
+            database,
+        },
+        (None, Some(sql), None) => StateBase::Database { sql, database },
+        (None, None, _) => StateBase::Nothing,
     }
 }
 
@@ -177,6 +187,7 @@ pub(super) fn verify_patch_stage(
     sql: &SqlExec,
     manifest: &SourceManifest,
     rows: &[super::BulkStageRow<'_>],
+    removed: &[String],
 ) -> Result<StageVerification> {
     let base_dir = std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").map(PathBuf::from);
     verify_staged_state(
@@ -184,10 +195,16 @@ pub(super) fn verify_patch_stage(
             kind: StageKind::Patch,
             source_root: &args.source_root,
             tree: TreeFiles::Scanned(manifest),
+            removed,
             path_prefix: &args.path_prefix,
             source_version: args.source_version,
         },
-        state_base(base_dir.as_deref(), Some(sql), &args.database),
+        state_base(
+            base_dir.as_deref(),
+            Some(sql),
+            &args.database,
+            super::prefetched_base_rows(&args.database),
+        ),
         &staged_rows(rows),
     )
 }
@@ -207,10 +224,11 @@ pub(super) fn verify_base_free_stage(
             kind: StageKind::BaseFree,
             source_root: &args.source_root,
             tree: TreeFiles::Listed(tree_files),
+            removed: &[],
             path_prefix: &args.path_prefix,
             source_version: args.source_version,
         },
-        state_base(base_dir.as_deref(), sql, &args.database),
+        state_base(base_dir.as_deref(), sql, &args.database, None),
         &staged_rows(rows),
     )
 }
@@ -267,14 +285,21 @@ pub(crate) fn verify_staged_state(
             })
             .unwrap_or(InfobaseConfigSourceVersion::V2_20)
     });
-    let export = export_staged_state(base, staged, version, &output_root, comparer.clone())
-        .map_err(|error| {
-            anyhow!(
-                "Не удалось проверить результат загрузки: {error:#}\n\
+    let export = export_staged_state(
+        base,
+        staged,
+        request.removed,
+        version,
+        &output_root,
+        comparer.clone(),
+    )
+    .map_err(|error| {
+        anyhow!(
+            "Не удалось проверить результат загрузки: {error:#}\n\
                  Загрузка не выполнена, в ConfigSave ничего не записано. Проверку можно отключить \
                  ключом --no-verify (тогда расхождения с деревом не обнаруживаются)."
-            )
-        })?;
+        )
+    })?;
     let outcome = comparer.finish()?;
     let total_seconds = started.elapsed().as_secs_f64();
     if !outcome.differences.is_empty() {
@@ -568,14 +593,14 @@ fn is_configuration_file(relative: &str) -> bool {
     first.eq_ignore_ascii_case("Ext") || is_metadata_collection(first)
 }
 
-fn normalize_prefix(prefix: &str) -> String {
+pub(super) fn normalize_prefix(prefix: &str) -> String {
     prefix.replace('\\', "/").trim_matches('/').to_string()
 }
 
 /// Whether a relative path is inside the paths the stage was asked for
 /// (`scan_sources_with_prefixes` semantics: the folder, or the object's XML
 /// beside it). No prefix: everything.
-fn in_scope(scope: &[String], relative: &str) -> bool {
+pub(super) fn in_scope(scope: &[String], relative: &str) -> bool {
     if scope.is_empty() {
         return true;
     }
@@ -974,7 +999,7 @@ fn refusal_text(
                 }
             }
             Difference::OnlyInState => lines.push(format!(
-                "  {}: файла нет в дереве, а в базе он остался бы (удаление объектов и форм из базы пока не переносится)",
+                "  {}: файла нет в дереве, а в базе он остался бы (удаление отдельных файлов объекта пока не переносится)",
                 difference.path
             )),
             Difference::OnlyInTree => lines.push(format!(
@@ -992,7 +1017,7 @@ fn refusal_text(
     match kind {
         StageKind::Patch => {
             lines.push(
-                "Загрузка в базу, где конфигурация уже есть, переносит из дерева имя, синоним и комментарий объектов, модули, формы, макеты, права ролей и командные интерфейсы; реквизиты, табличные части, значения перечислений, свойства объектов, состав подсистем и свойства конфигурации, новые и удалённые объекты в базе остаются прежними."
+                "Загрузка в базу, где конфигурация уже есть, собирает из дерева то, что в нём отличается от базы (описания объектов, новые и удалённые объекты, модули, формы, макеты, права ролей, командные интерфейсы), а остальные строки оставляет как в базе; перечисленное выше так не переносится."
                     .to_string(),
             );
             lines.push(
@@ -1539,6 +1564,7 @@ mod tests {
         export_staged_state(
             StateBase::Nothing,
             &staged(rows),
+            &[],
             InfobaseConfigSourceVersion::V2_20,
             &output_root,
             sink,
@@ -1551,6 +1577,7 @@ mod tests {
             kind,
             source_root: tree,
             tree: TreeFiles::Unlisted,
+            removed: &[],
             path_prefix: &[],
             source_version: Some(InfobaseConfigSourceVersion::V2_20),
         }

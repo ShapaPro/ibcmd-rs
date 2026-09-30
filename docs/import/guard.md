@@ -1,5 +1,10 @@
 # The import guard (#388, checkpoint 2)
 
+> Step 2 (`docs/import/override.md`) made the stage carry most of what this document lists as refused: the
+> refusals of section 5 (attribute, tabular section, new catalog, removed form, ...) are cases of the acceptance
+> at checkpoint 2, and now load. The guard is unchanged and checks every case; what it still refuses is the
+> removal of a single file of an object that stays (a module, a picture).
+
 `ibcmd infobase config import` into a database that holds the configuration stages in patch mode, and patch
 mode carries only part of a tree (`docs/import/patch-mode.md`). The guard makes the rest impossible to lose
 silently: before anything is written, the configuration the stage would leave is exported and compared with the
@@ -72,6 +77,9 @@ A guard that cannot run (the generation history row unreadable, the export fails
 way to skip it (`--no-verify`); it does not let an unchecked stage through.
 
 ## 4. The patch refusals
+
+(At checkpoint 2. Since step 2 the first two are built from the tree; a reference to an object the tree has no file
+of and an object no writer can build still refuse.)
 
 A patch stage cannot build an object the database does not hold, predefined data with items the stored row lacks,
 or a file whose reference names an object the tree has no file of. The stage collects **every** such object and one

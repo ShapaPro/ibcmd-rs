@@ -183,7 +183,6 @@ impl StorageGenerationOverlay {
         self
     }
 
-    #[cfg(test)]
     pub(super) fn renames(&self) -> &BTreeMap<String, String> {
         &self.renames
     }

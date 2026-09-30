@@ -2292,6 +2292,29 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
     })
 }
 
+/// The rows an active dynamic generation of the Config table publishes under
+/// another name, published name -> the alias row that holds its current
+/// content (`versions` -> `versions_dynupdate_<generation>`). `marker` is the
+/// payload of the `DynamicallyUpdated` row, `None` when the table has none.
+/// A stage bases the rows it patches on these, so the ids it keeps are the
+/// ones the storage now publishes.
+pub(crate) fn dynamic_generation_aliases<'a>(
+    marker: Option<&[u8]>,
+    file_names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>> {
+    let Some(marker) = marker else {
+        return Ok(BTreeMap::new());
+    };
+    let history = dynamic_generation::dynamic_generation_history(marker)
+        .ok_or_else(|| anyhow!("{} is not a generation history", DYNAMIC_UPDATE_MARKER_ROW))?;
+    let overlay = dynamic_generation::storage_generation_overlay(&history, file_names);
+    Ok(overlay
+        .renames()
+        .iter()
+        .map(|(alias, published)| (published.clone(), alias.clone()))
+        .collect())
+}
+
 /// The rows a state export starts from.
 pub(crate) enum StateBase<'a> {
     /// Nothing is stored: the staged rows are the whole configuration (a
@@ -2302,6 +2325,15 @@ pub(crate) enum StateBase<'a> {
     Folder(&'a Path),
     /// The Config table of a database, every part of every row.
     Database {
+        sql: &'a crate::sql::SqlExec,
+        database: &'a str,
+    },
+    /// The Config table of a database as a stage has already read it: part 0
+    /// of every row. Only the rows stored in more than one part are read
+    /// again, for their other parts -- the read of the whole table took
+    /// 195 s on ERP УХ.
+    Prefetched {
+        part0: &'a std::collections::HashMap<String, Arc<Vec<u8>>>,
         sql: &'a crate::sql::SqlExec,
         database: &'a str,
     },
@@ -2335,6 +2367,7 @@ pub(crate) struct StateExportReport {
 pub(crate) fn export_staged_state(
     base: StateBase<'_>,
     staged: &[StagedRow<'_>],
+    removed: &[String],
     source_version: InfobaseConfigSourceVersion,
     output_root: &Path,
     sink: Arc<dyn FileSink>,
@@ -2355,11 +2388,27 @@ pub(crate) fn export_staged_state(
                     .map(|row| (row.file_name, Arc::new(row.binary))),
             )
         }
+        StateBase::Prefetched {
+            part0,
+            sql,
+            database,
+        } => {
+            let _stored = dynamic_generation::StorageViewScope::begin(database);
+            let mut rows = part0
+                .iter()
+                .map(|(file_name, bytes)| (file_name.clone(), Arc::clone(bytes)))
+                .collect::<BTreeMap<_, _>>();
+            for row in fetch_multi_part_config_rows(sql, database)? {
+                rows.insert(row.file_name, Arc::new(row.binary));
+            }
+            offline_rows::OfflineRows::from_memory(rows)
+        }
     };
     let state = stored.with_staged(
         staged
             .iter()
             .map(|row| (row.file_name.to_owned(), Arc::new(row.bytes.to_vec()))),
+        removed,
     )?;
     let state_rows = state.len();
     let read_ms = elapsed_ms(started);
@@ -2421,6 +2470,41 @@ fn fetch_all_config_rows(
         rows.extend(fetch_binary_rows(sql, database, table, &selected, true)?);
     }
     Ok(rows)
+}
+
+/// One row of the Config table whole (its parts assembled), or `None` when
+/// the table has no row of that name.
+pub(crate) fn fetch_config_row_whole(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    file_name: &str,
+) -> Result<Option<Vec<u8>>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let selected = BTreeSet::from([file_name.to_string()]);
+    let rows = fetch_binary_rows(sql, database, table, &selected, false)?;
+    Ok(rows
+        .into_iter()
+        .find(|row| row.file_name == file_name)
+        .map(|row| row.binary))
+}
+
+/// The rows of the Config table that are stored in more than one part, each
+/// assembled from all its parts.
+fn fetch_multi_part_config_rows(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let headers = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
+    let multi = headers
+        .iter()
+        .filter(|header| header.part_no > 0)
+        .map(|header| header.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    if multi.is_empty() {
+        return Ok(Vec::new());
+    }
+    fetch_binary_rows(sql, database, table, &multi, true)
 }
 
 fn ensure_collect_all_strict_gates(

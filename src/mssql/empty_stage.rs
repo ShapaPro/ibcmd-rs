@@ -121,6 +121,21 @@ impl EmptyStageContext {
                 "IBCMD_RS_ALWAYS_USED_CONSTANTS is ignored: it names a target database's flags, and an empty infobase's constants carry none"
             );
         }
+        Self::for_objects(root, version, files, listing)
+    }
+
+    /// The context for compiling single objects inside a patch stage
+    /// (`override_stage`): the same facts about the tree, but none of the
+    /// process-wide switches of a whole base-free stage -- the rest of the
+    /// stage still has base rows and the target's always-used constants. Each
+    /// object is compiled with `SqlExec::detached(BASE_FREE_MISSING_ROW)`, which
+    /// its writers take for "no base row".
+    pub fn for_objects(
+        root: &Path,
+        version: Option<&str>,
+        files: &[(PathBuf, std::sync::Arc<Vec<u8>>)],
+        listing: Option<std::sync::Arc<SourceListing>>,
+    ) -> Result<Self> {
         let configuration_path = root.join("Configuration.xml");
         let configuration = fs::read(&configuration_path)
             .with_context(|| format!("failed to read {}", configuration_path.display()))?;
@@ -159,7 +174,7 @@ impl EmptyStageContext {
 /// 25-75 s, and a stage used to walk the tree twice (once for the index, once
 /// for the objects); the walk lists every folder on a task of its own, once,
 /// and its list also answers the existence probes of every object's writers.
-fn descriptor_xmls_of(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
+pub(super) fn descriptor_xmls_of(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = files
         .iter()
         .filter(|path| {
@@ -201,7 +216,7 @@ fn dispatch_rank(root: &Path, path: &Path) -> u8 {
 /// order. The paths are dispatched one at a time in `dispatch_rank` order
 /// (tree order within a rank) rather than split into ranges, so a heavy object
 /// starts when its turn comes, not when its range does.
-fn map_heaviest_first<T: Send>(
+pub(super) fn map_heaviest_first<T: Send>(
     root: &Path,
     paths: &[PathBuf],
     work: impl Fn(&Path) -> T + Sync,
@@ -246,7 +261,9 @@ fn map_heaviest_first<T: Send>(
 /// Every descriptor XML of the list, read on the file-bound pool: the index,
 /// the descriptors and the name resolvers of every body writer then read them
 /// from memory. ERP УХ: 56 758 files, 366 MB.
-fn read_descriptor_xmls(paths: &[PathBuf]) -> Result<Vec<(PathBuf, std::sync::Arc<Vec<u8>>)>> {
+pub(super) fn read_descriptor_xmls(
+    paths: &[PathBuf],
+) -> Result<Vec<(PathBuf, std::sync::Arc<Vec<u8>>)>> {
     parallel::install_io_bound(|| {
         paths
             .par_iter()
@@ -344,7 +361,7 @@ fn failed_row_name(
     Some(format!("{owner}.{suffix}"))
 }
 
-fn catch<T>(run: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(super) fn catch<T>(run: impl FnOnce() -> Result<T>) -> Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(result) => result,
         Err(panic) => {
@@ -1727,7 +1744,11 @@ pub(super) fn stage_source_objects_base_free(
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
     fs::write(
         &apply_path,
-        build_base_free_bulk_stage_apply_sql(&args.database, &table, bulk.len()),
+        build_base_free_bulk_stage_apply_sql(
+            &args.database,
+            &table,
+            super::bulk_stage_part_count(&bulk),
+        ),
     )
     .with_context(|| format!("failed to write {}", apply_path.display()))?;
 
@@ -1819,14 +1840,15 @@ pub(super) fn stage_source_objects_base_free(
         versions_blob: versions,
         version_replacements: Vec::new(),
         verification,
+        overrides: None,
     })
 }
 
 /// The bulk apply of a base-free stage: the staged rows are the whole
 /// configuration, `root`, `version` and `versions` among them, so nothing is
 /// copied from or checked against Config. Attributes are 0 (what every
-/// staged body row the target lacks already gets on the default path) and
-/// every row is part 0.
+/// staged body row the target lacks already gets on the default path); a row
+/// over the platform's part size is stored in parts, as its own import does.
 fn build_base_free_bulk_stage_apply_sql(database: &str, table: &str, staged_rows: usize) -> String {
     let stage = format!("tempdb.dbo.{}", quote_ident(table));
     format!(
@@ -1835,16 +1857,16 @@ fn build_base_free_bulk_stage_apply_sql(database: &str, table: &str, staged_rows
          USE {db};\n\
          IF (SELECT COUNT_BIG(*) FROM {stage}) <> {staged_rows}\n\
              THROW 55002, 'bcp loaded an unexpected number of staged rows', 1;\n\
-         IF EXISTS (SELECT 1 FROM {stage} WHERE DATALENGTH(BinaryData) <> DataSize)\n\
+         IF EXISTS (SELECT 1 FROM {stage} GROUP BY FileName, DataSize HAVING SUM(DATALENGTH(BinaryData)) <> DataSize)\n\
              THROW 55003, 'A staged row lost bytes on its way in', 1;\n\
-         IF EXISTS (SELECT FileName FROM {stage} GROUP BY FileName HAVING COUNT_BIG(*) > 1)\n\
+         IF EXISTS (SELECT FileName FROM {stage} GROUP BY FileName, PartNo HAVING COUNT_BIG(*) > 1)\n\
              THROW 55004, 'Two staged rows share a file name', 1;\n\
          IF (SELECT COUNT_BIG(*) FROM {stage} WHERE FileName IN (N'root', N'version', N'versions')) <> 3\n\
              THROW 55005, 'A base-free stage must carry root, version and versions', 1;\n\
          BEGIN TRAN;\n\
          DELETE FROM dbo.ConfigSave;\n\
          INSERT INTO dbo.ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT s.FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), 0, s.DataSize, s.BinaryData, 0\n\
+         SELECT s.FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), 0, s.DataSize, s.BinaryData, s.PartNo\n\
          FROM {stage} s;\n\
          IF (SELECT COUNT_BIG(*) FROM dbo.ConfigSave) <> {staged_rows}\n\
              THROW 56999, 'Unexpected ConfigSave row count after base-free staging', 1;\n\

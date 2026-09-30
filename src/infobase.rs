@@ -80,6 +80,8 @@ pub struct InfobaseConfigImportReport {
     /// (absent when it did not run: a stage compiled from the tree, or
     /// `--no-verify`).
     pub verification: Option<crate::mssql::StageVerification>,
+    /// What a patch stage built from the tree in place of the target's rows.
+    pub overrides: Option<crate::mssql::StageOverrides>,
 }
 
 /// The export refuses a directory that already holds files, as the
@@ -479,6 +481,7 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         staged_rows_after: report.after.row_count,
         scripts: report.scripts,
         verification: report.verification,
+        overrides: report.overrides,
     })
 }
 

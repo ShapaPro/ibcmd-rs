@@ -369,6 +369,28 @@ fn a_retyped_attribute_is_refused_in_a_removal_stage() {
 }
 
 #[test]
+fn the_deleted_row_may_also_name_the_rows_of_a_pending_online_update() {
+    let mut back = removing_a2();
+    // What the platform's import writes for a target with an online update pending, and this
+    // program's too: the attribute (flag 1) and the update's Config rows (flag 0).
+    let update =
+        "a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+    let list = format!(
+        "\u{feff}5,\"c60cdc87-198a-4f6e-8f17-76bcb1b1914b\",1,\"{update}\",0,\"{update}.0\",0,\
+         \"DynamicallyUpdated\",0,\"versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0"
+    );
+    back.staged.deleted = Some(deflate(list.as_bytes()).unwrap());
+    assert!(plan(&back, &options()).is_ok());
+    // Only as Config rows: the same name with the flag of an element is not one.
+    back.staged.deleted = Some(deflate(format!("\u{feff}1,\"{update}\",1").as_bytes()).unwrap());
+    assert!(error_of(&back).contains("deletes a627e390"));
+    // And no other row: an update row is named by its `_dynupdate_` mark.
+    back.staged.deleted =
+        Some(deflate("\u{feff}1,\"aaaaaaaa-0000-4000-8000-000000000000\",0".as_bytes()).unwrap());
+    assert!(error_of(&back).contains("deletes aaaaaaaa"));
+}
+
+#[test]
 fn the_deleted_row_of_a_removal_names_the_removed_attribute() {
     let mut back = removing_a2();
     // The platform's row for the removal: the id of the attribute, flag 1.
