@@ -630,7 +630,10 @@ Two gates stand behind the `StructuralGate` trait; `structural_gate()` is the on
 `ConservativeGate` (module `mssql_config_apply::gate`, one call site in `plan`) admits:
 
 - `root` and `version` unchanged (or absent: a delta stage), `versions` replaced with a new
-  generation;
+  generation. `root` may differ in its bytes when its inflated text is the same: the importer stages it deflated, and a
+  database the platform has applied to keeps it as one stored block (`compare_root`; found by the twin of S1-F N1,
+  before which every stage that carried `Configuration.xml` on such a database was refused as "the service row root
+  changes");
 - a descriptor row that exists in `Config` and inflates to the same text;
 - a body row whose owner kind and suffix the source-asset registry names as a module,
   form, template, picture or help page; other body roles pass only when the inflated
@@ -654,7 +657,7 @@ Two gates stand behind the `StructuralGate` trait; `structural_gate()` is the on
     of the kind list their groups in; the exchange-plan nodes must be readable
     (`_Node<n>` tables) and none marked for deletion.
 
-It refuses new objects of every other kind (a catalog, an attribute, a command, a subsystem),
+It refuses new objects of every other kind (a catalog or a document unless a structure phase answers for it, an attribute, a command, a subsystem),
 new bodies of nested objects or of the configuration, owners whose descriptor changes more
 than the lists, descriptors whose text differs, predefined data, rights, interface, package
 and unknown bodies, and unknown row names. Its rows read from a consumed `deleted` list are
@@ -901,6 +904,13 @@ restructurings and have none):
   **refusal** (`NeedsNativeApply`): apply the two changes in two steps.
 - `tables`, `objects`, `caches`: what the report names (`structure`), and the apply's `tables_touched` and
   `not_written` follow from it.
+- `created` (uuid, kind and staged files of each catalog or document the phase creates, S1-F, `new-object.md` 3.4) and
+  `answered_rows` (the configuration's descriptor, which lists them): the plan's `objects::analyze` knows a new form or
+  template only and blocks a new catalog or document, so the apply takes the phase first and drops the blockers on these
+  rows; the staged rows move like any staged row, and each created object is registered like a new form, at every node of
+  the exchange plans but the plans' own, with its files as the list in `_ConfigChngR_ExtProps` (#412; measured on
+  8.3.27 only: on 8.5, or on a change register that has no rows, `NeedsNativeApply`). The size guard counts a table the
+  database does not have yet as empty.
 
 `--allow-restructure s1` (`ConfigApplyOptions::allow_restructure`) picks the restructure track's S1 gate in `structural_gate()`
 (`restructure::s1::S1Gate`, wired on `feat/0.4` by track ddl; the gate also judges the stage's `deleted` row of removed attributes:
