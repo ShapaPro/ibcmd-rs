@@ -11,7 +11,8 @@ drop-in and every script of the lab run), the platform does not see other sessio
 whatever is connected; in server mode (`--pid`, `--remote`) it cancels with a warning and **exit
 0**. This apply refuses while SQL Server shows another user process on the database, with exit
 -1, so that a script never takes "not applied" for success (`--exclusivity=assumed` switches the
-look off). It also refuses, with exit 1, every stage that would restructure the database.
+look off). It also refuses, with exit 1, every stage that would restructure the database **unless** the
+restructuring is in the S1 set and the operator names a way back ([below](#the-way-back-before-a-restructuring)).
 
 Contents: [the platform's command](#the-platforms-command) -
 [what is served](#what-is-served) - [what the drop-in prints](#what-the-drop-in-prints) -
@@ -122,16 +123,30 @@ refusal), `--platform=<version>`, `--settings`, `--db-pwd-env`, `--exclusivity=<
 the operator answers for it), `--recovery-backup=<file>` and `--i-have-a-backup` (below). `--sqlcmd` is
 refused: the apply runs on the built-in client.
 
-**The way back before a restructuring.** The own apply drops the old tables of a restructured object inside its
-transaction, and its recovery artifact keeps the `Config` rows and the caches, not the tables (`own-apply.md`,
-"Backup policy"). So a stage that it restructures and writes is refused (`BackupRequired`, exit 1, in Russian, naming
-both options) unless the operator says how to go back: `--recovery-backup=<file>` (the apply takes `BACKUP DATABASE
-... WITH COPY_ONLY, COMPRESSION` to that file, a path the SQL Server service can write and that does not exist yet,
-before the transaction, and names it in the report) or `--i-have-a-backup` (the operator has one; recorded in the
-report). Both: the file. The platform has neither and needs no backup, so this is stricter than it. **In this build
-they are accepted and inert**: the drop-in does not choose the restructuring gate (`--allow-restructure` belongs to
-`mssql-config-apply`), so a stage that needs a restructuring is refused as `требуется штатный config apply` before
-the backup is looked at. They matter as soon as the gate of the restructure track (#391) can be chosen.
+### The way back before a restructuring
+
+The structural gate of the drop-in is always the restructuring track's S1 gate (#391, `AllowRestructure::S1`).
+The platform has no option to choose it, and the backup option is the operator's consent. What the gate does with a
+stage:
+
+| the stage | the drop-in | exit |
+|---|---|---|
+| changes no table: bodies, harmless properties of descriptors (a synonym), whatever the restructure check passes | applied as it always was; no backup option needed; the report's `gate` is `apply-check` | 0 |
+| a restructuring of the S1 set (add, delete an attribute, widen a variable string, switch the index of an attribute; catalogs and documents) **with** `--recovery-backup=<file>` or `--i-have-a-backup` | done by the own restructuring inside the apply's transaction; the report's `gate` is `s1` and `structure` lists the objects and tables | 0 |
+| the same **without** a backup option | `BackupRequired`: the Russian words naming both options; nothing written | 1 |
+| any other restructuring, or an S1 operation that is designed and not built yet (add a tabular section, add an object) | `требуется штатный config apply: <the reasons>`, the S1 reasons among them; nothing written | 1 |
+
+A restructuring drops the old tables of the objects inside the transaction, and the apply's recovery artifact keeps
+the `Config` rows and the caches, not the tables (`own-apply.md`, "Backup policy"), so the way back is a SQL Server
+backup: `--recovery-backup=<file>` (the apply takes `BACKUP DATABASE ... WITH COPY_ONLY, COMPRESSION` to that file,
+a path the SQL Server service can write and that does not exist yet, before the transaction, and names it in the
+report) or `--i-have-a-backup` (the operator has one; recorded in the report). Both: the file. The platform has
+neither and needs no backup, so this is stricter than it.
+
+The S1 gate sits **behind** the restructure check (`gate::FirstThen`): the check judges the stage first, and only
+what it refuses is handed to the S1 gate. Alone, the S1 gate wraps the conservative rule, which refuses every
+descriptor whose text differs, harmless or not: a stage that changed a synonym was refused with "S1: the conservative
+gate refuses descriptors, the restructuring check names no change in them" where the default gate applies it.
 
 The platform of the database is `--platform`, else the settings, else 8.3.27 (a release stands
 for the build the apply was measured on, `8.3.27.2214`). The storage layout is verified against
@@ -241,11 +256,17 @@ the words used to say `config apply` for an operation that was never finished.
 ### Where the drop-in stays stricter than the platform
 
 * **Sessions are looked for** (above), and a connected session is a failure, not a warning.
-* **A restructuring is refused** (`требуется штатный config apply`); the platform carries it out. With a gate that
-  admits S1 it will additionally need a backup option (above).
+* **A restructuring is refused** (`требуется штатный config apply`) unless it is in the S1 set, and then it needs a
+  backup option (`BackupRequired`, exit 1); the platform carries every restructuring out and needs no backup.
 * **`--dynamic=force`, `--extension`, `--sqlcmd`, `--pid`, `--remote`** are refused by name (exit 1).
 * **Stages of the platform's own `config import`** are exit 1 unless the check proves them (`restructuring-check.md`
-  3.6): the record-format noise of a whole native image is proven, a list of deleted files is not read.
+  3.6): the record-format noise of a whole native image is proven; a `deleted` list of removed attributes is judged
+  by the S1 gate, any other list is not read.
+* **Stages of this program's own import** do not carry a restructuring today (evidence:
+  [`s1-acceptance.md`](evidence/dropin-apply/s1-acceptance.md)): the patch mode transfers no attribute, and the
+  base-free stage of a changed descriptor is refused by S1 for the rows it rewrites (the business process flowchart, the
+  `root` row) and cannot compile a form that binds a deleted attribute. A restructuring is staged by the platform's
+  `import files --partial` (or a tree the platform imports) until that changes.
 * It is **less** strict in one place: no metadata check (difference 1 below).
 
 ## Tests and lab evidence
@@ -273,6 +294,9 @@ the words used to say `config apply` for an operation that was never finished.
   platform's own import and apply (`scripts/dropin-e2e/run_e2e.ps1`).
 
 ## Open points
+
+0. **Staging a restructuring with the program's own import** (import track): see the difference above. The
+   drop-in apply is measured on the platform's stage (`evidence/dropin-apply/s1-acceptance.md`).
 
 1. **Exit code of "sessions connected"**: -1 here; the platform's server mode exits 0 after
    cancelling. Its direct mode has no such case.

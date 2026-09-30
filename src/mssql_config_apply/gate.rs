@@ -158,6 +158,10 @@ pub struct StructurePhase {
     /// The catalogs and documents the phase creates. The apply moves their staged rows like any staged row and
     /// registers them at the exchange-plan nodes (the phase answers for the objects, not for their rows).
     pub created: Vec<CreatedObject>,
+    /// The size guard's verdict on the tables the phase rebuilds: the limit and where it came from, the
+    /// totals, the largest table (`restructure::size_guard`, S1-J). A gate without one leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_check: Option<serde_json::Value>,
 }
 
 /// A catalog or a document a structure phase creates.
@@ -189,6 +193,45 @@ pub trait StructuralGate {
     /// apply refuses the list after all.
     fn judges_deleted_row(&self) -> bool {
         false
+    }
+}
+
+/// Two gates in a row: what the first passes goes through as it is; what it refuses is handed to the
+/// second, which may refuse it again (with its own words) or let it through with a structure phase. The
+/// second gate is asked only when the first refuses, so a gate that can do more (the S1 gate) never
+/// makes a stage that the first passes harder to pass: the conservative rule under the S1 gate refuses
+/// every descriptor whose text differs, harmless or not, and the restructure check does not.
+pub struct FirstThen<'a> {
+    first: Box<dyn StructuralGate + 'a>,
+    then: Box<dyn StructuralGate + 'a>,
+}
+
+impl<'a> FirstThen<'a> {
+    pub fn new(first: Box<dyn StructuralGate + 'a>, then: Box<dyn StructuralGate + 'a>) -> Self {
+        Self { first, then }
+    }
+}
+
+impl StructuralGate for FirstThen<'_> {
+    /// The gate that answers for a restructuring.
+    fn name(&self) -> &'static str {
+        self.then.name()
+    }
+
+    fn check(&self, input: &GateInput<'_>) -> Result<GateVerdict> {
+        let first = self.first.check(input)?;
+        if !first.restructuring_required {
+            return Ok(first);
+        }
+        self.then.check(input)
+    }
+
+    fn take_structure(&self) -> Option<StructurePhase> {
+        self.then.take_structure()
+    }
+
+    fn judges_deleted_row(&self) -> bool {
+        self.then.judges_deleted_row()
     }
 }
 

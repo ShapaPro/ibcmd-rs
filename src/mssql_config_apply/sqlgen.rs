@@ -1144,6 +1144,62 @@ mod tests {
     }
 
     #[test]
+    fn a_rehearsal_rolls_the_structure_phase_back_with_the_rest() {
+        let mut input = inputs();
+        input.rehearse = true;
+        input.structure_sql = Some(
+            "-- restructure marker
+SELECT 1;"
+                .to_owned(),
+        );
+        let sql = render_apply_script(&input).unwrap();
+        let phase = sql.find("-- restructure marker").unwrap();
+        let rollback = sql.find("ROLLBACK TRANSACTION;").unwrap();
+        assert!(phase < rollback);
+        assert!(!sql.contains("COMMIT TRANSACTION;"));
+        // and the phase text stands once, as the gate wrote it
+        assert_eq!(sql.matches("-- restructure marker").count(), 1);
+    }
+
+    #[test]
+    fn the_cache_rows_of_a_structure_phase_are_written_guarded_after_it_in_the_same_transaction() {
+        let mut input = inputs();
+        input.structure_sql = Some(
+            "-- restructure marker
+SELECT 1;"
+                .to_owned(),
+        );
+        // the rows the phase makes stale, merged with the apply's own (distinct rows)
+        input.params_rewrites = vec![
+            ParamsRewrite {
+                file_name: "ea13a2c9-0c2f-40fa-b855-710387e3271d.si".to_owned(),
+                old_data_size: 10,
+                old_sha256_hex: "AA".to_owned(),
+                new_bytes: vec![1],
+                set_creation: true,
+            },
+            ParamsRewrite {
+                file_name: "siVersions".to_owned(),
+                old_data_size: 5,
+                old_sha256_hex: "BB".to_owned(),
+                new_bytes: vec![2],
+                set_creation: false,
+            },
+        ];
+        let sql = render_apply_script(&input).unwrap();
+        let phase = sql.find("-- restructure marker").unwrap();
+        let first = sql.find("UPDATE dbo.Params SET Creation = @now").unwrap();
+        let second = sql
+            .find("UPDATE dbo.Params SET Modified = @now, DataSize = 1")
+            .unwrap();
+        let commit = sql.find("COMMIT TRANSACTION;").unwrap();
+        assert!(phase < first && first < second && second < commit);
+        // each is guarded by the digest the plan saw
+        assert!(sql.contains("FileName = N'ea13a2c9-0c2f-40fa-b855-710387e3271d.si' AND PartNo = 0 AND CONVERT(bigint, DataSize) = 10 AND HASHBYTES('SHA2_256', BinaryData) = 0xAA"));
+        assert!(sql.contains("FileName = N'siVersions' AND PartNo = 0 AND CONVERT(bigint, DataSize) = 5 AND HASHBYTES('SHA2_256', BinaryData) = 0xBB"));
+    }
+
+    #[test]
     fn dynamic_generations_are_folded_oldest_first_before_the_move() {
         let mut input = inputs();
         input.generations = vec![

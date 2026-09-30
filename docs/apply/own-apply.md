@@ -810,31 +810,50 @@ restructurings and have none):
 - `tables`, `objects`, `caches`: what the report names (`structure`), and the apply's `tables_touched` and
   `not_written` follow from it.
 
-`--allow-restructure s1` (`ConfigApplyOptions::allow_restructure`) picks track ddl's gate in `structural_gate()`. That
-gate is **not merged yet**: until it is, the choice refuses with «the S1 restructuring gate is not part of this build»,
-and the wiring is one line in `structural_gate()`. The seam is tested by the script tests (the phase runs inside the
-transaction, between the assertions and the move, also ahead of a dynamic fold; without a phase the script is what it
-was) and by the acceptance run below.
+`--allow-restructure s1` (`ConfigApplyOptions::allow_restructure`) picks the restructure track's S1 gate in `structural_gate()`
+(`restructure::s1::S1Gate`, wired on `feat/0.4` by track ddl; the gate also judges the stage's `deleted` row of removed attributes:
+`StructuralGate::judges_deleted_row`, `StructurePhase::consumed_staged_rows`). **The script tests of the seam** (all in
+`cargo test --lib mssql_config_apply`):
 
-**Acceptance: the T1 types case through `mssql-config-apply` equals native.** Twins of the БСП 8.3.27 base with the
-restructure track's T1 stage (attributes of every basic type on five catalogs and a document: 9 rows, 361 KB), restored
-from their backup (`F:\ibcmd\lab\04\restructure\bak\...t1_staged.bak`); the phase was wired to the apply with a
-temporary local overlay of ddl's gate (the merge is theirs):
+| What #397 asks | Test |
+|---|---|
+| the structure phase runs between the checks and the move, inside the transaction, also ahead of a dynamic fold; without a phase the script is what it was | `sqlgen::a_structure_phase_runs_inside_the_transaction_between_the_assertions_and_the_move` |
+| a rehearsal rolls the phase back with the rest; the phase text stands once | `sqlgen::a_rehearsal_rolls_the_structure_phase_back_with_the_rest` |
+| the cache rows of a phase are written guarded by the digest the plan saw, after the phase, in the same transaction | `sqlgen::the_cache_rows_of_a_structure_phase_are_written_guarded_after_it_in_the_same_transaction` |
+| a conflict of two `Params` edits is refused (the object registry `1a621f0f` / `siVersions` wanted by the phase and by a new form), distinct rows join | `tests::a_cache_row_both_the_restructuring_and_a_new_form_want_is_a_refusal` |
+| no backup word: a structural apply that writes refuses, by type, in Russian, naming both options; a dry run and a rehearsal need none | `tests::a_structural_apply_that_writes_needs_a_word_about_a_backup`, `errors::backup_required_is_typed_russian_and_names_both_options`, `tests::the_backup_is_named_in_the_report` |
+| `--allow-restructure s1` builds the S1 gate; without it the gate is the check | `tests::the_s1_class_builds_the_s1_gate_of_the_restructure_track` |
 
-| | Native | This apply |
+**Acceptance: the types case through `mssql-config-apply` equals native, checks 1-10** (`docs/apply/evidence/own-apply/s1a-types-case-checks.txt`).
+Twins of ddl's staged backup of T1 (`F:\ibcmd\lab\04\restructure\bak\...t1_staged.bak`, read only) on the БСП 8.3.27 base, ddl's kit
+(`scripts/restructure-lab`, not modified) for the checks and the apply lab's own runners for the native commands. **The case is T1 without
+the three objects the extension `_ДемоРасширение` adopts** (`_ДемоМестаХранения`, `_ДемоГруппыДоступаПартнеров`, `_ДемоПартнеры`): since
+S1-I (#405) the own restructure refuses to change an object an extension adopts (the full T1 is refused with that reason: `S1: catalog
+_ДемоМестаХранения is adopted by the extension _ДемоРасширение ...`), so the three were unstaged on both twins. What runs: the catalog
+КлючевыеОперации (attributes of Булево, СтрокаПеременная, СтрокаФикс, СтрокаНеогр, ЧислоЦелое, ЧислоДробное, ЧислоНеотр, Дата, ДатаВремя),
+the catalog Удалить_ДемоОбщиеСведения (a string) and the document _ДемоЗаказПокупателя (a number, Булево, Строка, Число, Дата, ДатаВремя,
+СтрокаНеогр): 6 tables rebuilt. **Not covered by this run**: the types Время and ЧислоПапки, which only `_ДемоПартнеры` carried (the full
+T1 was compared before S1-I: `s1-port-acceptance.txt`, 11 tables, checks 3-8).
+
+| # | Check | Result |
 |---|---|---|
-| Time | 269.6 s | **10.1 s** in all (transaction 7.8 s) |
-| The 11 rebuilt tables (`_Reference569`, `16`, `20` with two `_VT`, `2598`, `9367`; `_Document39` with three `_VT`) | | rows, columns and indexes equal; only the names SQL Server generates for two primary keys differ |
-| `Config` | | **9 841 of 9 841 rows identical** |
-| `Params` | | 34 of 38 rows with the same inflated content, among them the XDTO model and the object registry `.si` that the phase rewrites; the other 4 are the two `.ui`, `siVersions` and `DBNamesVersion-DBNames` (native extras) |
-| Tables of the database | 2 234 | 2 234, the same names; `DBSchema` lists the same 1 761 tables |
-| `DBSchema` | | equal but for the two entries `DbCopies` and `DbCopiesUpdates` the native apply rewrites (known difference) |
-| Native `config check` on our result | | «успешно завершена» (6.4 s) |
-| Native `config apply` afterwards | | «Обновление конфигурации базы данных не требуется» (7.9 s) |
-| Native `config export` of both twins | | **12 198 files, all identical** |
+| 1 | the plan made offline from the staged snapshot equals the native result | `corpus_plan_of_the_types_case_equals_the_native_result` passes (ddl's snapshots of the full T1, read only) |
+| 2 | tables, columns, indexes | identical but the drift list: `_DbCopies*`, the auto-named primary keys of `_ConfigChngR`, `_Reference2598`, `_Reference9367` |
+| 3 | data of the 6 rebuilt tables | `EXCEPT` both ways: 0 rows in every table (716, 3, 8, 7, 4, 1 rows) |
+| 4 | `Config` rows, `Creation`/`Modified` included | 0 rows on either side (9 841 of 9 841) |
+| 5 | `DBSchema` entries and `DBNames` | 1 761 tables; entries equal but `DbCopies`, `DbCopiesUpdates`; `DBNames` text equal (348 071 characters) |
+| 6 | the 16 `.si` rows | 16 of 16 have the same text |
+| 7 | a native `config apply` on our twin | «Обновление конфигурации базы данных не требуется» (3.4 s); native `config check` succeeds |
+| 8 | native `config export` of both twins and `source-diff` | 12 198 files, 0 differing |
+| 9 | a session in the 8.3.27 cluster on both (external connection: defaults, write, read back through the object and a query, condition on a new attribute, delete) | 58 lines, identical on the two twins, twice; the tables have their row counts again |
+| 10 | a rehearsal changes nothing | `snapdiff` before and after the rehearsal: no table added, removed or changed, no data change, `DBSchema` the same |
 
-Without a backup option the same run refused before writing anything (exit 1). The register (`_ConfigChngR`) was not
-compared on this case.
+The real run: gate 7.4 s (debug build), transaction 4.2 s, 12.6 s in all, against 155 s of the native apply. Without a backup word
+the same run refuses before writing (exit 1, the Russian text of `BackupRequired`); `--i-have-a-backup` is recorded in the report. The
+change register (`tools\reg_cmp.py`): the same 20 685 rows and file lists on both; the message numbers differ as in the known difference of
+the long path (native 3 NULL per node, ours the NULL the corpus came with; not visible in an exchange message,
+[exchange plans](#exchange-plans-of-distributed-infobases-412)). Checks 11 (refusals) and 12 (a failure inside the transaction) belong to
+the case-by-case protocol of the restructure track; the refusals of this seam are the tests above and the adoption refusal seen here.
 
 **Backup policy for structural applies.** A restructuring drops the old tables inside the transaction; the recovery
 artifact keeps the `Config` rows and the caches, not the tables. So an apply that **restructures and writes** refuses
@@ -1057,8 +1076,9 @@ gate's finding of checkpoint 2, `versions must be based on the effective row`).
   "Removals"). The stage of the platform's own import is refused for its non-empty list and for its rewritten descriptors.
 - **8.5** is admitted for the same stages as 8.3.27 minus new objects (see [8.5](#85-392)); on any other 8.x profile the apply
   is refused.
-- **Restructuring**: the seam is in place and tested, the gate that fills it (`--allow-restructure s1`) waits for track ddl's
-  merge; a structural apply needs `--recovery-backup` or `--i-have-a-backup`.
+- **Restructuring**: `--allow-restructure s1` runs the restructure track's S1 gate in the apply's transaction (attributes added or
+  deleted, strings widened, the index flag; the operations built by the track); an object an extension adopts is refused (S1-I); a
+  structural apply needs `--recovery-backup` or `--i-have-a-backup`.
 - **Exchange plans**: proved on one exchange plan (`_ДемоОбменВРаспределеннойИнформационнойБазе`, DIB) of the БСП 8.3.27
   clone; an object with no register row at any node is not registered (the native rule for it is unknown); a node marked for
   deletion makes the apply refuse (`NeedsNativeApply`); the file list of an inserted row is measured for one-file objects
