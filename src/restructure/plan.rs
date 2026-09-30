@@ -139,6 +139,10 @@ pub struct Addition {
     pub position: usize,
     /// `Use` of a catalog attribute (0 `ForItem`, 1 `ForFolder`, 2 `ForFolderAndItem`).
     pub usage: Option<i64>,
+    /// The `Indexing` the attribute is added with: 0 `DontIndex`, 1 `Index`, 2 `IndexWithAdditionalOrder`.
+    pub indexing: i64,
+    /// The declared indexes the object's entry got for it (`ByFieldFld12`, ...): the same as for a switch.
+    pub indexes: Vec<String>,
 }
 
 impl Addition {
@@ -1185,31 +1189,77 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     // The caches list the attributes (the XDTO model its properties, the object registry its records) and
     // say nothing of a string's limit: a stage that only widens strings leaves them as they are.
     let mut caches = Vec::new();
-    let lists_change = objects.iter().any(ObjectPlan::changes_the_attribute_list);
     if create_context.is_some() && objects.iter().any(|object| !object.sections.is_empty()) {
         bail!(
             "a new object together with new tabular sections (or attributes of them) of existing objects is not built: both rewrite the registry, the index of the generated types and the XDTO model"
         );
     }
-    if objects.iter().any(|object| !object.sections.is_empty()) {
-        if objects.iter().any(|object| !object.removals.is_empty()) {
-            bail!(
-                "a stage that removes an attribute and adds a tabular section (or attributes of one) is not built: the caches are made for additions only"
-            );
-        }
+    if let Some(object) = objects
+        .iter()
+        .find(|object| !object.removals.is_empty() && !object.sections.is_empty())
+    {
+        bail!(
+            "{} {} removes an attribute and adds a tabular section (or attributes of one) in one stage: not built (the caches of a removal are not composed with the ones of a section of the same object)",
+            object.kind.label(),
+            object.object_name
+        );
+    }
+    // The objects with tabular sections get their rows from the caches module (it also does their attributes); the
+    // others -- attributes added or removed -- from the edits of `xdto_update` and `registry_update`, made on the
+    // rows the first left. The two sets edit different objects, so the order does not matter.
+    let with_sections: Vec<usize> = (0..prepared.len())
+        .filter(|&index| !objects[index].sections.is_empty())
+        .collect();
+    let with_attributes: Vec<usize> = (0..prepared.len())
+        .filter(|&index| {
+            objects[index].sections.is_empty() && objects[index].changes_the_attribute_list()
+        })
+        .collect();
+    let mut rows: Vec<RowText> = Vec::new();
+    if !with_sections.is_empty() && !(options.skip_xdto && options.skip_registry) {
         // A tabular section reaches a third row (the index of the generated types) and the row types of the
-        // XDTO model: the rows are made by the caches module for the whole stage; with both the XDTO model
-        // and the registry left alone the index goes with them.
-        if !(options.skip_xdto && options.skip_registry) {
-            caches = section_cache_updates(inputs, &prepared, options)?;
+        // XDTO model; with both the XDTO model and the registry left alone the index goes with them.
+        let subset: Vec<&Prepared> = with_sections
+            .iter()
+            .map(|&index| &prepared[index])
+            .collect();
+        for row in section_cache_rows(inputs, &subset)? {
+            if (options.skip_registry && row.name == cache_rows::REGISTRY)
+                || (options.skip_xdto && row.name == cache_rows::XDTO)
+            {
+                continue;
+            }
+            rows.push(row);
         }
-    } else {
-        if lists_change && !options.skip_xdto {
-            caches.push(xdto_update(inputs, &prepared, &objects)?);
+    }
+    if !with_attributes.is_empty() {
+        let subset: Vec<&Prepared> = with_attributes
+            .iter()
+            .map(|&index| &prepared[index])
+            .collect();
+        let planned: Vec<&ObjectPlan> = with_attributes
+            .iter()
+            .map(|&index| &objects[index])
+            .collect();
+        if !options.skip_xdto {
+            let row = xdto_update(inputs, &subset, &planned, &rows)?;
+            put_row(&mut rows, row);
         }
-        if lists_change && !options.skip_registry {
-            caches.push(registry_update(inputs, &prepared, &objects)?);
+        if !options.skip_registry {
+            let row = registry_update(inputs, &subset, &planned, &rows)?;
+            put_row(&mut rows, row);
         }
+    }
+    if !with_sections.is_empty() {
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    for row in rows {
+        caches.push(CacheUpdate {
+            row_name: row.name,
+            row: deflate(&row.text)?,
+            what: row.what,
+            set_creation: true,
+        });
     }
     if let Some(context) = &create_context {
         create::extend_caches(
@@ -1388,11 +1438,15 @@ fn plan_object(
         if !item.change.added.contains(&attribute.uuid) {
             continue;
         }
-        if attribute.indexing != Some(0) {
-            bail!(
-                "attribute {} is indexed: an index is a separate case of the rebuild",
+        let indexing = match attribute.indexing {
+            Some(mode @ (0 | 1 | 2)) => mode,
+            other => bail!(
+                "attribute {} has the indexing {other:?}: not one of the three modes",
                 attribute.name
-            );
+            ),
+        };
+        if indexing != 0 && method == Method::AlterAdd {
+            bail!("the alter method adds columns without indexes");
         }
         let entries = type_entries(&attribute.pattern_node)
             .with_context(|| format!("attribute {}", attribute.name))?;
@@ -1428,10 +1482,22 @@ fn plan_object(
             field,
             position,
             usage: attribute.usage,
+            indexing,
+            indexes: Vec::new(),
         });
     }
     for addition in &additions {
         insert_field(&mut entry, addition.position, &addition.field)?;
+    }
+    // The indexes of the attributes that come indexed (after the fields are in place: the entries sit in the order of
+    // the fields; the same entries as for a switched flag).
+    for addition in additions
+        .iter_mut()
+        .filter(|addition| addition.indexing != 0)
+    {
+        addition.indexes =
+            add_field_indexes(&mut entry, &addition.field.name, addition.indexing == 2)
+                .with_context(|| format!("the new attribute {}", addition.name))?;
     }
 
     // The switched indexes (after the fields are in place: the entries sit in the order of the fields).
@@ -1734,6 +1800,8 @@ fn plan_sections(
                     field,
                     position: at,
                     usage: None,
+                    indexing: i64::from(indexed),
+                    indexes: Vec::new(),
                 });
             }
             plans.push(SectionPlan {
@@ -1773,6 +1841,8 @@ fn plan_sections(
                     field: field.clone(),
                     position: fields.len() + 1,
                     usage: None,
+                    indexing: i64::from(indexed),
+                    indexes: Vec::new(),
                 });
                 fields.push(field);
             }
@@ -1825,12 +1895,9 @@ fn memoized_descriptors<'a>(
 
 /// The cache rows of a stage that adds tabular sections or attributes of them: the object registry, the index of
 /// the generated types and the XDTO model, from the descriptors before and after (`caches::change::rewrite`,
-/// measured against the native result in cases e1, e3 and e4). The plan refuses a stage that also removes.
-fn section_cache_updates(
-    inputs: &Inputs,
-    prepared: &[Prepared],
-    options: &PlanOptions,
-) -> Result<Vec<CacheUpdate>> {
+/// measured against the native result in cases e1, e3, e4, e5 and e6) for the objects `prepared` (the ones with
+/// sections; the plan refuses an object that also removes).
+fn section_cache_rows(inputs: &Inputs, prepared: &[&Prepared]) -> Result<Vec<RowText>> {
     let configuration = configuration_uuid(&inputs.root_row)?;
     // The descriptor rows parsed once: the traversal of the caches asks for every object of a kind, again and
     // again.
@@ -1884,28 +1951,51 @@ fn section_cache_updates(
             }
             _ => "rewritten by the caches module",
         };
-        if (options.skip_registry && row.name == cache_rows::REGISTRY)
-            || (options.skip_xdto && row.name == cache_rows::XDTO)
-        {
-            continue;
-        }
-        updates.push(CacheUpdate {
-            row_name: row.name.to_owned(),
-            row: deflate(&row.text)?,
+        updates.push(RowText {
+            name: row.name.to_owned(),
+            text: row.text,
             what: what.to_owned(),
-            set_creation: true,
         });
     }
     Ok(updates)
+}
+
+/// A cache row as text (inflated), what the plan changed in it, before it is deflated into a [`CacheUpdate`].
+struct RowText {
+    name: String,
+    text: Vec<u8>,
+    what: String,
+}
+
+/// The row `name` as the earlier edits of this plan left it, if they did.
+fn edited<'a>(rows: &'a [RowText], name: &str) -> Option<&'a [u8]> {
+    rows.iter()
+        .find(|row| row.name.eq_ignore_ascii_case(name))
+        .map(|row| row.text.as_slice())
+}
+
+/// Puts a row among the rows: a row of the same name is replaced (its text already holds the earlier edits).
+fn put_row(rows: &mut Vec<RowText>, row: RowText) {
+    match rows
+        .iter_mut()
+        .find(|kept| kept.name.eq_ignore_ascii_case(&row.name))
+    {
+        Some(kept) => {
+            kept.what = format!("{}; {}", kept.what, row.what);
+            kept.text = row.text;
+        }
+        None => rows.push(row),
+    }
 }
 
 /// The cache row of the XDTO model: a property for each new attribute, after the property of the
 /// attribute before it, and no property for a removed one.
 fn xdto_update(
     inputs: &Inputs,
-    prepared: &[Prepared],
-    objects: &[ObjectPlan],
-) -> Result<CacheUpdate> {
+    prepared: &[&Prepared],
+    objects: &[&ObjectPlan],
+    earlier: &[RowText],
+) -> Result<RowText> {
     let first = prepared
         .iter()
         .zip(objects)
@@ -1914,7 +2004,10 @@ fn xdto_update(
         .context("no object to update the XDTO model for")?;
     let needle = format!("{}.{}", first.new.kind().xdto_object(), first.new.name());
     for (name, stored) in &inputs.cache_rows {
-        let text = inflate(stored).unwrap_or_default();
+        let text = match edited(earlier, name) {
+            Some(text) => text.to_vec(),
+            None => inflate(stored).unwrap_or_default(),
+        };
         if !xdto::is_model(&text) {
             continue;
         }
@@ -1955,11 +2048,10 @@ fn xdto_update(
                 count += 1;
             }
         }
-        return Ok(CacheUpdate {
-            row_name: name.clone(),
-            row: deflate(&model.to_text())?,
+        return Ok(RowText {
+            name: name.clone(),
+            text: model.to_text(),
             what: format!("{count} property line(s) added or removed in the XDTO model"),
-            set_creation: true,
         });
     }
     bail!("no XDTO model cache row knows {needle}: pass --skip-xdto to leave the caches alone")
@@ -1968,9 +2060,10 @@ fn xdto_update(
 /// The cache row of the object registry: a record for each new attribute.
 fn registry_update(
     inputs: &Inputs,
-    prepared: &[Prepared],
-    objects: &[ObjectPlan],
-) -> Result<CacheUpdate> {
+    prepared: &[&Prepared],
+    objects: &[&ObjectPlan],
+    earlier: &[RowText],
+) -> Result<RowText> {
     let (name, stored) = inputs
         .cache_rows
         .iter()
@@ -1981,7 +2074,10 @@ fn registry_update(
                 registry::REGISTRY_ROW
             )
         })?;
-    let text = inflate(stored).context("the object registry row is not raw deflate")?;
+    let text = match edited(earlier, name) {
+        Some(text) => text.to_vec(),
+        None => inflate(stored).context("the object registry row is not raw deflate")?,
+    };
     let added: Vec<BTreeSet<String>> = objects
         .iter()
         .map(|object| {
@@ -2011,14 +2107,13 @@ fn registry_update(
     if count > 0 {
         updated = registry::add_attributes(&updated, &additions)?;
     }
-    Ok(CacheUpdate {
-        row_name: name.clone(),
-        row: deflate(&updated)?,
+    Ok(RowText {
+        name: name.clone(),
+        text: updated,
         what: format!(
             "{count} record(s) of attributes added, {} removed in the object registry",
             removed.len()
         ),
-        set_creation: true,
     })
 }
 

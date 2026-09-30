@@ -582,3 +582,52 @@ fn a_section_of_a_hierarchy_used_for_folders_is_not_built() {
     let text = error_of(&root);
     assert!(text.contains("another use than ForItem"), "{text}");
 }
+
+#[test]
+fn a_new_attribute_comes_indexed_with_the_entries_of_a_switch() {
+    use crate::restructure::tests_plan::NEW_ROW;
+    for (mode, tail) in [
+        (1, vec!["Fld11034", "ID"]),
+        (2, vec!["Fld11034", "Description", "ID", "Marked"]),
+    ] {
+        let mut root = parse_row(&inflate(NEW_ROW).unwrap()).unwrap();
+        let attributes = collection(&mut root, "cf4abea7-37b2-11d4-940f-008048da11f9");
+        let last = attributes.len() - 1;
+        set_indexing(&mut attributes[last], mode);
+        let plan = plan(&inputs(OLD_ROW, &stage(&root)), &options()).unwrap();
+        let object = &plan.objects[0];
+        let [addition] = object.additions.as_slice() else {
+            panic!("{:?}", object.additions)
+        };
+        assert_eq!(addition.indexing, mode);
+        assert_eq!(
+            addition.indexes,
+            ["ByParentFieldFld11034", "ByFieldFld11034"]
+        );
+        let schema = DbSchema::parse(&plan.new_schema).unwrap();
+        let view = schema
+            .view(schema.position("Reference20").unwrap())
+            .unwrap();
+        let indexes = view.indexes().unwrap();
+        let names: Vec<&str> = indexes.iter().map(|index| index.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "ByPredefinedIDNotUniq",
+                "ParentCode",
+                "ParentDescr",
+                "Code",
+                "Descr",
+                "ByParentFieldFld11034",
+                "ByFieldFld11034"
+            ]
+        );
+        assert_eq!(indexes[6].fields, tail);
+        // The physical table has the two indexes more than it would without them.
+        let plain = crate::restructure::plan::plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+        assert_eq!(
+            object.tables[0].table.indexes.len(),
+            plain.objects[0].tables[0].table.indexes.len() + 2
+        );
+    }
+}
