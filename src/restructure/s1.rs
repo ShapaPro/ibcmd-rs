@@ -2,7 +2,7 @@
 //!
 //! The apply asks its gate whether the staged configuration is something it may move. The conservative
 //! gate refuses every descriptor whose text differs. This gate lets through the changes of the set S1 --
-//! built so far: new, removed and widened (variable strings) attributes of catalogs and documents -- and
+//! built so far: new, removed, widened (variable strings) and re-indexed attributes of catalogs and documents -- and
 //! hands the apply the structure work to run in its own transaction ([`StructurePhase`]); everything else
 //! stays a refusal, with the reason.
 //!
@@ -140,6 +140,7 @@ pub fn decide(
             S1Operation::AddAttribute { .. }
                 | S1Operation::DeleteAttribute { .. }
                 | S1Operation::WidenString { .. }
+                | S1Operation::SwitchIndex { .. }
         ) {
             unbuilt = true;
             verdict.block(
@@ -169,15 +170,15 @@ pub fn decide(
         Err(error) => return refuse(verdict, "", format!("{error:#}")),
     };
 
-    // The two decoders agree: the same objects, the same new, removed and widened attributes.
-    type Names<'a> = (BTreeSet<&'a str>, BTreeSet<&'a str>, BTreeSet<&'a str>);
+    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes.
+    type Names<'a> = [BTreeSet<&'a str>; 4];
     let planned: BTreeMap<String, Names<'_>> = plan
         .objects
         .iter()
         .map(|object| {
             (
                 object.object_uuid.to_ascii_lowercase(),
-                (
+                [
                     object
                         .additions
                         .iter()
@@ -193,7 +194,12 @@ pub fn decide(
                         .iter()
                         .map(|widening| widening.name.as_str())
                         .collect(),
-                ),
+                    object
+                        .switches
+                        .iter()
+                        .map(|switch| switch.name.as_str())
+                        .collect(),
+                ],
             )
         })
         .collect();
@@ -206,7 +212,7 @@ pub fn decide(
             };
             (
                 object.row.to_ascii_lowercase(),
-                (
+                [
                     names(|operation| match operation {
                         S1Operation::AddAttribute { attribute, .. } => Some(attribute.as_str()),
                         _ => None,
@@ -219,7 +225,11 @@ pub fn decide(
                         S1Operation::WidenString { attribute, .. } => Some(attribute.as_str()),
                         _ => None,
                     }),
-                ),
+                    names(|operation| match operation {
+                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.as_str()),
+                        _ => None,
+                    }),
+                ],
             )
         })
         .collect();

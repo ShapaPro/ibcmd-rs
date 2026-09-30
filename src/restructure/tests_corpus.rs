@@ -559,3 +559,66 @@ fn corpus_plan_of_the_additional_order_deletion_case_equals_the_native_result() 
     );
     assert_equals_native(&plan, &after);
 }
+
+/// A plan that writes no cache row, against the platform's apply that left the text of all sixteen `.si` rows
+/// as it was.
+fn assert_no_cache_change(
+    plan: &crate::restructure::plan::Plan,
+    staged: &Snapshot,
+    after: &Snapshot,
+) {
+    assert!(plan.caches.is_empty());
+    let rows = staged.rows("Params");
+    let mut compared = 0;
+    for (name, part) in rows.keys().filter(|(name, _)| name.ends_with(".si")) {
+        let before = inflate(&staged.row("Params", name).unwrap()).unwrap();
+        let native = inflate(&after.row("Params", name).unwrap()).unwrap();
+        assert!(before == native, "{name} ({part}) changed natively");
+        compared += 1;
+    }
+    assert_eq!(compared, 16);
+}
+
+/// S1-D, the trace of one flag alone: `ЦелевоеВремя` of `КлючевыеОперации` (a number of a flat catalog)
+/// goes from `DontIndex` to `Index`; against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_index_flag_alone_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d0_base", "d0_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d0_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the index flag case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    let switches: Vec<_> = plan.switches().collect();
+    assert_eq!(switches.len(), 1);
+    assert_eq!((switches[0].from, switches[0].to), (0, 1));
+    assert_eq!(switches[0].added, ["ByFieldFld2646"]);
+    assert_no_cache_change(&plan, &staged, &after);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-D: the index flag on and off in six objects of the pristine БСП -- a number and a string, a flat
+/// catalog, a hierarchical one (a pair of indexes per attribute), a document; with the additional order (a
+/// hierarchical catalog, a document whose date index lists the attribute) on and off; against the native
+/// apply of the same stage.
+#[test]
+fn corpus_plan_of_the_index_flags_on_and_off_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d1_base", "d1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the index flags case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.objects.len(), 6);
+    let switches: Vec<_> = plan.switches().collect();
+    assert_eq!(switches.len(), 12);
+    assert_eq!(switches.iter().filter(|switch| switch.to == 0).count(), 6);
+    assert_eq!(switches.iter().filter(|switch| switch.to == 2).count(), 2);
+    assert_no_cache_change(&plan, &staged, &after);
+    assert_equals_native(&plan, &after);
+}

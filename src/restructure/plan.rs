@@ -8,9 +8,10 @@
 //! What is checked, fail closed (anything else is refused with the reason):
 //! 1. the staged image holds the same files as the stored one (no object added or removed) plus the
 //!    `deleted` marker, which names removed attributes and nothing else;
-//! 2. across every descriptor row of every kind, the new, the removed and the retyped attributes all sit in
-//!    the own attributes of catalogs or documents; none changes its indexing; a retyped one is a variable
-//!    string whose limit grows;
+//! 2. across every descriptor row of every kind, the new, the removed, the retyped and the re-indexed
+//!    attributes all sit in the own attributes of catalogs or documents; none changes its use; a retyped one
+//!    is a variable string whose limit grows; a re-indexed one switches `DontIndex` <-> `Index` or
+//!    `DontIndex` <-> `IndexWithAdditionalOrder`;
 //! 3. each such object is otherwise unchanged as far as its table goes (its shape: hierarchy, code and
 //!    description lengths, number length, ...; its tabular sections) and it has no predefined data, no data
 //!    history, no subordination;
@@ -33,8 +34,8 @@ use crate::restructure::names::{DbNames, deflate, inflate, next_number, version_
 use crate::restructure::object::{ObjectFacts, ObjectKind};
 use crate::restructure::registry::{self, ObjectAdditions};
 use crate::restructure::schema::{
-    Column, DbSchema, FieldEntry, PhysicalTable, SqlType, TableView, TypeEntry, create_index_sql,
-    create_table_sql, field_columns, insert_field, physical_tables, remove_field,
+    Column, DbSchema, FieldEntry, PhysicalTable, SqlType, TableView, TypeEntry, add_field_indexes,
+    create_index_sql, create_table_sql, field_columns, insert_field, physical_tables, remove_field,
     remove_field_indexes, replace_field,
 };
 use crate::restructure::storage::EMPTY_GENERATION;
@@ -166,6 +167,31 @@ pub struct Widening {
     pub to: u64,
 }
 
+/// One attribute whose `Indexing` is switched: the declared indexes of the table entry change, the columns
+/// stay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexSwitch {
+    pub uuid: String,
+    pub name: String,
+    /// The number of its `Fld` entry in `DBNames` (unchanged: a switched flag adds no name).
+    pub number: u64,
+    pub field: String,
+    /// `Indexing` before and after: 0 `DontIndex`, 1 `Index`, 2 `IndexWithAdditionalOrder`.
+    pub from: i64,
+    pub to: i64,
+    /// The declared indexes added (`ByFieldFld12`) or removed (`ByFieldFld12`, `ByDocDate (- Fld12)`).
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+pub(crate) fn indexing_word(mode: i64) -> &'static str {
+    match mode {
+        0 => "DontIndex",
+        1 => "Index",
+        _ => "IndexWithAdditionalOrder",
+    }
+}
+
 /// One physical table of the rebuilt object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TablePlan {
@@ -189,6 +215,7 @@ pub struct ObjectPlan {
     pub additions: Vec<Addition>,
     pub removals: Vec<Removal>,
     pub widenings: Vec<Widening>,
+    pub switches: Vec<IndexSwitch>,
     pub tables: Vec<TablePlan>,
     /// The columns of `Method::AlterAdd`.
     pub alter: Vec<AlterColumn>,
@@ -264,6 +291,22 @@ impl ObjectPlan {
                     .join(", ")
             ));
         }
+        if !self.switches.is_empty() {
+            parts.push(format!(
+                "switched indexes {}",
+                self.switches
+                    .iter()
+                    .map(|switch| format!(
+                        "{} = {} ({} -> {})",
+                        switch.field,
+                        switch.name,
+                        indexing_word(switch.from),
+                        indexing_word(switch.to)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         parts.join("; ")
     }
 
@@ -298,6 +341,13 @@ impl Plan {
         self.objects
             .iter()
             .flat_map(|object| object.widenings.iter())
+    }
+
+    /// Every attribute of every object whose index is switched.
+    pub fn switches(&self) -> impl Iterator<Item = &IndexSwitch> {
+        self.objects
+            .iter()
+            .flat_map(|object| object.switches.iter())
     }
 }
 
@@ -499,6 +549,14 @@ struct Change {
     /// The uuids of the attributes whose type text differs (`check_object` and `plan_object` decide
     /// whether it is a widening of a variable string, the one change of a type that is supported).
     retyped: BTreeSet<String>,
+    /// The uuids of the attributes whose `Indexing` differs and nothing else of their flags (`Use`):
+    /// `plan_object` decides whether the switch is one the platform was traced on.
+    reindexed: BTreeSet<String>,
+}
+
+/// The flags of an attribute wrapper as the inventory keeps them, `<indexing>|<use>`, without the indexing.
+fn flags_but_indexing(flag: &str) -> &str {
+    flag.split_once('|').map_or("", |(_, rest)| rest)
 }
 
 /// Compares the attribute inventory of the two images: the new and the removed attributes by object.
@@ -518,6 +576,7 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
     let mut added: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut removed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut retyped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut reindexed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (uuid, entry) in &new {
         match old.get(uuid) {
             None => {
@@ -534,13 +593,21 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
                         .insert(uuid.clone());
                 }
                 if before.flag != entry.flag {
-                    bail!(
-                        "attribute {} of {} changes its indexing or flags ({:?} -> {:?}): not supported",
-                        entry.name,
-                        entry.owner,
-                        before.flag,
-                        entry.flag
-                    );
+                    // The indexing alone can be switched; a change of `Use` or of anything else in the
+                    // wrapper cannot.
+                    if flags_but_indexing(&before.flag) != flags_but_indexing(&entry.flag) {
+                        bail!(
+                            "attribute {} of {} changes its use or flags ({:?} -> {:?}): not supported",
+                            entry.name,
+                            entry.owner,
+                            before.flag,
+                            entry.flag
+                        );
+                    }
+                    reindexed
+                        .entry(entry.owner.clone())
+                        .or_default()
+                        .insert(uuid.clone());
                 }
                 if before.owner != entry.owner {
                     bail!(
@@ -563,10 +630,11 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
         .keys()
         .chain(removed.keys())
         .chain(retyped.keys())
+        .chain(reindexed.keys())
         .collect();
     if owners.is_empty() {
         bail!(
-            "the staged image adds no attribute, removes none and retypes none: nothing this prototype restructures"
+            "the staged image adds no attribute, removes none, retypes none and switches no index: nothing this prototype restructures"
         );
     }
     Ok(owners
@@ -576,6 +644,7 @@ fn find_changes(image: &StagedImage) -> Result<Vec<Change>> {
             added: added.get(owner).cloned().unwrap_or_default(),
             removed: removed.get(owner).cloned().unwrap_or_default(),
             retyped: retyped.get(owner).cloned().unwrap_or_default(),
+            reindexed: reindexed.get(owner).cloned().unwrap_or_default(),
         })
         .collect())
 }
@@ -1172,6 +1241,79 @@ fn plan_object(
     for addition in &additions {
         insert_field(&mut entry, addition.position, &addition.field)?;
     }
+
+    // The switched indexes (after the fields are in place: the entries sit in the order of the fields).
+    let mut switches = Vec::new();
+    for attribute in attributes.iter() {
+        if !item.change.reindexed.contains(&attribute.uuid) {
+            continue;
+        }
+        let Some(before) = item
+            .old
+            .attributes()
+            .iter()
+            .find(|candidate| candidate.uuid == attribute.uuid)
+        else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (before.indexing, attribute.indexing) else {
+            bail!(
+                "attribute {} has no indexing to switch: not supported",
+                attribute.name
+            );
+        };
+        // Traced on the platform: DontIndex <-> Index (a flat catalog, a hierarchical one, a document) and
+        // DontIndex <-> IndexWithAdditionalOrder (a hierarchical catalog, a document); Index <->
+        // IndexWithAdditionalOrder is not.
+        if !matches!((from, to), (0, 1 | 2) | (1 | 2, 0)) {
+            bail!(
+                "attribute {} switches its index from {} to {}: only DontIndex <-> Index and DontIndex <-> IndexWithAdditionalOrder are traced",
+                attribute.name,
+                indexing_word(from),
+                indexing_word(to)
+            );
+        }
+        let number = stored
+            .main_names
+            .number_of(&attribute.uuid, "Fld")
+            .with_context(|| format!("attribute {} has no number in DBNames", attribute.name))?;
+        let field = format!("Fld{number}");
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        if to == 0 {
+            removed = remove_field_indexes(&mut entry, &field)
+                .with_context(|| format!("attribute {}", attribute.name))?;
+            if removed.is_empty() {
+                bail!(
+                    "attribute {} was indexed in the metadata but the stored table has no index for {field}",
+                    attribute.name
+                );
+            }
+        } else {
+            added = add_field_indexes(&mut entry, &field, to == 2)
+                .with_context(|| format!("attribute {}", attribute.name))?;
+        }
+        switches.push(IndexSwitch {
+            uuid: attribute.uuid.clone(),
+            name: attribute.name.clone(),
+            number,
+            field,
+            from,
+            to,
+            added,
+            removed,
+        });
+    }
+    if switches.len() != item.change.reindexed.len() {
+        bail!(
+            "some switched indexes are not among the own attributes of {} {}",
+            kind.label(),
+            new_facts.name()
+        );
+    }
+    if method == Method::AlterAdd && !switches.is_empty() {
+        bail!("the alter method adds columns only");
+    }
+
     let new_view = TableView::new(&entry)?;
     let old_tables = physical_tables(&old_view)?;
     let new_tables = physical_tables(&new_view)?;
@@ -1258,6 +1400,7 @@ fn plan_object(
             additions,
             removals,
             widenings,
+            switches,
             tables,
             alter,
         },
@@ -1471,7 +1614,7 @@ fn check_object(old: &ObjectFacts, new: &ObjectFacts, change: &Change) -> Result
         && kept_after.iter().zip(&kept_before).all(|(after, before)| {
             after.uuid == before.uuid
                 && (after.pattern == before.pattern || change.retyped.contains(&after.uuid))
-                && after.indexing == before.indexing
+                && (after.indexing == before.indexing || change.reindexed.contains(&after.uuid))
                 && after.usage == before.usage
         });
     if !same_attributes {

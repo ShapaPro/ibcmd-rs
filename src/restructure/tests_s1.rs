@@ -2,8 +2,8 @@
 //! (`apply_check::s1::classify`), and what it refuses (the fixtures of case a2 stand in for the database).
 
 use super::tests_plan::{
-    CATALOG, NEW_ROW, OLD_ROW, client_as_string, inputs, options, string_client_inputs,
-    widen_client,
+    CATALOG, NEW_ROW, OLD_ROW, client_as_string, client_indexing, inputs, options,
+    string_client_inputs, widen_client,
 };
 use crate::apply_check::{ChangeOp, Reason, ReasonClass, RuleId, Seg, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
@@ -85,7 +85,7 @@ fn length(name: &str, from: &str, to: &str) -> Reason {
     )
 }
 
-fn indexing(name: &str) -> Reason {
+fn indexing(name: &str, from: &str, to: &str) -> Reason {
     let mut path = attribute_path(name);
     path.extend([seg("Properties", None), seg("Indexing", None)]);
     structure(
@@ -94,8 +94,8 @@ fn indexing(name: &str) -> Reason {
         OBJECT,
         path,
         Some(ChangeOp::Modified {
-            old: "DontIndex".to_owned(),
-            new: "Index".to_owned(),
+            old: from.to_owned(),
+            new: to.to_owned(),
         }),
     )
 }
@@ -279,18 +279,7 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
         "ffffffff-0000-4000-8000-000000000000"
     );
 
-    // An operation of S1 that is designed but not built (the index flag, a tabular section, an object).
-    let check = check_of(vec![
-        attribute("ДемоНовыйРеквизит", ChangeOp::Added),
-        indexing("Х"),
-    ]);
-    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &base, &options());
-    assert!(verdict.restructuring_required && phase.is_none());
-    assert!(
-        blocked_with(&verdict, "designed") && blocked_with(&verdict, "switch-index"),
-        "{:?}",
-        verdict.blockers
-    );
+    // An operation of S1 that is designed but not built (a tabular section, an object).
     let section = check_of(vec![structure(
         RuleId::TabularSectionAddedDroppedMoved,
         "Catalog",
@@ -371,4 +360,69 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
     };
     let (verdict, phase) = decide(conservative(&[CATALOG]), &silent, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
+}
+
+#[test]
+fn an_index_switch_is_let_through_and_the_untraced_ones_are_not() {
+    // DontIndex -> Index, and -> IndexWithAdditionalOrder, of the boolean "Клиент" of case a2.
+    for (mode, word) in [(1u8, "Index"), (2u8, "IndexWithAdditionalOrder")] {
+        let indexed = client_indexing(OLD_ROW, 0, mode);
+        let staged = inputs(OLD_ROW, &indexed);
+        let check = check_of(vec![indexing("Клиент", "DontIndex", word)]);
+        let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &staged, &options());
+        assert!(
+            !verdict.restructuring_required,
+            "{word}: {:?}",
+            verdict.blockers
+        );
+        let phase = phase.expect("a structure phase");
+        assert!(
+            phase.objects[0].contains("switched indexes Fld151 = Клиент"),
+            "{:?}",
+            phase.objects
+        );
+        assert!(phase.params_rewrites.is_empty() && phase.caches.is_empty());
+        assert_eq!(phase.tables.len(), 3);
+
+        // The check names another attribute than the plan switches: the decoders disagree.
+        let other = check_of(vec![indexing("Другой", "DontIndex", word)]);
+        let (verdict, phase) = decide(conservative(&[CATALOG]), &other, &staged, &options());
+        assert!(verdict.restructuring_required && phase.is_none());
+        assert!(blocked_with(&verdict, "disagree"), "{:?}", verdict.blockers);
+    }
+
+    // The check refuses the switch between the two indexed modes (not traced) ...
+    let between = check_of(vec![indexing(
+        "Клиент",
+        "Index",
+        "IndexWithAdditionalOrder",
+    )]);
+    let staged = inputs(OLD_ROW, &client_indexing(OLD_ROW, 0, 1));
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &between, &staged, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "index-mode-outside-s1"),
+        "{:?}",
+        verdict.blockers
+    );
+    // ... and so does the plan when the check names it as a switch from DontIndex (the images say 1 -> 2).
+    let mut both = inputs(
+        &client_indexing(OLD_ROW, 0, 1),
+        &client_indexing(OLD_ROW, 0, 2),
+    );
+    both.schema = crate::restructure::plan::plan(&staged, &options())
+        .unwrap()
+        .new_schema;
+    let check = check_of(vec![indexing(
+        "Клиент",
+        "DontIndex",
+        "IndexWithAdditionalOrder",
+    )]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &both, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "only DontIndex <-> Index"),
+        "{:?}",
+        verdict.blockers
+    );
 }

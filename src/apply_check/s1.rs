@@ -16,7 +16,7 @@
 //! | add an attribute | `column-added-or-dropped`, `ChildObjects/Attribute[A]`, added |
 //! | delete an attribute | the same, removed |
 //! | widen a string | `attribute-property-not-covered`, `.../Properties/Type/StringQualifiers/Length`, `n -> m`, `m > n` |
-//! | switch the index | `attribute-property-not-covered`, `.../Properties/Indexing`, `DontIndex <-> Index` |
+//! | switch the index | `attribute-property-not-covered`, `.../Properties/Indexing`, `DontIndex <-> Index` or `DontIndex <-> IndexWithAdditionalOrder` |
 //! | add a tabular section | `tabular-section-added-dropped-moved`, `ChildObjects/TabularSection[T]`, added |
 //! | add a plain object | `object-with-storage-added-or-dropped` on the object, added, **and** the same rule on `Configuration`, `ChildObjects/<Kind>[Name]`, added |
 //!
@@ -62,11 +62,13 @@ impl ObjectId {
     }
 }
 
-/// The two values of an attribute's `Indexing` that S1 switches between.
+/// The values of an attribute's `Indexing` that S1 switches. `DontIndex` goes to either of the other two
+/// and back; the other two do not go to one another (not traced on the platform).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum IndexMode {
     DontIndex,
     Index,
+    IndexWithAdditionalOrder,
 }
 
 impl IndexMode {
@@ -74,6 +76,7 @@ impl IndexMode {
         match text {
             "DontIndex" => Some(Self::DontIndex),
             "Index" => Some(Self::Index),
+            "IndexWithAdditionalOrder" => Some(Self::IndexWithAdditionalOrder),
             _ => None,
         }
     }
@@ -183,7 +186,7 @@ refusal_codes! {
     AttributePropertyOutsideS1 => "attribute-property-outside-s1", "a property of an attribute changed that S1 does not switch (its type, its use, its history)";
     AttributeMoved => "attribute-moved", "the attributes changed order";
     LengthNotWidened => "length-not-widened", "the length of a string is not a number that grew";
-    IndexModeOutsideS1 => "index-mode-outside-s1", "the index of an attribute changed to or from a mode other than Index and DontIndex";
+    IndexModeOutsideS1 => "index-mode-outside-s1", "the index of an attribute changed between Index and IndexWithAdditionalOrder, or to or from a value that is none of the three modes";
     TabularSectionOutsideS1 => "tabular-section-outside-s1", "a tabular section was dropped or moved, or changed inside";
     ObjectRemoved => "object-removed", "an object with tables was dropped";
     ObjectListMismatch => "object-list-mismatch", "a new object and the configuration's listing of it do not match";
@@ -585,12 +588,14 @@ fn attribute_property(reason: &Reason, object: ObjectId) -> Taken {
             _ => None,
         };
         return match modes {
-            Some((from, to)) if from != to => Taken::Operation(S1Operation::SwitchIndex {
-                object,
-                attribute: attribute.to_string(),
-                from,
-                to,
-            }),
+            Some((from, to)) if (from == IndexMode::DontIndex) != (to == IndexMode::DontIndex) => {
+                Taken::Operation(S1Operation::SwitchIndex {
+                    object,
+                    attribute: attribute.to_string(),
+                    from,
+                    to,
+                })
+            }
             _ => Taken::Refused(refuse(
                 RefusalCode::IndexModeOutsideS1,
                 reason,
@@ -777,14 +782,19 @@ mod tests {
     }
 
     #[test]
-    fn the_index_switches_between_dontindex_and_index_only() {
+    fn the_index_switches_between_dontindex_and_either_indexed_mode_only() {
         let indexing = vec![
             seg("ChildObjects", None),
             seg("Attribute", Some("A")),
             seg("Properties", None),
             seg("Indexing", None),
         ];
-        for (old, new) in [("DontIndex", "Index"), ("Index", "DontIndex")] {
+        for (old, new) in [
+            ("DontIndex", "Index"),
+            ("Index", "DontIndex"),
+            ("DontIndex", "IndexWithAdditionalOrder"),
+            ("IndexWithAdditionalOrder", "DontIndex"),
+        ] {
             let class = classify(&verdict(vec![reason(
                 RuleId::AttributePropertyNotCovered,
                 "Document",
@@ -1059,7 +1069,8 @@ mod tests {
                     named
                         && matches!(
                             (old.as_str(), new.as_str()),
-                            ("DontIndex", "Index") | ("Index", "DontIndex")
+                            ("DontIndex", "Index" | "IndexWithAdditionalOrder")
+                                | ("Index" | "IndexWithAdditionalOrder", "DontIndex")
                         )
                 }
                 (

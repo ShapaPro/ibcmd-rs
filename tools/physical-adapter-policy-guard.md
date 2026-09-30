@@ -5,10 +5,15 @@ and `pwsh -File tools/validate-physical-adapter-policy.ps1 -RepositoryRoot .
 -SelfTest`.
 
 The guarded production slice is `src/module_blob.rs` plus non-test Rust modules
-under `src/mssql_dump/`, except `mxl_ir.rs` and `moxel.rs`.  `tests.rs` and
-`metadata_order_tests.rs` are excluded.  Inline items are excluded only when
-their `cfg(...)` predicate requires `test=true`; ambiguous or partly-production
-predicates remain guarded.  Schema-owned accessor calls without local literals
+under `src/mssql_dump/`, except `mxl_ir.rs` and `moxel.rs`.  A module the
+compiler reads only for tests is not production and is left out with every file
+below its directory: the guard finds it from the declaration `#[cfg(test)] mod
+name;` (also `pub`, or with other attributes) in a scoped file, so `tests.rs`,
+`tests/`, `metadata_order_tests.rs` and `revision_mix_tests.rs` need no listing
+and the next `*_tests.rs` file needs none either.  A module with a
+`#[path = "..."]` attribute is not resolved and stays guarded.  Inline items are
+excluded only when their `cfg(...)` predicate requires `test=true`; ambiguous
+or partly-production predicates remain guarded.  Schema-owned accessor calls without local literals
 add no inventory.  This intentionally does not cover `src/source_oracle.rs`,
 CLI/parity documentation, or MXL/MOXL production.
 

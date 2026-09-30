@@ -665,3 +665,172 @@ fn refuses_what_it_cannot_prove() {
         .insert("RefSInf4877".to_owned());
     assert!(error_of(&with_companion).contains("companion table"));
 }
+
+/// The row with `Indexing` of the attribute "Клиент" (a boolean of case a2, `Fld151`) changed from `from` to
+/// `to` (0 `DontIndex`, 1 `Index`, 2 `IndexWithAdditionalOrder`).
+pub(super) fn client_indexing(row: &[u8], from: u8, to: u8) -> Vec<u8> {
+    let text = String::from_utf8(inflate(row).unwrap()).unwrap();
+    let start = text.find("\"Клиент\"").unwrap();
+    let old = format!("{{\"B\",1}},1,0,0}},{from},0,1,1}}");
+    let at = start + text[start..].find(&old).unwrap();
+    let mut changed = text.clone();
+    changed.replace_range(
+        at..at + old.len(),
+        &format!("{{\"B\",1}},1,0,0}},{to},0,1,1}}"),
+    );
+    assert!(parse_row(changed.as_bytes()).is_ok());
+    deflate(changed.as_bytes()).unwrap()
+}
+
+#[test]
+fn switching_the_index_on_adds_the_entries_of_the_attribute_and_nothing_else() {
+    for (mode, tail, columns) in [
+        (
+            1u8,
+            vec!["Fld151", "ID"],
+            vec!["_Fld2683", "_ParentIDRRef", "_Folder", "_Fld151", "_IDRRef"],
+        ),
+        (
+            2u8,
+            vec!["Fld151", "Description", "ID", "Marked"],
+            vec![
+                "_Fld2683",
+                "_ParentIDRRef",
+                "_Folder",
+                "_Fld151",
+                "_Description",
+                "_IDRRef",
+                "_Marked",
+            ],
+        ),
+    ] {
+        let indexed = client_indexing(OLD_ROW, 0, mode);
+        let plan = plan(&inputs(OLD_ROW, &indexed), &options()).unwrap();
+        assert_eq!(plan.objects.len(), 1);
+        let object = &plan.objects[0];
+        assert!(
+            object.additions.is_empty()
+                && object.removals.is_empty()
+                && object.widenings.is_empty()
+        );
+        assert_eq!(object.switches.len(), 1);
+        let switch = &object.switches[0];
+        assert_eq!(
+            (switch.name.as_str(), switch.field.as_str()),
+            ("Клиент", "Fld151")
+        );
+        assert_eq!((switch.from, switch.to), (0, i64::from(mode)));
+        assert_eq!(switch.added, ["ByParentFieldFld151", "ByFieldFld151"]);
+        assert!(switch.removed.is_empty());
+        assert_eq!(
+            object.changes(),
+            format!(
+                "switched indexes Fld151 = Клиент (DontIndex -> {})",
+                if mode == 1 {
+                    "Index"
+                } else {
+                    "IndexWithAdditionalOrder"
+                }
+            )
+        );
+        // The entry: the stored one with the pair after the standard indexes; the fields and DBNames are
+        // what they were; no cache is written; all three tables are rebuilt.
+        let ours = DbSchema::parse(&plan.new_schema).unwrap();
+        let view = ours.view(ours.position("Reference20").unwrap()).unwrap();
+        let indexes = view.indexes().unwrap();
+        let names: Vec<&str> = indexes.iter().map(|index| index.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "ByPredefinedIDNotUniq",
+                "ParentCode",
+                "ParentDescr",
+                "Code",
+                "Descr",
+                "ByParentFieldFld151",
+                "ByFieldFld151"
+            ]
+        );
+        assert_eq!(indexes[6].fields, tail);
+        let before = DbSchema::parse(STAGED_SCHEMA).unwrap();
+        let stored = before
+            .view(before.position("Reference20").unwrap())
+            .unwrap();
+        assert_eq!(view.fields().unwrap(), stored.fields().unwrap());
+        assert_eq!(
+            plan.new_names_text,
+            DbNames::parse(NAMES).unwrap().to_text(),
+            "DBNames does not change"
+        );
+        assert!(plan.caches.is_empty());
+        assert_eq!(object.tables.len(), 3);
+        // The main table has the two indexes more, in the order of the entry; the copy is the same.
+        let main = &object.tables[0];
+        assert!(
+            main.table
+                .indexes
+                .iter()
+                .any(|index| index.columns == columns),
+            "{:?}",
+            main.table.indexes
+        );
+        assert_eq!(main.insert_columns.len(), main.old_columns.len() - 1);
+    }
+}
+
+#[test]
+fn switching_the_index_off_is_the_reverse_of_switching_it_on() {
+    let indexed = client_indexing(OLD_ROW, 0, 1);
+    let on = plan(&inputs(OLD_ROW, &indexed), &options()).unwrap();
+    let mut back = inputs(&indexed, OLD_ROW);
+    back.schema = on.new_schema.clone();
+    let off = plan(&back, &options()).unwrap();
+    let switch = &off.objects[0].switches[0];
+    assert_eq!((switch.from, switch.to), (1, 0));
+    assert_eq!(switch.removed, ["ByParentFieldFld151", "ByFieldFld151"]);
+    // The entry is the stored one again (the rebuilt table moves before ConfigChngR, so compare by name).
+    let ours = DbSchema::parse(&off.new_schema).unwrap();
+    let before = DbSchema::parse(STAGED_SCHEMA).unwrap();
+    assert_eq!(
+        ours.tables()[ours.position("Reference20").unwrap()],
+        before.tables()[before.position("Reference20").unwrap()]
+    );
+
+    // An attribute the metadata says is indexed but the stored table has no index for.
+    let mut lying = inputs(&indexed, OLD_ROW);
+    lying.schema = STAGED_SCHEMA.to_vec();
+    assert!(error_of(&lying).contains("has no index for Fld151"));
+}
+
+#[test]
+fn a_switch_the_platform_was_not_traced_on_is_refused() {
+    // Index <-> IndexWithAdditionalOrder.
+    let index = client_indexing(OLD_ROW, 0, 1);
+    let additional = client_indexing(OLD_ROW, 0, 2);
+    let mut both = inputs(&index, &additional);
+    both.schema = plan(&inputs(OLD_ROW, &index), &options())
+        .unwrap()
+        .new_schema;
+    assert!(
+        error_of(&both)
+            .contains("only DontIndex <-> Index and DontIndex <-> IndexWithAdditionalOrder")
+    );
+
+    // The use of the attribute changes with the index.
+    let text = String::from_utf8(inflate(OLD_ROW).unwrap()).unwrap();
+    let start = text.find("\"Клиент\"").unwrap();
+    let old = "{\"B\",1},1,0,0},0,0,1,1}";
+    let at = start + text[start..].find(old).unwrap();
+    let mut changed = text.clone();
+    changed.replace_range(at..at + old.len(), "{\"B\",1},1,0,0},1,1,1,1}");
+    let both_changed = deflate(changed.as_bytes()).unwrap();
+    assert!(error_of(&inputs(OLD_ROW, &both_changed)).contains("changes its use or flags"));
+
+    // A table the index generator does not know: the hierarchical catalog without its parent index.
+    let mut bare = inputs(OLD_ROW, &index);
+    let schema = String::from_utf8(STAGED_SCHEMA.to_vec()).unwrap();
+    bare.schema = schema
+        .replace("\"ParentDescr\"", "\"ParentDescription\"")
+        .into_bytes();
+    assert!(error_of(&bare).contains("ParentDescr"));
+}
