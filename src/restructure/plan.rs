@@ -454,7 +454,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A stored or staged row as text: raw deflate when it is, itself otherwise.
-fn row_bytes(stored: &[u8]) -> Vec<u8> {
+pub(crate) fn row_bytes(stored: &[u8]) -> Vec<u8> {
     inflate(stored).unwrap_or_else(|_| stored.to_vec())
 }
 

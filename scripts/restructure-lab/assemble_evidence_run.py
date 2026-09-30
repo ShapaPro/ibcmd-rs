@@ -2,7 +2,7 @@
 files that were made by hand.
 
 usage: python assemble_evidence_run.py <evidence file> <title> <case>...
-       (per case: out/failure_s2_<case>.txt and out/refusals_<case>/*.json are used when they exist)
+       (per case: out/failure_s2_<case>.txt, out/refusals_<case>/*.json and out/refusals_<case>.txt are used when they exist)
 The cluster session output of the own twin is copied next to the evidence file as s2-<case>-session.txt.
 """
 import glob
@@ -58,6 +58,10 @@ def main():
             blockers = sorted(data.get("gate", {}).get("blockers", []), key=lambda b: (not b["reason"].startswith("S1"), b["row"] != "root"))
             for blocker in blockers[:3]:
                 refusals.append("  %s  %s" % (blocker["row"][:40].ljust(40), blocker["reason"][:230]))
+        notes = os.path.join(OUT, "refusals_%s.txt" % case)
+        if os.path.exists(notes):
+            # refusals_e.ps1: the edits of the staged rows of a fresh twin, each with the S1 blockers of the dry run
+            refusals += [line for line in read(notes)[1:] if line.strip()]
         section(lines, "11. refusals (dry run on a fresh twin whose stage has one change more; nothing written)", refusals or ["(unit tests only)"])
         failure = os.path.join(OUT, "failure_s2_%s.txt" % case)
         if os.path.exists(failure):
