@@ -523,6 +523,72 @@ online applies of the module with the new binary (2.5 s and 1.7 s) leave a base 
 
 Tests, on this tree: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries): 3 703 passed, 0 failed, 12 ignored; the lib alone 3 495.
 
+### 6.6 #408 step 2: the exclusive mode of the old commands is carried out by `mssql_config_apply` (design, checkpoint 1)
+
+**The problem that is left.** Step 1 of #408 made `exclusive`, `live` and `worker` refuse a database that holds markers or
+`_dynupdate_` rows (F-4), and that includes the БСП corpus, whose native tail is such a state: on it the three modes do not run
+at all. Step 2 is the fold: the promotion has to keep what the earlier online generations published.
+
+**The decision.** The `exclusive` mode of `mssql-activate-staged-main` and `mssql-apply-source-change` is handed to
+`mssql_config_apply`, which folds the rows of every online generation into the ordinary rows as the native apply does (twins of
+the dynamic-update cases E1-E4 and of the БСП stages: `docs/apply/own-apply.md`, "Removals" and "Dynamic-update rows go even when the
+stage omits them"). `online` keeps the script of `mssql_main_activation.rs` (it *adds* a generation; nothing to fold). `live` and
+`worker` keep the script and keep refusing on a marker database until the worker lab cluster exists: their transaction is followed by
+a recovery cycle or a worker hand-off that the apply does not do.
+
+**The code path.** Both commands end in one function, so there is one place to change:
+
+| Entry point | Route today | Route for `--mode exclusive` |
+|---|---|---|
+| `mssql-apply-source-change` | `mssql_apply::apply_source_change` (export the active object, classify, `preflight_main_publication`, stage) then `mssql::activate_staged_main` | the same, up to the call of `activate_staged_main`; the preflight no longer refuses markers for `exclusive` |
+| `mssql-activate-staged-main` | `mssql::activate_staged_main` | as below |
+| `activate_staged_main` | profile verification by `rac`, `--allow-non-lab`, read the stage, the rows it replaces and both markers, `prepare_main_activation`, render the script, write the artifacts, run it with `sqlcmd` or the built-in client | the same preamble; `prepare_main_activation` validates the stage and builds the report but accepts markers for `exclusive` and names `MainActivationExecutor::ConfigApply` as the executor; **then** `mssql_config_apply::apply_staged_configuration(&sql, &options)` in place of render + run |
+
+What the preamble keeps, because it is the contract of these commands and not of the apply: the platform-profile verification, the
+acknowledgement, the cluster's word about clients (`own_ras_processes_for_exclusive`), the stage shape (service rows and bodies of existing
+objects, nothing new, one new generation), `--script-output` and `--recovery-output`.
+
+**What `mssql_config_apply` needs.**
+
+1. `ConfigApplyOptions.own_ras_processes` (default empty): the worker processes whose idle `1CV83 Server` sessions the tool's own RAS
+   verification opened (#409 F-3). Both places that count sessions leave them out with the predicate the old gate uses
+   (`mssql_platform_profile::session_exemption`, made `pub(crate)`): `other_sessions` (the plan) and the assertion inside the transaction. Without
+   them the apply counts every session, as it does today.
+2. Nothing else: the fold, the versions of the folded generation, the `Params` marker, the register and `MobileVersions.dat` are already the apply's.
+
+**The options of the call.** `database`, the profile of the command, `dry_run` from `--dry-run`, `exclusivity` = SQL sessions, the
+default gate (the restructure check reads `Config` with the overlay folded in; the conservative gate compares the staged descriptor of an
+aliased object with the raw row and would refuse it), `script_output` from `--script-output`. `--recovery-output` keeps its meaning (the JSON
+of the plan, written before the transaction, as now); the apply's own artifact (`rows.pack`, with the markers and the alias rows, the only one that can
+take a fold back) is named in the report next to it. `--tail-log-output` stays refused for `exclusive`.
+
+**The report.** `MssqlActivateStagedMainReport.activation` keeps its shape: `old_generation` is the generation the promotion starts from (the last online one), `new_generation`
+the staged one, `touched_tables`, `staged_rows`, `recovery_token` come from the apply's report; `apply_source_change` still reads
+`/activation/new_generation`, `/activation/old_generation` and `/activation/recovery_token`. A new field `config_apply` carries the apply's whole report (gate, dynamic
+generations folded, registrations, recovery directory).
+
+**Decisions and their reasons.**
+
+- *No-op.* A stage equal to the ordinary rows is a no-op only on a database without markers. With markers the ordinary rows are not the configuration (the aliases are): the stage takes
+  an online change back to the original text, and the fold has to run. (The step-1 test that expected a no-op there changes with it.)
+- *What changes for a database without markers.* The promotion is now the apply's: it also resets `_ConfigChngR._MessageNo` and registers for the
+  nodes of exchange plans, gives `Files.MobileVersions.dat` its new head, and keeps a recovery artifact of its own. The old exclusive script
+  did none of that; the native apply does all of it, so this is the intended difference, and it is written in the report's `not_written` and in the doc of the command.
+- *`--sqlcmd` (the legacy runner).* The apply needs the built-in SQL Server client. With `--sqlcmd` the `exclusive` mode keeps the script and keeps refusing markers; the message says which client to use.
+- *Extensions* (`mssql-activate-staged-extension`, `exclusive` on `ConfigCAS`) are another table set and are not touched.
+- *Locks.* The script held the application lock `ibcmd-rs:main-activation`, the apply holds `ibcmd-rs:config-apply`. An `online` activation running at the same time is not excluded by the lock, but it holds a session of its own, which the exclusivity check of the apply counts.
+
+**Tests, in this order.** (checkpoint 1: the red ones)
+
+1. `mssql_main_activation::tests::f4_*` (two, `#[ignore]` until step 2, `cargo test --lib f4_ -- --ignored`): the F-4 database of the #344 evidence (an ordinary generation, two online
+   generations) and a promotion of an unrelated module; today the plan refuses, so the test fails on the first assertion. It asserts what step 2 must do: the promotion is accepted, the executor is the config apply,
+   the generation it starts from is the last online one, the module renders no script for it, `live` and `worker` still refuse, `online` still extends the history; and a stage equal to the ordinary rows is not a no-op.
+2. `scripts/apply-lab/f4_repro.ps1`, the repro on a lab clone of the corpus (it carries a native online generation): our `online` generation, then `mssql-apply-source-change --mode exclusive` of another module, then
+   markers and alias rows gone, every alias row's bytes now in the ordinary row, and new sessions (external connection) that see the online change and the promoted one. Red today: the promotion is refused.
+3. (step 2) unit tests of the option and report mappings and of the session exemption in the apply; the twin: the same stage on a byte-equal copy applied by the native `config apply`, and the native exports of both compared.
+
+**Acceptance of #408** (from the issue): the F-4 repro keeps the earlier online changes and a new session sees both generations; the native export equals the native apply's on the same stage.
+
 ## 7. Recovery
 
 **ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from

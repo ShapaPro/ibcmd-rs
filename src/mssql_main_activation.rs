@@ -35,6 +35,17 @@ pub enum MainActivationMode {
     Worker,
 }
 
+/// Who carries out a promotion (#408 step 2, `docs/apply/online-activation.md` 6.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MainActivationExecutor {
+    /// The transaction this module renders ([`render_main_activation_sql`]): `online`, `live`, `worker`.
+    Script,
+    /// `mssql_config_apply`, which folds the rows of earlier online generations as the native apply does:
+    /// the `exclusive` mode.
+    ConfigApply,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MainStorageRow {
     pub file_name: String,
@@ -157,6 +168,12 @@ impl MainActivationPlan {
 
     pub fn is_no_op(&self) -> bool {
         self.no_op
+    }
+
+    /// Who carries the promotion out. Today always the rendered script; #408 step 2 hands the
+    /// `exclusive` mode to `mssql_config_apply` (see the ignored test of this module).
+    pub fn executor(&self) -> MainActivationExecutor {
+        MainActivationExecutor::Script
     }
 
     pub fn recovery(&self) -> &MainActivationRecoverySnapshot {
@@ -1776,6 +1793,58 @@ mod tests {
             let plan = database_with_online_generations(mode, true).unwrap();
             assert!(plan.is_no_op(), "{mode:?}");
         }
+    }
+
+    // #408 step 2 -- RED until the `exclusive` mode is handed to `mssql_config_apply`
+    // (docs/apply/online-activation.md, 6.6). Run them with
+    // `cargo test --lib f4_ -- --ignored`; step 2 removes the `ignore`.
+    //
+    // The F-4 database of the #344 evidence (an ordinary generation and two online generations) and the
+    // promotion of an unrelated module. What the user needs is that the earlier online changes are still
+    // the configuration afterwards: the apply that carries the `exclusive` mode out folds the `_dynupdate_`
+    // rows into the ordinary rows as the native apply does, so this module must accept the promotion, name
+    // that apply as its executor and never render it as a script. `live` and `worker` stay with the script
+    // and keep refusing until the worker lab cluster exists.
+    #[test]
+    #[ignore = "#408 step 2: red until the exclusive mode is handed to mssql_config_apply"]
+    fn f4_an_exclusive_promotion_on_a_database_with_online_generations_is_carried_out_by_the_config_apply()
+     {
+        let plan = database_with_online_generations(MainActivationMode::Exclusive, false).expect(
+            "an exclusive promotion is accepted on a database with online generations: the config apply folds them",
+        );
+        assert_eq!(plan.executor(), MainActivationExecutor::ConfigApply);
+        assert_eq!(
+            plan.old_generation().to_string(),
+            EVIDENCE_G2,
+            "the generation the promotion starts from is the last online one"
+        );
+        assert!(
+            render_main_activation_sql("lab", &plan, None).is_err(),
+            "no script of this module carries an exclusive promotion out"
+        );
+        for mode in [MainActivationMode::Live, MainActivationMode::Worker] {
+            assert!(
+                database_with_online_generations(mode, false).is_err(),
+                "{mode:?} keeps refusing on a database with online generations"
+            );
+        }
+        assert_eq!(
+            database_with_online_generations(MainActivationMode::Online, false)
+                .unwrap()
+                .executor(),
+            MainActivationExecutor::Script
+        );
+    }
+
+    #[test]
+    #[ignore = "#408 step 2: red until the exclusive mode is handed to mssql_config_apply"]
+    fn f4_a_stage_equal_to_the_ordinary_rows_is_no_noop_when_an_exclusive_promotion_has_to_fold() {
+        // The ordinary rows are not the configuration of a database with online generations: the aliases are. A stage
+        // that equals the ordinary rows (an online change taken back to the original text) still changes the
+        // configuration, and the fold has to run.
+        let plan = database_with_online_generations(MainActivationMode::Exclusive, true).unwrap();
+        assert!(!plan.is_no_op());
+        assert_eq!(plan.executor(), MainActivationExecutor::ConfigApply);
     }
 
     #[test]
