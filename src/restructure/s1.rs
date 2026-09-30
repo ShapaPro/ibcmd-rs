@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::apply_check::s1::{S1Operation, classify};
 use crate::apply_check::{RuleId, Verdict, check_staged};
 use crate::mssql_config_apply::gate::{
-    ConservativeGate, CreatedObject, GateInput, GateVerdict, StructuralGate,
+    ConservativeGate, CreatedObject, DESCRIPTOR_DIFFERS, GateInput, GateVerdict, StructuralGate,
     StructurePhase,
 };
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
@@ -363,9 +363,20 @@ pub fn decide(
                 .map(|name| name.to_ascii_lowercase())
         })
         .collect();
+    // A descriptor of an existing object whose text differs, and that no reason of the restructuring check names, is
+    // one the check has read and finds harmless (a synonym, a comment, a presentation, a record format the staging
+    // platform wrote): the conservative rule cannot tell it from a column and refuses it, the check, which the apply
+    // asked first, accepted it, and applying it copies the row. Every other blocker is a limit of this apply
+    // (a new object it cannot create, a row it does not know, a body of a role it does not pass), and stays.
+    let refused_by_the_check: HashSet<String> = check
+        .reasons
+        .iter()
+        .map(|reason| reason.file_name.to_ascii_lowercase())
+        .collect();
     conservative.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
-        !planned.contains_key(&row)
+        !(blocker.reason == DESCRIPTOR_DIFFERS && !refused_by_the_check.contains(&row))
+            && !planned.contains_key(&row)
             && !created_files.contains(&row)
             && !(has_deleted && row == "deleted")
             && row != "root"

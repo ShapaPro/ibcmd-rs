@@ -35,6 +35,12 @@ use super::model::{RowMeta, RowName, classify_name, quote_ident};
 use super::sqlgen::ParamsRewrite;
 use super::versions::{inflate_row, strip_bom};
 
+/// The conservative rule's reason for a descriptor of an existing object whose text differs from the active one: it
+/// cannot tell a synonym from a column, so it refuses them all. The S1 gate withdraws this blocker for a row that the
+/// restructuring check has read and finds harmless.
+pub const DESCRIPTOR_DIFFERS: &str =
+    "the descriptor's text differs from the active one: a metadata change, possibly structural";
+
 /// One reason the staged configuration is not for the own apply.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateBlocker {
@@ -421,10 +427,7 @@ fn compare_descriptors(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Resu
             (Ok(staged), Ok(active)) if staged == active => {
                 verdict.stats.descriptors_layout_only += 1;
             }
-            (Ok(_), Ok(_)) => verdict.block(
-                &name,
-                "the descriptor's text differs from the active one: a metadata change, possibly structural",
-            ),
+            (Ok(_), Ok(_)) => verdict.block(&name, DESCRIPTOR_DIFFERS),
             _ => verdict.block(&name, "a descriptor row that does not inflate"),
         }
         Ok(())
