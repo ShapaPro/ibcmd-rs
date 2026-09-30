@@ -42,7 +42,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::mssql_platform_profile::MssqlNativePlatformProfile;
+use crate::mssql_platform_profile::{MssqlNativePlatformProfile, OwnRasProcess, session_exemption};
 use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 
 use check_gate::ApplyCheckGate;
@@ -148,6 +148,11 @@ pub struct ConfigApplyOptions {
     /// The most rows and bytes of tables a restructuring may rebuild in the transaction (S1-J); the
     /// measured default unless a flag or the settings chain says otherwise.
     pub restructure_limit: crate::restructure::size_guard::LimitSetting,
+    /// The worker processes whose idle `1CV83 Server` SQL sessions the exclusivity check leaves out: the sessions the
+    /// tool's own RAS verification made the cluster open (#409 F-3; the old activation commands, #408). A session of
+    /// that program that runs or holds a transaction, and every session of another program or process, still counts.
+    /// Empty (the default): every session but this process's counts.
+    pub own_ras_processes: Vec<OwnRasProcess>,
 }
 
 /// The XML dialect the restructure check decodes descriptors with.
@@ -234,6 +239,7 @@ impl ConfigApplyOptions {
             backup: BackupPolicy::None,
             admit_unverified_roles: false,
             restructure_limit: Default::default(),
+            own_ras_processes: Vec::new(),
         }
     }
 }
@@ -636,7 +642,21 @@ pub struct OtherSession {
     pub last_request_end: String,
 }
 
-pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<OtherSession>> {
+/// The query of [`other_sessions`]: `@P1` the database, `@P2` this process's id. The idle `1CV83 Server` sessions
+/// of `own_ras_processes` are left out ([`session_exemption`]).
+fn other_sessions_query(own_ras_processes: &[OwnRasProcess]) -> String {
+    format!(
+        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
+         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2{} ORDER BY session_id",
+        session_exemption(own_ras_processes)
+    )
+}
+
+pub fn other_sessions(
+    client: &dyn SqlClient,
+    database: &str,
+    own_ras_processes: &[OwnRasProcess],
+) -> Result<Vec<OtherSession>> {
     let permitted = scalar_i64(
         client,
         "SELECT CONVERT(bigint, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER STATE'))",
@@ -650,8 +670,7 @@ pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<Othe
     let pid = i64::from(std::process::id());
     let mut sessions = Vec::new();
     client.read_rows(
-        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
-         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2 ORDER BY session_id",
+        &other_sessions_query(own_ras_processes),
         &[SqlParam::Text(database), SqlParam::I64(pid)],
         &mut |row| {
             sessions.push(OtherSession {
@@ -1493,6 +1512,7 @@ pub fn plan_with_gate(
         client_pid: std::process::id(),
         rehearse: options.rehearse,
         require_exclusive: options.exclusivity == Exclusivity::SqlSessions,
+        session_exemption: session_exemption(&options.own_ras_processes),
         staged: staged_fp,
         replaced: replaced_fp,
         special_config: special_config_fp,
@@ -1570,7 +1590,7 @@ pub fn apply_with_gate(
         plan.report.script_path = Some(path.clone());
     }
     if options.exclusivity == Exclusivity::SqlSessions {
-        let sessions = other_sessions(client, &options.database)?;
+        let sessions = other_sessions(client, &options.database, &options.own_ras_processes)?;
         if !sessions.is_empty() {
             return Err(ExclusiveAccessRefused {
                 database: options.database.clone(),
@@ -1683,7 +1703,8 @@ pub fn apply_with_gate(
         if let Some((number, message)) = errors::server_error_of(&error)
             && let Some(typed) =
                 errors::from_transaction_code(number, &message, &options.database, || {
-                    other_sessions(client, &options.database).unwrap_or_default()
+                    other_sessions(client, &options.database, &options.own_ras_processes)
+                        .unwrap_or_default()
                 })
         {
             return Err(typed);
@@ -1909,6 +1930,28 @@ fn write_artifact(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sessions_query_leaves_out_only_the_idle_sessions_of_the_own_ras_processes() {
+        // no own process (the default of every caller but the old activation commands): every session but ours counts
+        let plain = other_sessions_query(&[]);
+        assert!(plain.contains("ISNULL(host_process_id, -1) <> @P2 ORDER BY session_id"));
+        assert!(!plain.contains("1CV83 Server"));
+        assert!(
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214)
+                .own_ras_processes
+                .is_empty()
+        );
+        let own = [OwnRasProcess {
+            host: "wks".to_owned(),
+            pid: 4711,
+        }];
+        let query = other_sessions_query(&own);
+        assert!(query.contains("<> @P2 AND NOT (ISNULL(program_name,N'')=N'1CV83 Server'"));
+        assert!(query.contains("status=N'sleeping' AND open_transaction_count=0"));
+        assert!(query.contains("N'wks' AND ISNULL(host_process_id,-1) IN (4711)"));
+        assert!(query.ends_with(" ORDER BY session_id"));
+    }
 
     #[test]
     fn the_8_5_profile_is_planned_like_any_other() {

@@ -23,3 +23,11 @@ ddl track's kit (`scripts/restructure-lab`: `snapshot.py`, `snapdiff.py`, `si_di
 The stage of the first twin is what `ibcmd-rs infobase config import` (branch `feat/0.4-import-override`) writes for the tree of the
 import lab with the form `ВсеЗаметки` and the template `ДатыПасха` removed; the second adds the removal of the first attribute of
 `Catalog._ДемоГруппыДоступаНоменклатуры` (`edits.py attrdel`).
+
+## #408 step 2 (the exclusive mode of the old activation commands)
+
+| Script | What |
+|---|---|
+| `f4_repro.ps1` | the F-4 repro: a clone of the corpus (it carries a native online generation), our `online` generation, then `mssql-apply-source-change --mode exclusive` of another module; the checks of the acceptance (no marker, no alias row, the aliases' bytes in the ordinary rows, a new session sees both online changes and the promoted one). Red until step 2 |
+| `f4_session.ps1` | a NEW external-connection session (COM, Windows PowerShell 5.1) that reads `ТипыВнешнихСистем().Telegram` and `ПроверкаIbcmdRsF4()` |
+| `f4_trees.py` | the two source trees of the repro (one common module each, ExternalConnection = true) |
