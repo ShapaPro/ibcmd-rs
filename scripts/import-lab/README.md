@@ -25,6 +25,9 @@ the "ODBC Driver 18 for SQL Server", PowerShell 7, SQL Server with Windows authe
 | `native_subset.ps1` | native `config import` of a tree with only the named edits, to find which edit the platform refuses |
 | `run_guard_acceptance.ps1` | the guard's acceptance on a БСП clone: every edit of `edits.py` through the drop-in `config import` with its default flags; refusals must leave ConfigSave byte-identical (fingerprint before and after), carried edits must stage; results in `out\guard-acceptance\<tag>.json` |
 | `run_uha_guard.ps1` | what the guard costs on ERP УХ, offline (`IBCMD_RS_BASE_ROWS_DIR`, `--script-only`) inside the heavy lock: wall and CPU seconds, peak memory, the stage's timing lines; results in `out\uha-guard\<tag>.json` |
+| `run_override_acceptance.ps1` | step 2: a tree through the drop-in import into a БСП clone (default flags), what it left in ConfigSave, the platform's native `config apply` and `config export`, `source-diff` of the tree against the export; results in `out\override-acceptance\<tag>.json` |
+| `configsave_summary.py` | what a stage left in ConfigSave: row count, rows in parts, the years of the dates, the `deleted` row's names, the `versions` counts (read-only) |
+| `run_uha_import.ps1` | the database-backed import on an ERP УХ clone inside the heavy lock: wall and CPU seconds, peak memory, the stage's timing lines (the comparison of the tree, the base rows, the guard, the move into ConfigSave); results in `out\uha-import\<tag>.json` |
 
 Typical run:
 

@@ -481,6 +481,19 @@ def c_formdel(t):
     return {"object": "Catalog.Заметки", "form": "ВсеЗаметки"}
 
 
+@change("tpldel", "owned object removed", "template ДатыПасха removed from DataProcessor.ЗаполнениеКалендарныхГрафиков (files and the <Template> entry)")
+def c_tpldel(t):
+    owner = "DataProcessors/ЗаполнениеКалендарныхГрафиков"
+    t.delete(owner + "/Templates/ДатыПасха.xml")
+    t.delete(owner + "/Templates/ДатыПасха")
+    text = t.read(owner + ".xml")
+    key = "\t\t\t<Template>ДатыПасха</Template>\n"
+    assert key in text
+    text = text.replace(key, "", 1)
+    t.write(owner + ".xml", text)
+    return {"object": "DataProcessor.ЗаполнениеКалендарныхГрафиков", "template": "ДатыПасха"}
+
+
 @change("catfile", "object file removed, listing kept", "Catalogs/Удалить_ДемоОбщиеСведения.xml removed but Configuration.xml still lists it")
 def c_catfile(t):
     t.delete("Catalogs/Удалить_ДемоОбщиеСведения.xml")

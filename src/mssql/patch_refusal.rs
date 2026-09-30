@@ -34,6 +34,9 @@ pub(crate) enum StageProblem {
     /// file of: `what` is the writer's word for the place (an exchange plan's
     /// content, a role's rights, ...).
     UnresolvedReference { what: String, reference: String },
+    /// The build of the object from the tree (`override_stage`) refused it:
+    /// the writers' reasons, family by family.
+    CannotBuild { reasons: String },
 }
 
 /// The places whose writers say `failed to resolve <what> <reference>` when a
@@ -55,6 +58,25 @@ pub(super) fn classify(error: &anyhow::Error) -> Option<StageProblem> {
         .map(|cause| cause.to_string())
         .collect::<Vec<_>>();
     for text in &texts {
+        if let Some(reasons) = text.strip_prefix(super::override_stage::CANNOT_BUILD) {
+            return Some(StageProblem::CannotBuild {
+                reasons: reasons.to_string(),
+            });
+        }
+        if let Some(differ) = text.strip_prefix(super::override_stage::PREDEFINED_ITEMS_DIFFER) {
+            let added = differ
+                .strip_prefix("added: ")
+                .and_then(|rest| rest.split_once("; removed: "))
+                .map(|(added, _)| added)
+                .unwrap_or_default();
+            return Some(StageProblem::PredefinedItemsMissing {
+                items: added
+                    .split(", ")
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            });
+        }
         if let Some(items) = text.strip_prefix(ITEMS_MISSING) {
             return Some(StageProblem::PredefinedItemsMissing {
                 items: items.split(", ").map(str::to_string).collect(),
@@ -106,6 +128,7 @@ pub(super) fn refusal(source_root: &Path, failures: Vec<ObjectFailure>) -> anyho
     )];
     let mut new_objects = false;
     let mut dangling = false;
+    let mut unbuildable = false;
     for failure in failures.iter().take(LISTED_OBJECTS) {
         let path = relative(source_root, &failure.xml);
         match classify(&failure.error) {
@@ -126,6 +149,13 @@ pub(super) fn refusal(source_root: &Path, failures: Vec<ObjectFailure>) -> anyho
             Some(StageProblem::UnresolvedReference { what, reference }) => {
                 dangling = true;
                 lines.push(format!("  {path}: {}", unresolved_text(&what, &reference)));
+            }
+            Some(StageProblem::CannotBuild { reasons }) => {
+                unbuildable = true;
+                lines.push(format!(
+                    "  {path}: {} не удалось собрать из дерева: {reasons}",
+                    noun_nominative(&path)
+                ));
             }
             None => lines.push(format!(
                 "  {path}: не удалось собрать строки объекта: {:#}",
@@ -148,6 +178,12 @@ pub(super) fn refusal(source_root: &Path, failures: Vec<ObjectFailure>) -> anyho
     if dangling {
         lines.push(
             "Дерево неполное: на объект ссылаются, а файла нет. --base-free такое дерево тоже не примет.".to_string(),
+        );
+    }
+    if unbuildable {
+        lines.push(
+            "Причина названа выше: такой объект сборка из дерева не берёт. Исправьте файл дерева или загрузите эту конфигурацию штатным ibcmd (или Конфигуратором)."
+                .to_string(),
         );
     }
     anyhow::Error::new(StageRefused::new(lines.join("\n")))
@@ -193,6 +229,28 @@ fn relative(root: &Path, path: &Path) -> String {
         .map(|part| part.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// `объект`, `форму`, `макет` ...: what the file at `path` is, as the object of
+/// "could not build".
+fn noun_nominative(path: &str) -> &'static str {
+    match noun(path) {
+        "формы" => "форму",
+        "макета" => "макет",
+        "справочника" => "справочник",
+        "документа" => "документ",
+        "перечисления" => "перечисление",
+        "роли" => "роль",
+        "подсистемы" => "подсистему",
+        "общего модуля" => "общий модуль",
+        "отчёта" => "отчёт",
+        "обработки" => "обработку",
+        "регистра сведений" => "регистр сведений",
+        "регистра накопления" => "регистр накопления",
+        "константы" => "константу",
+        "плана обмена" => "план обмена",
+        _ => "объект",
+    }
 }
 
 /// `объекта`, `формы`, `макета` ...: what the file at `path` is, in the
@@ -405,6 +463,24 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("failed to"), "{text}");
+    }
+
+    #[test]
+    fn an_object_the_build_could_not_make_is_named_with_the_reason() {
+        let root = PathBuf::from("C:\tree");
+        let error = anyhow::anyhow!(
+            "{}kind body: the writer refuses it",
+            super::super::override_stage::CANNOT_BUILD
+        );
+        let text = message(&refusal(
+            &root,
+            vec![failure(&root, "Catalogs/A.xml", error)],
+        ));
+        assert!(
+            text.contains("  Catalogs/A.xml: справочник не удалось собрать из дерева: kind body: the writer refuses it"),
+            "{text}"
+        );
+        assert!(text.contains("Исправьте файл дерева"), "{text}");
     }
 
     #[test]
