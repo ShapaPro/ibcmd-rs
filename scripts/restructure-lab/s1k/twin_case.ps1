@@ -9,8 +9,8 @@
 # Checks: 10 (a rehearsal changes nothing), 3 (EXCEPT both ways: the rebuilt tables, Config, every table of the extension schema),
 # 4 (Config rows; part of 3), 5 (DBSchema, DBNames), 6 (the 16 .si rows), 7 (a native apply on our twin), 8 (native export of both,
 # ibcmd-rs source-diff), 9 (a cluster session on both, outputs compared). Check 1 (the offline plan) is the corpus tests'; 2 is the
-# snapshot diff printed here; 11 and 12 are the refusal and the injected failure (inject_failure.ps1 of the ddl track, on the script
-# this writes).
+# snapshot diff printed here; 11 and 12 are the refusal (check11.ps1, case i1) and the injected failure (check12.ps1, on the script
+# and the backup of the staged twin this writes: out\<case>\script_real.sql, staged.bak; -Skip check12 leaves the backup out).
 param(
     [Parameter(Mandatory = $true)][string]$Case,
     [Parameter(Mandatory = $true)][string]$Bin,
@@ -67,6 +67,10 @@ Log 'our apply: rehearsal (check 10)'
 python "$rk\snapshot.py" $own "${Case}_rehearsed" | Select-Object -Last 1
 python "$rk\snapdiff.py" $own "${Case}_staged" $own "${Case}_rehearsed" > "$o\rehearse_diff.txt"
 "check 10: " + ((Get-Content "$o\rehearse_diff.txt" -Encoding UTF8 | Select-String -Pattern '^changed \(0\)|^\(0\)' ) -join ' ')
+if ($Skip -notcontains 'check12') {
+    # the staged state, for check12.ps1 (a fresh twin the injected failure runs on)
+    sqlcmd -S localhost -E -C -b -Q "BACKUP DATABASE [$own] TO DISK = N'$o\staged.bak' WITH COPY_ONLY, COMPRESSION, INIT" | Select-Object -Last 1
+}
 Log 'our apply: real run'
 & $Bin @common --i-have-a-backup --report "$o\real.json" --script-output "$o\script_real.sql" --recovery-dir "$o\recovery" > "$o\real.txt" 2> "$o\real.err"
 "real exit $LASTEXITCODE"

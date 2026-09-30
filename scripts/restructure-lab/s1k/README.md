@@ -21,6 +21,16 @@ pwsh -NoProfile -File twin_case.ps1 -Case d0 -Bin <ibcmd-rs.exe> -Job ..\jobs\s2
 #   -StageOwnNative: HARNESS VALIDATION ONLY (the own twin is staged by the native partial import)
 ```
 
+Checkpoint 2 in one command (the import phase, the twin protocol with the session job, check 12 per case; check 11 for i1):
+
+```powershell
+pwsh -NoProfile -File run_checkpoint2.ps1 -Bin <ibcmd-rs.exe> -Cases "a1,b1,b2,c1,d0,d1,i1" [-Drop]
+# or by hand, per case, after import_phase.ps1 staged the own twin:
+pwsh -NoProfile -File twin_case.ps1 -Case b1 -Bin <ibcmd-rs.exe> -Job ..\jobs\s2_b1.bsl   # also takes out\<case>\staged.bak
+pwsh -NoProfile -File check12.ps1 -Case b1                                                # the injected failure on a fresh twin
+pwsh -NoProfile -File check11.ps1 -Case i1 -Bin <ibcmd-rs.exe> [-Native]                  # the refusal (adopted objects)
+```
+
 `python cases.py list` prints the cases. Set `PYTHONDONTWRITEBYTECODE=1` (the repository ignores `__pycache__`, but a
 kit that leaves bytecode about is a nuisance). Databases are dropped by the caller with
 `F:\ibcmd\lab\04\tools\drop-lab-dbs.ps1 -Track ext -MinIdleMinutes 10`.

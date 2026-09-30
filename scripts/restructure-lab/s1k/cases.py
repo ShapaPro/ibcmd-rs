@@ -11,6 +11,7 @@ the ones the S1 operations were traced and twin-verified with, so a difference b
 the chain's, not the edit's. `REF` is the reference native export of the БСП 8.3.27 corpus clone (12 198 files).
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +88,112 @@ def run_i1(out):
     tree.save()
 
 
+def unbind_form(text, attr):
+    """The form text without what binds the deleted attribute `attr` of the object: the items whose `<DataPath>` is
+    `Объект.<attr>` / `Список.<attr>` (with their menus, tooltips and children), the `<Field>Список.<attr></Field>`
+    lines of a dynamic list, and the field of a manual query text (`<alias>.<attr>,`). Returns (text, removed)."""
+    lines = text.split("\n")
+    removed = []
+
+    def indent(line):
+        return len(line) - len(line.lstrip("\t"))
+
+    # items
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # the item that binds the attribute: a form item by its data path, or an item of the list's settings (an
+        # order, a filter, a selected field) by its field
+        if stripped in (
+            "<DataPath>Объект.%s</DataPath>" % attr,
+            "<DataPath>Список.%s</DataPath>" % attr,
+            "<dcsset:field>%s</dcsset:field>" % attr,
+            '<dcsset:left xsi:type="dcscor:Field">%s</dcsset:left>' % attr,
+        ):
+            depth = indent(lines[i]) - 1
+            start = i
+            while start > 0 and not (indent(lines[start]) == depth and lines[start].lstrip("\t").startswith("<") and not lines[start].lstrip("\t").startswith("</")):
+                start -= 1
+            end = i
+            while end < len(lines) and not (indent(lines[end]) == depth and lines[end].lstrip("\t").startswith("</")):
+                end += 1
+            removed.append("item " + lines[start].strip()[:60])
+            del lines[start:end + 1]
+            i = start
+            continue
+        i += 1
+    # the fields a dynamic list keeps always selected
+    kept = []
+    for line in lines:
+        if line.strip() == "<Field>Список.%s</Field>" % attr:
+            removed.append("field " + attr)
+            continue
+        kept.append(line)
+    lines = kept
+    # a manual query: `<alias>.<attr>,` (the last field has no comma: the one before loses its own)
+    field = re.compile(r"^\t+[^\s<>.]+\.%s(,?)\r?$" % re.escape(attr))
+    out = []
+    for line in lines:
+        match = field.match(line)
+        if match:
+            removed.append("query " + line.strip())
+            if not match.group(1) and out and out[-1].rstrip("\r").endswith(","):
+                out[-1] = out[-1].rstrip("\r")[:-1] + ("\r" if out[-1].endswith("\r") else "")
+            continue
+        out.append(line)
+    return "\n".join(out), removed
+
+
+def form_paths(rel_object):
+    """The Form.xml files of an object of the reference tree: Catalogs/X -> [Catalogs/X/Forms/F/Ext/Form.xml]."""
+    folder = os.path.join(REF, rel_object, "Forms")
+    if not os.path.isdir(folder):
+        return []
+    return [
+        "%s/Forms/%s/Ext/Form.xml" % (rel_object, name)
+        for name in sorted(os.listdir(folder))
+        if os.path.isfile(os.path.join(folder, name, "Ext", "Form.xml"))
+    ]
+
+
+def with_form_unbinding(name):
+    """The s2 case `name` (deleted attributes) with the bindings of the deleted attributes taken out of the object's
+    forms: the platform refuses a tree whose form binds an attribute the object no longer has, and a case of our
+    chain must fail (or not) for the operation, not for the edit."""
+    def run(out):
+        tree = s2.Tree(out)
+        deleted = []
+        original = s2.remove_attribute
+
+        def recording(t, rel, attribute):
+            deleted.append((rel[:-len(".xml")], attribute))
+            original(t, rel, attribute)
+
+        s2.remove_attribute = recording
+        try:
+            s2.CASES[name](tree)
+        finally:
+            s2.remove_attribute = original
+        for obj, attribute in deleted:
+            for form in form_paths(obj):
+                # a form the deletion does not touch stays out of the stage
+                if form in tree.files:
+                    current = tree.files[form][0]
+                else:
+                    with open(os.path.join(REF, form), encoding="utf-8-sig") as f:
+                        current = f.read()
+                text, removed = unbind_form(current, attribute)
+                if removed:
+                    tree.put(form, text)
+                    current = text
+                    print("unbound %s from %s: %s" % (attribute, form, "; ".join(removed)))
+                left = re.findall(r"[^\n]*\b%s\b[^\n]*" % re.escape(attribute), current)
+                if left:
+                    print("WARNING %s still mentions %s: %s" % (form, attribute, left[0].strip()[:100]))
+        tree.save()
+    return run
+
+
 def from_s2(name):
     def run(out):
         tree = s2.Tree(out)
@@ -98,8 +205,8 @@ def from_s2(name):
 # id -> (S1 operation, title, editor, built, expected outcome of the chain with the import of this branch, notes)
 CASES = {
     "a1": ("A", "add attributes of every primitive type (objects no extension adopts)", run_a1, True),
-    "b1": ("B", "delete attributes (middle, last, first, indexed, only, hierarchical, document, delete + add)", from_s2("b1"), True),
-    "b2": ("B", "delete an attribute with the additional-order index (catalog, document)", from_s2("b2"), True),
+    "b1": ("B", "delete attributes (middle, last, first, indexed, only, hierarchical, document, delete + add)", with_form_unbinding("b1"), True),
+    "b2": ("B", "delete an attribute with the additional-order index (catalog, document)", with_form_unbinding("b2"), True),
     "c1": ("C", "widen variable strings (catalog, hierarchical, document, indexed, up to 1024)", from_s2("c1"), True),
     "d0": ("D", "the index flag: one alone", from_s2("d0"), True),
     "d1": ("D", "the index flag on and off, additional order", from_s2("d1"), True),

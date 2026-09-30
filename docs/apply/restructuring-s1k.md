@@ -27,6 +27,10 @@ carries), `out\<case>\` (the edit, the reports, the record), `snap\` (the snapsh
 | `twin_case.ps1` | the twin protocol of one case: the native side (native `import files --partial` of the edited files, native apply), OUR apply on our twin (dry run, rehearsal, real run), checks 10, 3, 4, 5, 6, 7, 8, 9 |
 | `compare_twins.py`, `check4.py`, `checks56.py`, `check8.py` | EXCEPT both ways over tables (and every table of the extension schema); `Config` row by row; `DBNames`, `DBSchema` entries and the `.si` rows; the native exports |
 | `native_main.ps1` | native `ibcmd` on a lab clone: `ImportFiles`, `Apply`, `Export` (the writes under the native lock, one command per hold) |
+| `digest.ps1` | the digest of a database that checks 11 and 12 compare before and after (rows of `Config` / `ConfigSave` / `Params`, `SchemaStorage`, `DBSchema`, `DBNames`, every column and index, the `*NG` tables); the ddl track's own, for `ibcmd_rs_05_ext_s1k_*` |
+| `check11.ps1` | the refusal of a case (i1): OUR apply, dry run and real run, must refuse naming the objects and the adoption and leave the digest as it was; `-Native` also runs the platform apply on the same twin, for the record |
+| `check12.ps1` | the injected failure: the script our real apply made (`out\<case>\script_real.sql`) on a fresh twin of the staged state (`staged.bak`, taken by `twin_case.ps1` just before the real run) with a `THROW` before `COMMIT`; the digest must be unchanged |
+| `run_checkpoint2.ps1` | every built case through the whole chain (`import_phase.ps1`, `twin_case.ps1` with the case's session job, `check12.ps1`; i1: `check11.ps1`), one log per case, the summary at the end |
 
 ## 2. The cases
 
@@ -36,15 +40,29 @@ them) and used by case i1.
 
 | case | operation | edit | session job |
 |---|---|---|---|
-| a1 | A: add attributes | attributes of every primitive type on `КлючевыеОперации`, `Удалить_ДемоОбщиеСведения` and the document `_ДемоЗаказПокупателя` (the ddl track's types case without its three adopted catalogs) | to write |
-| b1 | B: delete attributes | the middle, the last, the first, an indexed one, the only one, in a hierarchical catalog, in a document, delete + add (6 objects) | `jobs/s2_b1.bsl` |
-| b2 | B | an attribute with the additional-order index (catalog `_ДемоПроекты`, document `_ДемоНачислениеЗарплаты`) | `jobs/s2_b2.bsl` |
+| a1 | A: add attributes | attributes of every primitive type on `КлючевыеОперации`, `Удалить_ДемоОбщиеСведения` and the document `_ДемоЗаказПокупателя` (the ddl track's types case without its three adopted catalogs) | `jobs/s1k_a1.bsl` (`types_t1.bsl` of the ddl track on those three objects) |
+| b1 | B: delete attributes | the middle, the last, the first, an indexed one, the only one, in a hierarchical catalog, in a document, delete + add (6 objects); **the forms of these objects lose what binds the deleted attributes** (see below) | `jobs/s2_b1.bsl` |
+| b2 | B | an attribute with the additional-order index (catalog `_ДемоПроекты`, document `_ДемоНачислениеЗарплаты`); its list form loses the binding too | `jobs/s2_b2.bsl` |
 | c1 | C: widen a string | six strings in five objects (catalog, hierarchical catalog, document, indexed, up to 1024) | `jobs/s2_c1.bsl` |
 | d0 | D: the index flag | one flag alone | `jobs/s2_d0.bsl` |
 | d1 | D | on and off, additional order, string and number, hierarchical and flat catalog, document | `jobs/s2_d1.bsl` |
 | i1 | I: an adopted object | a string attribute on `_ДемоПартнеры` and `_ДемоНоменклатура` (adopted by `_ДемоРасширение`, the second with `_Reference18X1`): S1-I must refuse | - |
 | e1 | E: add a tabular section | not built in the gate yet; the editor comes with the operation | - |
 | f1 | F: add a catalog / a document | not built yet; the same | - |
+
+**The forms of b1 and b2.** The ddl track's edit deleted the attributes in the object files alone and staged only those
+files natively, so the forms that bind the attributes were never part of what native saw. A whole tree is another matter: a
+form whose item binds an attribute the object no longer has is a tree the platform refuses (the coordinator's finding, and
+what import's b1 failure at the form pack is near to). From checkpoint 2 the editor of b1 and b2 (`cases.py`,
+`with_form_unbinding`) takes out of every form of the object what binds each deleted attribute: the items whose `<DataPath>`
+is `Объект.<attr>` / `Список.<attr>` with their menus, tooltips and children, the `<Field>Список.<attr></Field>` lines of a
+dynamic list, the items of the list settings that name the field (`dcsset:field`, an order or a filter), and the field of
+a manual query text (`<alias>.<attr>,`). For b1: ten form items, one field line and two query lines in nine forms (the
+forms are added to the edited files); for b2: one form item, one order item of the list settings, one field line and one
+query line in one form. The stage of the native partial import of the whole b1 set, forms included, is accepted (exit 0);
+the native apply of it is in the record of checkpoint 2. What is left of the attribute's name in a form is the word in a title
+(`СтраницаКомментарий`, `Комментарий`), which binds nothing. The failure of b1 in the form pack of the import stays a
+separate note to the import track if it persists after the override.
 
 ## 3. The protocol for two chains that stage apart
 
@@ -105,6 +123,17 @@ about our import) and runs everything after it, through `mssql-config-apply --al
 
 ## 5. Checkpoint 2
 
-When step 2 of #388 and the wiring of the drop-in apply merge: `run_phase1.ps1` again (now expecting a stage), then
-`twin_case.ps1` per case with its session job, the cases i1 (refusal, check 11) and, when the operations land, e1 and f1,
-and one injected failure (check 12). Cases that stage more than S1 covers stay refusals.
+When step 2 of #388 and the wiring of the drop-in apply merge, **only runs are left**:
+
+```powershell
+# the binary of feat/0.4 with the import override and the wiring; the lab as in README.md
+pwsh -NoProfile -File run_checkpoint2.ps1 -Bin <ibcmd-rs.exe> -Cases "a1,b1,b2,c1,d0,d1,i1" [-Drop]
+python assemble_phase1.py ...                      # the import phase of every case, as one text
+```
+
+per case: the import phase (`import_phase.ps1`: the edit, our import, the record, our dry apply), the twin protocol
+(`twin_case.ps1`: checks 10, 3-9 with the case's session job), check 12 (`check12.ps1`), and for i1 check 11 (`check11.ps1`).
+The pieces are validated without our import (section 4) on d0 with the twin staged natively: check 12 on the script the
+real run of d0 made, and check 11 on the same twin staged with the i1 edit. e1 and f1 join when their operations land;
+cases that stage more than S1 covers stay refusals. Each check 12 needs one restore of the staged state (a backup of about
+1.2 GB, dropped with the case by `-Drop`).
