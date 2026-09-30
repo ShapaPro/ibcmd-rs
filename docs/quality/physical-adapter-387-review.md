@@ -464,7 +464,11 @@ unchanged.
   `external_export` 7, `extension_export` 11, `extension_adopted` 8, `form_events` 4, `cf_corpus` 2; `external_corpus`
   is ignored without `IBCMD_ONECDEC_CORPUS`); the baseline diff is **removal only**: 8 605 to 8 559 entries, exactly
   the 46 R3 entries, all in `mod.rs`.
-- Offline equality on the БСП rows, 8.3.27 and 8.5, binary built before the change against binary built after it: OFFLINE_RESULT
+- Offline equality on the БСП rows, a binary built before the change against a binary built after it (`iter` profile, the
+  same rows, `mssql-dump-config --rows-dir ... --extract-metadata-xml --extract-module-text --no-binary-rows`, each run
+  under the heavy lock; trees compared by SHA-256 with `compare_trees_fast.py`): БСП 8.3.27 (`--platform=8.3.27`) **12 199
+  of 12 199 files identical**, БСП 8.5 (`--platform=8.5.1`) **12 338 of 12 338 identical**, no file on one side only. No
+  УХ run for G3, as decided.
 
 ### 10.3 Filed
 
