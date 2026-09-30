@@ -84,6 +84,16 @@ value>,1`, refilled in the traversal order of 1) and the XDTO model (`CatalogTab
 property `T` in the object type, `lowerBound="0" upperBound="99999"`). All equal native's for catalogs (h); for
 documents the new section of case d is part of the new document and equals native's too.
 
+**Several sections in one stage (S1-E, cases e1 and e4).** The sections of a kind are added in **one** refill of the
+section of `2203278d` (`plan::new_tabular_sections`): the traversal lists the sections of every object of the kind in the
+root's order, each object's in the order of its descriptor, and the section is rebuilt from that order with the new
+entries in it, so it does not matter how many are new. Measured against native: e1 (five new sections: three
+catalogs, one of them hierarchical and one subordinate, and two documents) and e4 (a catalog with one new section
+and a document with two, both with new own attributes and a new attribute in a section they had) -- the registry,
+`2203278d` and the XDTO model equal native's text in both, and in e3 (new attributes of old sections only) the
+registry and the XDTO model (`tests_corpus.rs` of `restructure`: `corpus_plan_of_*_equals_the_native_result`). The
+registry and the XDTO model are text edits and compose in any order.
+
 ## 4. `c4629235`: proven acceptable, not byte-exact
 
 The map is filled in an order that is neither the root's nor the registry's (`1a621f0f`) nor a finer hash
@@ -247,9 +257,10 @@ Add to the platform's own derived state that a twin comparison tolerates:
 - **`facbfffe` section 7** (`Explanation`) and the sections 0, 5, 6 (constants, registers) are refused.
 - **Kinds other than catalogs and documents** are refused (`Enum` and `ExchangePlan` on purpose).
 - **Objects with forms, templates or commands** are refused: their records reach rows this module does not build.
-- **More than one new catalog, or more than one addition of tabular sections per owner kind, in one stage**: the
-  rows are refilled in the hash order of all the keys; the sequential composition has it only for the last
-  addition. Refused.
+- **More than one new catalog or document of a kind in one stage**: the rows are refilled in the hash order of all
+  the keys; the sequential composition has it only for the last addition. Refused. The new tabular sections of
+  *existing* objects are not in this list (S1-E, section 3): any number of them come in one refill; together with the
+  sections of a *new* object of the same kind they are refused.
 - `DocumentObject` `Number` as `xs:decimal` for a numeric `NumberType`: only the string is measured.
 
 ## 12. API (`src/restructure/caches/`)
@@ -264,6 +275,8 @@ plan::new_object(&NewObject { kind, descriptor, root, table_number, has_help, ha
     // 1a621f0f 2203278d a07b62f0 [42ed49cc: catalogs] facbfffe fe8acd6a c4629235 ea13a2c9
 plan::new_tabular_section(&NewSection { kind, root, descriptor, owner, section, cache }) -> Result<Vec<CacheRow>>
     // 1a621f0f 2203278d ea13a2c9
+plan::new_tabular_sections(&NewSections { kind, root, descriptor, sections: &[(owner, section)], cache })
+    // the same for several sections of a kind in one refill of 2203278d (the one above is a call with one)
 members::Members::parse(kind, descriptor)      // attributes, tabular sections, the other collections
 registry::{add_object, add_section, add_attributes}
 xdto_types::{attribute_property, RefNames, XdtoModel::insert_property_lines}
