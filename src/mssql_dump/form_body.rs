@@ -27001,6 +27001,10 @@ pub(super) fn parse_form_title_data_path(
         ("Page", 20) => ("18", 20, 4),
         ("Page", 18) => ("17", 18, 4),
         ("UsualGroup", 29) => ("29", 29, 5),
+        // The older `{28,…}` group bag of 28 members keeps the binding in the
+        // same member: ERP WE 2.5.8 (compatibility 8.3.17), all 50 groups
+        // whose native element carries a `TitleDataPath`.
+        ("UsualGroup", 28) => ("28", 28, 5),
         _ => return None,
     };
     if options.len() != options_len
