@@ -123,6 +123,13 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
                 }
             })
             .collect(),
+        answered_rows: if plan.objects.iter().any(|object| object.created) {
+            crate::restructure::plan::configuration_uuid(&inputs.root_row)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        },
         size_check: None,
     })
 }

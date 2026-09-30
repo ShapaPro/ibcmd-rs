@@ -17,6 +17,8 @@ const CATALOG: &str = "11111111-2222-4333-8444-555555555555";
 #[derive(Default)]
 struct Canned {
     reads: AtomicUsize,
+    /// The staged and the active bytes of the `root` row, when the gate compares them.
+    root_pair: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl SqlClient for Canned {
@@ -39,6 +41,13 @@ impl SqlClient for Canned {
         each: &mut dyn FnMut(SqlRow) -> Result<()>,
     ) -> Result<()> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        if query.contains("FileName IN (N'root')") {
+            let (staged, active) = self.root_pair.clone().expect("a root pair");
+            return each(SqlRow {
+                result_set: 0,
+                values: vec![SqlValue::Binary(staged), SqlValue::Binary(active)],
+            });
+        }
         if query.contains("FileName = N'root'") {
             let root = format!("\u{feff}{{2,{CONFIG},0}}");
             return each(SqlRow {
@@ -114,6 +123,61 @@ fn blocker_reasons(verdict: &GateVerdict) -> Vec<String> {
         .iter()
         .map(|blocker| format!("{}: {}", blocker.row, blocker.reason))
         .collect()
+}
+
+const BOM: char = char::from_u32(0xFEFF).unwrap();
+
+/// The bytes of a row the platform stores as one stored deflate block.
+fn stored_block(text: &[u8]) -> Vec<u8> {
+    let length = u16::try_from(text.len()).unwrap();
+    let mut out = vec![1];
+    out.extend(length.to_le_bytes());
+    out.extend((!length).to_le_bytes());
+    out.extend(text);
+    out
+}
+
+#[test]
+fn a_root_row_in_another_layout_is_no_change() {
+    let text = format!("{BOM}{{2,{CONFIG},}}");
+    let client = Canned {
+        root_pair: Some((
+            deflate_row(text.as_bytes()).unwrap(),
+            stored_block(text.as_bytes()),
+        )),
+        ..Canned::default()
+    };
+    let verdict = check(
+        &client,
+        &[meta("root", 0, "AA")],
+        &[meta("root", 0, "BB")],
+        &[],
+    );
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    assert_eq!(verdict.stats.descriptors_layout_only, 1);
+}
+
+#[test]
+fn a_root_row_that_names_another_configuration_is_refused() {
+    let staged = format!("{BOM}{{2,{CATALOG},}}");
+    let active = format!("{BOM}{{2,{CONFIG},}}");
+    let client = Canned {
+        root_pair: Some((
+            deflate_row(staged.as_bytes()).unwrap(),
+            stored_block(active.as_bytes()),
+        )),
+        ..Canned::default()
+    };
+    let verdict = check(
+        &client,
+        &[meta("root", 0, "AA")],
+        &[meta("root", 0, "BB")],
+        &[],
+    );
+    assert_eq!(
+        blocker_reasons(&verdict),
+        ["root: the service row root changes"]
+    );
 }
 
 #[test]

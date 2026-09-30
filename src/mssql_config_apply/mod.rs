@@ -1044,16 +1044,21 @@ pub fn plan_with_gate(
         .as_ref()
         .map(|phase| phase.created.clone())
         .unwrap_or_default();
+    let answered_rows: Vec<String> = structure
+        .as_ref()
+        .map(|phase| phase.answered_rows.clone())
+        .unwrap_or_default();
     let answered_for = |row: &str| {
         let row = row.to_ascii_lowercase();
-        created.iter().any(|object| {
-            let uuid = object.uuid.to_ascii_lowercase();
-            row == uuid
-                || object
-                    .files
-                    .iter()
-                    .any(|file| file.to_ascii_lowercase() == row)
-        })
+        answered_rows.contains(&row)
+            || created.iter().any(|object| {
+                let uuid = object.uuid.to_ascii_lowercase();
+                row == uuid
+                    || object
+                        .files
+                        .iter()
+                        .any(|file| file.to_ascii_lowercase() == row)
+            })
     };
     for blocker in analysis_blockers {
         if !answered_for(&blocker.row) {
