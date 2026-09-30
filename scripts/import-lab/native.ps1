@@ -6,7 +6,20 @@
 
 $script:Lab = if ($env:IMPORT_LAB) { $env:IMPORT_LAB } else { 'F:\ibcmd\lab\04\import' }
 $script:Ibcmd = 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe'
+$script:NativeUser = 'Администратор'
 $script:Lock = 'F:\ibcmd\lab\04\tools\heavy-lock.ps1'
+
+# The platform the native ibcmd of the next calls belongs to: '8.3.27' (the default) or '8.5'. The 8.5 БСП clones keep
+# the administrator as "Администратор (обычное приложение)" with an empty password.
+function Set-NativePlatform([string]$Platform) {
+    if ($Platform -eq '8.5') {
+        $script:Ibcmd = 'C:\Program Files\1cv8\8.5.1.1150\bin\ibcmd.exe'
+        $script:NativeUser = '"Администратор (обычное приложение)"'   # quoted: it holds spaces and Start-Process does not quote
+    } else {
+        $script:Ibcmd = 'C:\Program Files\1cv8\8.3.27.2214\bin\ibcmd.exe'
+        $script:NativeUser = 'Администратор'
+    }
+}
 
 function Assert-LabDb([string]$Db) {
     if ($Db -notmatch '^ibcmd_rs_04_import_[a-z0-9_]+$') { throw "lab databases only: ibcmd_rs_04_import_* (got $Db)" }
@@ -41,7 +54,7 @@ function Invoke-NativeImport([string]$Db, [string]$Tree, [string]$Tag = 'x', [in
     Invoke-WithNativeLock {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $args = @('infobase', 'config', 'import', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
-                  "--data=$data", '--user=Администратор', $Tree)
+                  "--data=$data", "--user=$($script:NativeUser)", $Tree)
         $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
             -RedirectStandardOutput "$($script:Lab)\logs\native-import-$Tag.out.txt" `
             -RedirectStandardError "$($script:Lab)\logs\native-import-$Tag.err.txt" `
@@ -64,7 +77,7 @@ function Invoke-NativeApply([string]$Db, [string]$Dynamic = 'disable', [string]$
     Invoke-WithNativeLock {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $args = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
-                  "--data=$data", '--user=Администратор', '--force', "--dynamic=$Dynamic")
+                  "--data=$data", "--user=$($script:NativeUser)", '--force', "--dynamic=$Dynamic")
         $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
             -RedirectStandardOutput "$($script:Lab)\logs\native-apply-$Tag.out.txt" `
             -RedirectStandardError "$($script:Lab)\logs\native-apply-$Tag.err.txt" `
@@ -84,7 +97,7 @@ function Invoke-NativeExport([string]$Db, [string]$OutDir, [string]$Tag = 'x', [
     if (-not (Test-Path "$($script:Lab)\logs\empty.txt")) { New-Item -ItemType File "$($script:Lab)\logs\empty.txt" | Out-Null }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $args = @('infobase', 'config', 'export', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
-              "--data=$data", '--user=Администратор', $OutDir)
+              "--data=$data", "--user=$($script:NativeUser)", $OutDir)
     $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
         -RedirectStandardOutput "$($script:Lab)\logs\native-export-$Tag.out.txt" `
         -RedirectStandardError "$($script:Lab)\logs\native-export-$Tag.err.txt" `
@@ -93,6 +106,24 @@ function Invoke-NativeExport([string]$Db, [string]$OutDir, [string]$Tag = 'x', [
     if (-not $p.WaitForExit($TimeoutSec * 1000)) { $p.Kill(); $res.Exit = -999 } else { $res.Exit = $p.ExitCode }
     $res.Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     $res
+}
+
+# ours: the drop-in `infobase config apply` (the own apply: it stops with "требуется штатный config apply: <reasons>"
+# and exit 1 when the stage needs the platform's); returns @{Exit; Seconds; Tail}
+function Invoke-OursApply([string]$Db, [string]$Tag = 'x', [string]$Exe = '', [string]$Platform = '8.3.27') {
+    Assert-LabDb $Db
+    if (-not $Exe) { $Exe = "$($script:Lab)\bin\ibcmd-rs-v0.exe" }
+    $data = "$($script:Lab)\ibdata\$Db"
+    New-Item -ItemType Directory -Force $data, "$($script:Lab)\out", "$($script:Lab)\logs" | Out-Null
+    $version = if ($Platform -eq '8.5') { '8.5.1' } else { $Platform }
+    $args = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
+              "--data=$data", '--force', '--dynamic=disable', '--exclusivity=assumed', "--platform=$version",
+              "--report=$($script:Lab)\out\apply-$Tag.json")
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $o = & $Exe @args 2>&1
+    $rc = $LASTEXITCODE
+    $o | ForEach-Object { "$_" } | Set-Content "$($script:Lab)\logs\ours-apply-$Tag.log" -Encoding UTF8
+    @{ Exit = $rc; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Tail = (($o | Select-Object -Last 4) -join ' | ') }
 }
 
 # ours: the drop-in `infobase config import` (Auto = patch on a database that holds the configuration)

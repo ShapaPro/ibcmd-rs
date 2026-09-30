@@ -1,27 +1,32 @@
 # Acceptance of the patch stage that carries what the target's rows cannot (issue #388 step 2, #393 import side).
 #
 #   pwsh -NoProfile -File run_override_acceptance.ps1 -Exe F:\...\ibcmd-rs.exe -Database ibcmd_rs_04_import_bsp_add `
-#        -Tree F:\...\tree\add5 -Tag add1 [-SkipApply]
+#        -Tree F:\...\tree\add5 -Tag add1 [-SkipApply] [-Platform 8.5] [-ApplyWith ours]
 #
 # A tree that differs from the clone's configuration goes through the drop-in `infobase config import` with its
 # default flags (a patch stage that builds what the target's rows cannot carry, and the guard on). What it left in
 # ConfigSave is summarized (`configsave_summary.py`: the `deleted` row, the dates, the parts, the counts); then the
 # platform's own `config apply --force --dynamic=disable` and `config export` run inside the native lock, and the
 # export is compared with the tree (`ibcmd-rs source-diff`; only ConfigDumpInfo.xml, which holds the fresh generation
-# ids, may differ). Results: out\override-acceptance\<tag>.json. Lab databases only (ibcmd_rs_04_import_*).
+# ids, may differ). -Platform 8.5 runs the native ibcmd of 8.5.1.1150 as the 8.5 administrator; -ApplyWith ours applies
+# with the drop-in `infobase config apply` instead of the platform's. Results: out\override-acceptance\<tag>.json.
+# Lab databases only (ibcmd_rs_04_import_*).
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [Parameter(Mandatory = $true)][string]$Database,
     [Parameter(Mandatory = $true)][string]$Tree,
     [Parameter(Mandatory = $true)][string]$Tag,
     [switch]$SkipApply,
-    [string]$Dynamic = 'disable'
+    [string]$Dynamic = 'disable',
+    [ValidateSet('8.3.27', '8.5')][string]$Platform = '8.3.27',
+    [ValidateSet('native', 'ours')][string]$ApplyWith = 'native'
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONDONTWRITEBYTECODE = '1'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\native.ps1"
+Set-NativePlatform $Platform
 Assert-LabDb $Database
 $lab = $script:Lab
 $outDir = "$lab\out\override-acceptance"
@@ -29,7 +34,7 @@ New-Item -ItemType Directory -Force $outDir | Out-Null
 $free = (Get-PSDrive F).Free / 1GB
 if ($free -lt 25) { throw "F: has $([math]::Round($free,1)) GB free; not starting" }
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$report = [ordered]@{ tag = $Tag; database = $Database; tree = $Tree; exe = $Exe }
+$report = [ordered]@{ tag = $Tag; database = $Database; tree = $Tree; exe = $Exe; platform = $Platform; apply_with = $ApplyWith }
 
 # 1. ours
 $r = Invoke-OursImport -Db $Database -Tree $Tree -Tag "$Tag-import" -Exe $Exe
@@ -54,8 +59,9 @@ $report.configsave = $summary
 if ($summary.deleted) { "  deleted ($($summary.deleted.count)): " + (($summary.deleted.names | ForEach-Object { $_[0] }) -join ' ') }
 if ($SkipApply) { $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8; exit 0 }
 
-# 2. native apply, 3. native export, 4. the tree against the export
-$a = Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag
+# 2. apply (native, or ours), 3. native export, 4. the tree against the export
+$a = if ($ApplyWith -eq 'ours') { Invoke-OursApply -Db $Database -Tag $Tag -Exe $Exe -Platform $Platform }
+     else { Invoke-NativeApply -Db $Database -Dynamic $Dynamic -Tag $Tag }
 $report.apply = $a
 "apply: exit=$($a.Exit) $($a.Seconds)s $($a.Tail)"
 if ($a.Exit -ne 0) { $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8; exit 2 }
