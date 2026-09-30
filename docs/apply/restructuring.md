@@ -1129,8 +1129,9 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
    built). Split the stage, or build the chain in S1-A.
 3. **Exchange plans**: the apply resets `_ConfigChngR` for the staged objects; native rebuilds the table with new keys and
    registers 782 more objects (10.15). Untested on a base with real exchange-plan nodes.
-4. **Size** (S1-J): a rebuilt table is copied in one transaction. The log of a 100 GB table is not acceptable; the limit
-   and the chunked copy of 0.5 are open.
+4. **Size** (S1-J): a rebuilt table is copied in one transaction. The log of a 100 GB table is not acceptable. Done: the
+   stage is refused above a limit (10 million rows, 2 GiB to write), measured and proven on twins in
+   `docs/apply/restructure-size-limit.md`; the chunked copy is 0.5.
 5. **Types by reference, composite types, defined types**: need the map from type ids to tables (`Reference569`,
    `Enum2894`) built from the generated types of the rows, and the `RRef` / `_TYPE` / `_RRRef` columns (case h has them).
 6. **Predefined data**: the platform rebuilds `RefSInf` with the catalog (14 of 75 catalogs of the БСП); refused.

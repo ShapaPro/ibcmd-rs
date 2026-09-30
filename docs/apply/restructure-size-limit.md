@@ -1,199 +1,221 @@
 # S1-J: a limit on the tables the own restructuring rebuilds (#406)
 
-Checkpoint 1 of #406, track ui, 2026-09-30: the measurement plan and the place of the check, before code. Part of
-[#391](https://github.com/Untru/ibcmd-rs/issues/391); the design it belongs to is
-`docs/apply/restructuring.md`, section 12 (S1-J is row 12.7). Nothing here is measured yet unless it says so;
-what is quoted is quoted from that document.
+Issue [#406](https://github.com/Untru/ibcmd-rs/issues/406), part of [#391](https://github.com/Untru/ibcmd-rs/issues/391);
+track ui, 2026-09-30. Checkpoint 1 (the place of the check and the measurement plan) was accepted; this is checkpoint 2:
+the code, the measured table, the limit derived from it, and the refusal proven on twins. The design the limit
+belongs to is `docs/apply/restructuring.md`, section 12 (S1-J is row 12.7). What is measured says so.
 
-## 1. The question
+## 1. Summary
 
-The own restructuring rebuilds an object the platform's way: for every changed table (the main table and all its
-sub-tables) it creates `<table>NG`, copies the rows with `INSERT INTO <t>NG WITH(TABLOCK) (...) SELECT ... FROM <t>
-WITH(NOLOCK)`, creates the indexes, drops the old table and renames (`plan.rs`, `Plan::statements`). The whole
-structure phase runs inside the apply's one SERIALIZABLE transaction (12.4.1), so that a failure takes everything
-back and no `Status 200/400/500` is ever visible. That is the design, and it has one cost the design already
-names (9.3, 12.9 item 4): the log of the whole copy is held until `COMMIT`, and a transaction also reserves log
-for its own rollback. For a catalog of 14 or 716 rows it is kilobytes; for a table of 100 GB it is not
-acceptable. The native apply commits in steps; chunking the copy is 0.5.
+- **What the log is.** The own restructuring rebuilds a table through its `NG` twin in the apply's one transaction. Under
+  full recovery the log of the structure phase is **`2 x data + indexes`** of the rebuilt tables: the load into a heap
+  writes the data once, the clustered index built over the heap once more, the other indexes once. Measured on 17 runs
+  and probes (10 thousand to 4.8 million rows, four row shapes, real tables): 0.52 to 1.05 of that figure, the whole
+  apply transaction 1.05 (section 4).
+- **The limit** (a default the operator may change): the stage's rebuilt tables may hold **10 000 000 rows** and may
+  make the rebuild write **2 GiB** (`2 x data + indexes`, summed over the stage). Above it the stage is refused, nothing
+  is written, and the operator is sent to the native `config apply`, which commits in steps. The 2 GiB is half of the
+  4 GiB log the budget allows; the derivation is section 5.
+- **Where it plugs in** (decided at checkpoint 1): the gate side, after `decide`, over `phase.tables`, only for
+  `Method::Rebuild`; one new file, `src/restructure/size_guard.rs`.
+- **Raised or lowered by** `--restructure-limit-rows` / `--restructure-limit-bytes` of `mssql-config-apply` and
+  `mssql-restructure`, and for every command by `IBCMD_RS_RESTRUCTURE_LIMIT_ROWS` / `IBCMD_RS_RESTRUCTURE_LIMIT_BYTES`
+  and the keys `restructure-limit-rows` / `restructure-limit-bytes` of `ibcmd-rs.toml` (section 3). The drop-in
+  `ibcmd infobase config apply` takes no new flag. A raised limit still needs a backup option.
+- **Proof on twins** (section 6): a table above the limit is refused with nothing written (a fingerprint of the
+  database is equal before and after); a stage below it goes through and equals the native apply on checks 3, 4, 7 and 8
+  of the twin protocol (12.6).
 
-S1-J puts a limit on the rows and bytes of what is rebuilt and refuses above it, with a message that sends the
-user to the native `ibcmd infobase config apply`. The limit has to be justified by measurement, not chosen.
+## 2. What was built
 
-Known now (from the traces of 12.8, БСП 8.3.27, small tables): a stage of 11 tables (716 rows the biggest) copies in
-0.4 s and creates its 40 indexes in 1.9 s; the apply's transaction, all of it, is 21 s. Not known: the log per
-byte of table, the time per gigabyte, what the recovery model changes, what the indexes and the LOB columns
-cost, and how much log a rollback needs. Those are the numbers this plan measures.
+| file | what |
+|---|---|
+| `src/restructure/size_guard.rs` (new) | `RestructureLimit`, `LimitSetting` (the limit and where each half came from), `TableSize` (`rebuild_bytes` = 2 x data + indexes), `read_sizes` (one query on `sys.dm_db_partition_stats` over the plan's tables), `evaluate` (pure), `SizeCheck::refusal` / `to_json`, `parse_byte_size`, `resolve_limit` (flag, then the settings chain, then the default), `guard_phase` (what the gate calls) |
+| `src/restructure/tests_size_guard.rs` (new) | 15 tests: at the limit passes, one above refuses, the sum over the stage, the largest table named, a missing table is 0, a name that is no plain identifier is not put into a query, the gate blocks and drops the phase, `AlterAdd` is not guarded, a server that cannot answer fails closed, units |
+| `src/settings/restructure.rs` (new) | the two settings (environment, file) and their 5 tests; `settings.rs`, `settings/files.rs`, `settings/show.rs` gain the names, the two keys and two lines of `settings show` |
+| `src/restructure/s1.rs` | `S1Gate` holds the limit (`size_limit(..)` next to `xml_version`) and calls `guard_phase` after `decide` |
+| `src/restructure/command.rs` | `mssql-restructure`: the two flags, the guard after `make_plan` (for `--dry-run`, `--trial` and the apply), the report gets `size_check`, `--through-apply` builds the gate with the limit |
+| `src/mssql_config_apply/mod.rs`, `gate.rs`, `cli.rs`, `dropin/apply.rs` | `ConfigApplyOptions.restructure_limit`; `StructurePhase.size_check` (in the report, `structure.size_check`); the flags of `mssql-config-apply`; the drop-in reads the settings chain only |
+| `scripts/restructure-lab/size-limit/` (new) | the measurement kit (section 8) |
 
-## 2. Where the check plugs in
+The refusal is a blocker of the S1 gate like every other reason (`S1: ...`), so the apply's existing path carries it
+(`needs_native_apply`, exit 1; the drop-in words it `требуется штатный config apply: ...`). A server that cannot
+answer the size query (no `VIEW DATABASE STATE`) fails the gate closed. The guard is not repeated inside the
+transaction script: the apply holds an exclusive lock, the window between the gate's read and the transaction is the
+gate's seconds, and the script is what checks 10-12 of the twin protocol pin.
 
-The check needs two things: which tables will be rebuilt, and how big they are. The first is known only after
-`plan()` (`Plan::tables()`; a new object's table has no rows). The second is database state, not a fact of the
-staged image.
+## 3. The settings
 
-| place | what it means | for | against |
-|---|---|---|---|
-| **in `plan()`** (`plan.rs`, with `Inputs` and `PlanOptions`) | every caller is covered at once | one place | `Inputs` gets a field and `plan_object` a check: the hot file of S1-D/E (track ddl), the constructors of `Inputs` in the tests of `tests_plan.rs` and `tests_corpus.rs` change, `plan()` becomes impure or `Inputs` grows a database-side field |
-| **in `decide()`** (`s1.rs`, the pure decision) | the refusal is one more blocker of the gate | pure, unit tests need no database | the signature of `decide` and all its call sites in `tests_s1.rs` change (ddl's file); sizes must be read before it, before the plan says which tables |
-| **in the gate's impure wrapper, `S1Gate::check`, and in the standalone command** (proposed) | after `decide` returned a phase, read the sizes of `phase.tables` and refuse above the limit | additive: a new file, a builder on `S1Gate`, a few lines at two call sites; the check is one pure function that a test feeds with sizes; the gate already reads the database here (`check_staged`, `read_inputs`); the refusal takes the apply's existing path (`verdict.block`, `StructuralRefusal`) | the standalone `mssql-restructure` has to call it too (`command.rs:226`, after `make_plan`) |
-| inside the transaction script (`script.rs`) | an `IF ... THROW` on the size just before the copy | closes the window between the gate's read and the transaction | changes the script that 12.6 check 12 and the twin comparisons pin; the apply holds an exclusive lock anyway (12.4.1), so the window is only the gate's seconds; **not proposed** for the first version |
+Rows and bytes are chosen independently, highest first: the flag; the environment; the settings files (the highest
+layer that sets it); the default.
 
-**Proposal: the gate side, in a new file `src/restructure/size_guard.rs`.**
+| | rows | bytes to write |
+|---|---|---|
+| flag (`mssql-config-apply`, `mssql-restructure`) | `--restructure-limit-rows 5000000` | `--restructure-limit-bytes 4GB` |
+| environment | `IBCMD_RS_RESTRUCTURE_LIMIT_ROWS=5_000_000` | `IBCMD_RS_RESTRUCTURE_LIMIT_BYTES="4 GiB"` |
+| `ibcmd-rs.toml` | `restructure-limit-rows = 5000000` | `restructure-limit-bytes = "4GB"` (a number of bytes also) |
+| default | 10 000 000 | 2 GiB |
 
-- `SizeLimit { max_rows: u64, max_bytes: u64 }` with the measured defaults; `TableSize { rows, data_bytes,
-  index_bytes }`.
-- `read_sizes(source: &mut dyn RowSource, tables: &[String]) -> Result<BTreeMap<String, TableSize>>`: one query on
-  `sys.dm_db_partition_stats` (rows and pages of the heap or clustered index, and of the other indexes; LOB and
-  row-overflow pages included) for the names of the plan's tables. `RowSource` is the existing reader trait, so
-  the same function serves the standalone command (`TdsConnection`) and the gate (`ClientSource`).
-- `evaluate(sizes, limit) -> Result<(), SizeRefusal>`: pure. The limit is on the **sum over the stage**, because
-  one transaction rebuilds every table of the stage and its log is the sum; the refusal names the largest table,
-  the totals and the limit, and ends with what to do: the native apply. A table missing from the result (a new
-  object) counts as 0.
-- Hooks (the only edits to shared files): `S1Gate::check` in `s1.rs` (after `decide` returns a phase: read, evaluate,
-  on refusal `verdict.block("", "S1: ...")` and no phase); a builder `S1Gate::size_limit(...)` next to `xml_version`
-  (`mssql_config_apply/mod.rs:187` passes it, and `command.rs:318` builds the same gate for `--through-apply`, so
-  `mssql-config-apply` and `mssql-restructure --through-apply` are covered by that one hook); `command.rs` after
-  `make_plan` (line 226) for the standalone run and for `--trial`, which also fills the log; `mod.rs` two lines for
-  the modules.
-- Only `Method::Rebuild` is guarded. `Method::AlterAdd` is the research variant the apply never uses.
+Rows: a whole number (`_` allowed). Bytes: a whole number or a number with a unit, every unit a power of 1024
+(`512MB`, `4 GiB`, `1.5g`). A value of 0, a malformed value or an unknown unit fails when the command asks for the
+limit, naming the flag, the variable, or the file and line. `ibcmd-rs settings show` prints both with their source;
+the report of an apply prints the limit, where it came from, and what the stage rebuilds (`structure.size_check`).
 
-Not affected: an operation of S1-D/E/F that ddl adds needs no change here. The guard reads what the plan says it
-rebuilds, whatever the operation.
+The drop-in `ibcmd infobase config apply` is the platform's syntax and gets no flag: `connect` in `dropin/apply.rs`
+reads the two settings from the chain and puts them into the apply's options. (The drop-in does not yet ask for the S1
+gate; when it does, the limit is already there.) A raised limit changes nothing else: the apply still refuses a
+restructuring without `--recovery-backup` or `--i-have-a-backup` (`backup_required`); section 6 shows both.
 
-Open for the coordinator: whether the limit may be raised on the command line (`--max-rebuild-bytes`,
-`--max-rebuild-rows`, for a user who knows his log) or is fixed; I propose a flag that can raise it, printed in the
-report, because the refusal points to a slower tool and the measured limit is conservative by a stated factor.
+## 4. The measurements
 
-## 3. The measurement plan
+### 4.1 Instruments and twins
 
-### 3.1 What the numbers must answer
+- **Tool.** The existing `ibcmd-rs mssql-restructure --database <twin> --trial` (the rebuild in one transaction, the
+  read-back, `ROLLBACK`; its JSON report has the milliseconds of each phase) and `--through-apply --rehearse` (the whole
+  apply script, rolled back), built from the base of the branch without the guard (`iter` profile). One committed rebuild
+  (`mssql-restructure` without `--trial`).
+- **Sampler.** `scripts/restructure-lab/size-limit/s1j.py poll`, its own process connected to `master` (the tool refuses a
+  database another session holds; ODBC pooling is off in the kit for the same reason), every 250 ms:
+  `database_transaction_log_bytes_used` and `..._reserved` of the twin's open transaction, `DBCC SQLPERF(LOGSPACE)`, file
+  bytes written, tempdb allocated pages, the running statement. It stops on a stop file and at the latest after
+  `--max-seconds`; `trial` checks that it is gone. No sampler process survived any run.
+- **Twins.** `restore-clone.ps1` from the delta-staged and whole-image staged backups of the ddl track (read only): the
+  case a2 (`Catalog._ДемоПартнеры`, main table `_Reference20`, sub-tables `_VT155`, `_VT159`) and the types case. The
+  tables were grown by `s1j.py grow` (batched `INSERT ... SELECT`, in SIMPLE): **narrow** (`_Reference20`, about 1.6 KiB per row
+  with its five indexes), **thin** (`_VT155`, 105 bytes, the clustered index only), **wide** (`_VT159`, 2 KiB of strings),
+  **LOB** (`_VT159`, two `nvarchar(max)` values of 20 KB). SIMPLE for the growth, then `ALTER DATABASE ... SET RECOVERY FULL`
+  with a full backup to `NUL` before the FULL runs and a log backup to `NUL` before each run.
+- **The log figure.** The whole-image stage of a2 promotes 9 838 `Config` rows, which costs 270 MB of log by itself; the
+  S1 gate refuses a whole image and accepts only a delta, so the figure that counts is the **structure phase**: the
+  transaction's log up to the first statement that moves the staged rows (`structure_log_used`). The whole apply
+  transaction of a delta stage was measured too (R15, R16).
 
-1. **Log per byte.** Peak log used and reserved by the rebuild transaction, against the bytes of the rebuilt
-   tables (data, and data plus indexes), for a heap load plus index build.
-2. **Recovery model.** The same under SIMPLE and FULL. The lab twins are SIMPLE (`sys.databases`, the ddl twins): a heap
-   load with `TABLOCK` can be minimally logged there, so SIMPLE alone would flatter the copy. A customer's base is
-   usually FULL, where the copy is fully logged. **Hypothesis:** FULL is about the size of the table plus its
-   indexes, SIMPLE a fraction of it; the limit is set from FULL.
-3. **Time** per phase (create, copy, indexes, drop, rename, publication) against size, and what part of it the
-   transaction holds `Sch-M` locks for (all of it; the apply is exclusive).
-4. **Rollback.** The log reservation is why one transaction needs about twice its used log. Measure
-   `database_transaction_log_bytes_reserved` beside `..._used`, and the time of a rollback (`--trial` ends in one).
-5. **Shape.** Row width (narrow rows are index-bound, wide rows copy-bound), LOB columns, and sub-tables
-   (a tabular section can be the biggest table of an object).
-6. **The summed-stage claim.** Two objects in one stage log the sum of their tables.
+### 4.2 The table (FULL recovery; `2d+i` = 2 x data + indexes, all in MB of 10^6 bytes)
 
-### 3.2 Instruments (no new code)
+| run | rows | data | indexes | 2d+i | structure log | log/(2d+i) | structure s | rollback s |
+|---|---|---|---|---|---|---|---|---|
+| narrow, 10 thousand rows | 10 061 | 5 | 10 | 21 | 21 | 1.02 | 0.5 | 5 |
+| narrow, 100 thousand | 100 047 | 52 | 101 | 206 | 217 | 1.05 | 29 | 7 |
+| narrow, 1 million | 1 000 047 | 573 | 1 127 | 2 273 | 2 071 | 0.91 | 36 | 32 |
+| narrow, 3 million | 3 000 047 | 1 660 | 3 228 | 6 549 | 6 209 | 0.95 | 233 | 92 |
+| thin: 4 million rows of 105 bytes | 4 000 032 | 441 | 0 | 882 | 831 | 0.94 | 15 | 30 |
+| wide: + 200 thousand rows of 2 KiB | 4 200 014 | 854 | 25 | 1 734 | 1 679 | 0.97 | 22 | 29 |
+| wide: + 800 thousand rows of 2 KiB | 4 800 014 | 2 094 | 147 | 4 335 | 4 235 | 0.98 | 62 | 23 |
+| LOB: + 20 thousand rows of 40 KB | 4 820 014 | 2 922 | 154 | 5 999 | 5 096 | 0.85 | 72 | 35 |
+| R15: committed rebuild, 700 thousand narrow rows (whole transaction, delta stage) | 700 061 | 365 | 696 | 1 426 | 1 476 | 1.04 | 69 | (committed) |
+| R16: rehearsal of the whole apply script, the same twin | 700 061 | 365 | 696 | 1 426 | 1 493 | 1.05 | (rolled back) | |
 
-- The tool is what exists: `ibcmd-rs mssql-restructure --database <twin> --trial` (the standalone rebuild in one
-  transaction, verified, rolled back) with its JSON report (phases and milliseconds per step); and
-  `--through-apply --rehearse` (the whole apply's 9.3 MB script, rolled back) for the full-transaction number.
-  Both leave the database as it was (12.6 check 10), so one twin serves a whole ladder of sizes.
-- A poller in its own process, connected to **`master`** (not to the twin: the tool refuses when another session
-  is connected to the database: `reader::other_sessions`, called by `exec.rs`), every 250 ms:
-  `sys.dm_tran_database_transactions` (`database_transaction_log_bytes_used` and `..._reserved` of the twin's
-  open transaction), `DBCC SQLPERF(LOGSPACE)` (log size and percent used), `sys.dm_io_virtual_file_stats` (bytes
-  written to the data and log files), tempdb `sys.dm_db_file_space_usage` (`SORT_IN_TEMPDB`), and the phase clock
-  from the tool's report. Output: one CSV per run, one JSON summary.
-- The log file is pre-sized above the expected peak so that autogrowth does not enter the timing (the file size
-  after the run is recorded as well: it is what the user's disk sees).
+Real tables of the БСП demo (`s1j.py probe`: an empty heap of the same columns, `INSERT ... WITH(TABLOCK) SELECT`,
+the indexes built after the load, the log read before `ROLLBACK`; the biggest БСП table is 45 MB), log over `2d+i`:
+`_InfoRg5222` 0.90, `_InfoRg5253` 0.82, `_InfoRg6498` 0.93, `_InfoRg5906` 1.02, and two LOB-heavy tables 0.52 and 0.52;
+a compact 700 thousand row catalog table, 1.00. The raw rows of every run: `docs/apply/evidence/restructuring/size-limit/measured-runs.csv`.
 
-### 3.3 The twins and the synthetic table
+What the table says:
 
-- **Base.** A twin restored from the staged backup of the simplest case, `ibcmd_rs_04_ddl_bsp8327_a_a2_staged.bak`
-  (case a2: one String attribute in `Catalog._ДемоПартнеры`, main table `_Reference20` and two sub-tables
-  `_Reference20_VT155`, `_Reference20_VT159`; 14 rows), with `restore-clone.ps1 -Corpus bak` (name
-  `ibcmd_rs_04_ui_s1j_a`, track `ui`, about 10 s). Track ddl's file is only read. The staged image is in the
-  backup, so no native import is needed: the plan is the same as on every a2 twin, and the growth below does not
-  touch `ConfigSave`.
-- **Growth.** A T-SQL script (lab folder) reads the columns of the three tables from `sys.columns`, and inserts N
-  rows into each by `INSERT ... SELECT` from an existing row and a number generator, giving `_IDRRef` a new
-  `binary(16)` and leaving the rest as the existing row has it. Variants: **narrow** (the row as it is), **wide**
-  (the long string columns padded to about 2 KB per row), **LOB** (an `nvarchar(max)` value of about 20 KB per row where the
-  table has one, or the value-storage column), **sub-table heavy** (few rows in the main table, many in a section).
-  The growth is inserted once per rung on the same twin: the trial after it rolls back, and the next rung adds
-  more rows.
-- **Ladder** (main-table rows for a narrow row of about 250 bytes; the real width is read first from the twin):
-  10^4, 10^5, 10^6, 4x10^6 (about 1 GB) and 1.6x10^7 (about 4 GB). Wide: 10^5 and 10^6 (up to 2 GB). LOB: 10^5. Stop
-  when the log or the time of a rung is clearly out of any usable limit; the last rung is the evidence for the
-  refusal.
-- **Disk.** F: has about 1 TB free now. The largest rung is about 4 GB of data and up to 2x that in log, about
-  10-15 GB with tempdb, one twin at a time; I check `(Get-PSDrive F).Free` before each rung and stop below
-  25 GB. The twin is dropped at the end of the task with `drop-lab-dbs.ps1 -Track ui`.
+1. **`2 x data + indexes` predicts the log** within 0.85 to 1.05 for the copies, and the whole apply transaction (R15,
+   R16) is 1.04 and 1.05 of it. It does not depend on the row shape (narrow rows are index-bound, wide rows data-bound,
+   thin rows have no index) or on the size (four orders of magnitude). The reason is in the plan: the copy loads a heap
+   (`INSERT ... WITH(TABLOCK)`, the data once), then `CREATE ... CLUSTERED INDEX` rebuilds the data (once more), then the
+   other indexes. LOB pages are not written twice (0.85), so the model reads high there.
+2. **A row term is not needed at 105 bytes per row** (0.94 for 4 million rows). Thinner rows are unmeasured; they are
+   what the rows limit is for (section 5).
+3. **Recovery model.** In SIMPLE the same rebuild writes 0.5% of that: 0.5 MB, 5 MB, 10 MB and 34 MB at 10 thousand,
+   100 thousand, 1 million and 3 million narrow rows (the load into a heap is minimally logged). The limit is derived from FULL,
+   which is what a production base usually runs; a SIMPLE base can raise it.
+4. **Time.** The structure phase takes 12 to 36 seconds per GiB written; the index phase dominates. 233 s for the 6.5 GB
+   of the 3 million row case. The times vary two to three times between repeated runs on this shared machine (the
+   10 thousand row index phase took 7.7 s once and 0.2 s in the next run), so they justify an order of magnitude, not a
+   number.
+5. **Rollback** of a trial takes a quarter to twice the structure phase (92 s after 233 s, 30 s after 15 s) and its own
+   log is small (0.18 to 0.26 GB, the promotion's part); the log reserved for it is 1 to 3% of the used log.
+6. **tempdb** (`SORT_IN_TEMPDB`) peaked at +1.0 GB at 3 million narrow rows, +0.9 GB at the wide case.
+7. **One failure.** The first LOB run ended with error 1205 (chosen as the deadlock victim) in
+   `copy _Reference20_VT159 into _Reference20_VT159NG`, rolled back cleanly (exit 1); the repeat succeeded. Not
+   investigated; a robustness note for the ddl track (the copy of a table with 20 KB `nvarchar(max)` values).
+8. **The УХ confirmation of the checkpoint-1 plan could not be made on real data.** `uha_parity2_20260924.bak` holds
+   the configuration only: every table has 0 rows but 844 (`_Enum4473`) or fewer. The clone was restored, surveyed and
+   dropped at once (4.3 GB). The calibration on real tables was made on the БСП demo instead (six probes above), whose data is
+   real but small; the model holds there too, and the guard never fires on either demo configuration (the limit is 40
+   times the biggest БСП table).
 
-### 3.4 The matrix
+## 5. The limit
 
-| run | table | rows | recovery | mode | purpose |
-|---|---|---|---|---|---|
-| R0 | a2 twin as restored | 14 | SIMPLE | trial | the baseline of the tool and the poller (9.3: trial 33.5 s under load; an apply 9 s, 7.3 s of it in the transaction) |
-| R1-R5 | narrow ladder | 10^4 ... 1.6x10^7 | SIMPLE | trial | log and time against size where the load can be minimally logged |
-| R6-R10 | narrow ladder | the same | FULL (`ALTER DATABASE` of the own twin; a log backup to `NUL` before each run) | trial | the same where it is fully logged: the number the limit is set from |
-| R11-R12 | wide | 10^5, 10^6 | FULL | trial | bytes against rows |
-| R13 | LOB | 10^5 | FULL | trial | LOB pages |
-| R14 | sub-table heavy | 10^3 in the main table, 10^6 in `_VT155` | FULL | trial | the sum over the object |
-| R15 | a mid rung | about 10^6 | FULL | **apply** (`mssql-restructure`, committed) then rollback of the test by restoring the twin | the committed number against the trial's: the commit itself, checkpoint and log backup behaviour |
-| R16 | a mid rung | about 10^6 | FULL | `--through-apply --rehearse` | the log of the whole apply transaction (the move of 9 842 staged rows and the caches on top) |
-| R17 | two objects grown to the same size in one stage | on the types-case twin (`s1_base_t1_staged.bak`) | FULL | trial | the sum over two objects |
-| R18 | rollback | the largest rung that finishes | FULL | trial | time of the rollback, and log that the rollback itself writes |
+The budget (yours, section 6 of checkpoint 1): a **log of 4 GiB**, and an **exclusive window under ten minutes**. Derived
+from FULL recovery.
 
-Each run: the tool's JSON report, the poller CSV, the size of the tables before (`sys.dm_db_partition_stats`), the
-machine load (nothing else heavy: every run of more than five minutes is one command inside
-`heavy-lock.ps1 acquire ui` ... `release ui`, and the ladder is a loop of such commands, never one long hold).
+- **Log.** Log = `rebuild_bytes` x at most 1.05 (worst measured; the guard's estimate uses 1.10). A log of 4 GiB allows
+  `rebuild_bytes` up to 3.6 GiB. **The default is 2 GiB**, half of that, for what the model cannot see: the rest of the
+  transaction (the fold, the move of the staged rows, the caches: 0.1 to 0.3 GB), the rollback, and a source table that is
+  page-compressed (the platform creates the `NG` tables without compression, so the rebuilt table is larger than
+  the `used_page_count` the guard reads). At the limit the estimated log is 2.2 GiB.
+- **Time.** At 12 to 36 s per GiB written, a stage at the 2 GiB limit takes about 25 to 75 s of structure phase, plus
+  the gate (about 10 s) and the promotion of a delta stage (under a second). The ten-minute window would allow about
+  12 GiB; the log binds first.
+- **Rows.** 10 000 000. The byte limit binds first for every row of 210 bytes or more (a narrow catalog row is 2.3 KiB to
+  write). The rows limit is for thin rows, whose per-row log the model reads low: even 100 unmodelled bytes of log per
+  row on 10 million rows are 1 GB, which the half-budget absorbs.
+- **Refused stages are the exception.** The biggest table of the БСП demo is 45 MB to write; the limit is 2 GiB. A stage
+  is refused only on a base with a catalog or document of hundreds of thousands of rows.
 
-### 3.5 From the numbers to the limit
+The numbers are constants in `size_guard.rs` (`DEFAULT_LIMIT_ROWS`, `DEFAULT_LIMIT_BYTES`, `LOG_PER_REBUILD_BYTE`),
+pinned by a test; the coordinator fixes them after this table.
 
-- Fit peak log (used, and used plus reserved) against the rebuilt bytes, per recovery model and shape; the predictor
-  is the one with the tightest fit that the guard can read cheaply: data bytes of the heap or clustered index, or
-  data plus index bytes, both from `sys.dm_db_partition_stats`.
-- The limit is a policy on top of a measured coefficient: refuse when the **projected log** (coefficient x bytes,
-  worst measured shape, FULL) exceeds a budget, or the **projected time** exceeds a budget. I propose the budgets
-  as figures for the coordinator to fix: a log of at most 4 GB (a first figure, to be decided) and a rebuild
-  that keeps the apply's exclusive window under about 10 minutes; whichever gives the lower bytes wins, and a safety
-  factor of 2 on the coefficient. `max_rows` is the narrow-row cap where indexes rather than bytes bind.
-- The result is stated as constants with the table of the measurements that justify them, in
-  `docs/apply/restructure-size-limit.md` (this file, extended at checkpoint 2); the refusal text quotes the limit.
+## 6. The refusal and the pass, on twins
 
-### 3.6 The ERP УХ confirmation
+Twins from the types-case backup (a delta stage of 9 rows: six objects, 11 tables), `Catalog._ДемоПартнеры` grown
+with narrow rows; the binary with the guard (`iter` profile).
 
-УХ only to confirm, under the heavy lock. The УХ base is not staged with a change, and staging one there costs a
-native import. Proposal: confirm the coefficient on real data without staging, on the largest catalog or document
-table of a УХ clone, in one rolled-back transaction: create `<t>NG` from the table's own `DBSchema` entry, copy with
-the plan's statement shape, create its indexes, read the transaction's log, `ROLLBACK`. Needs an ERP УХ clone (about
-8 GB) or an existing УХ twin: **the coordinator's OK is required** (README, "Processes and disk"). If a УХ twin is
-already in the lab I will reuse it.
+**Above the limit** (1 200 061 rows: 672 MiB of data and 1.3 GiB of indexes, 2.6 GiB to write):
 
-### 3.7 Cost
+| run | result |
+|---|---|
+| `mssql-config-apply --allow-restructure s1 --dry-run`, default limit | refused, `needs_native_apply`, exit 1: "the stage rebuilds 11 tables with 1200812 rows, 672.0 MiB of data and 1.3 GiB of indexes; ... log would grow by about 2.9 GiB; bytes to write (the data twice and the indexes once): 2.6 GiB above the limit of 2.0 GiB (the default). The largest is _Reference20: 1200014 rows, 2.6 GiB to write. Run the native `ibcmd infobase config apply` for this stage ..." |
+| the same, a real run with `--i-have-a-backup` | refused the same way |
+| `mssql-restructure --trial` | refused before it writes, the same words, exit 1 |
+| the limit raised by `--restructure-limit-rows 5000000 --restructure-limit-bytes 4GB`, a real run, **no backup option** | passes the gate and is refused by the backup rule: `backup_required` (Russian text naming `--recovery-backup` and `--i-have-a-backup`) |
+| the limit raised by `IBCMD_RS_RESTRUCTURE_LIMIT_ROWS=5_000_000` and `IBCMD_RS_RESTRUCTURE_LIMIT_BYTES="4 GiB"`, dry run | passes; the report says `limit rows 5000000 (IBCMD_RS_RESTRUCTURE_LIMIT_ROWS)`, `bytes 4294967296 (IBCMD_RS_RESTRUCTURE_LIMIT_BYTES)`, `within_limit: true` |
+| the same environment and `--restructure-limit-bytes 1GB` | refused again, "(--restructure-limit-bytes)": the flag beats the environment |
+| `ibcmd-rs.toml` in the current directory with both keys, dry run | passes; sources `...\ibcmd-rs.toml:1` and `:2`; `settings show` prints the two lines |
 
-About 19 runs. The narrow ladder is minutes for the top rungs, the LOB and wide runs a few minutes each, the
-whole matrix roughly two to three hours of machine time in one-command locks, plus the twin's growth time (a 4 GB
-`INSERT ... SELECT` is minutes). The 3.6 confirmation adds an hour if allowed.
+**Nothing written.** `s1j.py fingerprint` (row counts, sizes and checksums of `ConfigSave`, `Config`, `Params`, `Files`, the
+`SchemaStorage` and `DBSchema` and `DBNames` hashes, the table count, the newest table modification, `_Reference20`'s rows
+and columns) is byte-equal before and after the three refused runs that could have written (the real run with a backup
+option, the trial, the raised limit without one); the dry runs write nothing by design.
 
-## 4. Code at checkpoint 2
+**Below the limit, against the native apply** (a pair of twins from one backup: 500 061 rows in `_Reference20`, 700 MB
+to write, 34% of the limit): native `config apply` on one (143 s), `mssql-config-apply --allow-restructure s1
+--i-have-a-backup` on the other (50.7 s, `size_check.within_limit: true`, 11 tables, 500 812 rows). The checks of
+12.6 that apply:
 
-New files: `src/restructure/size_guard.rs` (types, `read_sizes`, `evaluate`, the refusal text) and
-`src/restructure/tests_size_guard.rs` (below the limit passes; exactly at the limit passes; one row or one byte above
-refuses; the sum over two tables; the largest table is named; a missing table counts as 0; the message names the native
-apply and the limit; `AlterAdd` unguarded). Edits to shared files, a few lines each: `mod.rs` (two module lines), `s1.rs`
-(`S1Gate::check` and the builder), `command.rs` (the standalone call), `mssql_config_apply/mod.rs` (pass the limit).
-Measurement kit: `scripts/restructure-lab/size-limit/` (new folder). Doc: this file, plus one pointer line in 12.9
-item 4 of `restructuring.md`.
+| check | result |
+|---|---|
+| 3 the data of the rebuilt tables | `EXCEPT` both ways **0 rows** in `_Reference20` (500 014 rows), its two sub-tables, `_Reference2598`, `_Document39`, `_Document39_VT970` |
+| 4 `Config` | 9 841 rows on both, **0 rows on either side** (`Creation` and `Modified` included) |
+| 7 native `config apply` on our twin | «Обновление конфигурации базы данных не требуется», exit 0 |
+| 8 native `config export` of both, `compare_trees_fast.py` | 12 198 of 12 198 files identical (`configVersion` blanked in `ConfigDumpInfo.xml`, as in the ddl protocol) |
 
-Acceptance, from 12.6: the case is "a synthetic table above the limit is refused, and the limit is measured".
-Checks that apply: 3 and 4 and 8 unchanged for a stage below the limit (the guard adds no statement: the twin
-comparison of a small case equals native as before); 10 (a rehearsal still changes nothing); 11 (the refusal: a twin
-with a table grown above the limit, `--through-apply --dry-run`, refused with the message, nothing written, snapshot
-equal); 12 needs no new case (the guard adds no statement to the transaction).
+## 7. Open, and what is not done
 
-## 5. Coordination
+- The chunked copy is 0.5 (this issue is the refusal).
+- The guard does not adapt to the recovery model: a SIMPLE base writes 0.5% of the log and could rebuild far more; it
+  raises the limit today. Reading `sys.databases.recovery_model_desc` is a small later change if wanted.
+- The drop-in reads the limit but does not yet ask for the S1 gate.
+- The error 1205 of section 4.2 (7).
+- `mssql-restructure --trial` needs `--skip-session-check` (the tool's own pool holds a second session on the database and
+  its check counts it).
 
-Track ddl is in the same planner (S1-D, S1-E). The plan touches `s1.rs` and `command.rs` in a few lines each and adds
-files otherwise; I will rebase on `feat/0.4` before every edit of those two, and keep the hooks small enough to merge by
-hand.
+## 8. Reproduction
 
-## 6. Decisions I ask for
+```
+python scripts/restructure-lab/size-limit/s1j.py presize  --db ibcmd_rs_04_ui_s1j_x --data-gb 6 --log-gb 10
+python scripts/restructure-lab/size-limit/s1j.py rung     --db ibcmd_rs_04_ui_s1j_x --shape narrow --rows 1000000 --exe <ibcmd-rs.exe> --tag n1e6
+python scripts/restructure-lab/size-limit/s1j.py probe    --db ibcmd_rs_04_ui_s1j_bsp --table _InfoRg5222 --tag probe1
+python scripts/restructure-lab/size-limit/s1j.py fingerprint --db ibcmd_rs_04_ui_s1j_u --out before.json
+python scripts/restructure-lab/size-limit/table.py [--csv file | --markdown]
+pwsh scripts/restructure-lab/size-limit/native_twin.ps1 apply|export -Database ibcmd_rs_04_ui_s1j_e_nat [-Out dir]
+python scripts/restructure-lab/size-limit/compare_twins.py <db A> <db B> --tables _Reference20,...
+```
 
-1. The place of the check: the gate side in a new file (section 2), not `plan()`.
-2. Whether the limit may be raised on the command line (I propose yes, printed in the report) or is fixed.
-3. The two budgets of section 3.5 (log, exclusive window) the limit is derived from, or leave them to me with
-   the measured table in front of you.
-4. The ceiling of the synthetic table: about 4 GB of data and 10-15 GB of disk at the top rung, one twin at a time.
-5. The ERP УХ confirmation of 3.6: yes or no, and a clone or an existing twin.
+Every run over five minutes was one command inside `heavy-lock.ps1 acquire ui` ... `release ui`; the native commands
+under the `native` lock. Twins: the writes only to `ibcmd_rs_04_ui_*` (the kit checks), every twin dropped with
+`drop-lab-dbs.ps1` when its runs were done.
