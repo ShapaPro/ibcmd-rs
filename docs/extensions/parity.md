@@ -322,7 +322,7 @@ skips that compile: `compile_extension_module_overlay` reads the family and
 uuid off each owner's document, consumes it unread, and compiles the `.bsl`
 files (`compiler::bootstrap`). A body must replace an existing row (adding one
 to an object that has none is a structural change and is refused); a form,
-picture or template in the selection takes the full compile as before.
+picture or template in the selection goes to the whole-tree route below.
 
 Measured 2026-09-29 on БСП 8.3.27 clones, extension `_ДемоРасширение`, module
 of the adopted common module `ОбщегоНазначенияПереопределяемый` (one comment
@@ -351,6 +351,115 @@ the corpus, until the platform has applied them once; `ServiceDesk` and
 `VAExtension` have it clear), and `--mode exclusive` refuses while the cluster
 holds sessions of the database (a clone registered with `register-ib.ps1`
 does), so `--mode online` is the one that runs on a registered clone.
+
+## Whole-tree load
+
+The strict compile above refuses what a native export writes for an extension,
+so no whole native tree of the four БСП 8.3.27 extensions loaded, and a form, a
+picture or a template failed even in a bounded selection. `mssql-load-extension`
+now goes the other way round (`mssql_extension_tree_load`), for the whole tree
+and for a `--path-prefix` selection that holds more than module bodies:
+
+1. the extension's active image is exported (the export equals the platform's
+   `config export --extension`, see the sections above) and the tree is compared
+   with it file by file. `ConfigDumpInfo.xml` is derived and left out; a module
+   is compared by its text, so a byte order mark or LF line ends saved by an
+   editor are no change;
+2. the objects that own a changed file are compiled by the staging compiler of
+   `cf load` (`load::compiled::compile_edit`, the one that loads a `.cfe`),
+   offline against the extension's own rows; only the rows of the changed files
+   replace the active ones, every other row stays the active image's byte for
+   byte (a recompile could lose what the compiler cannot read);
+3. the proposed image is exported again and must equal the tree, file for file
+   (`ConfigDumpInfo.xml` aside). A difference refuses the load by file name and
+   nothing is staged, so an edit is either carried exactly or refused, never
+   approximated. A dry run does all three.
+
+Activation publishes rows and restructures nothing, so a change that would
+change what a database table holds is refused before any compile, by file and
+with the reason: the descriptor of an object of a family that may own a table
+(catalogs, documents, registers, ...), the root descriptor unless only the
+`<ChildObjects>` lines of table-less families changed, an asset of the root, a
+body file added or removed (except the module of a form), an object added or
+removed outside the table-less families (common forms, modules, pictures and
+templates, roles). Bodies (module, form and its module, template, picture,
+rights, help) and the descriptors of forms, templates and table-less families
+change in place; an object of a table-less family may come or go (the root's
+child list follows the tree's). A tree equal to the export of the active image
+is refused as "no changes" (`--all-extensions` lists such extensions as
+`unchanged_extensions`). `--path-prefix` takes only the files under the given
+paths and leaves the rest of the proposal the active image's; a new object
+needs `--path-prefix Configuration.xml` beside its own path, since the root's
+child list is a file too. A selection of module bodies alone is still overlaid
+without any comparison (`selection: "bounded"`, what `mssql-apply-source-change
+--extension` uses), and gives the same rows as the tree route (checked: root
+`bf0f9c26...` on both). One process compiles one extension's tree offline, so
+several changed extensions are loaded one by one with `--extension` (module
+edits and unchanged extensions do not count; the refusal says so).
+
+Side files: the export report names the file an entry is written as, not the
+files unpacked beside it (`Ext/Help/ru.html`, `Ext/Picture/Picture.png`); such a
+file belongs to the entry of its `Ext/Help.xml` / `Ext/Picture.xml`.
+
+One writer rule came out of it: an ExtPicture with `LoadTransparent` true and no
+`TransparentPixel` is stored `{1,0,-1,-1}` (6 of 6 pictures of the extensions;
+the main-configuration corpora never have it, and the compiler refused it).
+
+Only platform 8.3.27.2214 writes extensions (8.5 is declared unsupported for
+extension writes).
+
+### Measured against the platform, 2026-09-30
+
+Each case is a copy of the native tree of one extension of the БСП 8.3.27 clone
+with one edit (`F:\ibcmd\lab\05\ext\tools\tl_edit.py`), loaded twice from the
+corpus backup: by us (`mssql-load-extension`, whole tree) on one clone and by
+the platform (`ibcmd infobase config import --extension=<name> <tree>`) on a
+twin (`tl_twin.ps1 -Apply`). The staged state and then the state after the
+platform's `config apply --extension` are exported by the platform and by us;
+all four exports of both clones equal the edited tree, file for file
+(`ConfigDumpInfo.xml` aside), and the generation the platform creates from the
+rows we staged has exactly the root we proposed (the CAS root is the SHA-1 of
+`configinfo`, which lists the SHA-1 of every row, so the platform kept every row
+byte for byte). The twin's rows differ from ours in bytes, as its import
+recompiles every object (element timestamps, the `Navigator` records of forms,
+the layout of a few rows), and export identically.
+
+| case | extension | edit | changed files | staged rows |
+|---|---|---|---|---|
+| m1 | `_ДемоРасширение` | a line in the module of an adopted common module | 1 | 170 |
+| m2, m3 | `_ДемоРасширение` | manager module, and manager + record set module, of an adopted register | 1, 2 | 170 |
+| fm1 | `VAExtension` | the module of an own form (inside the form's body row) | 1 | 70 |
+| fx1 | `VAExtension` | `Form.xml` of an own form: a command title | 1 | 70 |
+| fx2 | `ServiceDesk` | `Form.xml` of an own form of an own catalog | 1 | 431 |
+| fx3 | `VAExtension` | `Form.xml` and its module together | 2 | 70 |
+| fa1 | `_ДемоРасширение` | a module written for an adopted form that had none | 1 | 170 |
+| fa2 | `_ДемоРасширение` | `Form.xml` of an adopted form (165 KB, `BaseForm`): the title | 1 | 170 |
+| tc1 | `ServiceDesk` | data composition schema of an own report: a parameter title | 1 | 431 |
+| tm1 | `_ДемоРасширение` | spreadsheet template of an own document: a text | 1 | 170 |
+| p1 | `ServiceDesk` | an SVG picture recoloured | 1 | 431 |
+| p2 | `_ДемоРасширение` | a PNG picture replaced | 1 | 170 |
+| r1 | `_ДемоРасширение` | rights of an own role: one object taken out | 1 | 170 |
+| h1 | `_ДемоРасширение` | help page of an own catalog: a paragraph | 1 | 170 |
+| d1 | `ServiceDesk` | the descriptor (synonym) of an own common picture | 1 | 431 |
+| all1 | `_ДемоРасширение` | module, spreadsheet template, rights, help page and picture at once | 5 | 170 |
+| n1 | `ServiceDesk` | a new common picture (descriptor, `Picture.xml`, SVG) + the root's list | 4 | 433 |
+| n2 | `VAExtension` | a new common module + the root's list | 3 | 72 |
+| n3, n4 | `ServiceDesk` | a new role, a new common form (`Form.xml`, module) | 3, 4 | 433 |
+| n5, n6 | `ServiceDesk` | a role removed, a common module removed | 3 | 429 |
+
+Refused, as designed (`ServiceDesk`): the synonym of an own catalog
+(`Catalogs/сд_Контрагенты.xml`: "the descriptor of an object that may own a
+table") and the synonym in the root `Configuration.xml`. Not part of the table:
+one platform export of the twin's staged state (case h1) came out with 171 of
+184 files, the known intermittent short export of the native `ibcmd` (our export
+of the same state has 184, and so has the platform's after its apply); it was
+repeated.
+
+What the comparison found on the way, all fixed: side files of help and picture
+entries had no entry key (an edit of `Ext/Help/ru.html` was lost, caught by the
+export-back check); a module saved without a byte order mark exported with one;
+`LoadTransparent` true without a pixel (SVG pictures) was refused by the
+ExtPicture writer.
 
 ## Cross-check against the platform fixtures of upstream PR 387
 
@@ -421,8 +530,12 @@ These are read off a single native sample; the evidence is in the lab folder
 * the ERP УХ 8.5 corpus for the 8.5 readers (no such clone was made);
 * the load of an 8.5 extension (the 8.5 form loader has the planner bag entry
   and the empty-source characteristic compiles, but no 8.5 extension was loaded);
-* the load of a whole native-format tree (only the bounded module change loads;
-  forms, pictures and templates of an extension still take the strict compile);
+* the whole-tree load on the 8.5 clone (extension writes are declared
+  unsupported for 8.5), of interceptors of an adopted form and of a binary
+  template (`Template.bin`): the compiler has them, no case ran;
+* a structural change of an extension (a new attribute, an object with a table,
+  a body added to an object that has none) is the platform's own load: the
+  load refuses it by file and the activation restructures nothing;
 * the drop-in route on the other extensions (the route is the same export; only
   `_ДемоРасширение` of the БСП 8.3.27 clone and `ServiceDesk` of the БСП 8.5
   clone were run through it).
