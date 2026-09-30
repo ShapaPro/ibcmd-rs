@@ -1380,3 +1380,160 @@ ones is refused: both rewrite the same cache rows.
 Not traced, therefore refused: the removal of a section or of an attribute of one (the caches of a removal are not composed with an
 addition), a section in the middle of the list (the order of the sub-tables of the entry is not known), `Use` of a section other than
 `ForItem`, the additional order in an attribute of a section, two new objects of a kind in one stage (S1-F).
+
+### 12.15 S1 combinations: the built operations in one stage (#391, before 0.4.0)
+
+Users do not stage one operation at a time. The operations of S1 were each traced and verified alone (12.8 A add an attribute, 12.11 B delete one
+and C widen a string, 12.13 D switch the index, 12.14 E add a tabular section or an attribute of one); this section is the matrix of their
+combinations, run through the drop-in route users run, `ibcmd-rs infobase config apply --recovery-backup=<file>` (gate `s1`), on objects no
+extension adopts (S1-I). With S1-F merged (`docs/apply/new-object.md`) the matrix has its rows too: a new catalog or document next to other operations.
+The stages are made by `edit_cases_s4.py <out> <case>` (m*, r1-r6) and `edit_cases_s5.py <out> <case>` (f*, r7, r8) on the БСП 8.3.27 and are described in
+the table below.
+
+**What the combinations needed** (`plan.rs`, `schema.rs`; the first run of the matrix found the first two, rcheck's run on the ERP УХ the third):
+
+* **One refusal was wider than what was not traced.** `plan()` refused any stage that removes an attribute *and* adds a section or an attribute
+  of one, because the object registry (`1a621f0f`) and the XDTO model (`ea13a2c9`) have two writers -- `caches::change::rewrite` for the objects
+  with sections and the removal/addition editors (`xdto_update`, `registry_update`) for the objects that only change their attribute list --
+  and the two were never run over the same rows. Native rewrites each row once for the whole stage, so the plan now does the same: the objects
+  with sections go through `rewrite` first, then the editors run on the rows that are left (`RowText`, `edited()`, `put_row()`), and each row
+  is deflated once (`CacheUpdate`). The refusal stays for what was never traced, **one object that removes an attribute and adds a section (or
+  an attribute of one)**: `S1: catalog <name> removes an attribute and adds a tabular section (or attributes of one) in one stage: not built`.
+  A stage that creates an object (S1-F) *and* adds sections to existing objects, or removes their attributes, stays refused (r7, r8, below).
+* **A new attribute that comes with the index flag** (`Index`, `IndexWithAdditionalOrder`) was refused as "an index is a separate case". It
+  is not: the entries are those of a switch of the index (12.13), added to the entry after the fields are inserted (`add_field_indexes`:
+  `ByFieldFld<n>`, and `ByParentFieldFld<n>` for a hierarchical catalog, the additional order with the key on `Description,ID,Marked` /
+  `Date_Time,ID,Marked`). Native traced it on m7 (all seven attributes) and the plan equals it: `DBNames`, every `DBSchema` entry, both cache rows.
+
+* **The place of the rebuilt tables in `DBSchema`.** The platform appends every table it rebuilds to the **end** of the list, in the order it rebuilds
+  them; the plan put them before `ConfigChngR`, which is the same only where that table is the last one (the БСП: the platform rebuilds it after
+  the others). On the ERP УХ (empty change register) the platform does not rebuild it, it stays in the middle, and rcheck's twins showed the six
+  rebuilt tables of `b1` at positions 16 851-16 856 natively and 4 803-4 808 in ours, every entry equal. `DbSchema::insert_rebuilt` puts a table at
+  the end and ahead of `ConfigChngR` only when that is the last table; the tables S1-F creates come first, in the same place, so the placements
+  compose. Nothing changes on the БСП (every corpus test, every twin of this section).
+
+Nothing else changed in the planner, the gate or the seam: a stage with several operations on several objects was already one plan, one
+rebuild of every table of every changed object (12.3), one transaction.
+
+**The stages.** Operations: A add an attribute, B delete one, C widen a string, D switch the index, E+ a new tabular section, E~ a new attribute of
+a section the object had. Every stage is checked first offline: the plan made from the staged snapshot equals the platform's result in `DBNames`
+(text), every `DBSchema` entry, every cache row the plan writes, and the `.si` rows the plan does not write are the ones the platform left alone
+(`tests_corpus.rs`, `corpus_mix`).
+
+| case | the stage | objects | A | B | C | D | E+ | E~ | tables rebuilt or created |
+|---|---|---|---|---|---|---|---|---|---|
+| **m1** | **B + C** in the same objects: `КлассификаторБанков` (hierarchical) 2 deleted and 3 widened, `ШаблоныЗаданийОчереди` 1 and 2, `КлючевыеОперации` 1 and 1 | 3 | 0 | 4 | 6 | 0 | 0 | 0 | 3 |
+| **m2** | **C + D** on the same attribute (widened and its index switched on, off, to the additional order): `КлассификаторБанков` 3 attributes, `_ДемоЗаказПокупателя` 2, `КлючевыеОперации` 1 | 3 | 0 | 0 | 6 | 6 | 0 | 0 | 6 |
+| **m3** | **E + C + A** in the same object: `КлючевыеОперации` a new section and a widened attribute; `_ДемоЗаказПокупателя` a new section, a new attribute of the old section, a widened attribute and a new own attribute; `ТелефонныйЗвонок` a new section and a new own attribute | 3 | 2 | 0 | 2 | 0 | 3 | 1 | 11 |
+| **m4** | **B in some objects, E in others**: `КлассификаторБанков` 2 and `ШаблоныЗаданийОчереди` 1 attributes deleted; `КлючевыеОперации` and `_ДемоСчетФактураПолученный` a new section each, `_ДемоОприходованиеТоваров` two new attributes of its section | 5 | 0 | 3 | 0 | 0 | 2 | 2 | 8 |
+| **m5** | **A, B, C, D and E at once** on six objects: `КлассификаторБанков` B+C+D, `ШаблоныЗаданийОчереди` B+A, `КлючевыеОперации` C+D+E, `_ДемоЗаказПокупателя` A+D+E+E~, `ТомаХраненияФайлов` D, `_ДемоПодразделения` (hierarchical) A+E~ | 6 | 3 | 2 | 2 | 4 | 2 | 2 | 12 |
+| **m6** | **one large stage**: the six objects of m5 and eleven more (catalogs and documents, flat, hierarchical and subordinate, with and without sections; every operation at least four times) | 17 | 4 | 4 | 6 | 8 | 4 | 4 | 30 |
+| **m7** | **A + D** on the same new attribute: seven new attributes that come indexed (`Index`, `IndexWithAdditionalOrder`, a string, a number, a date) in `КлассификаторБанков` (hierarchical, nullable ones too), `КлючевыеОперации`, `ТомаХраненияФайлов`, `ШаблоныЗаданийОчереди` and `_ДемоЗаказПокупателя` | 5 | 7 | 0 | 0 | 0 | 0 | 0 | 8 |
+| **f1** | **F + C + D**: a new flat catalog `ДемоКатН1` (S1-F, case N1: attributes of every primitive type, a reference, indexed ones) next to two widened strings (`КлючевыеОперации`, `_ДемоСписаниеБезналичныхДенежныхСредств`) and three switched indexes (`КлассификаторБанков`, `ТомаХраненияФайлов`, the same document) | 5 | 0 | 0 | 2 | 3 | 0 | 0 | 5 |
+| **f3** | **F + A + C + D**: a new catalog `ДемоКатН5` and a new document `ДемоДокН5` (N5) next to two new own attributes (`ШаблоныЗаданийОчереди`, `_ДемоРасходныйКассовыйОрдер`), a widened string (`КлючевыеОперации`) and two switched indexes (`ТомаХраненияФайлов`, `_ДемоНачислениеЗарплаты`) | 7 | 2 | 0 | 1 | 2 | 0 | 0 | 10 |
+
+**The twin protocol through the drop-in route** (12.6; the platform stages the descriptors of the case with `import files --partial`, the
+platform's apply is the native twin, ours is `ibcmd-rs infobase config apply --recovery-backup=<file>` on the other): checks 2-8 for every case,
+with the binary of this branch after the merge of feat/0.4 (`029b4a2b`), except that m2-m5 ran first with the binary before that merge (their
+plans are unchanged by it; their offline tests and the snapshot checks of the drop-in twin were repeated with the final binary, see the route
+through our import below).
+
+| case | drop-in | 3. `EXCEPT` both ways | 4. `Config` | 6. `.si` rows | 7. the platform's apply afterwards | 8. native exports, `source-diff` |
+|---|---|---|---|---|---|---|
+| **m1** | 48.5 s | 0 rows (3 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m2** | 8.5 s | 0 rows (6 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m3** | 41.6 s | 0 rows (11 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m4** | 37.3 s | 0 rows (8 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m5** | 27.5 s | 0 rows (12 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m6** | 66.6 s | 0 rows (30 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **m7** | 63.7 s | 0 rows (8 tables) | 0 rows on either side | 16 of 16 | «не требуется» | 12 198 of 12 198 identical |
+| **f1** | 65.1 s | 0 rows (5 tables) | 0 rows on either side | 15 of 16 | «не требуется» | 12 200 of 12 200 identical |
+| **f3** | 285.8 s | 0 rows (10 tables) | 0 rows on either side | 15 of 16 | «не требуется» | 12 201 of 12 201 identical |
+
+Checks 2 (tables, columns, indexes: the same but the drift list of 12.6) and 5 (`DBSchema` entries equal but `DbCopies*`, on the base of the F rows
+equal) held in every case; 6 is "16 of 16 `.si` rows have the same text", or "15 of 16" where a new object is created (`c4629235` differs in the order
+of some entries only, `derived-caches.md` 4; the offline test accepts that row by its length). The check 12 (a `THROW` before `COMMIT` of the generated script on a fresh twin) was run once, on
+the largest stage, m6 (17 objects, 30 tables, 5 676 rows rebuilt, three cache rows and `siVersions`): the script ran for 46.7 s, the error was raised, and the digest
+of the whole database -- rows and checksums of `Config`, `ConfigSave` and `Params`, the schema storage, `DBSchema`, `DBNames`, the checksums of all
+columns and indexes, 2 234 tables, no `*NG` table -- was the one before the run (`s1-mix-check12-m6.txt`).
+
+**The F rows (f1, f3).** The platform stages a new object on a base that has had a native apply already (`new-object.md` 8), so these two run on the backup of
+case c after its native apply (`bsp8327_c2_native_after`, `MIX_BASE_BAK`) and use its native export as the tree (`MIX_BASE_TREE`); the new objects are the ones
+of the S1-F cases N1 (a flat catalog) and N5 (a catalog and a document), copied as they are with `Configuration.xml`. With `Configuration.xml` in the
+stage the platform's partial import also wants the forms and templates of every edited object in the base directory, listed or not (it stops with
+`Файл объекта не существует .../Forms/ФормаЭлемента.xml` otherwise, and `stage_case.ps1` now stops on an empty `ConfigSave` instead of going on with
+nothing staged). The tables of a new object are created empty and come first in `DBSchema`, the rebuilt ones after them (12.15, above).
+
+**The route through our import.** The same stages, staged by `ibcmd-rs infobase config import <the whole tree>` (the base tree, the edited
+descriptors, and the forms of the objects that lose attributes) into a pristine clone, then the drop-in apply. The reference is the drop-in twin of
+the platform route, which the platform route showed equal to the platform's own result in checks 2-8 (0 rows apart in 3, 4, 8), and, for the
+checks that read snapshots (2, 5, 6), the platform's own snapshot (`nat_after`). The native lock is one queue for all tracks, so this pass was
+run with one native write per case (`mix_ours.ps1`, the check 7).
+
+| case | our import | drop-in | 2, 5, 6 against the platform's snapshot | 3. `EXCEPT` against the drop-in twin | 4. `Config` rows that differ in text | 7. the platform's apply afterwards | 8. exports against the drop-in twin |
+|---|---|---|---|---|---|---|---|
+| **m1** | 43 s | 206.2 s | equal | 0 rows | 3 068 of 9 841 | «не требуется» | 4 file(s) differ: 3 edited forms and `ConfigDumpInfo.xml` |
+| **m2** | 87.7 s | 242.1 s | equal | 0 rows | 3 068 of 9 841 | «не требуется» | 1 file(s) differ: `ConfigDumpInfo.xml` only |
+| **m3** | 37.1 s | 170.9 s | equal | 0 rows | 3 068 of 9 841 | «не требуется» | 1 file(s) differ: `ConfigDumpInfo.xml` only |
+| **m4** | 42.8 s | 223.2 s | equal | 0 rows | 3 070 of 9 841 | «не требуется» | 4 file(s) differ: 3 edited forms and `ConfigDumpInfo.xml` |
+| **m5** | 56.1 s | 299.5 s | equal | 0 rows | 3 071 of 9 841 | «не требуется» | 4 file(s) differ: 3 edited forms and `ConfigDumpInfo.xml` |
+| **m6** | 105.2 s | 546.9 s | equal | 0 rows | 3 082 of 9 841 | «не требуется» | 6 file(s) differ: 5 edited forms and `ConfigDumpInfo.xml` |
+| **m7** | 44.8 s | 445.5 s | equal | 0 rows | 3 070 of 9 841 | «не требуется» | 1 file(s) differ: `ConfigDumpInfo.xml` only |
+| **f1** | 80.7 s | -- | -- | -- | -- | -- | not run to the end: our import first refused the hand-made catalog file (no `<Use>`, below); with the fixed file the rerun (`mix_ours.ps1 -Case f1`) was stopped by the pause of 2026-09-30 |
+| **f3** | 23.1 s (160.3 s in the first run) | 62.2 s (252 s) | equal (15 of 16) | 0 rows (10 tables) | 30 of 9 841 | «не требуется» | 1 file differs: `ConfigDumpInfo.xml` only |
+
+* The **check 3** (`EXCEPT` both ways of every rebuilt table) and the checks 2, 5, 6 are the ones that matter for S1: the structure phase and
+  the data of the rebuilt tables do not depend on how the stage got into `ConfigSave`.
+* The **check 4** differs by construction until #395: our import re-compiles rows. Counted after inflate, 3 068-3 082 of the 9 841 `Config` rows
+  differ in text from the platform's (2 275 of them the `.0` rows, 554 `.2`, 108 `.1`, 103 `.3`, and the descriptors of the changed objects: 3
+  in m2, 6 in m5, 17 in m6), 6 081-6 095 differ only in the compression of the same text, 678 are equal bytes. The descriptors of the changed
+  objects are written in the older record layout (`{56,` and no `1,0,{1,00000000-...}` tail of each attribute where the platform writes `{57,`
+  with the tail); the platform reads both (checks 7 and 8), and the S1 result does not depend on it.
+* The **check 8** differs in `ConfigDumpInfo.xml` (its per-object versions are hashes of the rows, and the rows differ as above) and, for a stage
+  that removes attributes, in the forms our import was given: the twin the platform staged with the descriptors only keeps the original forms,
+  ours has the forms without the elements bound to the removed attributes. `diff_paths.py` verifies that the differing files are **exactly** the
+  edited forms and `ConfigDumpInfo.xml`, and that each edited form comes back from the export of our twin byte for byte.
+* **The base decides how many rows differ.** The figures above are for the pristine БСП, whose rows were compiled by another build than the one that
+  compiles ours; on the base that had a native apply (f3) 30 of 9 841 rows differ in text: the descriptors of the changed and the new objects,
+  their `.0` rows, `versions`, and three further parts of rows of the new objects (our import splits a row into parts where the platform keeps one).
+* **A hand-made file is not an export.** The catalog files of the S1-F cases were written by a script and lack `<Use>` in the attributes (the exporter always
+  writes it, the platform's import defaults it); our import refuses them (`Catalogs/ДемоКатН1.xml: ... descriptor: no <Use>`). The route through our import
+  is given the same files with `<Use>ForItem</Use>` (`stage_full/`).
+* **A tree that removes an attribute must be a configuration.** The platform's partial import takes the descriptors alone and does not look at
+  the forms; our import of a whole tree (like the platform's) refuses a tree whose forms still bind fields to a removed attribute
+  (`Form/ChildItems/.../DataPath: "Список.КоррСчет" in the tree, "~Список.КоррСчет" in the configuration that would result`), and a list form
+  that keeps a manual query column of it (`Таблица.Версия КАК Версия` in `ВнешниеКомпоненты`: every field of the list turned into `~Список.X`).
+  What a user does is what `form_bindings.py` does: the elements bound to `Объект.<attribute>` / `Список.<attribute>` and the query columns are
+  taken out of the forms (m1 3 forms, m4 3, m5 3, m6 5).
+
+**The refusals** (`mix_case.ps1 -Refused`; r7 could not be staged when the work was paused: the platform's partial import refuses `КлассификаторБанков`'s forms, which `edit_cases_s5.py` copies into the stage for `Configuration.xml` and which still bind `Список.КоррСчет` -- the copied forms of an object that loses an attribute must lose those bindings, `form_bindings.py`): the drop-in must exit 1 and leave the database as it was (the digest of check 12 before and after).
+
+| case | the stage | the reason the gate gives | exit | database |
+|---|---|---|---|---|
+| **r1** | **B + E+ on the same object** (`КлючевыеОперации`: an attribute deleted, a section added), with a widening and a section in other objects | `S1: catalog КлючевыеОперации removes an attribute and adds a tabular section (or attributes of one) in one stage: not built (the caches of a removal are not composed with the ones of a section of the same object)` | 1 | unchanged (digest of check 12) |
+| **r2** | **B + E~ on the same object** (`_ДемоЗаказПокупателя`: an attribute deleted, an attribute added to its section), with an index switch elsewhere | `S1: document _ДемоЗаказПокупателя removes an attribute and adds a tabular section (or attributes of one) in one stage: not built (the caches of a removal are not composed with the ones of a section of the same object)` | 1 | unchanged (digest of check 12) |
+| **r3** | valid operations on three objects, and a change of `_ДемоПартнеры`, an object the extension `_ДемоРасширение` adopts (S1-I) | `S1: catalog _ДемоПартнеры is adopted by the extension _ДемоРасширение (object _ДемоПартнеры 3014d9c1-cb00-49fb-81b3-e8ced354975f, active image); the extension keeps no table of its own for it: the own restructure does not change an object an extension adopts, the platform's apply does` | 1 | unchanged (digest of check 12) |
+| **r4** | valid operations on three objects, and a string that gets shorter (`ОчередьЗаданий.ИмяПользователя` 32 -> 16) | `S1: length-not-widened: Catalog.ОчередьЗаданий: ChildObjects/Attribute[ИмяПользователя]/Properties/Type/StringQualifiers/Length: 32 -> 16` | 1 | unchanged (digest of check 12) |
+| **r5** | valid operations on three objects, and an attribute that changes its type (`ОчередьЗаданий.ИмяПользователя` string -> number) | `S1: attribute-property-outside-s1: Catalog.ОчередьЗаданий: ChildObjects/Attribute[ИмяПользователя]/Properties/Type/Type: xs:string -> xs:decimal` | 1 | unchanged (digest of check 12) |
+| **r6** | valid operations on three objects, and a subordinate catalog's own attributes (`_ДемоБанковскиеСчета`: one deleted, one widened) | `S1: catalog _ДемоБанковскиеСчета is subordinate to owners: its owner field is not covered` | 1 | unchanged (digest of check 12) |
+| **r7** | **F + B**: a new document `ДемоДокН4` (S1-F, N4) and an attribute deleted from a catalog (`КлассификаторБанков.КоррСчет`), with a widening elsewhere | expected: `S1: a new object together with removed attributes of existing objects is not built: the caches of the new object are chained on the additions only` (the refusal is in `plan()` and was not reached: **not staged yet**, below) | -- | -- |
+| **r8** | **F + E**: a new catalog `ДемоКатН1` and new tabular sections of existing objects (a section of `КлючевыеОперации`, an attribute of the section of `_ДемоОприходованиеТоваров`), with a widening elsewhere | `S1: a new object together with new tabular sections (or attributes of them) of existing objects is not built: both rewrite the registry, the index of the generated types and the XDTO model` | 1 | unchanged (digest of check 12) |
+
+Each refused stage also contains valid operations on other objects (r3-r6 three of them on other objects, r1 and r2 one or two), and none of them is
+half-applied: the gate refuses the whole stage, with the reason, before anything is written.
+
+The rows of the matrix that are not built, and why: one object that removes an attribute and adds a section or an attribute of one (r1, r2:
+the caches of the two are not composed for one object; it is the *same-object* case only); a stage that creates an object (S1-F) and removes an
+attribute of another (r7: the caches of a new object are chained on additions only, N3, N6 and N7 trace additions) or adds sections to another (r8: both
+rewrite the registry, the index of the generated types and the XDTO model); a subordinate catalog's own attributes (the owner field, r6; its sections
+are built); and, as before, everything of 12.14 "not traced" and the refusals of 12.9.
+
+Evidence (`docs/apply/evidence/restructuring/`): `s1-mix-matrix.txt` (the summaries of all cases, both routes), `s1-mix-check12-m6.txt`;
+tools `scripts/restructure-lab/`: `edit_cases_s4.py`, `edit_cases_s5.py`, `mix_case.ps1`, `mix_ours.ps1`, `form_bindings.py`, `mix_forms.py`,
+`config_compare.py`, `diff_paths.py`, `assemble_mix_evidence.py`, `uha_order_proof.ps1`, `schema_order_dump.py`. Tests: `tests_corpus.rs` (`corpus_mix_*`, nine
+cases), `tests_sections.rs` (`a_new_attribute_comes_indexed_with_the_entries_of_a_switch`), `tests_schema.rs` (the place of the rebuilt tables).
+
+**State at the pause (2026-09-30).** Run and verified: m1-m7, f1 (platform route), f3 (both routes), r1-r6, r8, check 12 on m6, the order of the tables in the
+unit tests. Not run: the route through our import for f1, the staging of r7, the ERP УХ twin of the table order (`uha_order_proof.ps1`: a fresh УХ clone,
+rcheck's stage of `b1`, the native import, our drop-in apply, the positions of the moved tables against rcheck's log; written and parsed, never run; rcheck's own
+`run_case_uha.ps1 -Cases b1,c1 -Exe <the binary of this branch>` reproduces the check 5 the same way). The evidence file is `s1-mix-matrix.txt`.
