@@ -13,7 +13,11 @@ param(
     [switch]$Cleanup,
     [switch]$SkipStage,
     [switch]$SkipNative,
-    [switch]$NativeOnly
+    [switch]$NativeOnly,
+    # The route through OUR import as well: a third twin (_ours) is staged by `ibcmd-rs infobase config import` of the full tree (the base
+    # tree, the edited descriptors, the forms without the fields bound to removed attributes), then the drop-in apply, then the checks 3, 7 and
+    # 8 against the native twin (the check 4 differs by construction until #395: our import re-compiles about 3 000 rows).
+    [switch]$Ours
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -22,6 +26,7 @@ $kit = $PSScriptRoot
 . "$kit\native_lock.ps1"
 $lab = if ($env:DDL_LAB) { $env:DDL_LAB } else { 'F:\ibcmd\lab\04\restructure' }
 $base = "ibcmd_rs_04_ddl_s2_${Case}_base"
+$oursDb = "ibcmd_rs_04_ddl_s2_${Case}_ours"
 $nat = "ibcmd_rs_04_ddl_s2_${Case}_nat"
 $own = "ibcmd_rs_04_ddl_s2_${Case}_own"
 $o = "$lab\out\mix_$Case"
@@ -131,10 +136,52 @@ if ($Refused) {
     $diff = python -c "import json; d=json.load(open(r'$o\export_diff.json',encoding='utf-8')); print(d['summary'])"
     Note "check 8 (source-diff): $diff"
 }
+if ($Ours -and -not $Refused) {
+    Log 'the route through our import'
+    $tree = "$lab\tree_full\$Case"
+    New-Item -ItemType Directory -Force "$lab\tree_full" | Out-Null
+    robocopy 'F:\ibcmd\lab\04\import\tree\base' $tree /MIR /NFL /NDL /NJH /NJS /NP /MT:16 | Out-Null
+    robocopy "$lab\tree_s2\$Case\stage" $tree /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    if (Test-Path "$lab\tree_s2\$Case\stage_full") { robocopy "$lab\tree_s2\$Case\stage_full" $tree /E /NFL /NDL /NJH /NJS /NP | Out-Null }
+    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus bsp8327 -Name $oursDb -Track ddl -Purpose "S1 mix $Case : our import of the full tree, then the drop-in apply" | Select-Object -Last 1
+    $oursData = "$lab\ibdata\$oursDb"
+    New-Item -ItemType Directory -Force $oursData | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $importOut = & $Exe infobase config import --dbms=MSSQLServer --db-server=localhost "--db-name=$oursDb" "--data=$oursData" "--report=$o\ours_import.json" $tree 2>&1
+    $importExit = $LASTEXITCODE
+    $importOut | ForEach-Object { "$_" } | Set-Content "$o\ours_import.log" -Encoding UTF8
+    $rows = sqlcmd -S localhost -E -C -h -1 -W -d $oursDb -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM ConfigSave"
+    Note "our import exit $importExit in $([math]::Round($sw.Elapsed.TotalSeconds, 1))s, $($rows.Trim()) rows in ConfigSave"
+    if ($importExit -ne 0) { $importOut | Select-Object -Last 12 | ForEach-Object { Note "  ours import: $_" } }
+    else {
+        $backupOurs = "$lab\bak\mix_${Case}_ours_$([Guid]::NewGuid().ToString('N').Substring(0, 8)).bak"
+        $oursArgs = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$oursDb", "--data=$oursData",
+                      '--user=Администратор', '--force', '--dynamic=disable', "--recovery-backup=$backupOurs")
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $rc2 = Invoke-NativeCommand -Ibcmd $Exe -Arguments $oursArgs -Log "$o\ours_apply" -TimeoutSec 3600 -NoLock
+        Note "ours: drop-in exit $rc2 in $([math]::Round($sw.Elapsed.TotalSeconds, 1))s"
+        Get-Content "$o\ours_apply.out" -Tail 3 -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object { Note "  ours apply.out: $_" }
+        Get-Content "$o\ours_apply.err" -Tail 4 -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { Note "  ours apply.err: $_" }
+        if (Test-Path $backupOurs) { Remove-Item -Force $backupOurs }
+        if ($rc2 -eq 0) {
+            $tables = @((Get-Content "$o\dry.json" -Raw -Encoding UTF8 | ConvertFrom-Json).structure.tables) -join ','
+            pwsh -NoProfile -File "$kit\compare_tables.ps1" -A $nat -B $oursDb -Tables $tables -Out "$o\ours_except.txt" *> $null
+            $except2 = Get-Content "$o\ours_except.txt" | Select-String -Pattern 'only in A [1-9]|only in B [1-9]'
+            Note ("ours: check 3 (EXCEPT both ways): " + $(if ($except2) { "DIFFERENCES: $($except2.Count) tables" } else { 'no row differs' }))
+            pwsh -NoProfile -File "$kit\apply_only.ps1" -Database $oursDb *> "$o\ours_noop.txt"
+            Get-Content "$o\ours_noop.txt" | Select-String -Pattern 'не требуется|exit=' | ForEach-Object { Note "ours: check 7: $($_.Line)" }
+            Remove-Item -Recurse -Force "$lab\export\$oursDb" -ErrorAction SilentlyContinue
+            pwsh -NoProfile -File "$kit\export_tree.ps1" -Database $oursDb -Out "$lab\export\$oursDb" 2>&1 | Select-Object -Last 1 | ForEach-Object { Note "ours: export : $_" }
+            & $Exe source-diff "$lab\export\$nat" "$lab\export\$oursDb" > "$o\ours_export_diff.json" 2>&1
+            $diff2 = python -c "import json; d=json.load(open(r'$o\ours_export_diff.json',encoding='utf-8')); print(d['summary'])"
+            Note "ours: check 8 (source-diff against the platform's twin): $diff2"
+        }
+    }
+}
 if ($Cleanup) {
     Log 'cleanup'
-    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\drop-lab-dbs.ps1 -Track ddl -Names "$base,$nat,$own" -MinIdleMinutes 1 -Execute 2>&1 | Select-Object -Last 4
-    foreach ($db in $nat, $own) {
+    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\drop-lab-dbs.ps1 -Track ddl -Names "$base,$nat,$own,$oursDb" -MinIdleMinutes 1 -Execute 2>&1 | Select-Object -Last 4
+    foreach ($db in $nat, $own, $oursDb) {
         foreach ($root in 'export', 'ibdata') { if (Test-Path "$lab\$root\$db") { Remove-Item -Recurse -Force "$lab\$root\$db" } }
     }
     if (Test-Path "$o\recovery") { Remove-Item -Recurse -Force "$o\recovery" }

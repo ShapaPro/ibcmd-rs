@@ -20,6 +20,7 @@ usage: python edit_cases_s4.py <out dir> <case>
   r3  REFUSED: valid operations, and a change of an object an extension adopts
   r4  REFUSED: valid operations, and a string that gets shorter
   r5  REFUSED: valid operations, and an attribute that changes its type
+  r6  REFUSED: valid operations, and attributes of a subordinate catalog (its owner field is not covered)
 """
 import os
 import sys
@@ -143,13 +144,10 @@ def run_m6(tree):
     five_objects(tree)
     own(tree, UNITS, "ДемоРеквизит", 20, "ForItem")
     add_section_attribute(tree, UNITS, "Сотрудники", section_attribute(*s("ДемоСтрока", 30)))
-    # eleven more objects
+    # ten more objects (a subordinate catalog is not among them: its own attributes are refused, r6)
     remove_attribute(tree, SERVICES, "Идентификатор")
     flip(tree, PROJECTS, "РеквизитДопУпорядочивания", "IndexWithAdditionalOrder", "DontIndex")
     flip(tree, PAYROLL, "ПериодРегистрации", "IndexWithAdditionalOrder", "DontIndex")
-    remove_attribute(tree, BANK_ACCOUNTS, "ГородБанка")
-    widen(tree, BANK_ACCOUNTS, "НаименованиеБанка", 100, 150)
-    flip(tree, BANK_ACCOUNTS, "НомерСчета", "DontIndex", "Index")
     remove_attribute(tree, COMPONENTS, "Версия")
     widen(tree, COMPONENTS, "Идентификатор", 150, 200)
     widen(tree, NOTICES, "НаименованиеПользователя", 100, 200)
@@ -210,9 +208,18 @@ def run_r5(tree):
     retype(tree, QUEUE, "ИмяПользователя", number(5, 0))
 
 
+def run_r6(tree):
+    widen(tree, BANKS, "Город", 50, 200)
+    remove_attribute(tree, JOBS, "Ключ")
+    section_of(tree, KEYOPS, "ДемоТЧ", [s("ДемоСтрока", 20)])
+    # a subordinate catalog: the owner field is not covered when its own attributes change
+    remove_attribute(tree, BANK_ACCOUNTS, "ГородБанка")
+    widen(tree, BANK_ACCOUNTS, "НаименованиеБанка", 100, 150)
+
+
 CASES = {
     "m1": run_m1, "m2": run_m2, "m3": run_m3, "m4": run_m4, "m5": run_m5, "m6": run_m6, "m7": run_m7,
-    "r1": run_r1, "r2": run_r2, "r3": run_r3, "r4": run_r4, "r5": run_r5,
+    "r1": run_r1, "r2": run_r2, "r3": run_r3, "r4": run_r4, "r5": run_r5, "r6": run_r6,
 }
 
 if __name__ == "__main__":

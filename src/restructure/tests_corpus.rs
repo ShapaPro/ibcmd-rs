@@ -863,3 +863,45 @@ fn corpus_mix_every_operation_in_one_stage_on_six_objects_equals_the_native_resu
     assert_eq!(operations(&plan), [3, 2, 2, 4, 2, 2]);
     assert_eq!(plan.objects.len(), 6);
 }
+
+/// Mix m3: a new section and a widened own attribute in one object; a document with a new section, a new attribute of an old section,
+/// a widened attribute and a new own attribute; a document with a new section and a new own attribute.
+#[test]
+fn corpus_mix_sections_with_widened_and_new_own_attributes_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m3") else {
+        eprintln!("skipped: no lab snapshots of mix m3");
+        return;
+    };
+    assert_eq!(operations(&plan), [2, 0, 2, 0, 3, 1]);
+    assert_eq!(plan.objects.len(), 3);
+}
+
+/// Mix m7: attributes that are added with the index flag (`Index`, `IndexWithAdditionalOrder`), in a flat catalog, a hierarchical
+/// catalog (nullable ones too) and a document: the declared indexes are the ones of a switch.
+#[test]
+fn corpus_mix_new_attributes_that_come_indexed_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m7") else {
+        eprintln!("skipped: no lab snapshots of mix m7");
+        return;
+    };
+    assert_eq!(operations(&plan), [7, 0, 0, 0, 0, 0]);
+    assert_eq!(plan.objects.len(), 5);
+    assert!(
+        plan.objects
+            .iter()
+            .flat_map(|object| &object.additions)
+            .all(|addition| addition.indexing != 0 && !addition.indexes.is_empty())
+    );
+}
+
+/// Mix m6, the large stage: 17 objects, every operation -- deletes, widenings and re-indexing in catalogs and documents that come
+/// with new own attributes, new sections and new attributes of old sections in other objects, all in one plan.
+#[test]
+fn corpus_mix_one_large_stage_on_seventeen_objects_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m6") else {
+        eprintln!("skipped: no lab snapshots of mix m6");
+        return;
+    };
+    assert_eq!(operations(&plan), [4, 4, 6, 8, 4, 4]);
+    assert_eq!(plan.objects.len(), 17);
+}
