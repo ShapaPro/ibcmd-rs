@@ -1203,7 +1203,14 @@ fn preflight_main_publication(args: &MssqlApplySourceChangeArgs) -> Result<()> {
         crate::mssql::exactly_one_optional_marker("Config", fetch("Config", &marker_name)?)?;
     let params_marker =
         crate::mssql::exactly_one_optional_marker("Params", fetch("Params", &marker_name)?)?;
+    // The exclusive mode is carried out by the config apply where the built-in SQL client is there, and that
+    // apply folds the rows of online generations (#408 step 2); the script of every other route refuses them.
+    let executor = crate::mssql_main_activation::MainActivationExecutor::for_mode(
+        activation_mode(args.mode),
+        matches!(sql.backend(), crate::sql::SqlBackend::Client(_)),
+    );
     crate::mssql_main_activation::preflight_publication(
+        executor,
         activation_mode(args.mode),
         &versions,
         config_marker.as_ref(),

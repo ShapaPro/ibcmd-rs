@@ -405,7 +405,7 @@ pub fn exclusive_session_gate(code: u32, message: &str, own: &[OwnRasProcess]) -
 
 /// The sessions the exclusive gates leave out, as a condition to append to a
 /// `WHERE` over `sys.dm_exec_sessions`: none when `own` is empty.
-fn session_exemption(own: &[OwnRasProcess]) -> String {
+pub(crate) fn session_exemption(own: &[OwnRasProcess]) -> String {
     if own.is_empty() {
         String::new()
     } else {

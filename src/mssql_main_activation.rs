@@ -36,14 +36,28 @@ pub enum MainActivationMode {
 }
 
 /// Who carries out a promotion (#408 step 2, `docs/apply/online-activation.md` 6.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MainActivationExecutor {
-    /// The transaction this module renders ([`render_main_activation_sql`]): `online`, `live`, `worker`.
+    /// The transaction this module renders ([`render_main_activation_sql`]): `online`, `live`, `worker`, and
+    /// `exclusive` where the built-in SQL client is not there (`--sqlcmd`).
+    #[default]
     Script,
     /// `mssql_config_apply`, which folds the rows of earlier online generations as the native apply does:
     /// the `exclusive` mode.
     ConfigApply,
+}
+
+impl MainActivationExecutor {
+    /// The executor of a mode: the config apply for `exclusive` where it can run (`config_apply_available`: the
+    /// built-in SQL client), the script for the rest.
+    pub fn for_mode(mode: MainActivationMode, config_apply_available: bool) -> Self {
+        if mode == MainActivationMode::Exclusive && config_apply_available {
+            Self::ConfigApply
+        } else {
+            Self::Script
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +117,9 @@ pub struct MainActivationDryRunReport {
     /// opened them (#409 F-3).
     #[serde(default)]
     pub own_ras_processes: Vec<OwnRasProcess>,
+    /// Who carries the promotion out (`config_apply`: the report of that run is `config_apply` of the command's report).
+    #[serde(default)]
+    pub executor: MainActivationExecutor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +137,7 @@ pub struct MainActivationPlan {
     no_op: bool,
     recovery: MainActivationRecoverySnapshot,
     own_ras_processes: Vec<OwnRasProcess>,
+    executor: MainActivationExecutor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,10 +188,17 @@ impl MainActivationPlan {
         self.no_op
     }
 
-    /// Who carries the promotion out. Today always the rendered script; #408 step 2 hands the
-    /// `exclusive` mode to `mssql_config_apply` (see the ignored test of this module).
+    /// Who carries the promotion out: `mssql_config_apply` for `exclusive` (unless the plan was made for the
+    /// legacy runner), the rendered script for the rest. A no-op is always the script's: it only empties
+    /// `ConfigSave`.
     pub fn executor(&self) -> MainActivationExecutor {
-        MainActivationExecutor::Script
+        self.executor
+    }
+
+    /// Whether the promotion is handed to `mssql_config_apply`: it changes something and the plan's executor is
+    /// the apply.
+    pub fn is_carried_out_by_config_apply(&self) -> bool {
+        self.executor == MainActivationExecutor::ConfigApply && !self.no_op
     }
 
     pub fn recovery(&self) -> &MainActivationRecoverySnapshot {
@@ -230,6 +255,7 @@ impl MainActivationPlan {
             requires_tail_log_artifact: self.mode == MainActivationMode::Live && !self.no_op,
             recovery_token: hex(&Sha256::digest(recovery_json)),
             own_ras_processes: self.own_ras_processes.clone(),
+            executor: self.executor,
         }
     }
 }
@@ -243,6 +269,32 @@ pub fn prepare_main_activation(
     allowed_non_structural_targets: &[String],
     allow_non_lab: bool,
 ) -> Result<MainActivationPlan, MainActivationError> {
+    prepare_main_activation_for(
+        MainActivationExecutor::for_mode(mode, true),
+        mode,
+        staged_rows,
+        snapshot,
+        allowed_non_structural_targets,
+        allow_non_lab,
+    )
+}
+
+/// [`prepare_main_activation`] for a given executor. The config apply carries out `exclusive` only; the script
+/// carries out every mode, `exclusive` included where the built-in SQL client is not there.
+pub fn prepare_main_activation_for(
+    executor: MainActivationExecutor,
+    mode: MainActivationMode,
+    staged_rows: Vec<MainStorageRow>,
+    snapshot: MainActivationSnapshot,
+    allowed_non_structural_targets: &[String],
+    allow_non_lab: bool,
+) -> Result<MainActivationPlan, MainActivationError> {
+    if executor == MainActivationExecutor::ConfigApply && mode != MainActivationMode::Exclusive {
+        return Err(MainActivationError::SafetyGate(format!(
+            "the {} mode is not carried out by the config apply",
+            mode_name(mode)
+        )));
+    }
     if !allow_non_lab {
         return Err(MainActivationError::SafetyGate(
             "--allow-non-lab acknowledgement is required".to_owned(),
@@ -304,17 +356,26 @@ pub fn prepare_main_activation(
         ));
     }
 
-    let no_op = staged.iter().all(|(key, row)| {
+    let equal_to_active = staged.iter().all(|(key, row)| {
         active
             .get(key)
             .is_some_and(|current| current.binary_data == row.binary_data)
     });
+    // The config apply folds the rows of online generations, and the ordinary rows are not the configuration of a
+    // database that has them: a stage that equals the ordinary rows (an online change taken back to the original
+    // text) still changes the configuration. The script's promotion refuses such a database (#408 step 1) or is a
+    // no-op only where nothing is promoted.
+    let no_op = equal_to_active
+        && !(executor == MainActivationExecutor::ConfigApply
+            && (snapshot.config_dynamically_updated.is_some()
+                || snapshot.params_dynamically_updated.is_some()));
     let PublicationState {
         ordinary_generation,
         old_generation,
         dynamic_history,
     } = check_publication_state(
         mode,
+        executor,
         !no_op,
         &active[&("versions".to_owned(), 0)].binary_data,
         snapshot.config_dynamically_updated.as_ref(),
@@ -350,6 +411,7 @@ pub fn prepare_main_activation(
         no_op,
         recovery,
         own_ras_processes: Vec::new(),
+        executor,
     })
 }
 
@@ -368,17 +430,20 @@ struct PublicationState {
 /// `changes` is whether the promotion writes anything.
 fn check_publication_state(
     mode: MainActivationMode,
+    executor: MainActivationExecutor,
     changes: bool,
     ordinary_versions: &[u8],
     config_marker: Option<&MainStorageRow>,
     params_marker: Option<&MainStorageRow>,
 ) -> Result<PublicationState, MainActivationError> {
-    // #408 (finding F-4 of #344): an ordinary promotion replaces only the staged rows and
+    // #408 (finding F-4 of #344): a promotion by the script replaces only the staged rows and
     // deletes both markers, so what earlier online generations published (their
     // `_dynupdate_` rows) silently stops being the configuration. Refuse it before anything
-    // is written until the aliases are folded (`mssql-config-apply`, or the native apply).
+    // is written. The config apply folds the aliases as the native apply does (step 2), so the
+    // promotion it carries out (`exclusive`) is not refused.
     if changes
         && mode != MainActivationMode::Online
+        && executor == MainActivationExecutor::Script
         && (config_marker.is_some() || params_marker.is_some())
     {
         return Err(MainActivationError::SafetyGate(online_history_refusal(
@@ -408,6 +473,7 @@ fn check_publication_state(
 /// left `ConfigSave` filled). The plan the activation builds from the staged
 /// rows makes the same checks ([`prepare_main_activation`]).
 pub fn preflight_publication(
+    executor: MainActivationExecutor,
     mode: MainActivationMode,
     ordinary_versions: &MainStorageRow,
     config_marker: Option<&MainStorageRow>,
@@ -418,6 +484,7 @@ pub fn preflight_publication(
     validate_optional_marker("Params", params_marker)?;
     check_publication_state(
         mode,
+        executor,
         true,
         &ordinary_versions.binary_data,
         config_marker,
@@ -451,6 +518,11 @@ pub fn render_main_activation_sql(
     plan: &MainActivationPlan,
     tail_log_output: Option<&str>,
 ) -> Result<MainActivationScript, MainActivationError> {
+    if plan.is_carried_out_by_config_apply() {
+        return Err(MainActivationError::SafetyGate(
+            "an exclusive promotion is carried out by mssql_config_apply, not by a script of this module".to_owned(),
+        ));
+    }
     let database_name = database;
     let database_literal = quote_string(database_name);
     let database = quote_ident(database_name)?;

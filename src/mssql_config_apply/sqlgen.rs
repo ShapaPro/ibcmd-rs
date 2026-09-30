@@ -220,6 +220,9 @@ pub struct ScriptInputs {
     pub rehearse: bool,
     /// Require that no other user session is connected to the database.
     pub require_exclusive: bool,
+    /// A condition to append to the session count (`" AND NOT (...)"`, or empty): the idle `1CV83 Server` sessions of
+    /// the worker processes that the tool's own RAS verification opened (#409 F-3, #408).
+    pub session_exemption: String,
     pub staged: Fingerprint,
     pub replaced: Fingerprint,
     pub special_config: Fingerprint,
@@ -414,8 +417,8 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         throw(
             &mut sql,
             &format!(
-                "EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND session_id <> @@SPID AND database_id = DB_ID() AND ISNULL(host_process_id, -1) <> {})",
-                input.client_pid
+                "EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND session_id <> @@SPID AND database_id = DB_ID() AND ISNULL(host_process_id, -1) <> {}{})",
+                input.client_pid, input.session_exemption
             ),
             code::OTHER_SESSIONS,
             "another session is connected to the database; the apply needs exclusive access",
@@ -1094,6 +1097,7 @@ mod tests {
             client_pid: 4242,
             rehearse: false,
             require_exclusive: true,
+            session_exemption: String::new(),
             staged: Fingerprint {
                 rows: 3,
                 bytes: 300,
