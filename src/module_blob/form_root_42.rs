@@ -533,7 +533,7 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
         items[0] = Node::leaf("4");
         items.extend([Node::leaf("0"), Node::leaf("0")]);
         items
-    } else if depth == 1 && matches!(own.as_str(), "37" | "38" | "42" | "46") {
+    } else if depth == 1 && matches!(own.as_str(), "37" | "38" | "42" | "46" | "48") {
         upgrade_root(items)
     } else if own == "21" && is_item {
         upgrade_item(items)
@@ -593,7 +593,7 @@ pub(super) fn upgrade_root_42_body(plain: &str) -> Option<String> {
     let items = body.as_list()?;
     let root = items.get(1).and_then(tag)?.to_owned();
     let container_ok = match tag(&body) {
-        Some("3") => matches!(root.as_str(), "38" | "42" | "46"),
+        Some("3") => matches!(root.as_str(), "38" | "42" | "46" | "48"),
         Some("2") => root == "37",
         _ => false,
     };
