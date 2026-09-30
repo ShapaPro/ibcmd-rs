@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::restructure::exec::{ExecOptions, ExecReport, run as run_plan};
-use crate::restructure::plan::{Inputs, Method, Plan, PlanOptions, plan};
+use crate::restructure::plan::{Inputs, Method, Plan, PlanOptions, indexing_word, plan};
 use crate::restructure::reader::{database_name, read_inputs};
 use crate::restructure::storage::STATUS_IDLE;
 use crate::sql::mssql::TdsPool;
@@ -114,6 +114,17 @@ pub struct WideningReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SwitchReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub from: String,
+    pub to: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct TableReport {
     pub table: String,
     pub columns: usize,
@@ -137,6 +148,7 @@ pub struct ObjectReport {
     pub additions: Vec<AdditionReport>,
     pub removals: Vec<RemovalReport>,
     pub widenings: Vec<WideningReport>,
+    pub switches: Vec<SwitchReport>,
     pub tables: Vec<TableReport>,
 }
 
@@ -412,6 +424,19 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
                         number: widening.number,
                         from: widening.from,
                         to: widening.to,
+                    })
+                    .collect(),
+                switches: object
+                    .switches
+                    .iter()
+                    .map(|switch| SwitchReport {
+                        attribute: switch.name.clone(),
+                        uuid: switch.uuid.clone(),
+                        field: switch.field.clone(),
+                        from: indexing_word(switch.from).to_owned(),
+                        to: indexing_word(switch.to).to_owned(),
+                        added: switch.added.clone(),
+                        removed: switch.removed.clone(),
                     })
                     .collect(),
                 tables: object
