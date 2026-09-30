@@ -79308,3 +79308,25 @@ fn ws_definition_publishes_schema_local_qnames_with_the_later_prefix() {
 
 // Tests of the onecdec fork, kept apart from the upstream file.
 mod onecdec;
+
+/// Evidence: 1C:Документооборот's `Catalogs/ЗаписиРабочегоКалендаря` forms
+/// store the planner's and its item's border with an all-zero style id where
+/// the fixture's seeds store `48312c09-…`; 8.3.27.2214 writes both as
+/// `ControlBorderType`. The whole `<Settings>` block used to go unwritten.
+#[test]
+fn a_planner_border_with_a_zero_style_id_is_a_control_border() {
+    let raw = include_str!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-planner-settings/raw/bits-a.txt"
+    )
+    .replace(
+        "48312c09-257f-4b29-b280-284dd89efc1e",
+        "00000000-0000-0000-0000-000000000000",
+    );
+    let rendered = parse_and_render_form_planner_settings_for_test(raw.trim()).unwrap();
+    assert_eq!(
+        rendered
+            .matches(r#"<v8ui:style xsi:type="v8ui:ControlBorderType">"#)
+            .count(),
+        2
+    );
+}

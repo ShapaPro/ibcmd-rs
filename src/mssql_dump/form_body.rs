@@ -37633,10 +37633,13 @@ fn form_planner_border_xml(name: &str, field: &str, indent: usize) -> Option<Str
         || fields.get(1)?.trim() != "0"
         || form_chart_compact(fields.get(2)?) != "{0}"
         || fields.get(5)?.trim() != "0"
-        || !fields
+        // An all-zero style id is the same border (1C:Документооборот's
+        // planner forms; 8.3.27.2214 writes `ControlBorderType` for both).
+        || !(fields
             .get(6)?
             .trim()
             .eq_ignore_ascii_case(FORM_CHART_BORDER_UUID)
+            || fields.get(6)?.trim() == "00000000-0000-0000-0000-000000000000")
     {
         return None;
     }

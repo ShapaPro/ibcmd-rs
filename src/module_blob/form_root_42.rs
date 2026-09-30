@@ -167,6 +167,11 @@ const DEFAULT_VISIBLE: &str = r#"{0,{0,{"B",1},0}}"#;
 
 /// `{N, (uuid, name)*N, 0, 0}`: an event list as the older platform stores it.
 fn is_event_list(node: &Node) -> bool {
+    is_event_list_shaped(node, false)
+}
+
+/// [`is_event_list`], also taking the bare `{0}` when `short` is set.
+fn is_event_list_shaped(node: &Node, short: bool) -> bool {
     let Some(items) = node.as_list() else {
         return false;
     };
@@ -182,13 +187,13 @@ fn is_event_list(node: &Node) -> bool {
     let shape = (items.len() == 2 * count + 3
         && items[items.len() - 2].is("0")
         && items[items.len() - 1].is("0"))
-        || (count >= 1 && items.len() == 2 * count + 1);
+        || ((count >= 1 || short) && items.len() == 2 * count + 1);
     shape && (0..count).all(|j| items[1 + 2 * j].as_leaf().is_some_and(is_uuid))
 }
 
 /// `{N, (uuid, name)*N, 0, 0}` -> `{N, (uuid, name)*N, 1, 0, (uuid, 0, 1)*N}`.
 fn upgrade_events(node: Node) -> Node {
-    if !is_event_list(&node) {
+    if !is_event_list_shaped(&node, true) {
         return node;
     }
     let Node::List(mut items) = node else {
@@ -226,8 +231,20 @@ const EMPTY_EVENT_SLOTS: &[(&str, usize)] = &[
     ("36", 36),
     ("37", 40),
     ("37", 41),
+    ("50", 19),
+    ("50", 21),
     ("50", 25),
     ("50", 27),
+];
+
+/// Positions whose empty event list roots `37`/`38` store as a bare `{0}`.
+const SHORT_EMPTY_EVENT_SLOTS: &[(&str, usize)] = &[
+    ("5", 5),
+    ("36", 36),
+    ("37", 40),
+    ("50", 19),
+    ("50", 21),
+    ("50", 25),
 ];
 
 /// Drops the default visibility tuple an item record keeps at slot 4 or 5
@@ -253,9 +270,9 @@ const ROOT_50_TRAILER: &[&str] = &[
     "0", "{50,0}", "1",
 ];
 
-/// Roots `38`/`42`/`46` -> `50`. Behind the root's two empty strings the
+/// Roots `37`/`38`/`42`/`46` -> `50`. Behind the root's two empty strings the
 /// navigator flag drops to `0` with its item; what follows is a prefix of the
-/// `50` trailer, completed from it. Root `38` keeps four members there (its
+/// `50` trailer, completed from it. Roots `37`/`38` keep four members there (its
 /// caption-button items leave) and repeats the third at trailer slot 12.
 fn upgrade_root(items: Vec<Node>) -> Vec<Node> {
     let Some(anchor) = (0..items.len().saturating_sub(1))
@@ -274,7 +291,7 @@ fn upgrade_root(items: Vec<Node>) -> Vec<Node> {
     };
     rest.drain(..skip.min(rest.len()));
     let trailer = ROOT_50_TRAILER.iter().map(|value| parse_str_or_leaf(value)).collect::<Vec<_>>();
-    let new_rest = if old_root == "38" && rest.len() >= 4 {
+    let new_rest = if matches!(old_root.as_str(), "37" | "38") && rest.len() >= 4 {
         let mut new_rest = rest[..4].to_vec();
         new_rest.extend_from_slice(&trailer[4..12]);
         new_rest.push(rest[2].clone());
@@ -307,12 +324,19 @@ fn upgrade_item(mut items: Vec<Node>) -> Vec<Node> {
 }
 
 /// Usual group `23` -> `29`: old slots 10 and 22 reappear in the tail.
+///
+/// Slot 10 is the group's behavior and stays where it is, echoed at 24 and
+/// closing slot 28: `0` is an explicit `Usual`, which 8.3.27.2214 writes for
+/// these groups under compatibility 8.3.21 (1C:Документооборот z34, 120
+/// forms). The re-save the other rules come from went through XML dumped
+/// under 8.3.17, where `Usual` is not written, and so reads back as the
+/// default (`1` at 10, `3` at 28) instead.
 fn upgrade_group(mut items: Vec<Node>) -> Vec<Node> {
     let slot10 = items[10].clone();
     let slot22 = items[22].clone();
-    let closing = if slot10.is("0") { "3" } else { "1" };
+    let closing = slot10.as_leaf().unwrap_or("3").to_owned();
+    let closing = closing.as_str();
     items[0] = Node::leaf("29");
-    items[10] = Node::leaf("1");
     items.push(parse_str("{3,4,{0}}"));
     items.push(slot10);
     items.extend([Node::leaf("2"), Node::leaf("0")]);
@@ -359,7 +383,7 @@ fn upgrade_table(items: Vec<Node>) -> Vec<Node> {
     upgraded[54] = Node::Leaf((count + 1).to_string());
     upgraded.insert(at, parse_str(r#"{"S",""}"#));
     upgraded.insert(at, Node::leaf("19"));
-    if let Some(events) = upgraded.get_mut(at + 2) {
+    if let Some(events) = upgraded.get_mut(at + 2).filter(|events| is_event_list(events)) {
         let old = std::mem::replace(events, Node::leaf(""));
         *events = upgrade_events(old);
     }
@@ -394,7 +418,7 @@ fn upgrade_dynamic_list_table(items: Vec<Node>) -> Vec<Node> {
         bag.push((Node::leaf("20"), parse_str(r#"{"B",1}"#)));
     }
     let mut rest = upgraded[bag_end..].to_vec();
-    if let Some(events) = rest.first_mut() {
+    if let Some(events) = rest.first_mut().filter(|events| is_event_list(events)) {
         let old = std::mem::replace(events, Node::leaf(""));
         *events = upgrade_events(old);
     }
@@ -503,7 +527,13 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
         let mut items = items;
         items[0] = Node::leaf("4");
         items
-    } else if depth == 1 && matches!(own.as_str(), "38" | "42" | "46") {
+    } else if depth == 0 && own == "2" {
+        // Container `2` lacks the last two members of `4`.
+        let mut items = items;
+        items[0] = Node::leaf("4");
+        items.extend([Node::leaf("0"), Node::leaf("0")]);
+        items
+    } else if depth == 1 && matches!(own.as_str(), "37" | "38" | "42" | "46") {
         upgrade_root(items)
     } else if own == "21" && is_item {
         upgrade_item(items)
@@ -535,11 +565,16 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
             .into_iter()
             .enumerate()
             .map(|(index, child)| {
-                let child = if is_event_list(&child)
-                    && (!child.as_list().is_some_and(|list| list[0].is("0"))
-                        || kind.as_deref().is_some_and(|kind| {
-                            EMPTY_EVENT_SLOTS.contains(&(kind, index))
-                        })) {
+                let slot_is = |slots: &[(&str, usize)]| {
+                    kind.as_deref().is_some_and(|kind| slots.contains(&(kind, index)))
+                };
+                let len = child.as_list().map_or(0, <[Node]>::len);
+                let empty = child.as_list().is_some_and(|list| list[0].is("0"));
+                let child = if is_event_list_shaped(&child, true)
+                    && (!empty
+                        || (len == 3 && slot_is(EMPTY_EVENT_SLOTS))
+                        || (len == 1 && slot_is(SHORT_EMPTY_EVENT_SLOTS)))
+                {
                     upgrade_events(child)
                 } else {
                     child
@@ -557,7 +592,12 @@ pub(super) fn upgrade_root_42_body(plain: &str) -> Option<String> {
     let (body, end) = parse(plain, start)?;
     let items = body.as_list()?;
     let root = items.get(1).and_then(tag)?.to_owned();
-    if tag(&body) != Some("3") || !matches!(root.as_str(), "38" | "42" | "46") {
+    let container_ok = match tag(&body) {
+        Some("3") => matches!(root.as_str(), "38" | "42" | "46"),
+        Some("2") => root == "37",
+        _ => false,
+    };
+    if !container_ok {
         return None;
     }
     let upgraded = upgrade(body, &root, 0, None, None);
