@@ -109,6 +109,8 @@ pub fn run(
 }
 
 fn run_inside(connection: &mut TdsConnection, plan: &Plan, report: &mut ExecReport) -> Result<()> {
+    let extensions_before = crate::restructure::extensions::fingerprint(connection)
+        .context("the state of the extensions before the restructure")?;
     let statements = plan.statements();
     let mut previous: Option<Phase> = None;
     for statement in &statements {
@@ -122,6 +124,19 @@ fn run_inside(connection: &mut TdsConnection, plan: &Plan, report: &mut ExecRepo
     if let Some(finished) = previous {
         after_phase(connection, plan, finished, report)?;
     }
+    let extensions_after = crate::restructure::extensions::fingerprint(connection)
+        .context("the state of the extensions after the restructure")?;
+    let changed = extensions_before.differences(&extensions_after);
+    if !changed.is_empty() {
+        bail!(
+            "the restructure changed what the extensions keep ({}): rolled back",
+            changed.join(", ")
+        );
+    }
+    report.verified.push(format!(
+        "extensions: {} parts as they were (SchemaStorage(1), DBNames-Ext-*, _ExtensionsInfo, _ExtensionsRestruct*, row counts of the X1 tables)",
+        extensions_after.len()
+    ));
     Ok(())
 }
 
@@ -183,7 +198,7 @@ fn after_phase(
             }
         }
         (Phase::Load, Method::Rebuild) => {
-            for table in plan.tables() {
+            for table in plan.tables().filter(|table| !table.create) {
                 let old = count(connection, &table.table.name)?;
                 let new = count(connection, &format!("{}NG", table.table.name))?;
                 if old != new {

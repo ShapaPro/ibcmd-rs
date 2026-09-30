@@ -11,3 +11,5 @@
 /_onecdec/__pycache__/
 _onecdec/corpora.local.json
 .claude/worktrees/
+__pycache__/
+*.pyc

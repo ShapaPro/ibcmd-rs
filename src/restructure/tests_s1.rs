@@ -426,3 +426,70 @@ fn an_index_switch_is_let_through_and_the_untraced_ones_are_not() {
         verdict.blockers
     );
 }
+
+/// The extensions of the infobase (S1-I): the objects they adopt come with the plan's input.
+fn with_extensions(adopted: &[(&str, &str)]) -> crate::restructure::plan::Inputs {
+    use crate::mssql_dump::extension::AdoptedObject;
+    use crate::restructure::extensions::{Adoption, ExtensionInputs};
+    let mut staged = inputs(OLD_ROW, NEW_ROW);
+    staged.extensions = ExtensionInputs {
+        registered: 2,
+        adoptions_read: true,
+        adoptions: adopted
+            .iter()
+            .map(|(extension, name)| Adoption {
+                extension: (*extension).to_owned(),
+                image: "active",
+                object: AdoptedObject {
+                    row: "3014d9c1-cb00-49fb-81b3-e8ced354975f".to_owned(),
+                    uuid: "3014d9c1-cb00-49fb-81b3-e8ced354975f".to_owned(),
+                    name: (*name).to_owned(),
+                    extends: None,
+                },
+            })
+            .collect(),
+        ..ExtensionInputs::default()
+    };
+    staged
+}
+
+#[test]
+fn an_attribute_of_a_catalog_an_extension_adopts_is_refused_and_another_object_is_not() {
+    // The extension has an object of its own uuid and the name of the catalog: adopted by identity.
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check_of_a2(),
+        &with_extensions(&[("_ДемоРасширение", "_ДемоПартнеры")]),
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "is adopted by the extension _ДемоРасширение"),
+        "{:?}",
+        verdict.blockers
+    );
+    // An extension whose adopted objects are other ones lets the stage through.
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check_of_a2(),
+        &with_extensions(&[("_ДемоРасширение", "_ДемоНоменклатура")]),
+        &options(),
+    );
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    assert!(phase.is_some());
+    // Extensions whose objects were not read are a refusal, not a guess.
+    let mut unread = with_extensions(&[]);
+    unread.extensions.adoptions_read = false;
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check_of_a2(),
+        &unread,
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "were not read"),
+        "{:?}",
+        verdict.blockers
+    );
+}

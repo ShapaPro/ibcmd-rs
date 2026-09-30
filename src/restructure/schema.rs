@@ -529,13 +529,13 @@ pub fn remove_field_indexes(table: &mut Brace, field: &str) -> Result<Vec<String
     Ok(removed)
 }
 
-/// A declared index `{"<name>",1,{<n>,"<field>"...},0,0,0,{0},0,0}`.
-fn index_brace(name: &str, fields: &[&str]) -> Brace {
+/// A declared index `{"<name>",<unique>,{<n>,"<field>"...},0,0,0,{0},0,0}`.
+fn index_brace(name: &str, unique: bool, fields: &[&str]) -> Brace {
     let mut names = vec![Brace::atom(fields.len())];
     names.extend(fields.iter().map(|field| Brace::str(*field)));
     Brace::List(vec![
         Brace::str(name),
-        Brace::num(1),
+        Brace::num(i64::from(unique)),
         Brace::List(names),
         Brace::num(0),
         Brace::num(0),
@@ -650,7 +650,7 @@ pub fn add_field_indexes(
         .context("a table entry has no index list")?;
     let mut added = Vec::new();
     for (offset, (name, keys)) in fresh.iter().enumerate() {
-        indexes.insert(1 + at + offset, index_brace(name, keys));
+        indexes.insert(1 + at + offset, index_brace(name, true, keys));
         added.push(name.clone());
     }
     if document && additional_order {
@@ -682,6 +682,56 @@ pub fn add_field_indexes(
     }
     indexes[0] = Brace::atom(indexes.len() - 1);
     Ok(added)
+}
+
+/// The entry of a sub-table (the table of a tabular section) that does not exist yet, in the layout the platform
+/// stores: `{"VT<n>","I",0,"<Owner>",{<k+1>,<the line number field>,<fields>...},{0},{<indexes>},1,"S",{0},{0},"",0,0}`.
+/// `line_no` is the name of the line number field (`LineNo<n+1>`, a `numeric(5,0)`: the section's
+/// `LineNumberLength`), `fields` are the attributes' fields, `indexes` the declared indexes of the indexed
+/// attributes as (name, fields), which the platform makes not unique (`ByFieldFld12 {2,"Fld12","ID"}`).
+pub fn subtable_entry(
+    name: &str,
+    owner: &str,
+    line_no: &str,
+    fields: &[FieldEntry],
+    indexes: &[(String, Vec<String>)],
+) -> Brace {
+    let line = FieldEntry::new(line_no, false, vec![TypeEntry::new("N", 5, 0, "", 0)]);
+    let mut list = vec![Brace::atom(fields.len() + 1), line.to_brace()];
+    list.extend(fields.iter().map(FieldEntry::to_brace));
+    let mut declared = vec![Brace::atom(indexes.len())];
+    declared.extend(indexes.iter().map(|(index, keys)| {
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        index_brace(index, false, &keys)
+    }));
+    Brace::List(vec![
+        Brace::str(name),
+        Brace::str("I"),
+        Brace::num(0),
+        Brace::str(owner),
+        Brace::List(list),
+        Brace::List(vec![Brace::num(0)]),
+        Brace::List(declared),
+        Brace::num(1),
+        Brace::str("S"),
+        Brace::List(vec![Brace::num(0)]),
+        Brace::List(vec![Brace::num(0)]),
+        Brace::str(""),
+        Brace::num(0),
+        Brace::num(0),
+    ])
+}
+
+/// Appends a sub-table entry to the sub-table list of an object's table entry (element 5) and fixes the count.
+pub fn push_subtable(table: &mut Brace, subtable: Brace) -> Result<()> {
+    let items = table.as_list_mut().context("a table entry is not a list")?;
+    let list = items
+        .get_mut(5)
+        .and_then(Brace::as_list_mut)
+        .context("a table entry has no sub-table list")?;
+    list.push(subtable);
+    list[0] = Brace::atom(list.len() - 1);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
