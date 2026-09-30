@@ -1,6 +1,8 @@
 //! The derived caches of a new object (issue #403, part of S1 = #391): the `Params` `*.si` rows the
-//! platform rewrites when a configuration change adds a catalog, a document or a tabular section
-//! ([`plan::new_object`], [`plan::new_tabular_section`]).
+//! platform rewrites when a configuration change adds a catalog, a document, a tabular section or an
+//! attribute. [`change::rewrite`] gives the final text of every rewritten row for a staged change
+//! ([`plan::new_object`], [`plan::new_tabular_section`], the registry [`registry`], the attribute lines
+//! of [`xdto_types::attribute_property`]).
 //!
 //! See `docs/apply/derived-caches.md` for the measurements behind every rule here; the lab kit of the
 //! proofs is `scripts/apply-trace/lab/s1g-caches/`.
