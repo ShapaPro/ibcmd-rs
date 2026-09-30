@@ -17,7 +17,8 @@ of the platform's own `ibcmd infobase config import` is refused: it carries a
 `deleted` row (a list of removals, written to every stage), about 600 descriptors
 rewritten in another record shape (format 56 to 57, a `{68}` Configuration row),
 new version guids for every name and values above 10 MB cut into parts. The plan
-stops at a `deleted` row that names anything but the rows of a dynamic update, with
+stops at a `deleted` row that names anything but the rows of a dynamic update and of the forms and templates it can
+account for name by name (since #393; before, anything but the dynamic rows), with
 a message that says so; the conservative gate would stop at the descriptors. The
 restructure check of track rcheck (#338, `apply_check::check_staged`, the default gate
 since checkpoint 2) refuses such a stage as unknown, too. Measured on the stages the
@@ -38,7 +39,8 @@ written** by this apply; see [known differences](#known-differences-from-the-nat
   the conservative rule is the explicit option ([the default gate](#the-default-gate)).
 - A staged `deleted` row that is **empty** or names **all** the dynamic-update rows of the
   base is consumed as the native apply consumes it ([removals](#removals-the-stages-deleted-row));
-  any other list is still refused.
+  since #393 a list that names the rows of removed forms and templates is executed too, and any list the apply
+  cannot account for name by name is refused whole.
 - **Typed refusals** for callers that sort them ([refusals](#refusals-a-caller-can-sort)).
 - The recovery artifact is **one file** and the newest five per database are kept
   ([recovery](#recovery-artifact-and-its-retention)).
@@ -600,7 +602,7 @@ writing any long extra, and to run once on a long stage of 21 to 30 rows if a re
 
 - **Fail closed**: an unknown storage layout (table fingerprint of the profile), an
   unsupported platform profile, a `deleted_dynupdate_*` row, an unfinished operation,
-  a `deleted` row that asks for more than the dynamic rows (removals), a reused generation,
+  a `deleted` list with a name that the analysis of removals cannot account for, a reused generation,
   an unlisted staged row (warning), any structural blocker, a restructuring without a stated
   way back: no write.
 - **Plan without locks, verify under locks**: the plan reads metadata and server-side
@@ -852,7 +854,7 @@ any other caller sort by type, not by text; `run_command` prints the same distin
 | Type | Fields | When | `refused` in the report |
 |---|---|---|---|
 | `StructuralRefusal` | the gate's verdict | the gate refuses the stage (message: the gate's own text, for the default gate `Verdict::refusal()`) | `needs_native_apply` |
-| `NeedsNativeApply` | `command` (`NativeCommand::Apply` or `Repair`), `reason` | the stage or the base needs the native tool: a `deleted` list that asks for more, an overlay in `Params`, a `deleted_dynupdate_*` row, a new object on an empty change register, a new object on 8.5, an unfinished operation (`Repair`) | `needs_native_apply` (with `native_command`, `reason`) |
+| `NeedsNativeApply` | `command` (`NativeCommand::Apply` or `Repair`), `reason` | the stage or the base needs the native tool: a `deleted` list with a name the apply cannot account for, an overlay in `Params`, a `deleted_dynupdate_*` row, a new object on an empty change register, a new object on 8.5, an unfinished operation (`Repair`) | `needs_native_apply` (with `native_command`, `reason`) |
 | `ExclusiveAccessRefused` | `database`, `sessions` (id, login, host, program, ...), `in_transaction` | other user sessions on the database; `in_transaction` is true when the in-transaction check (`THROW 57302`) found them after the plan had not | `exclusive_access` |
 | `ExclusiveAccessUnprovable` | `reason` | exclusivity cannot be proved: no `VIEW SERVER STATE` (57301) | `exclusive_access_unprovable` |
 | `BackupRequired` | none | a restructuring that writes, without `--recovery-backup` or `--i-have-a-backup` (Russian message naming both) | `backup_required` |
