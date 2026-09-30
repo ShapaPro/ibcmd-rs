@@ -576,6 +576,16 @@ pub struct StageOverrides {
     pub built_files: Vec<String>,
     /// The tree files whose descriptor was compiled from the tree.
     pub compiled_files: Vec<String>,
+    /// Files of the tree the target's own export does not reproduce (#395).
+    pub differing_files: usize,
+    /// Objects the stage did not prepare, because no file of theirs differs, and
+    /// rows of the prepared ones that stay the target's.
+    pub objects_left_out: usize,
+    pub rows_left_out: usize,
+    /// Seconds the comparison of the tree with the target's export took.
+    pub compare_seconds: f64,
+    /// Why every row is staged, when the comparison could not decide (#395).
+    pub all_rows_because: Option<String>,
 }
 
 #[cfg(test)]

@@ -101,12 +101,27 @@ pub struct StageVerification {
 #[derive(Debug)]
 pub struct StageRefused {
     message: String,
+    /// The files of the staged state that differ from the tree, when the guard found them.
+    differences: Vec<FileDifference>,
 }
 
 impl StageRefused {
     /// A refusal with this message: one `[ERROR]` line per line of it.
     pub(super) fn new(message: String) -> Self {
-        Self { message }
+        Self {
+            message,
+            differences: Vec::new(),
+        }
+    }
+
+    fn with_differences(mut self, differences: Vec<FileDifference>) -> Self {
+        self.differences = differences;
+        self
+    }
+
+    /// The files that differ (empty for a refusal that is not the guard's comparison).
+    pub(super) fn differences(&self) -> &[FileDifference] {
+        &self.differences
     }
 }
 
@@ -253,6 +268,89 @@ pub(crate) fn verify_staged_state(
     staged: &[StagedRow<'_>],
 ) -> Result<StageVerification> {
     let started = Instant::now();
+    let (outcome, export) = compare_state(request, base, staged).map_err(|error| {
+        anyhow!(
+            "Не удалось проверить результат загрузки: {error:#}\n\
+                 Загрузка не выполнена, в ConfigSave ничего не записано. Проверку можно отключить \
+                 ключом --no-verify (тогда расхождения с деревом не обнаруживаются)."
+        )
+    })?;
+    let total_seconds = started.elapsed().as_secs_f64();
+    if !outcome.differences.is_empty() {
+        let message = refusal_text(
+            request.kind,
+            request.source_root,
+            &outcome.differences,
+            outcome.compared,
+        );
+        return Err(anyhow::Error::new(
+            StageRefused::new(message).with_differences(outcome.differences),
+        ));
+    }
+    Ok(StageVerification {
+        checked_files: outcome.compared,
+        identical_files: outcome.identical,
+        state_rows: export.state_rows,
+        read_seconds: export.read_ms as f64 / 1000.0,
+        export_seconds: export.export_ms as f64 / 1000.0,
+        total_seconds,
+    })
+}
+
+/// How the tree stands against the target's own state: the stored rows as the
+/// storage publishes them, nothing staged, exported with the model.
+pub(super) struct TargetComparison {
+    /// Files of the tree the target's export does not reproduce (by content),
+    /// files the export has and the tree lacks, and files the tree has and the
+    /// export lacks.
+    pub differences: Vec<FileDifference>,
+    pub compared: usize,
+    pub identical: usize,
+    pub seconds: f64,
+}
+
+/// Compares the tree with the export of the target's own state (#395): what
+/// the target already holds as the tree has it needs no row in a stage.
+pub(super) fn compare_tree_with_target(
+    args: &MssqlStageSourceObjectsArgs,
+    sql: &SqlExec,
+    manifest: &SourceManifest,
+) -> Result<TargetComparison> {
+    let started = Instant::now();
+    let base_dir = std::env::var_os("IBCMD_RS_BASE_ROWS_DIR").map(PathBuf::from);
+    let request = GuardRequest {
+        kind: StageKind::Patch,
+        source_root: &args.source_root,
+        tree: TreeFiles::Scanned(manifest),
+        removed: &[],
+        path_prefix: &args.path_prefix,
+        source_version: args.source_version,
+    };
+    let (outcome, _) = compare_state(
+        &request,
+        state_base(
+            base_dir.as_deref(),
+            Some(sql),
+            &args.database,
+            super::prefetched_base_rows(&args.database),
+        ),
+        &[],
+    )?;
+    Ok(TargetComparison {
+        differences: outcome.differences,
+        compared: outcome.compared,
+        identical: outcome.identical,
+        seconds: started.elapsed().as_secs_f64(),
+    })
+}
+
+/// Exports the state `staged` would leave over `base` and compares each file
+/// with the tree.
+fn compare_state(
+    request: &GuardRequest<'_>,
+    base: StateBase<'_>,
+    staged: &[StagedRow<'_>],
+) -> Result<(Compared, crate::mssql_dump::StateExportReport)> {
     let output_root = std::env::temp_dir().join("ibcmd-rs-verified-state");
     let comparer = Arc::new(match &request.tree {
         TreeFiles::Scanned(manifest) => TreeComparer::new(
@@ -292,33 +390,9 @@ pub(crate) fn verify_staged_state(
         version,
         &output_root,
         comparer.clone(),
-    )
-    .map_err(|error| {
-        anyhow!(
-            "Не удалось проверить результат загрузки: {error:#}\n\
-                 Загрузка не выполнена, в ConfigSave ничего не записано. Проверку можно отключить \
-                 ключом --no-verify (тогда расхождения с деревом не обнаруживаются)."
-        )
-    })?;
+    )?;
     let outcome = comparer.finish()?;
-    let total_seconds = started.elapsed().as_secs_f64();
-    if !outcome.differences.is_empty() {
-        let message = refusal_text(
-            request.kind,
-            request.source_root,
-            &outcome.differences,
-            outcome.compared,
-        );
-        return Err(anyhow::Error::new(StageRefused::new(message)));
-    }
-    Ok(StageVerification {
-        checked_files: outcome.compared,
-        identical_files: outcome.identical,
-        state_rows: export.state_rows,
-        read_seconds: export.read_ms as f64 / 1000.0,
-        export_seconds: export.export_ms as f64 / 1000.0,
-        total_seconds,
-    })
+    Ok((outcome, export))
 }
 
 // ---------------------------------------------------------------------------

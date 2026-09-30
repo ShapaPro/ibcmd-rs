@@ -234,9 +234,8 @@ why it is detached, which is how a writer knows it works for a base-free object 
 - **A partial import** (`--path-prefix`) builds and compiles inside the prefix, removes nothing and does not clear
   the pending online update. `--per-row` and an offline stage (`--script-only` with `IBCMD_RS_BASE_ROWS_DIR`) do
   not compare the tree with a database at all, so they carry nothing new.
-- **Every row is still staged** (9 521 rows for an unchanged tree on БСП, 116 717 on УХ), as before: only a row
-  that differs from Config needs to be written (#395). The plan of this stage - which objects are new, changed or
-  removed - is the input that change needs.
+- **Every row was staged** (9 521 rows for an unchanged tree on БСП, 116 717 on УХ) when this stage was written; #395
+  stages only the rows that change (`docs/import/delta.md`).
 - **Not run:** the whole matrix on platform 8.5 (dialect 2.21: a module comment, `add5` and `rem2` ran, section
   3.1); ERP УХ 8.5; ERP УХ with real changes (a second copy of the tree is not allowed in the lab; the run is of the
   unchanged tree, so the build path costs there are the setup of the base-free stage: about 64 s for the walk, the
