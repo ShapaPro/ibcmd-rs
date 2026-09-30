@@ -1132,7 +1132,7 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         // XDTO model: the rows are made by the caches module for the whole stage; with both the XDTO model
         // and the registry left alone the index goes with them.
         if !(options.skip_xdto && options.skip_registry) {
-            caches = section_cache_updates(inputs, &prepared, &objects, options)?;
+            caches = section_cache_updates(inputs, &prepared, options)?;
         }
     } else {
         if lists_change && !options.skip_xdto {
@@ -1723,33 +1723,43 @@ fn plan_sections(
     Ok(plans)
 }
 
+/// The parsed descriptor of a uuid: from `first`, else from `second`; each is parsed once.
+fn memoized_descriptors<'a>(
+    first: &'a BTreeMap<String, Vec<u8>>,
+    second: &'a BTreeMap<String, Vec<u8>>,
+) -> impl Fn(&str) -> Option<Brace> + 'a {
+    let cache: RefCell<HashMap<String, Option<Brace>>> = RefCell::new(HashMap::new());
+    move |uuid: &str| {
+        let uuid = uuid.to_ascii_lowercase();
+        if let Some(hit) = cache.borrow().get(&uuid) {
+            return hit.clone();
+        }
+        let parsed = first
+            .get(&uuid)
+            .or_else(|| second.get(&uuid))
+            .and_then(|stored| parse_row(&row_bytes(stored)).ok());
+        cache.borrow_mut().insert(uuid, parsed.clone());
+        parsed
+    }
+}
+
 /// The cache rows of a stage that adds tabular sections or attributes of them: the object registry, the index of
 /// the generated types and the XDTO model, from the descriptors before and after (`caches::change::rewrite`,
 /// measured against the native result in cases e1, e3 and e4). The plan refuses a stage that also removes.
 fn section_cache_updates(
     inputs: &Inputs,
     prepared: &[Prepared],
-    objects: &[ObjectPlan],
     options: &PlanOptions,
 ) -> Result<Vec<CacheUpdate>> {
     let configuration = configuration_uuid(&inputs.root_row)?;
-    let memo = |rows: fn(&StagedImage) -> Vec<&BTreeMap<String, Vec<u8>>>| {
-        let cache: RefCell<HashMap<String, Option<Brace>>> = RefCell::new(HashMap::new());
-        move |uuid: &str| -> Option<Brace> {
-            let uuid = uuid.to_ascii_lowercase();
-            if let Some(hit) = cache.borrow().get(&uuid) {
-                return hit.clone();
-            }
-            let parsed = rows(&inputs.staged)
-                .into_iter()
-                .find_map(|rows| rows.get(&uuid))
-                .and_then(|stored| parse_row(&row_bytes(stored)).ok());
-            cache.borrow_mut().insert(uuid, parsed.clone());
-            parsed
-        }
-    };
-    let before_row = memo(|image| vec![&image.old_descriptors]);
-    let after_row = memo(|image| vec![&image.new_descriptors, &image.old_descriptors]);
+    // The descriptor rows parsed once: the traversal of the caches asks for every object of a kind, again and
+    // again.
+    let empty = BTreeMap::new();
+    let before_row = memoized_descriptors(&inputs.staged.old_descriptors, &empty);
+    let after_row = memoized_descriptors(
+        &inputs.staged.new_descriptors,
+        &inputs.staged.old_descriptors,
+    );
     let root = after_row(&configuration)
         .context("the configuration's own descriptor is not among the rows")?;
     let changed: Vec<ChangedObject> = prepared
