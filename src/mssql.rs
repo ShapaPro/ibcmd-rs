@@ -7617,7 +7617,115 @@ fn target_always_used_constants(
     flagged
 }
 
-/// Part 0 of the named Config rows, a hundred names a query.
+/// The online generations active in `database`, oldest first (empty when there
+/// is none), asked once per process: the history a stage reads its base rows
+/// through ([`fetch_effective_blob`]).
+fn active_generation_history(sql: &SqlExec, database: &str) -> Result<std::sync::Arc<Vec<String>>> {
+    static HISTORIES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Vec<String>>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(found) = HISTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(database)
+    {
+        return Ok(found.clone());
+    }
+    ensure_online("run a query")?;
+    let history = std::sync::Arc::new(crate::mssql_dump::active_generation_history(sql, database)?);
+    HISTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(database.to_owned(), history.clone());
+    Ok(history)
+}
+
+/// Part 0 of the plain row `published` names and of every alias of it, in any
+/// generation: `(stored name, DataSize, bytes)`.
+fn fetch_effective_candidates(
+    sql: &SqlExec,
+    database: &str,
+    published: &str,
+) -> Result<Vec<(String, i64, Vec<u8>)>> {
+    ensure_online("run a query")?;
+    let pattern = crate::mssql_effective_row::alias_pattern(published);
+    if let SqlBackend::Client(client) = sql.backend() {
+        let query = format!(
+            "SELECT FileName, DataSize, BinaryData FROM {db}.dbo.Config \
+             WHERE PartNo = 0 AND (FileName = @P1 OR FileName LIKE @P2 ESCAPE N'\\')",
+            db = quote_ident(database),
+        );
+        let mut found = Vec::new();
+        client.read_rows(
+            &query,
+            &[SqlParam::Text(published), SqlParam::Text(&pattern)],
+            &mut |mut row| {
+                found.push((row.take_text(0)?, row.i64(1)?, row.take_binary(2)?));
+                Ok(())
+            },
+        )?;
+        return Ok(found);
+    }
+    let query = format!(
+        "SET NOCOUNT ON; USE {db};\n\
+         SELECT COALESCE((\n\
+             SELECT FileName AS file_name,\n\
+                    DataSize AS data_size,\n\
+                    CONVERT(varchar(max), BinaryData, 2) AS binary_hex\n\
+             FROM Config\n\
+             WHERE PartNo = 0 AND (FileName = N'{name}' OR FileName LIKE N'{pattern}' ESCAPE N'\\')\n\
+             FOR JSON PATH\n\
+         ), '[]');",
+        db = quote_ident(database),
+        name = quote_string(published),
+        pattern = quote_string(&pattern),
+    );
+    let json = query_json_required(
+        sql,
+        &query,
+        &format!("fetch_effective_candidates({published})"),
+    )?;
+    let rows: Vec<BinaryBlobRow> = serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse Config blob JSON for {published}"))?;
+    rows.into_iter()
+        .map(|row| Ok((row.file_name, row.data_size, decode_hex(&row.binary_hex)?)))
+        .collect()
+}
+
+/// Part 0 of the row the platform reads for `published` when online generations
+/// are active: the alias of the newest generation that carries it, else the
+/// plain row. `None` when neither exists.
+///
+/// A stage patches base rows, and builds the next generation's `versions` from
+/// one; reading the plain rows there sent the version of every object an earlier
+/// generation had changed back to what it was before that generation (#416).
+fn fetch_effective_row(
+    sql: &SqlExec,
+    database: &str,
+    published: &str,
+    history: &[String],
+) -> Result<Option<Vec<u8>>> {
+    let candidates = fetch_effective_candidates(sql, database, published)?;
+    let Some((stored, (data_size, bytes))) = crate::mssql_effective_row::pick(
+        published,
+        history,
+        candidates
+            .into_iter()
+            .map(|(name, size, bytes)| (name, (size, bytes))),
+    ) else {
+        return Ok(None);
+    };
+    if bytes.len() as i64 != data_size {
+        bail!(
+            "Config row {stored} DataSize {data_size} does not match BinaryData length {}",
+            bytes.len()
+        );
+    }
+    Ok(Some(bytes))
+}
+
+/// Part 0 of the named Config rows, a hundred names a query; the rows the
+/// platform reads when online generations are active ([`fetch_effective_row`]).
 fn fetch_config_blobs_for_files(
     sql: &SqlExec,
     database: &str,
@@ -7630,6 +7738,19 @@ fn fetch_config_blobs_for_files(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let history = active_generation_history(sql, database)?;
+    if !history.is_empty() {
+        for name in &unique {
+            if let Some(bytes) = fetch_effective_row(sql, database, name, &history)? {
+                rows.push(BinaryBlobRow {
+                    file_name: name.clone(),
+                    data_size: bytes.len() as i64,
+                    binary_hex: encode_hex(&bytes),
+                });
+            }
+        }
+        return Ok(rows);
+    }
     for chunk in unique.chunks(100) {
         let selected = chunk
             .iter()
@@ -7818,6 +7939,11 @@ fn fetch_config_blob(sql: &SqlExec, database: &str, file_name: &str) -> Result<V
         if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
             bail!("Config row not found: {file_name}");
         }
+    }
+    let history = active_generation_history(sql, database)?;
+    if !history.is_empty() {
+        return fetch_effective_row(sql, database, file_name, &history)?
+            .ok_or_else(|| anyhow!("Config row not found: {file_name}"));
     }
     if let SqlBackend::Client(client) = sql.backend() {
         ensure_online("run a query")?;
@@ -9889,6 +10015,49 @@ mod tests {
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// #416 (F-18), on a lab database that holds online generations
+    /// (`IBCMD_RS_DYNGEN_DB`): the `versions` row a stage builds the next
+    /// generation from is the active generation's, not the plain one.
+    ///
+    /// ```text
+    /// IBCMD_RS_DYNGEN_DB=ibcmd_rs_05_ui_v3 cargo test --locked -p ibcmd-rs --lib --no-default-features \
+    ///     --features mssql-live-tests the_stage_reads_the_versions_row -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "mssql-live-tests")]
+    #[test]
+    #[ignore = "reads a lab database: set IBCMD_RS_DYNGEN_DB"]
+    fn the_stage_reads_the_versions_row_the_platform_reads() -> anyhow::Result<()> {
+        let Some(database) = std::env::var_os("IBCMD_RS_DYNGEN_DB") else {
+            return Ok(());
+        };
+        let database = database.to_string_lossy().into_owned();
+        let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions::integrated(
+            "localhost",
+            None,
+        ))?;
+        // `{1,<count>,<generation>...}` (with a byte order mark): the last one is the active one.
+        let marker = super::fetch_config_blob(&sql, &database, "DynamicallyUpdated")?;
+        let marker = String::from_utf8_lossy(&marker).into_owned();
+        let active = marker
+            .trim_matches(|c: char| {
+                !(c.is_ascii_hexdigit() || c == '-' || c == ',' || c == '{' || c == '}')
+            })
+            .trim_matches(['{', '}'])
+            .split(',')
+            .next_back()
+            .map(str::to_owned)
+            .filter(|generation| generation.len() == 36)
+            .expect("a generation history");
+        let active_versions =
+            super::fetch_config_blob(&sql, &database, &format!("versions_dynupdate_{active}"))?;
+        let read = super::fetch_config_blob(&sql, &database, "versions")?;
+        assert!(
+            read == active_versions,
+            "the stage reads the plain `versions` row, not versions_dynupdate_{active}"
+        );
+        Ok(())
+    }
 
     /// A SQL handle for unit tests: any request it gets fails.
     fn test_sql() -> crate::sql::SqlExec {

@@ -127,6 +127,10 @@ pub struct GateInput<'a> {
     /// (lower-cased names): the `deleted` list, when it is empty or names
     /// only the rows of a dynamic update. A gate does not judge them.
     pub consumed_rows: &'a HashSet<String>,
+    /// Names of the stage's `deleted` list (lower-cased) that the caller has executed itself: the rows of
+    /// the removed forms and templates. They are no staged rows. A gate that judges the list (the S1
+    /// gate, for the attributes it names) leaves them out.
+    pub removed_rows: &'a HashSet<String>,
 }
 
 /// What a gate that lets a restructuring through hands to the apply: the structure work as T-SQL for
@@ -155,10 +159,29 @@ pub struct StructurePhase {
     pub objects: Vec<String>,
     /// One line per cache row the phase rewrites (`Params.<row>: what`).
     pub caches: Vec<String>,
+    /// The catalogs and documents the phase creates. The apply moves their staged rows like any staged row and
+    /// registers them at the exchange-plan nodes (the phase answers for the objects, not for their rows).
+    pub created: Vec<CreatedObject>,
+    /// Staged rows besides the created objects' and their files whose analysis blockers the phase answers for
+    /// (lower-cased): the configuration's descriptor, which lists the objects the phase creates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub answered_rows: Vec<String>,
     /// The size guard's verdict on the tables the phase rebuilds: the limit and where it came from, the
     /// totals, the largest table (`restructure::size_guard`, S1-J). A gate without one leaves it out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_check: Option<serde_json::Value>,
+}
+
+/// A catalog or a document a structure phase creates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreatedObject {
+    /// The uuid of its descriptor row.
+    pub uuid: String,
+    /// `Catalog` or `Document`.
+    pub kind: String,
+    /// The staged rows of the object besides its descriptor (`<uuid>.0`, `<uuid>.1`, ...), in the order
+    /// their files are registered.
+    pub files: Vec<String>,
 }
 
 pub trait StructuralGate {
@@ -244,6 +267,7 @@ impl StructuralGate for ConservativeGate {
         };
         let mut changed_bodies: Vec<(&RowMeta, String, String)> = Vec::new();
         let mut descriptors_to_compare = 0usize;
+        let mut root_to_compare = false;
         // A row of several parts (the platform cuts a value at 10 MB) is one change:
         // any part that is new or differs makes its name changed, and its first
         // part stands for it in the role check.
@@ -283,7 +307,11 @@ impl StructuralGate for ConservativeGate {
             match classify_name(&row.name) {
                 RowName::Service(name) => {
                     verdict.stats.service_rows += 1;
-                    if name != "versions" && !identical {
+                    if name == "root" && !identical && row.part == 0 {
+                        // the row that names the configuration's descriptor: the platform stores it as a
+                        // stored block, the importer deflates it; the text is what counts
+                        root_to_compare = true;
+                    } else if name != "versions" && !identical {
                         verdict.block(&row.name, format!("the service row {name} changes"));
                     }
                 }
@@ -331,6 +359,9 @@ impl StructuralGate for ConservativeGate {
         if descriptors_to_compare > 0 {
             compare_descriptors(input, &mut verdict)?;
         }
+        if root_to_compare {
+            compare_root(input, &mut verdict)?;
+        }
         if !changed_bodies.is_empty() {
             classify_bodies(
                 input,
@@ -375,6 +406,26 @@ fn compare_descriptors(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Resu
                 "the descriptor's text differs from the active one: a metadata change, possibly structural",
             ),
             _ => verdict.block(&name, "a descriptor row that does not inflate"),
+        }
+        Ok(())
+    })
+}
+
+/// The `root` row that differs from the active one in its bytes must still inflate to the same text (it names
+/// the configuration's descriptor; a database whose root the platform once rewrote keeps it as a stored block).
+fn compare_root(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Result<()> {
+    let db = quote_ident(input.database)?;
+    let query = format!(
+        "SELECT s.BinaryData, c.BinaryData FROM {db}.dbo.ConfigSave s JOIN {db}.dbo.Config c ON c.FileName = s.FileName AND c.PartNo = s.PartNo WHERE s.PartNo = 0 AND s.FileName IN (N'root')"
+    );
+    input.client.read_rows(&query, &[], &mut |mut row| {
+        let staged = row.take_binary(0)?;
+        let active = row.take_binary(1)?;
+        match (inflate_row(&staged), inflate_row(&active)) {
+            (Ok(staged), Ok(active)) if staged == active => {
+                verdict.stats.descriptors_layout_only += 1;
+            }
+            _ => verdict.block("root", "the service row root changes"),
         }
         Ok(())
     })

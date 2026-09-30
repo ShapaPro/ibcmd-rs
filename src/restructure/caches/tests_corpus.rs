@@ -66,25 +66,87 @@ impl Snap {
     /// (the `trace` store).
     pub(crate) fn open(name: &str) -> Option<Self> {
         let (db, label) = match name {
-            "pristine" => ("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
-            "c2" => ("ibcmd_rs_04_ddl_bsp8327_c2", "c2_now"),
-            "m" => ("ibcmd_rs_04_ddl_bsp8327_m", "m_now"),
-            "t1_before" => ("ibcmd_rs_04_ddl_s1_base", "t1_staged"),
-            "t1_nat" => ("ibcmd_rs_04_ddl_s1_t1_nat", "nat_after"),
-            "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base", name),
-            "e1_before" => ("ibcmd_rs_04_ddl_s2_e1_base", "e1_staged"),
-            "e1_nat" => ("ibcmd_rs_04_ddl_s2_e1_nat", "nat_after"),
-            "e3_before" => ("ibcmd_rs_04_ddl_s2_e3_base", "e3_staged"),
-            "e3_nat" => ("ibcmd_rs_04_ddl_s2_e3_nat", "nat_after"),
-            "e4_before" => ("ibcmd_rs_04_ddl_s2_e4_base", "e4_staged"),
-            "e4_nat" => ("ibcmd_rs_04_ddl_s2_e4_nat", "nat_after"),
-            "e5_before" => ("ibcmd_rs_04_ddl_s2_e5_base", "e5_staged"),
-            "e5_nat" => ("ibcmd_rs_04_ddl_s2_e5_nat", "nat_after"),
-            "e6_before" => ("ibcmd_rs_04_ddl_s2_e6_base", "e6_staged"),
-            "e6_nat" => ("ibcmd_rs_04_ddl_s2_e6_nat", "nat_after"),
+            "pristine" => (
+                "ibcmd_rs_04_ddl_bsp8327_a".to_owned(),
+                "a2_staged".to_owned(),
+            ),
+            "c2" => ("ibcmd_rs_04_ddl_bsp8327_c2".to_owned(), "c2_now".to_owned()),
+            "m" => ("ibcmd_rs_04_ddl_bsp8327_m".to_owned(), "m_now".to_owned()),
+            "t1_before" => ("ibcmd_rs_04_ddl_s1_base".to_owned(), "t1_staged".to_owned()),
+            "t1_nat" => (
+                "ibcmd_rs_04_ddl_s1_t1_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base".to_owned(), name.to_owned()),
+            "e1_before" => (
+                "ibcmd_rs_04_ddl_s2_e1_base".to_owned(),
+                "e1_staged".to_owned(),
+            ),
+            "e1_nat" => (
+                "ibcmd_rs_04_ddl_s2_e1_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e3_before" => (
+                "ibcmd_rs_04_ddl_s2_e3_base".to_owned(),
+                "e3_staged".to_owned(),
+            ),
+            "e3_nat" => (
+                "ibcmd_rs_04_ddl_s2_e3_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e4_before" => (
+                "ibcmd_rs_04_ddl_s2_e4_base".to_owned(),
+                "e4_staged".to_owned(),
+            ),
+            "e4_nat" => (
+                "ibcmd_rs_04_ddl_s2_e4_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e5_before" => (
+                "ibcmd_rs_04_ddl_s2_e5_base".to_owned(),
+                "e5_staged".to_owned(),
+            ),
+            "e5_nat" => (
+                "ibcmd_rs_04_ddl_s2_e5_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e6_before" => (
+                "ibcmd_rs_04_ddl_s2_e6_base".to_owned(),
+                "e6_staged".to_owned(),
+            ),
+            "e6_nat" => (
+                "ibcmd_rs_04_ddl_s2_e6_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            // the native cases of S1-F: the staged state `n1_staged` of the database `..._tw1_st` and the platform's
+            // result `n1_after` (the snapshot `nat_after` of `..._tw1_nat`), from the twin runs of `twin_stage.ps1`
+            other
+                if other.len() > 3
+                    && other.starts_with('n')
+                    && other[1..2].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                let tag = match &other[..2] {
+                    "n1" => "tw1",
+                    "n2" => "tw2",
+                    "n3" => "tw3c",
+                    "n4" => "tw4",
+                    "n5" => "tw5",
+                    "n6" => "tw6",
+                    "n7" => "tw7",
+                    _ => panic!("unknown snapshot {other}"),
+                };
+                if other.ends_with("_staged") {
+                    (format!("ibcmd_rs_05_trace_{tag}_st"), other.to_owned())
+                } else {
+                    (
+                        format!("ibcmd_rs_05_trace_{tag}_nat"),
+                        "nat_after".to_owned(),
+                    )
+                }
+            }
             other => panic!("unknown snapshot {other}"),
         };
-        let root = if name.starts_with("d_") {
+        let root = if name.starts_with("d_") || (name.starts_with('n') && name.len() > 3) {
             trace_store()?
         } else {
             lab()?

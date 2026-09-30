@@ -14,6 +14,8 @@
 //!   9 000 small files cost more than their bytes;
 //! - `special_rows.tsv` and their bytes (in the pack): the dynamic-update
 //!   markers and alias rows the apply folds away;
+//! - `removed_rows.tsv` and their bytes (in the pack): the `Config` rows of the
+//!   forms and templates a `deleted` list removes;
 //! - `files_before.tsv` and `change_registrations_before.tsv`: the
 //!   `MobileVersions.dat` head and the `_MessageNo` values it resets;
 //! - `params_replaced.tsv` and their bytes: the search-information rows a new
@@ -56,6 +58,8 @@ pub struct RecoveryRequest<'a> {
     /// The new objects and body rows the apply registers, and the `Params`
     /// rows it rewrites for them.
     pub new_objects: &'a NewObjects,
+    /// The forms and templates the stage removes: their `Config` rows are saved.
+    pub removals: &'a super::removals::Removals,
     /// The change registrations inserted for nodes that had none, and the owners of the rows a
     /// `deleted` list names.
     pub registration: &'a super::registrations::RegistrationPlan,
@@ -85,6 +89,8 @@ struct Manifest<'a> {
     /// `_ConfigChngR` rows inserted for nodes that had none (`added_registrations.tsv`).
     registrations_added: usize,
     appended_files: usize,
+    /// `Config` rows of removed forms and templates (`removed_rows.tsv`, their bytes in the pack).
+    removed_rows: usize,
     blobs: &'a str,
     /// The way back for the tables: a backup file, or the operator's word.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +319,46 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
     }
     special_file.flush()?;
 
+    // The rows of the removed forms and templates, always with their bytes.
+    let mut removed_count = 0usize;
+    if !request.removals.rows.is_empty() {
+        let mut file = BufWriter::new(
+            fs::File::create(request.dir.join("removed_rows.tsv")).context("removed_rows.tsv")?,
+        );
+        writeln!(file, "name\tpart\tattributes\tcreation\tmodified\tfile")?;
+        for chunk in request.removals.rows.chunks(200) {
+            let names = chunk
+                .iter()
+                .map(|name| format!("N'{}'", quote_string(name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            client.read_rows(
+                &format!(
+                    "SELECT FileName, PartNo, CONVERT(int, Attributes), CONVERT(varchar(27), Creation, 121), CONVERT(varchar(27), Modified, 121), BinaryData FROM {db}.dbo.Config WHERE FileName IN ({names}) ORDER BY FileName, PartNo"
+                ),
+                &[],
+                &mut |mut row| {
+                    let name = row.take_text(0)?;
+                    let part = row.i64(1)?;
+                    let attributes = row.i64(2)?;
+                    let creation = row.text(3)?.to_owned();
+                    let modified = row.text(4)?.to_owned();
+                    let bytes = row.take_binary(5)?;
+                    let stored = pack.add(&bytes)?;
+                    saved_bytes += bytes.len() as u64;
+                    removed_count += 1;
+                    writeln!(
+                        file,
+                        "{}\t{part}\t{attributes}\t{creation}\t{modified}\t{stored}",
+                        tsv(&name)
+                    )?;
+                    Ok(())
+                },
+            )?;
+        }
+        file.flush()?;
+    }
+
     if let Some(bytes) = request.mobile_versions_before {
         fs::write(request.dir.join("MobileVersions.dat.before"), bytes)?;
         saved_bytes += bytes.len() as u64;
@@ -474,6 +520,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         new_objects: new_object_count,
         registrations_added: added_registration_count,
         appended_files: appended_count,
+        removed_rows: removed_count,
         blobs: match request.blobs {
             RecoveryBlobs::Changed => "changed",
             RecoveryBlobs::None => "none",
@@ -494,6 +541,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              rows.pack             the saved bytes of every row below, one after the other; a `file` value `rows.pack@<offset>+<length>` names a byte range\n\
              config_replaced.tsv   every Config row (all parts) the staged rows replaced; `file` is where its saved bytes are\n\
              special_rows.tsv      the DynamicallyUpdated markers and _dynupdate_ alias rows that were folded away\n\
+             removed_rows.tsv      the Config rows of the forms and templates the stage's deleted list removed, with their bytes\n\
              MobileVersions.dat.before   Files.MobileVersions.dat before the new head GUID\n\
              change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\
              params_replaced.tsv   the search-information rows of Params (and siVersions) rewritten for new forms/templates, with their old bytes\n\

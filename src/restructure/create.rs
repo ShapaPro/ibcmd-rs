@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::compiler::families::assets::{SourceAssetRegistry, SourceAssetRole};
 use crate::metadata_model::brace::{Brace, parse_row};
 use crate::restructure::caches::facts::ObjectFacts as SlotFacts;
 use crate::restructure::caches::members::Members;
@@ -137,6 +138,31 @@ pub fn find_created(image: &StagedImage) -> Result<Vec<Created>> {
     Ok(out)
 }
 
+/// A stage creates at most one catalog and one document: how the platform numbers several of a kind, and whether
+/// its header then moves once or more, is not traced (n5 has one of each). Fails closed.
+pub fn check_count(created: &[Created]) -> Result<()> {
+    for kind in [ObjectKind::Catalog, ObjectKind::Document] {
+        let names: Vec<&str> = created
+            .iter()
+            .filter(|item| item.kind == kind)
+            .map(|item| item.facts.name.as_str())
+            .collect();
+        if names.len() > 1 {
+            bail!(
+                "the stage creates {} new {} ({}): the numbering of several is not traced, one catalog and one document at a time",
+                names.len(),
+                if matches!(kind, ObjectKind::Catalog) {
+                    "catalogs"
+                } else {
+                    "documents"
+                },
+                names.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The staged image without the created objects' descriptors and files: what the planner of changed objects
 /// looks at.
 pub fn without_created(image: &StagedImage, created: &[Created]) -> StagedImage {
@@ -245,10 +271,55 @@ pub fn in_platform_order(created: Vec<Created>, context: &Context) -> Result<Vec
     Ok(keyed.into_iter().map(|(_, item)| item).collect())
 }
 
-/// Plans one created object: its numbers, its schema entry and its tables. Returns the plan of the object and
-/// the entry to put before `ConfigChngR`.
-pub fn plan_created(
-    running: &mut Running,
+/// Hands out the numbers of the created objects in the platform's order (traced: cases c, d, n1-n5): first the
+/// main tables of all of them (kinds in the configuration's order), then the attributes of each, then the tabular
+/// sections of each with their line number and attributes.
+pub(crate) fn allocate(running: &mut Running, created: &[Created]) -> Result<()> {
+    for item in created {
+        running.allocate(&item.uuid, entry_kind(item.kind).table_kind())?;
+    }
+    for item in created {
+        for attribute in &item.members.attributes {
+            running.allocate(&attribute.uuid, "Fld")?;
+        }
+    }
+    for item in created {
+        for section in &item.members.sections {
+            running.allocate(&section.uuid, "VT")?;
+            running.allocate(&section.uuid, "LineNo")?;
+            for attribute in &section.attributes {
+                running.allocate(&attribute.uuid, "Fld")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The place of every catalog and document in the platform's walk of the staged configuration: the kind, then the
+/// place in the configuration's own list. A changed object takes the numbers of its new attributes in this walk, and
+/// a created catalog takes one number that no entry records (`Running::reserve`): traced on N1-N7, where a catalog
+/// created before a changed one takes it before the changed one's attribute and a catalog created after takes it
+/// after. The created objects' own numbers come before the walk (`allocate`).
+pub(crate) fn walk_positions(
+    context: &Context,
+) -> Result<std::collections::HashMap<String, (ObjectKind, usize)>> {
+    let all = collections(&context.configuration);
+    let mut places = std::collections::HashMap::new();
+    for (class, kind) in [
+        (CONTEXT_CLASSES[0], ObjectKind::Catalog),
+        (CONTEXT_CLASSES[1], ObjectKind::Document),
+    ] {
+        for (position, uuid) in collection_of(&all, class)?.objects.iter().enumerate() {
+            places.insert(uuid.to_ascii_lowercase(), (kind, position));
+        }
+    }
+    Ok(places)
+}
+
+/// Plans one created object whose numbers [`allocate`] has handed out: its schema entry and its tables.
+/// Returns the plan of the object and the entry to put before `ConfigChngR`.
+pub(crate) fn plan_created(
+    running: &Running,
     schema: &DbSchema,
     inputs: &Inputs,
     context: &Context,
@@ -268,6 +339,25 @@ pub fn plan_created(
         .any(|file| file.to_ascii_lowercase().ends_with(".1c"))
     {
         bail!("the new {label} {name} has predefined items: not built");
+    }
+    // Its other files are modules and the help page: rows the apply moves without reading them.
+    for file in &item.files {
+        let suffix = file.rsplit('.').next().unwrap_or_default();
+        let admitted = SourceAssetRegistry
+            .route_by_suffix(kind_name(item.kind), suffix)
+            .is_some_and(|route| {
+                matches!(
+                    route.role(),
+                    SourceAssetRole::ObjectModule
+                        | SourceAssetRole::ManagerModule
+                        | SourceAssetRole::Help
+                )
+            });
+        if !admitted {
+            bail!(
+                "the new {label} {name} has the file {file}, which is not a module or a help page: not built"
+            );
+        }
     }
     if item.facts.number("DataHistory")? != 0 {
         bail!("the new {label} {name} keeps data history: not built");
@@ -296,19 +386,6 @@ pub fn plan_created(
                 "the stage changes the common attribute {}: a new object is not planned with it",
                 attribute.name
             );
-        }
-    }
-
-    // the numbers, in the platform's order
-    running.allocate(&item.uuid, entry_kind(item.kind).table_kind())?;
-    for attribute in &item.members.attributes {
-        running.allocate(&attribute.uuid, "Fld")?;
-    }
-    for section in &item.members.sections {
-        running.allocate(&section.uuid, "VT")?;
-        running.allocate(&section.uuid, "LineNo")?;
-        for attribute in &section.attributes {
-            running.allocate(&attribute.uuid, "Fld")?;
         }
     }
 
