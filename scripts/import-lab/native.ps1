@@ -67,6 +67,29 @@ function Invoke-NativeImport([string]$Db, [string]$Tree, [string]$Tag = 'x', [in
     $res
 }
 
+# native `config import files --partial`: the listed files (relative to BaseDir) only; returns @{Exit; Seconds; Rows; Tail}
+function Invoke-NativeImportFiles([string]$Db, [string]$BaseDir, [string[]]$Files, [string]$Tag = 'x', [int]$TimeoutSec = 1800) {
+    Assert-LabDb $Db
+    $data = "$($script:Lab)\ibdata\$Db"
+    New-Item -ItemType Directory -Force $data, "$($script:Lab)\logs" | Out-Null
+    if (-not (Test-Path "$($script:Lab)\logs\empty.txt")) { New-Item -ItemType File "$($script:Lab)\logs\empty.txt" | Out-Null }
+    $res = @{}
+    Invoke-WithNativeLock {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $args = @('infobase', 'config', 'import', 'files', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$Db",
+                  "--data=$data", "--user=$($script:NativeUser)", "--base-dir=$BaseDir", '--partial') + $Files
+        $p = Start-Process -FilePath $script:Ibcmd -ArgumentList $args -NoNewWindow -PassThru `
+            -RedirectStandardOutput "$($script:Lab)\logs\native-importfiles-$Tag.out.txt" `
+            -RedirectStandardError "$($script:Lab)\logs\native-importfiles-$Tag.err.txt" `
+            -RedirectStandardInput "$($script:Lab)\logs\empty.txt"
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) { $p.Kill(); $res.Exit = -999 } else { $res.Exit = $p.ExitCode }
+        $res.Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    }
+    $res.Rows = Get-ConfigSaveRows $Db
+    $res.Tail = ((Get-Content "$($script:Lab)\logs\native-importfiles-$Tag.out.txt", "$($script:Lab)\logs\native-importfiles-$Tag.err.txt" -ErrorAction SilentlyContinue) | Select-Object -Last 3) -join ' | '
+    $res
+}
+
 # native `config apply --force --dynamic=<mode>`
 function Invoke-NativeApply([string]$Db, [string]$Dynamic = 'disable', [string]$Tag = 'x', [int]$TimeoutSec = 3600) {
     Assert-LabDb $Db
