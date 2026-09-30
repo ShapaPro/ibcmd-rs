@@ -248,11 +248,13 @@ pub fn decide(
 
     // The planned objects' descriptors are the blockers the plan answers for, and so is the stage's
     // `deleted` row (the plan checked that it names removed attributes only); another blocker is a
-    // change this gate does not cover.
+    // change this gate does not cover. The `root` row is answered for by the check: the conservative rule
+    // compares its bytes, the check reads it (the 8.5 platform re-stamps the last block of its payload on
+    // every write) and a root that really changed is a `service-row-changed` refusal above.
     let has_deleted = inputs.staged.deleted.is_some();
     verdict.blockers.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
-        !planned.contains_key(&row) && !(has_deleted && row == "deleted")
+        !planned.contains_key(&row) && !(has_deleted && row == "deleted") && row != "root"
     });
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;
     if verdict.restructuring_required {
