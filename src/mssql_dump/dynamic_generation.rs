@@ -68,7 +68,7 @@
 //! recompute the name for every row and every list entry.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 /// The infix an online update inserts before the storage suffix.
 const DYNAMIC_UPDATE_INFIX: &str = "_dynupdate_";
@@ -183,7 +183,6 @@ impl StorageGenerationOverlay {
         self
     }
 
-    #[cfg(test)]
     pub(super) fn renames(&self) -> &BTreeMap<String, String> {
         &self.renames
     }
@@ -292,34 +291,105 @@ pub(super) fn storage_generation_overlay<'a>(
     overlay
 }
 
+/// The table of a database an overlay describes: (database, table).
+type StorageKey = (String, String);
+
 /// The overlays are shared, not copied: a query builder asks for the table's
 /// overlay once per statement and an overlay may name a hundred thousand rows.
+///
+/// An overlay is the view of one table of one database, so it is kept under
+/// both names, and whoever installs one does it inside a [`StorageViewScope`],
+/// which takes it away again. A step of a run that must read the rows as they
+/// are stored -- the activation compares them with the table inside its
+/// transaction -- and a run that handles another database never read it by
+/// accident (#409 F-2: the overlay was once process-global and outlived the
+/// export that installed it).
 static STORAGE_GENERATION_OVERLAYS: LazyLock<
-    RwLock<BTreeMap<String, Arc<StorageGenerationOverlay>>>,
+    RwLock<BTreeMap<StorageKey, Arc<StorageGenerationOverlay>>>,
 > = LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-/// Makes every query this run builds on `table` read the configuration the
-/// overlay describes. An empty overlay installs nothing.
+fn storage_key(database: &str, table: &str) -> StorageKey {
+    (database.to_owned(), table.to_owned())
+}
+
+/// Makes every query this run builds on `table` of `database` read the
+/// configuration the overlay describes, until the enclosing
+/// [`StorageViewScope`] ends. An empty overlay installs nothing.
 pub(super) fn install_storage_generation_overlay(
+    database: &str,
     table: &str,
     overlay: Arc<StorageGenerationOverlay>,
 ) {
     if overlay.is_empty() {
         return;
     }
-    if let Ok(mut overlays) = STORAGE_GENERATION_OVERLAYS.write() {
-        overlays.insert(table.to_owned(), overlay);
+    STORAGE_GENERATION_OVERLAYS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(storage_key(database, table), overlay);
+}
+
+/// The overlay installed for `table` of `database`, if there is one.
+pub(super) fn storage_generation_overlay_for(
+    database: &str,
+    table: &str,
+) -> Option<Arc<StorageGenerationOverlay>> {
+    STORAGE_GENERATION_OVERLAYS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&storage_key(database, table))
+        .cloned()
+}
+
+/// What the reads of one database see while the scope lives: the rows as they
+/// are stored, plus the overlays installed since it began.
+///
+/// Beginning a scope suspends the overlays already installed for the database
+/// -- an enclosing scope's -- and ending it takes away what was installed
+/// inside and gives the suspended ones back. An export begins one for its
+/// database, so the overlay it resolves is gone when it returns; the reads of
+/// the activation begin one to be sure they see the stored rows.
+#[must_use = "the scope ends when it is dropped"]
+pub(super) struct StorageViewScope {
+    database: String,
+    suspended: Vec<(String, Arc<StorageGenerationOverlay>)>,
+}
+
+impl StorageViewScope {
+    pub(super) fn begin(database: &str) -> Self {
+        let mut overlays = STORAGE_GENERATION_OVERLAYS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let tables = overlays
+            .keys()
+            .filter(|(installed, _)| installed == database)
+            .map(|(_, table)| table.clone())
+            .collect::<Vec<_>>();
+        let suspended = tables
+            .into_iter()
+            .filter_map(|table| {
+                overlays
+                    .remove(&storage_key(database, &table))
+                    .map(|overlay| (table, overlay))
+            })
+            .collect();
+        Self {
+            database: database.to_owned(),
+            suspended,
+        }
     }
 }
 
-pub(super) fn clear_storage_generation_overlays() {
-    if let Ok(mut overlays) = STORAGE_GENERATION_OVERLAYS.write() {
-        overlays.clear();
+impl Drop for StorageViewScope {
+    fn drop(&mut self) {
+        let mut overlays = STORAGE_GENERATION_OVERLAYS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        overlays.retain(|(installed, _), _| installed != &self.database);
+        for (table, overlay) in std::mem::take(&mut self.suspended) {
+            overlays.insert(storage_key(&self.database, &table), overlay);
+        }
     }
-}
-
-pub(super) fn storage_generation_overlay_for(table: &str) -> Option<Arc<StorageGenerationOverlay>> {
-    STORAGE_GENERATION_OVERLAYS.read().ok()?.get(table).cloned()
 }
 
 fn quote(value: &str) -> String {
@@ -785,6 +855,61 @@ mod tests {
         assert_eq!(text.matches("UNION ALL").count(), 2);
     }
 
+    #[test]
+    fn an_overlay_is_the_view_of_one_table_of_one_database() {
+        let overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let _scope = StorageViewScope::begin("keyed_a");
+        install_storage_generation_overlay("keyed_a", "Config", overlay.clone());
+        assert_eq!(
+            storage_generation_overlay_for("keyed_a", "Config"),
+            Some(overlay)
+        );
+        assert!(storage_generation_overlay_for("keyed_b", "Config").is_none());
+        assert!(storage_generation_overlay_for("keyed_a", "ConfigSave").is_none());
+    }
+
+    #[test]
+    fn a_scope_takes_away_what_it_installed_and_gives_back_what_it_suspended() {
+        let outer_overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let inner_overlay = Arc::new(overlay_of(&[G2], &["b".into(), alias("b", G2, "")]));
+        let outer = StorageViewScope::begin("nested");
+        install_storage_generation_overlay("nested", "Config", outer_overlay.clone());
+        {
+            let _inner = StorageViewScope::begin("nested");
+            assert!(
+                storage_generation_overlay_for("nested", "Config").is_none(),
+                "the inner scope reads the rows as they are stored"
+            );
+            install_storage_generation_overlay("nested", "Config", inner_overlay.clone());
+            assert_eq!(
+                storage_generation_overlay_for("nested", "Config"),
+                Some(inner_overlay)
+            );
+        }
+        assert_eq!(
+            storage_generation_overlay_for("nested", "Config"),
+            Some(outer_overlay),
+            "the suspended view is back"
+        );
+        drop(outer);
+        assert!(
+            storage_generation_overlay_for("nested", "Config").is_none(),
+            "nothing outlives the outermost scope"
+        );
+    }
+
+    #[test]
+    fn a_scope_leaves_the_views_of_other_databases_alone() {
+        let overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let _other = StorageViewScope::begin("untouched");
+        install_storage_generation_overlay("untouched", "Config", overlay.clone());
+        drop(StorageViewScope::begin("another"));
+        assert_eq!(
+            storage_generation_overlay_for("untouched", "Config"),
+            Some(overlay)
+        );
+    }
+
     const SAVED: &str = "[db].dbo.[ConfigSave]";
 
     #[test]
@@ -1012,7 +1137,7 @@ mod live {
         let staged = stored_rows(client, &saved)?;
 
         // What the export installs, exactly as `dump_table_rows_streamed` asks for it.
-        clear_storage_generation_overlays();
+        let _view = StorageViewScope::begin(&database);
         let headers = fetch_row_headers(&sql, &database, "Config", &BTreeSet::new())?;
         let listed = crate::mssql_dump::install_storage_overlay(
             &sql,
@@ -1022,7 +1147,8 @@ mod live {
             headers,
             main,
         )?;
-        let overlay = storage_generation_overlay_for("Config").expect("an overlay is installed");
+        let overlay =
+            storage_generation_overlay_for(&database, "Config").expect("an overlay is installed");
 
         // What the overlay says is published.
         let mut expected = Rows::new();

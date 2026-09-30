@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use ibcmd_core::artifact::ProfileId;
 use ibcmd_core::profile::{CapabilityId, CapabilityState, EffectiveProfile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -244,6 +244,187 @@ fn verify_ras_infobase_binding(
         cluster_id,
         infobase_id,
     })
+}
+
+/// A worker process of the cluster that holds an infobase only for the RAS
+/// service's own connections: where the SQL sessions of the tool's own RAS
+/// verification live ([`read_infobase_clients`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct OwnRasProcess {
+    /// The machine the process runs on (`host_name` of its SQL sessions).
+    pub host: String,
+    /// Its operating-system process id (`host_process_id` of its SQL sessions).
+    pub pid: u32,
+}
+
+/// What the cluster says about who is connected to one infobase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasInfobaseClients {
+    /// Connections and sessions of the infobase that are not the RAS service's
+    /// own: a client, a background job, a web or COM connection, ...
+    pub clients: Vec<String>,
+    /// The worker processes that carry a RAS connection of the infobase and no
+    /// other connection or session of it.
+    pub ras_only_processes: BTreeSet<OwnRasProcess>,
+}
+
+/// Asks the cluster who is connected to the infobase: `rac connection list`,
+/// `rac session list` and `rac process list`, without the infobase login (which
+/// would itself open a RAS connection).
+///
+/// The tool's own RAS verification (`rac infobase info --infobase-user`) makes
+/// the worker process load the infobase, and the process keeps two idle
+/// `1CV83 Server` SQL sessions on the database for as long as its RAS
+/// connection lives (#409 F-3: observed for 56 minutes after the command
+/// ended). They are not users, but the SQL gate of an exclusive activation
+/// counts every session.
+pub fn read_infobase_clients(
+    rac: &Path,
+    ras_endpoint: &str,
+    cluster_id: Uuid,
+    infobase_id: Uuid,
+) -> Result<RasInfobaseClients> {
+    let list = |what: &str, extra: Vec<String>| -> Result<Vec<BTreeMap<String, String>>> {
+        let mut args = vec![what.to_owned(), "list".to_owned()];
+        args.push(format!("--cluster={cluster_id}"));
+        args.extend(extra);
+        args.push(ras_endpoint.to_owned());
+        run_rac_bounded(rac, args)
+            .map(|output| parse_rac_blocks(&output))
+            .with_context(|| format!("rac {what} list failed"))
+    };
+    let infobase = format!("--infobase={infobase_id}");
+    let connections = list("connection", vec![infobase.clone()])?;
+    let sessions = list("session", vec![infobase])?;
+    let processes = list("process", Vec::new())?;
+    Ok(infobase_clients(&connections, &sessions, &processes))
+}
+
+fn infobase_clients(
+    connections: &[BTreeMap<String, String>],
+    sessions: &[BTreeMap<String, String>],
+    processes: &[BTreeMap<String, String>],
+) -> RasInfobaseClients {
+    let field = |block: &BTreeMap<String, String>, key: &str| -> String {
+        block.get(key).cloned().unwrap_or_default()
+    };
+    let mut clients = Vec::new();
+    let mut ras_processes = BTreeSet::new();
+    let mut client_processes = BTreeSet::new();
+    for connection in connections {
+        let process = field(connection, "process");
+        let application = field(connection, "application");
+        // An application the cluster does not name is not RAS: it counts.
+        if application.eq_ignore_ascii_case("RAS") {
+            ras_processes.insert(process);
+        } else {
+            client_processes.insert(process);
+            clients.push(format!(
+                "connection {} of application {application:?} on {}",
+                field(connection, "conn-id"),
+                field(connection, "host")
+            ));
+        }
+    }
+    for session in sessions {
+        client_processes.insert(field(session, "process"));
+        clients.push(format!(
+            "session {} of user {:?} ({})",
+            field(session, "session-id"),
+            field(session, "user-name"),
+            field(session, "app-id")
+        ));
+    }
+    let ras_only_processes = processes
+        .iter()
+        .filter_map(|process| {
+            let id = field(process, "process");
+            if !ras_processes.contains(&id) || client_processes.contains(&id) {
+                return None;
+            }
+            Some(OwnRasProcess {
+                host: field(process, "host"),
+                pid: field(process, "pid").parse().ok()?,
+            })
+        })
+        .collect();
+    RasInfobaseClients {
+        clients,
+        ras_only_processes,
+    }
+}
+
+/// For an exclusive activation: refuses, before anything is written, an
+/// infobase that has client connections or sessions, and returns the worker
+/// processes whose idle SQL sessions the gate of the activation leaves out
+/// ([`exclusive_session_gate`]) because they belong to the RAS service.
+pub fn own_ras_processes_for_exclusive(
+    rac: &Path,
+    ras_endpoint: &str,
+    cluster_id: Uuid,
+    infobase_id: Uuid,
+) -> Result<Vec<OwnRasProcess>> {
+    let found = read_infobase_clients(rac, ras_endpoint, cluster_id, infobase_id)?;
+    if !found.clients.is_empty() {
+        bail!(
+            "exclusive activation refused before any write: the cluster reports {} client connection(s) or session(s) on the infobase ({}); end them, or activate `online`",
+            found.clients.len(),
+            found
+                .clients
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    Ok(found.ras_only_processes.into_iter().collect())
+}
+
+/// The statement of an exclusive activation that refuses when the database has
+/// a session other than its own: `THROW code, message`.
+///
+/// `own` are the worker processes that hold the infobase only for RAS
+/// connections ([`own_ras_processes_for_exclusive`]). Their `1CV83 Server` SQL
+/// sessions are left out while they are idle -- `sleeping`, no open
+/// transaction -- because the tool's own RAS verification made the process open
+/// them; a session of that program that runs or holds a transaction, and every
+/// session of another program or another process, still refuses. Without `own`
+/// the statement counts every session, as it always did.
+///
+/// One case is not caught: a user who signs in through the same process in the
+/// seconds between the cluster query and the transaction, while the sessions
+/// stay idle.
+pub fn exclusive_session_gate(code: u32, message: &str, own: &[OwnRasProcess]) -> String {
+    let exempt = if own.is_empty() {
+        String::new()
+    } else {
+        let mut by_host = BTreeMap::<&str, Vec<u32>>::new();
+        for process in own {
+            by_host.entry(&process.host).or_default().push(process.pid);
+        }
+        let alternatives = by_host
+            .iter()
+            .map(|(host, pids)| {
+                format!(
+                    "(ISNULL(host_name,N'')=N'{}' AND ISNULL(host_process_id,-1) IN ({}))",
+                    host.replace('\'', "''"),
+                    pids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!(
+            " AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ({alternatives}))"
+        )
+    };
+    format!(
+        "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(){exempt}) THROW {code}, '{}', 1;",
+        message.replace('\'', "''")
+    )
 }
 
 fn run_rac_bounded<I>(rac: &Path, args: I) -> Result<String>
@@ -682,6 +863,105 @@ pub fn verify_mssql_storage_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What `rac` printed on the lab cluster (8.3.27.2214) for the clone that
+    // the tool's own verification had opened: one RAS connection, two worker
+    // processes.
+    const RAS_CONNECTIONS: &str = "connection     : d243edc4-d9a1-43b5-8b19-910671df20fd\nconn-id        : 104390\nhost           : DESKTOP-SMI5N4O\nprocess        : 68c054ba-34d3-4900-9c08-ead9756a9cf1\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\napplication    : \"RAS\"\nconnected-at   : 2026-09-30T01:28:35\nsession-number : 0\nblocked-by-ls  : 0\n";
+    const RAS_PROCESSES: &str = "process              : 68c054ba-34d3-4900-9c08-ead9756a9cf1\nhost                 : DESKTOP-SMI5N4O\nport                 : 2560\npid                  : 22608\nturned-on            : yes\nrunning              : yes\nconnections          : 14\n\nprocess              : 5f8f3e05-2c7b-4ebf-8d6e-b0e6eed2b64a\nhost                 : DESKTOP-SMI5N4O\nport                 : 2564\npid                  : 110352\nturned-on            : yes\nrunning              : yes\nconnections          : 10\n";
+
+    fn clients_of(connections: &str, sessions: &str, processes: &str) -> RasInfobaseClients {
+        infobase_clients(
+            &parse_rac_blocks(connections),
+            &parse_rac_blocks(sessions),
+            &parse_rac_blocks(processes),
+        )
+    }
+
+    fn own(host: &str, pid: u32) -> OwnRasProcess {
+        OwnRasProcess {
+            host: host.to_owned(),
+            pid,
+        }
+    }
+
+    #[test]
+    fn a_ras_connection_alone_is_no_client_and_names_its_process() {
+        let found = clients_of(RAS_CONNECTIONS, "", RAS_PROCESSES);
+        assert!(found.clients.is_empty(), "{:?}", found.clients);
+        assert_eq!(
+            found.ras_only_processes,
+            BTreeSet::from([own("DESKTOP-SMI5N4O", 22608)])
+        );
+    }
+
+    #[test]
+    fn a_client_connection_or_session_is_counted_and_takes_its_process_out() {
+        // The same process also carries a client of the infobase.
+        let with_client = format!(
+            "{RAS_CONNECTIONS}\nconnection     : 5d6d5f08-6c7c-4d4b-8f2e-000000000001\nconn-id        : 104391\nhost           : DESKTOP-SMI5N4O\nprocess        : 68c054ba-34d3-4900-9c08-ead9756a9cf1\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\napplication    : \"1CV8C\"\nconnected-at   : 2026-09-30T01:30:00\nsession-number : 3\nblocked-by-ls  : 0\n"
+        );
+        let found = clients_of(&with_client, "", RAS_PROCESSES);
+        assert_eq!(found.clients.len(), 1);
+        assert!(found.clients[0].contains("1CV8C"), "{:?}", found.clients);
+        assert!(found.ras_only_processes.is_empty());
+
+        // A session with no connection listed still counts.
+        let found = clients_of(
+            RAS_CONNECTIONS,
+            "session        : 1\nsession-id     : 7\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\nconnection     : 5d6d5f08-6c7c-4d4b-8f2e-000000000001\nprocess        : 5f8f3e05-2c7b-4ebf-8d6e-b0e6eed2b64a\nuser-name      : Иванов\napp-id         : 1CV8C\n",
+            RAS_PROCESSES,
+        );
+        assert_eq!(found.clients.len(), 1);
+        assert_eq!(
+            found.ras_only_processes,
+            BTreeSet::from([own("DESKTOP-SMI5N4O", 22608)])
+        );
+
+        // No application name is not RAS.
+        let unnamed = RAS_CONNECTIONS.replace("application    : \"RAS\"\n", "");
+        let found = clients_of(&unnamed, "", RAS_PROCESSES);
+        assert_eq!(found.clients.len(), 1);
+        assert!(found.ras_only_processes.is_empty());
+    }
+
+    #[test]
+    fn an_empty_cluster_answer_means_no_client_and_nothing_to_leave_out() {
+        let found = clients_of("", "", RAS_PROCESSES);
+        assert!(found.clients.is_empty());
+        assert!(found.ras_only_processes.is_empty());
+    }
+
+    #[test]
+    fn the_exclusive_gate_counts_every_session_unless_told_which_are_the_rac_sessions() {
+        assert_eq!(
+            exclusive_session_gate(
+                57209,
+                "exclusive activation requires no other database sessions",
+                &[]
+            ),
+            "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID()) THROW 57209, 'exclusive activation requires no other database sessions', 1;"
+        );
+        let text = exclusive_session_gate(
+            57209,
+            "no other sessions",
+            &[
+                own("DESKTOP-SMI5N4O", 22608),
+                own("DESKTOP-SMI5N4O", 110352),
+                own("o'host", 7),
+            ],
+        );
+        assert!(text.contains("AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ("));
+        assert!(text.contains(
+            "(ISNULL(host_name,N'')=N'DESKTOP-SMI5N4O' AND ISNULL(host_process_id,-1) IN (22608,110352))"
+        ));
+        assert!(
+            text.contains(
+                "(ISNULL(host_name,N'')=N'o''host' AND ISNULL(host_process_id,-1) IN (7))"
+            )
+        );
+        assert!(text.ends_with(") THROW 57209, 'no other sessions', 1;"));
+    }
 
     fn test_binding() -> RasDatabaseBinding {
         RasDatabaseBinding {

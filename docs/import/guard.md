@@ -1,5 +1,10 @@
 # The import guard (#388, checkpoint 2)
 
+> Step 2 (`docs/import/override.md`) made the stage carry most of what this document lists as refused: the
+> refusals of section 5 (attribute, tabular section, new catalog, removed form, ...) are cases of the acceptance
+> at checkpoint 2, and now load. The guard is unchanged and checks every case; what it still refuses is the
+> removal of a single file of an object that stays (a module, a picture).
+
 `ibcmd infobase config import` into a database that holds the configuration stages in patch mode, and patch
 mode carries only part of a tree (`docs/import/patch-mode.md`). The guard makes the rest impossible to lose
 silently: before anything is written, the configuration the stage would leave is exported and compared with the
@@ -55,21 +60,26 @@ The message names, per file, the first three differing leaves; an element only o
 | | |
 |---|---|
 | patch stage (`infobase config import`, the target holds the configuration) | on |
-| base-free stage (an empty infobase, or `--base-free`) | off; `--verify` turns it on |
+| base-free stage (an empty infobase, or `--base-free`) | on |
 | `--no-verify` | off for any stage |
+| `--verify` | on (the default; for scripts that want it written down) |
 | `IBCMD_RS_STAGE_VERIFY=0\|1` | off / on for any stage, over the command line (for scripts) |
 | `mssql-stage-source-objects` (the research command) | off; `--verify` turns it on |
 
-Why base-free is off by default: it is the flow for an empty infobase, where every row is compiled from the tree,
-and the guard makes it slower by more than it does a patch stage: on ERP УХ the stage takes 121 s and the guard adds
-152 s, against +9 % for a patch stage (section 6). That is not prohibitive - the unchanged native УХ tree passes,
-140 708 of 140 708 files - so this is a policy choice, not a limit: the default is one line
-(`InfobaseImportVerify::Auto` in `src/infobase.rs`), and `--verify` turns the check on for one run.
+Every stage is checked: the project fails closed, and a stage compiled from the tree can carry a slip of the
+compiler as well as a patch stage can drop a change. The base-free check costs the export and nothing else. The
+first version scanned the tree after the stage (a full read and hash of the tree's files: 152 s on ERP УХ, of a
+stage of 121 s); a second read each file when the export produced it and was worse (263 s, the export's writer
+threads wait on the disk). The version in use hashes the tree's files on the file-bound pool beside the export,
+which spends its time in the model: 94 s (section 6).
 
 A guard that cannot run (the generation history row unreadable, the export fails) refuses with the reason and the
 way to skip it (`--no-verify`); it does not let an unchecked stage through.
 
 ## 4. The patch refusals
+
+(At checkpoint 2. Since step 2 the first two are built from the tree; a reference to an object the tree has no file
+of and an object no writer can build still refuse.)
 
 A patch stage cannot build an object the database does not hold, predefined data with items the stored row lacks,
 or a file whose reference names an object the tree has no file of. The stage collects **every** such object and one
@@ -143,15 +153,15 @@ native tree (12 336 files) also passes, with a guard of 8.5 s.
 | БСП 8.3.27, patch, a real database (drop-in import) | 12 197 | 3.9-8.1 s (15.4 s on a cold first run): Config read into memory 1.7 s, export 2.3 s, comparison | the whole `config import` takes 5-80 s on the shared machine | not measured apart |
 | БСП 8.5, patch, unchanged tree | 12 336 | 8.5 s | | |
 | ERP УХ 8.3.27, patch, offline (`--script-only`, Config rows from a folder) | 140 708 | 98.5 s: rows read 5.1 s, export 93.1 s (+9 % of the stage) | 1 049.6 s wall, 1 411 s CPU, of which the guard 98.8 s | 6.7 GB |
-| ERP УХ 8.3.27, base-free, offline | 140 708 | 152.4 s: export 83.5 s, the rest is the scan of the tree's 140 708 files (a patch stage has its scan already) | stage 120.9 s; the process 341.9 s wall, 1 092 s CPU | 8.3 GB |
+| ERP УХ 8.3.27, base-free, offline | 140 708 | 94.3 s: export 92.7 s, the tree hashed beside it (an earlier version that scanned the tree after the stage: 152 s) | stage 120.6 s; the process 286 s wall, 1 103 s CPU | 8.3 GB |
 
 Offline means no database is touched: `scripts/import-lab/run_uha_guard.ps1` (inside the heavy lock) runs
 `mssql-stage-source-objects --script-only --verify`. The database-backed patch stage of УХ holds all Config rows
 in memory for the guard, which the offline run does not (it reads them from the folder as it goes): its peak has not
 been measured. The wall figures come from a machine shared with other work; the CPU figures are the steadier ones.
 
-The default follows from this: on БСП the guard is a few seconds and on ERP УХ a tenth of the patch stage, so it
-is on for a patch stage. A base-free stage is off for the reasons of section 3.
+The default follows from this: on БСП the guard is a few seconds and on ERP УХ a tenth of a patch stage and
+94 s on a base-free stage of 121 s, so every stage is checked.
 
 ## 7. Limits
 
