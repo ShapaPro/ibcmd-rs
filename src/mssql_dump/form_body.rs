@@ -7390,6 +7390,36 @@ pub(super) fn form_dynamic_list_use_always_universe(
             ),
         }
     }
+    // A manual query that selects a standard attribute its main table does not
+    // declare (`СпискиАдресовЭлектроннойПочты.Представление`, a catalog with no
+    // standard presentation) gets no such field: the platform writes the list's
+    // data path onto it marked `~`, in every 1C:Документооборот configuration
+    // that carries the form (dm, DO, z34, DocMngHolding).
+    if settings.manual_query
+        && let Some(main_table) = settings.main_table.as_deref()
+        && let Some(declarations) = declarations
+        && let Some((kind, _)) = main_table.split_once('.')
+        && let Some(pairs) = form_dynamic_list_std_attribute_pairs(kind)
+    {
+        let declared = form_dynamic_list_declared_std_attribute_pairs(pairs, main_table, Some(declarations))
+            .map(|(ru, _)| *ru)
+            .collect::<BTreeSet<_>>();
+        let children = form_dynamic_list_main_table_children(
+            main_table,
+            object_refs,
+            FORM_DYNAMIC_LIST_MAIN_TABLE_CHILD_KINDS,
+            object_ref_index,
+        );
+        for (ru, en) in pairs {
+            if !declared.contains(ru)
+                && !children.contains(*ru)
+                && !children.contains(*en)
+            {
+                universe.remove(*ru);
+                universe.remove(*en);
+            }
+        }
+    }
     if let Some(server_state_xml) = &settings.server_state_xml {
         universe.extend(form_dynamic_list_calculated_field_data_paths(
             server_state_xml,
@@ -14231,6 +14261,7 @@ fn parse_form_child_item_with_metadata_owners(
                         | "CheckBoxField"
                         | "RadioButtonField"
                         | "TextDocumentField"
+                        | "FormattedDocumentField"
                 ) && form_input_field_layout_is_extended(&fields)
                     && input_field_top_level_offset > 0)
                     .then(|| {
@@ -14397,6 +14428,17 @@ fn parse_form_child_item_with_metadata_owners(
                 {
                     parse_form_input_field_horizontal_align(&fields)
                         .map(FormChildItemAlignment::Horizontal)
+                } else if tag == "TextDocumentField" && form_input_field_layout_is_extended(&fields)
+                {
+                    // Member 23 reads `0` on exactly the `TextDocumentField`s
+                    // 1C:Конвертация данных writes `<HorizontalAlign>Left` on
+                    // (4 of 19 in `Catalogs/Конвертации/Forms/ФормаЭлемента`)
+                    // and `3` on the rest.
+                    (fields
+                        .get(23 + form_input_field_top_level_offset(&fields))
+                        .map(|field| field.trim())
+                        == Some("0"))
+                    .then_some(FormChildItemAlignment::Horizontal("Left"))
                 } else if let Some((schema, _)) = check_box_field_layout.as_ref() {
                     schema
                         .horizontal_align(&fields)

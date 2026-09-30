@@ -4390,7 +4390,9 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
     let fields = configuration_root_property_fields(text, uuid)?;
     let raw_fields = split_1c_braced_fields(fields.get(53)?.trim(), 0)?;
     let table_version = raw_fields.first()?.trim();
-    if !matches!(table_version, "1" | "2") {
+    // Version `0` is the table of the oldest roots (ISL 2.8, `{63,...}`), the
+    // same pair run as version `1`.
+    if !matches!(table_version, "0" | "1" | "2") {
         return None;
     }
     let count = raw_fields.get(1)?.trim().parse::<usize>().ok()?;
@@ -4455,7 +4457,7 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
         // functionalities it lacks as unused -- the same Configuration.xml as
         // the same configuration saved by 8.5 with all 38 pairs.
         ("2.20" | "2.21", n)
-            if table_version == "1"
+            if matches!(table_version, "0" | "1")
                 && n + 1 < full
                 && tail.len() == 1
                 && trailing_field.trim() == "0" =>

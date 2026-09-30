@@ -79407,3 +79407,30 @@ fn a_view_status_addition_reads_center_and_a_lowered_stretch() {
     );
     assert_eq!(parse_form_view_status_addition_horizontal_stretch(&fields), None);
 }
+
+/// Evidence: 1C:Интеграция ISL 2.8.1.13 (root `{63,...}`, compatibility 8.3.21)
+/// stores its mobile table as `{0,30,{0,1},...,{25,1},...,{32,0},{33,0},0}` --
+/// version `0`, the first 30 ids, a closing `0` -- and the platform prints the
+/// 38 functionalities with only `Biometrics` and `OSBackup` (ids 0 and 25) used.
+#[test]
+fn a_version_0_mobile_table_reads_like_version_1() {
+    let ids: Vec<u32> = (0..=27).chain([32, 33]).collect();
+    let pairs = ids
+        .iter()
+        .map(|id| format!("{{{id},{}}}", u8::from(*id == 0 || *id == 25)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let raw = format!("{{0,30,{pairs},0}}");
+    let (uuid, text) = flat_configuration_mobile_text(67, 60, &raw);
+    let (functionalities, messages) =
+        parse_configuration_used_mobile_application_functionalities(&text, &uuid, "2.20")
+            .unwrap();
+    assert!(messages.is_empty());
+    assert_eq!(functionalities.len(), 38);
+    let used = functionalities
+        .iter()
+        .filter(|entry| entry.use_functionality)
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    assert_eq!(used, ["Biometrics", "OSBackup"]);
+}
