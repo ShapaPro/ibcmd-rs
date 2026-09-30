@@ -239,6 +239,9 @@ pub struct ObjectPlan {
     pub tables: Vec<TablePlan>,
     /// The columns of `Method::AlterAdd`.
     pub alter: Vec<AlterColumn>,
+    /// The object is new (S1-F): all its tables are created, nothing is copied or dropped, and the
+    /// attribute lists above are empty (its attributes are part of the object, not changes of it).
+    pub created: bool,
 }
 
 /// A `Params` row of the derived caches, rewritten.
@@ -275,8 +278,19 @@ pub struct Plan {
 }
 
 impl ObjectPlan {
-    /// `new attributes Fld1 = A, Fld2 = B; removed attributes Fld3 = C`.
+    /// `new attributes Fld1 = A, Fld2 = B; removed attributes Fld3 = C`, or `new catalog, tables ...`.
     pub fn changes(&self) -> String {
+        if self.created {
+            return format!(
+                "new {}, tables {}",
+                self.kind.label(),
+                self.tables
+                    .iter()
+                    .map(|table| table.table.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let mut parts = Vec::new();
         if !self.additions.is_empty() {
             parts.push(format!(
@@ -1451,6 +1465,7 @@ fn plan_object(
             switches,
             tables,
             alter,
+            created: false,
         },
         entry,
     ))
