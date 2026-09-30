@@ -1,4 +1,4 @@
-// S1-F (issue #402): a session job over the catalogs and documents a native case creates (the names ДемоКатН*, ДемоДокН*).
+// S1-F (issue #402): a session job over the catalogs and documents a native case creates (the names ДемоКатН*, ДемоДокН*) and the catalog that gains an attribute beside them (_ДемоСтавкиНДС in N3, N6, N7).
 // For each one: what the metadata reports (the type index, the names), the attributes and tabular sections, the XDTO type
 // of the object and of its reference (the model cache row), a write of a group and an element (or a document) with a value in every
 // attribute and tabular row, read back and found by queries (each attribute alone and the ordering by it), the XDTO
@@ -8,7 +8,16 @@
 Результат = "";
 Объекты = Новый Массив;
 Для Каждого ОбъектМД Из Метаданные.Справочники Цикл
-	Если СтрНачинаетсяС(ОбъектМД.Имя, "ДемоКатН") Тогда
+	Включить = СтрНачинаетсяС(ОбъектМД.Имя, "ДемоКатН");
+	// the existing catalog a case adds an attribute to (N3, N6, N7): its new attribute is named ДемоН..Реквизит
+	Если ОбъектМД.Имя = "_ДемоСтавкиНДС" Тогда
+		Для Каждого Реквизит Из ОбъектМД.Реквизиты Цикл
+			Если СтрНачинаетсяС(Реквизит.Имя, "ДемоН") Тогда
+				Включить = Истина;
+			КонецЕсли;
+		КонецЦикла;
+	КонецЕсли;
+	Если Включить Тогда
 		Объекты.Добавить(Новый Структура("Вид,МД", "Справочник", ОбъектМД));
 	КонецЕсли;
 КонецЦикла;

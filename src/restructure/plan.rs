@@ -1235,6 +1235,11 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     // say nothing of a string's limit: a stage that only widens strings leaves them as they are.
     let mut caches = Vec::new();
     let lists_change = objects.iter().any(ObjectPlan::changes_the_attribute_list);
+    if create_context.is_some() && objects.iter().any(|object| !object.removals.is_empty()) {
+        bail!(
+            "a new object together with removed attributes of existing objects is not built: the caches of the new object are chained on the additions only (N3, N6 and N7 trace additions)"
+        );
+    }
     if create_context.is_some() && objects.iter().any(|object| !object.sections.is_empty()) {
         bail!(
             "a new object together with new tabular sections (or attributes of them) of existing objects is not built: both rewrite the registry, the index of the generated types and the XDTO model"
