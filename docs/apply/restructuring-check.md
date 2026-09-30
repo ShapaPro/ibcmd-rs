@@ -739,7 +739,7 @@ pub struct Classification { pub operations: Vec<S1Operation>, pub refusals: Vec<
 pub enum S1Operation {                    // every variant carries `object: ObjectId { kind, name, row }`
     AddAttribute { attribute },  DeleteAttribute { attribute },
     WidenString { attribute, from: u32, to: u32 },
-    SwitchIndex { attribute, from: IndexMode, to: IndexMode },   // DontIndex <-> Index only
+    SwitchIndex { attribute, from: IndexMode, to: IndexMode },   // DontIndex <-> Index or IndexWithAdditionalOrder
     AddTabularSection { section },  AddObject,                   // a catalog or a document
 }
 pub struct Refusal { pub code: RefusalCode, pub rule: RuleId, pub reason: String, pub detail: String }
@@ -762,8 +762,8 @@ match is on `rule`, `kind`, the steps of `path` and `op`, never on words.
 | the same, removed | `DeleteAttribute` |
 | `attribute-property-not-covered`; ...; `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`; modified `n -> m`, both numbers, `m > n` | `WidenString` |
 | the same, `m <= n` or not a number | refused `length-not-widened` |
-| `attribute-property-not-covered`; ...; `.../Properties/Indexing`; `DontIndex <-> Index` | `SwitchIndex` |
-| the same to or from another mode (`IndexWithAdditionalOrder`) | refused `index-mode-outside-s1` |
+| `attribute-property-not-covered`; ...; `.../Properties/Indexing`; `DontIndex <-> Index` or `DontIndex <-> IndexWithAdditionalOrder` | `SwitchIndex` |
+| the same between `Index` and `IndexWithAdditionalOrder` (not traced), or to or from any other value | refused `index-mode-outside-s1` |
 | `tabular-section-added-dropped-moved`; ...; `ChildObjects/TabularSection[T]`; added | `AddTabularSection` |
 | the same, dropped or moved; any change inside a section (an added column: case h) | refused `tabular-section-outside-s1` |
 | `object-with-storage-added-or-dropped`; Catalog, Document; no path; added, **and** the same rule on `Configuration`, `ChildObjects/<Kind>[Name]`, added, of the same kind and name | `AddObject` (one operation for the two reasons) |
