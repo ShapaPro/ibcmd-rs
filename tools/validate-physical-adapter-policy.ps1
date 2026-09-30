@@ -10,7 +10,10 @@ $ErrorActionPreference = 'Stop'
 
 $BaselineRelativePath = 'tools/physical-adapter-policy-baseline.json'
 $AllowedCategories = @('uuid-literal', 'name-special-case', 'xml-policy')
-$ExcludedMssqlModules = @('tests.rs', 'metadata_order_tests.rs', 'mxl_ir.rs', 'moxel.rs')
+# Production modules that stay out of the guarded slice by decision.  Modules the
+# compiler reads only for tests are not listed: they are found from their
+# `#[cfg(test)] mod name;` declaration (see Get-TestOnlyModulePaths).
+$ExcludedMssqlModules = @('mxl_ir.rs', 'moxel.rs')
 
 $scannerSource = @'
 using System;
@@ -231,6 +234,59 @@ public static class PhysicalAdapterPolicyScanner
             result.Add(tokens[index++]);
         }
         return result;
+    }
+
+    // The names of the out-of-line modules a file declares as `mod name;` under
+    // a cfg predicate that cannot be true outside tests (`#[cfg(test)] mod x;`).
+    // The compiler reads such a module from a file next to the declaring one;
+    // the caller leaves that file, and everything below its directory, out of
+    // the guarded slice.  A `#[path = "..."]` module is not resolved here (its
+    // file is not `name.rs`): it stays guarded.  Written for C# 5 (Windows
+    // PowerShell 5.1 compiles this source too).
+    public static string[] TestOnlyModules(string source)
+    {
+        var tokens = Tokenize(source);
+        var names = new List<string>();
+        int index = 0;
+        while (index < tokens.Count)
+        {
+            int attributeEnd;
+            Possibility predicate;
+            if (TryParseCfgAttribute(tokens, index, out attributeEnd, out predicate) && !predicate.CanTrue)
+            {
+                int cursor = attributeEnd;
+                bool hasPath = false;
+                while (cursor < tokens.Count && tokens[cursor].Text == "#")
+                {
+                    int ignoredEnd;
+                    if (!TrySkipAttribute(tokens, cursor, out ignoredEnd)) break;
+                    if (cursor + 2 < ignoredEnd && tokens[cursor + 2].Text == "path") hasPath = true;
+                    cursor = ignoredEnd;
+                }
+                if (cursor < tokens.Count && tokens[cursor].Text == "pub")
+                {
+                    cursor++;
+                    if (cursor < tokens.Count && tokens[cursor].Text == "(")
+                    {
+                        int depth = 0;
+                        while (cursor < tokens.Count)
+                        {
+                            if (tokens[cursor].Text == "(") depth++;
+                            else if (tokens[cursor].Text == ")") depth--;
+                            cursor++;
+                            if (depth == 0) break;
+                        }
+                    }
+                }
+                if (!hasPath && cursor + 2 < tokens.Count && tokens[cursor].Text == "mod" &&
+                    tokens[cursor + 1].Kind == "identifier" && tokens[cursor + 2].Text == ";")
+                    names.Add(tokens[cursor + 1].Text);
+                index = attributeEnd;
+                continue;
+            }
+            index++;
+        }
+        return names.Distinct().ToArray();
     }
 
     private static bool TrySkipAttribute(List<Token> tokens, int start, out int end)
@@ -677,6 +733,61 @@ function Get-RustLogicalUnits {
     return @($units)
 }
 
+function Get-PathComparison {
+    if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+        return [System.StringComparison]::OrdinalIgnoreCase
+    }
+    return [System.StringComparison]::Ordinal
+}
+
+# The files the compiler reads only for tests: the module a scoped file declares
+# as `#[cfg(test)] mod name;` (`name.rs` or `name/mod.rs` next to a `mod.rs`, or
+# under the declaring file's own directory for any other file), and every file
+# below the directory of such a module.  A cfg predicate that can also be true in
+# a production build keeps its module guarded.
+function Get-TestOnlyModulePaths {
+    param([Parameter(Mandatory)] [System.IO.FileInfo[]]$Candidates)
+
+    $files = [System.Collections.Generic.List[string]]::new()
+    $directories = [System.Collections.Generic.List[string]]::new()
+    foreach ($file in $Candidates) {
+        $text = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+        if ([string]::IsNullOrEmpty($text) -or $text.IndexOf('cfg', [System.StringComparison]::Ordinal) -lt 0) {
+            continue
+        }
+        $moduleRoot = if (@('mod.rs', 'lib.rs', 'main.rs') -contains $file.Name) {
+            $file.DirectoryName
+        }
+        else {
+            Join-Path $file.DirectoryName $file.BaseName
+        }
+        foreach ($name in [PhysicalAdapterPolicyScanner]::TestOnlyModules($text)) {
+            $moduleDirectory = Join-Path $moduleRoot $name
+            $files.Add((Join-Path $moduleRoot "$name.rs"))
+            $files.Add((Join-Path $moduleDirectory 'mod.rs'))
+            $directories.Add($moduleDirectory)
+        }
+    }
+    return [pscustomobject]@{ Files = @($files); Directories = @($directories) }
+}
+
+function Test-InsideTestOnlyModule {
+    param(
+        [Parameter(Mandatory)] [string]$FullPath,
+        [Parameter(Mandatory)] $TestOnly
+    )
+
+    $comparison = Get-PathComparison
+    foreach ($path in $TestOnly.Files) {
+        if ([string]::Equals($FullPath, $path, $comparison)) { return $true }
+    }
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    foreach ($directory in $TestOnly.Directories) {
+        if ($FullPath.StartsWith($directory.TrimEnd([char[]]@('/', '\')) + $separator, $comparison)) { return $true }
+    }
+    return $false
+}
+
 function Get-ScopedFiles {
     param([Parameter(Mandatory)] [string]$Root)
 
@@ -696,7 +807,9 @@ function Get-ScopedFiles {
             $files.Add($file)
         }
     }
-    return @($files | Sort-Object FullName)
+    $testOnly = Get-TestOnlyModulePaths -Candidates $files.ToArray()
+    $scoped = @($files | Where-Object { -not (Test-InsideTestOnlyModule -FullPath $_.FullName -TestOnly $testOnly) })
+    return @($scoped | Sort-Object FullName)
 }
 
 function Get-LogicalPath {
@@ -898,6 +1011,66 @@ function Assert-Rejected {
     throw "Synthetic self-test unexpectedly succeeded for expected=$Expected."
 }
 
+function Invoke-ScopeSelfTest {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ibcmd-physical-scope-" + [guid]::NewGuid())
+    $mssql = Join-Path $root 'src/mssql_dump'
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $uuid = 'const ID: &str = "11111111-1111-4111-8111-111111111111";'
+    $files = [ordered]@{
+        'src/module_blob.rs'                        = 'fn module_blob() {}'
+        'src/mssql_dump/mod.rs'                     = @'
+#[cfg(test)]
+mod declared_tests;
+#[cfg(test)]
+pub(crate) mod nested_tests;
+#[cfg(any(test, feature = "synthetic"))]
+mod partly_tests;
+mod plain_tests;
+#[cfg(test)]
+#[path = "elsewhere.rs"]
+mod pathed;
+#[cfg(test)]
+mod inline_tests { const INLINE: &str = "11111111-1111-4111-8111-111111111112"; }
+mod host;
+'@
+        'src/mssql_dump/declared_tests.rs'          = $uuid
+        'src/mssql_dump/declared_tests/deeper.rs'   = $uuid
+        'src/mssql_dump/nested_tests/mod.rs'        = $uuid
+        'src/mssql_dump/nested_tests/child.rs'      = $uuid
+        'src/mssql_dump/partly_tests.rs'            = $uuid
+        'src/mssql_dump/plain_tests.rs'             = $uuid
+        'src/mssql_dump/pathed.rs'                  = $uuid
+        'src/mssql_dump/host.rs'                    = "#[cfg(test)]`nmod host_tests;"
+        'src/mssql_dump/host/host_tests.rs'         = $uuid
+        'src/mssql_dump/host_tests.rs'              = $uuid
+    }
+    try {
+        foreach ($relative in $files.Keys) {
+            $path = Join-Path $root $relative
+            [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($path)) | Out-Null
+            [System.IO.File]::WriteAllText($path, ([string]$files[$relative]).Replace("`r`n", "`n"), $utf8)
+        }
+        [System.IO.Directory]::CreateDirectory((Join-Path $root 'tools')) | Out-Null
+        $expected = @(
+            'src/module_blob.rs', 'src/mssql_dump/host.rs', 'src/mssql_dump/host_tests.rs', 'src/mssql_dump/mod.rs',
+            'src/mssql_dump/partly_tests.rs', 'src/mssql_dump/pathed.rs', 'src/mssql_dump/plain_tests.rs'
+        )
+        $actual = @(Get-ScopedFiles $root | ForEach-Object { Get-LogicalPath -Root $root -Path $_.FullName } | Sort-Object)
+        if (($actual -join '|') -ne (($expected | Sort-Object) -join '|')) {
+            throw "Test-only module scope self-test failed: expected [$($expected -join ', ')] but scoped [$($actual -join ', ')]."
+        }
+        Write-BaselineDocument -Root $root -Document (New-InventoryDocument $root)
+        $declared = Join-Path $mssql 'declared_tests.rs'
+        [System.IO.File]::WriteAllText($declared, $uuid + "`nconst EXTRA: &str = `"33333333-3333-4333-8333-333333333333`";`n", $utf8)
+        Assert-InventoryAllowed -Baseline (Read-Baseline $root) -Current (New-InventoryDocument $root)
+        Add-Content -LiteralPath (Join-Path $mssql 'plain_tests.rs') 'const EXTRA: &str = "33333333-3333-4333-8333-333333333333";'
+        Assert-Rejected { Assert-InventoryAllowed -Baseline (Read-Baseline $root) -Current (New-InventoryDocument $root) } 'category=uuid-literal'
+    }
+    finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
 function Invoke-SelfTest {
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ibcmd-physical-policy-" + [guid]::NewGuid())
     [System.IO.Directory]::CreateDirectory((Join-Path $root 'src/mssql_dump')) | Out-Null
@@ -1017,6 +1190,7 @@ fn multiline(xml: &mut String) {
     finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
     }
+    Invoke-ScopeSelfTest
     Write-Host 'Physical-adapter policy guard self-tests passed.'
 }
 

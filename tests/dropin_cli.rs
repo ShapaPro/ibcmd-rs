@@ -453,6 +453,8 @@ fn help_and_version() {
     for word in [
         "--dynamic=<auto|disable|prompt|force>",
         "--session-terminate=<disable|prompt|force>",
+        "--recovery-backup=<file>",
+        "--i-have-a-backup",
         "требуется штатный config apply",
     ] {
         assert!(help.contains(word), "{word}");
@@ -521,6 +523,11 @@ fn apply_words_and_refusals_are_the_platforms_before_anything_runs() {
             "Недопустимое значение параметра --exclusivity: maybe",
         ),
         (
+            "--recovery-backup=",
+            MALFORMED,
+            "Недопустимое значение параметра --recovery-backup: ",
+        ),
+        (
             "--dynamic=force",
             UNSUPPORTED,
             "Параметр `--dynamic=force` команды `infobase config apply`",
@@ -568,6 +575,9 @@ fn apply_words_and_refusals_are_the_platforms_before_anything_runs() {
             "--session-terminate-message=lab",
         ],
         vec!["--dynamic=prompt", "--session-terminate=prompt"],
+        vec!["--recovery-backup=F:/lab/before.bak"],
+        vec!["--i-have-a-backup"],
+        vec!["--platform=8.5.1"],
         vec!["stray"],
     ] {
         let mut args = common.to_vec();

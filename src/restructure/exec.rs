@@ -151,6 +151,11 @@ fn run_statement(
         milliseconds: started.elapsed().as_millis(),
         rows,
     });
+    if let (Some(expected), Some(changed)) = (statement.expect_rows, rows)
+        && expected != changed
+    {
+        bail!("the statement changed {changed} row(s), the plan expects {expected}");
+    }
     Ok(())
 }
 
@@ -163,20 +168,22 @@ fn after_phase(
 ) -> Result<()> {
     match (phase, plan.method) {
         (Phase::Create, Method::AlterAdd) => {
-            let table = &plan.tables[0].table;
-            let physical_order = verify_structure(connection, table, "", false)?;
-            report.verified.push(format!(
-                "{}: columns as the model (set), physical order {}",
-                table.name,
-                if physical_order {
-                    "as the model"
-                } else {
-                    "differs from the model: the new column is last"
-                }
-            ));
+            for object in &plan.objects {
+                let table = &object.tables[0].table;
+                let physical_order = verify_structure(connection, table, "", false)?;
+                report.verified.push(format!(
+                    "{}: columns as the model (set), physical order {}",
+                    table.name,
+                    if physical_order {
+                        "as the model"
+                    } else {
+                        "differs from the model: the new column is last"
+                    }
+                ));
+            }
         }
         (Phase::Load, Method::Rebuild) => {
-            for table in &plan.tables {
+            for table in plan.tables() {
                 let old = count(connection, &table.table.name)?;
                 let new = count(connection, &format!("{}NG", table.table.name))?;
                 if old != new {
@@ -191,7 +198,7 @@ fn after_phase(
             }
         }
         (Phase::Indexes, Method::Rebuild) => {
-            for table in &plan.tables {
+            for table in plan.tables() {
                 verify_structure(connection, &table.table, "NG", true)?;
                 report.verified.push(format!(
                     "{}NG: columns and indexes as the model",
@@ -200,7 +207,7 @@ fn after_phase(
             }
         }
         (Phase::Rename, Method::Rebuild) => {
-            for table in &plan.tables {
+            for table in plan.tables() {
                 verify_structure(connection, &table.table, "", true)?;
                 let rows = count(connection, &table.table.name)?;
                 report.verified.push(format!(
@@ -208,7 +215,7 @@ fn after_phase(
                     table.table.name
                 ));
             }
-            for table in &plan.tables {
+            for table in plan.tables() {
                 if table_exists(connection, &format!("{}NG", table.table.name))? {
                     bail!("{}NG is left behind", table.table.name);
                 }
@@ -456,6 +463,24 @@ fn verify_published(connection: &mut TdsConnection, plan: &Plan) -> Result<()> {
             "Params DBNames holds {names_length} bytes, the plan {}",
             plan.new_names_row.len()
         );
+    }
+    for cache in &plan.caches {
+        let mut length = -1i64;
+        connection.query_each(
+            "SELECT DATALENGTH(BinaryData) FROM dbo.Params WHERE FileName = @P1 AND PartNo = 0",
+            &[SqlParam::Text(&cache.row_name)],
+            |row| {
+                length = sql_row(row).i64(0)?;
+                Ok(())
+            },
+        )?;
+        if length != cache.row.len() as i64 {
+            bail!(
+                "Params {} holds {length} bytes, the plan {}",
+                cache.row_name,
+                cache.row.len()
+            );
+        }
     }
     Ok(())
 }

@@ -538,7 +538,13 @@ pub(super) fn compare(
     );
     let labels = Labels::new(&plan, &plan);
     let names = std::mem::take(&mut plan.names);
-    let decoder = Decoder::new(names, &plan.version, plan.compat);
+    // A stored row may be in the newer record format of a native apply.
+    let decoder = Decoder::for_comparison(
+        names,
+        &plan.version,
+        plan.compat,
+        &[crate::metadata_model::objects::parts::Compat(8, 3, 27)],
+    );
     let mut verdict = Verdict::new("tree-db");
     plan_problems(&plan, &plan, &mut verdict);
     compare_planned(

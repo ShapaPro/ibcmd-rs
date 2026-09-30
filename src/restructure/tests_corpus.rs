@@ -246,20 +246,13 @@ fn corpus_model_reproduces_the_tables_and_indexes_of_the_database() {
     }
 }
 
-/// The plan of case a2 made from the staged snapshot against what the native apply produced.
-#[test]
-fn corpus_plan_of_case_a2_equals_the_native_result() {
-    let (Some(staged), Some(after)) = (
-        Snapshot::open("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
-        Snapshot::open("ibcmd_rs_04_ddl_bsp8327_a", "a2_after"),
-    ) else {
-        eprintln!("skipped: no lab snapshots of case a2");
-        return;
-    };
+/// The plan's input as it stands in a snapshot of a database that holds a staged image.
+fn inputs_of(staged: &Snapshot) -> Inputs {
     let params = staged.rows("Params");
     let mut inputs = Inputs {
         schema: staged.schema(),
         main_names: staged.blob(&params[&("DBNames".to_owned(), 0)]),
+        root_row: staged.row("Config", "root").unwrap_or_default(),
         ..Inputs::default()
     };
     for ((name, _), sha) in &params {
@@ -268,7 +261,7 @@ fn corpus_plan_of_case_a2_equals_the_native_result() {
                 .extension_names
                 .push((name.clone(), staged.blob(sha)));
         }
-        if name.ends_with(".si") {
+        if name.ends_with(".si") || name == "siVersions" {
             inputs.cache_rows.push((name.clone(), staged.blob(sha)));
         }
     }
@@ -292,40 +285,63 @@ fn corpus_plan_of_case_a2_equals_the_native_result() {
         }
     }
     assert!(
-        image.new_descriptors.len() > 4000,
+        image.new_descriptors.len() > 4000 || image.new_descriptors.len() < 100,
         "{}",
         image.new_descriptors.len()
     );
     inputs.staged = image;
-    let plan = plan(&inputs, &PlanOptions::default()).unwrap();
-    assert_eq!(plan.object, "Reference20");
+    inputs
+}
 
-    // The XDTO model cache: the platform's row text, character for character (only the
-    // deflate stream differs).
-    let update = plan.xdto.as_ref().expect("the XDTO model row is updated");
-    assert_eq!(update.row_name, "ea13a2c9-0c2f-40fa-b855-710387e3271d.si");
-    assert_eq!(
-        update.properties,
-        [(
-            "ВидПартнера".to_owned(),
-            "ДемоНовыйРеквизит".to_owned(),
-            "xs:string".to_owned()
-        )]
-    );
-    let native_model = inflate(&after.row("Params", &update.row_name).unwrap()).unwrap();
-    assert_eq!(inflate(&update.row).unwrap().len(), native_model.len());
-    assert!(
-        inflate(&update.row).unwrap() == native_model,
-        "the XDTO model differs from the platform's"
-    );
+/// The plan against what the native apply produced: `DBNames` text, `DBSchema` entries (but the two
+/// system tables the platform upgraded on its own), and the derived caches -- the XDTO model and the
+/// object registry -- as text (only the deflate stream differs).
+fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot) {
+    // The derived caches (a plan that writes none -- a stage that only widens strings -- is checked by the
+    // test itself against the rows before).
+    let cache = |name: &str| {
+        plan.caches
+            .iter()
+            .find(|cache| cache.row_name == name)
+            .unwrap_or_else(|| panic!("the plan does not update {name}"))
+    };
+    for name in [
+        "ea13a2c9-0c2f-40fa-b855-710387e3271d.si",
+        "1a621f0f-5568-4183-bd9f-f6ef670e7090.si",
+    ]
+    .into_iter()
+    .filter(|_| !plan.caches.is_empty())
+    {
+        let update = cache(name);
+        let native_row = inflate(&after.row("Params", name).unwrap()).unwrap();
+        let ours_row = inflate(&update.row).unwrap();
+        if ours_row != native_row {
+            let at = ours_row
+                .iter()
+                .zip(&native_row)
+                .position(|(a, b)| a != b)
+                .unwrap_or(ours_row.len().min(native_row.len()));
+            let show = |row: &[u8]| {
+                String::from_utf8_lossy(&row[at.saturating_sub(60)..(at + 120).min(row.len())])
+                    .into_owned()
+            };
+            panic!(
+                "{name} differs from the platform's at byte {at} ({} vs {} bytes):\nours:   {:?}\nnative: {:?}",
+                ours_row.len(),
+                native_row.len(),
+                show(&ours_row),
+                show(&native_row)
+            );
+        }
+    }
 
     // DBNames: exactly what the platform stored.
     let native_names = inflate(&after.row("Params", "DBNames").unwrap()).unwrap();
     assert_eq!(plan.new_names_text, native_names);
 
-    // DBSchema: every table entry is the platform's except the two system tables it
-    // upgraded on its own (a platform-build drift, not a consequence of the change); the
-    // table order differs only by where those two sit.
+    // DBSchema: every table entry is the platform's except the two system tables it upgraded on its
+    // own (a platform-build drift, not a consequence of the change); the table order differs only by
+    // where those two sit.
     let ours = DbSchema::parse(&plan.new_schema).unwrap();
     let native = DbSchema::parse(&after.schema()).unwrap();
     assert_eq!(ours.len(), native.len());
@@ -351,7 +367,258 @@ fn corpus_plan_of_case_a2_equals_the_native_result() {
         .map(|(name, _)| name.as_str())
         .collect();
     assert_eq!(differing, ["DbCopies", "DbCopiesUpdates"]);
-    // The rebuilt table sits at the end, before ConfigChngR, as in the platform's text.
+    // The rebuilt tables sit at the end, before ConfigChngR, in the order they were rebuilt.
     assert_eq!(ours.position("ConfigChngR"), Some(ours.len() - 1));
-    assert_eq!(ours.position("Reference20"), Some(ours.len() - 2));
+    let rebuilt: Vec<&str> = plan
+        .objects
+        .iter()
+        .map(|object| object.object.as_str())
+        .collect();
+    let tail: Vec<String> = (ours.len() - 1 - rebuilt.len()..ours.len() - 1)
+        .map(|position| ours.view(position).unwrap().name().to_owned())
+        .collect();
+    assert_eq!(tail, rebuilt);
+}
+
+/// The plan of case a2 made from the staged snapshot against what the native apply produced.
+#[test]
+fn corpus_plan_of_case_a2_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_bsp8327_a", "a2_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_bsp8327_a", "a2_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of case a2");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(plan.objects[0].object, "Reference20");
+    assert_equals_native(&plan, &after);
+
+    // siVersions: the same rows in the same order, new versions for the two rows we rewrote.
+    let versions = String::from_utf8(
+        plan.caches
+            .iter()
+            .find(|cache| cache.row_name == "siVersions")
+            .unwrap()
+            .row
+            .clone(),
+    )
+    .unwrap();
+    let before = String::from_utf8(staged.row("Params", "siVersions").unwrap()).unwrap();
+    let words = |text: &str| -> Vec<String> {
+        text.split([',', '"', '{', '}'])
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (old_words, new_words) = (words(&before), words(&versions));
+    assert_eq!(old_words.len(), new_words.len());
+    let mut changed: Vec<String> = old_words
+        .iter()
+        .zip(&new_words)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(index, _)| old_words[index - 1].clone())
+        .collect();
+    changed.sort();
+    assert_eq!(
+        changed,
+        [
+            "1a621f0f-5568-4183-bd9f-f6ef670e7090.si",
+            "ea13a2c9-0c2f-40fa-b855-710387e3271d.si"
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    );
+}
+
+/// The types case (S1 step 1): attributes of every primitive type on five catalogs and a document, one
+/// stage, against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_types_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s1_base", "t1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s1_t1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the types case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let objects: Vec<&str> = plan
+        .objects
+        .iter()
+        .map(|object| object.object.as_str())
+        .collect();
+    // The platform's order: the configuration's own (not the table numbers, not the names).
+    assert_eq!(
+        objects,
+        [
+            "Reference569",
+            "Reference16",
+            "Reference20",
+            "Reference2598",
+            "Reference9367",
+            "Document39"
+        ]
+    );
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-B: eleven attributes deleted in six objects of the pristine БСП -- the middle, the last, the first,
+/// indexed ones (of a flat catalog, a hierarchical one and a document), the only attribute of an object,
+/// the field of a hierarchical catalog that is nullable -- and two replaced (deleted and added in one
+/// stage), against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_deletion_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b1_base", "b1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the deletion case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let removed: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.removals.len())
+        .sum();
+    let added: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.additions.len())
+        .sum();
+    assert_eq!((removed, added), (11, 2));
+    assert_eq!(plan.objects.len(), 6);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-C: six variable strings widened in five objects of the pristine БСП -- a catalog, a hierarchical
+/// catalog (two attributes, one indexed), a document (one indexed, one widened by a single character), the
+/// widest allowed (1024) -- against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_widening_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_c1_base", "c1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_c1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the widening case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let widened: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.widenings.len())
+        .sum();
+    assert_eq!(widened, 6);
+    assert_eq!(plan.objects.len(), 5);
+    // Nothing is added or removed, so no cache row is written (XDTO, registry and siVersions stay): the
+    // platform, too, left the text of all sixteen rows as it was.
+    assert!(plan.caches.is_empty());
+    let rows = staged.rows("Params");
+    let mut compared = 0;
+    for (name, part) in rows.keys().filter(|(name, _)| name.ends_with(".si")) {
+        let before = inflate(&staged.row("Params", name).unwrap()).unwrap();
+        let native = inflate(&after.row("Params", name).unwrap()).unwrap();
+        assert!(before == native, "{name} ({part}) changed natively");
+        compared += 1;
+    }
+    assert_eq!(compared, 16);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-B, the additional-order index: an attribute of a catalog and one of a document that have it are
+/// deleted; the catalog loses the index of the attribute, the document keeps `ByDocDate` (which listed the
+/// attribute last) and loses the field from its list.
+#[test]
+fn corpus_plan_of_the_additional_order_deletion_case_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b2_base", "b2_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_b2_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the additional-order deletion case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    let removed: usize = plan
+        .objects
+        .iter()
+        .map(|object| object.removals.len())
+        .sum();
+    assert_eq!((removed, plan.objects.len()), (2, 2));
+    assert!(
+        plan.objects
+            .iter()
+            .flat_map(|object| object.removals.iter())
+            .any(|removal| removal
+                .indexes
+                .iter()
+                .any(|name| name.starts_with("ByDocDate")))
+    );
+    assert_equals_native(&plan, &after);
+}
+
+/// A plan that writes no cache row, against the platform's apply that left the text of all sixteen `.si` rows
+/// as it was.
+fn assert_no_cache_change(
+    plan: &crate::restructure::plan::Plan,
+    staged: &Snapshot,
+    after: &Snapshot,
+) {
+    assert!(plan.caches.is_empty());
+    let rows = staged.rows("Params");
+    let mut compared = 0;
+    for (name, part) in rows.keys().filter(|(name, _)| name.ends_with(".si")) {
+        let before = inflate(&staged.row("Params", name).unwrap()).unwrap();
+        let native = inflate(&after.row("Params", name).unwrap()).unwrap();
+        assert!(before == native, "{name} ({part}) changed natively");
+        compared += 1;
+    }
+    assert_eq!(compared, 16);
+}
+
+/// S1-D, the trace of one flag alone: `ЦелевоеВремя` of `КлючевыеОперации` (a number of a flat catalog)
+/// goes from `DontIndex` to `Index`; against the native apply of the same stage.
+#[test]
+fn corpus_plan_of_the_index_flag_alone_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d0_base", "d0_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d0_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the index flag case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    let switches: Vec<_> = plan.switches().collect();
+    assert_eq!(switches.len(), 1);
+    assert_eq!((switches[0].from, switches[0].to), (0, 1));
+    assert_eq!(switches[0].added, ["ByFieldFld2646"]);
+    assert_no_cache_change(&plan, &staged, &after);
+    assert_equals_native(&plan, &after);
+}
+
+/// S1-D: the index flag on and off in six objects of the pristine БСП -- a number and a string, a flat
+/// catalog, a hierarchical one (a pair of indexes per attribute), a document; with the additional order (a
+/// hierarchical catalog, a document whose date index lists the attribute) on and off; against the native
+/// apply of the same stage.
+#[test]
+fn corpus_plan_of_the_index_flags_on_and_off_equals_the_native_result() {
+    let (Some(staged), Some(after)) = (
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d1_base", "d1_staged"),
+        Snapshot::open("ibcmd_rs_04_ddl_s2_d1_nat", "nat_after"),
+    ) else {
+        eprintln!("skipped: no lab snapshots of the index flags case");
+        return;
+    };
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.objects.len(), 6);
+    let switches: Vec<_> = plan.switches().collect();
+    assert_eq!(switches.len(), 12);
+    assert_eq!(switches.iter().filter(|switch| switch.to == 0).count(), 6);
+    assert_eq!(switches.iter().filter(|switch| switch.to == 2).count(), 2);
+    assert_no_cache_change(&plan, &staged, &after);
+    assert_equals_native(&plan, &after);
 }

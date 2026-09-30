@@ -368,27 +368,18 @@ fn decode_tree(kind: &str, tree: &Brace, context: &ExportContext) -> Result<Elem
 /// go through one decoder, so a reference is spelled the same on both.
 pub struct Decoder {
     context: ExportContext,
-    /// Other compatibility modes a staged row may be written for: the
+    /// Other compatibility modes a row may be written for. A staged row: the
     /// platform that imported it writes the record format of its own
     /// edition, which is not always the one the active configuration's
-    /// compatibility mode stores.
-    staged: Vec<ExportContext>,
+    /// compatibility mode stores. A stored row: a native apply promotes the
+    /// staged rows into `Config` as they are, so an object that was changed
+    /// natively once is stored in that newer format from then on.
+    others: Vec<ExportContext>,
 }
 
 impl Decoder {
-    pub fn new(names: NameIndex, version: &str, compat: Compat) -> Self {
-        Self {
-            context: ExportContext {
-                names,
-                version: version.to_string(),
-                compat,
-            },
-            staged: Vec::new(),
-        }
-    }
-
-    /// A decoder for a comparison: the active rows are read in `compat`, a
-    /// staged row in `compat` or, when that does not read it, in the first of
+    /// A decoder for a comparison: a row, stored or staged, is read in
+    /// `compat` or, when that does not read it, in the first of
     /// `staged_compats` that does.
     pub fn for_comparison(
         names: NameIndex,
@@ -402,7 +393,7 @@ impl Decoder {
                 others.push(*other);
             }
         }
-        let staged = others
+        let others = others
             .into_iter()
             .map(|other| ExportContext {
                 names: names.clone(),
@@ -416,20 +407,38 @@ impl Decoder {
                 version: version.to_string(),
                 compat,
             },
-            staged,
+            others,
         }
     }
 
-    /// The text of the file an export writes for a stored descriptor.
+    /// The text of the file an export writes for a stored descriptor, in the
+    /// active compatibility mode or, when the row is stored in a newer record
+    /// format, in the first other one that reads it.
     pub fn export(&self, kind: &str, row: &[u8]) -> Result<String> {
         if !has_decoder(kind) {
             return Err(anyhow!("the model has no decoder for {kind}"));
         }
-        export_descriptor(kind, row, &self.context)
+        let first = export_descriptor(kind, row, &self.context);
+        if first.is_ok() {
+            return first;
+        }
+        for context in &self.others {
+            if let Ok(text) = export_descriptor(kind, row, context) {
+                return Ok(text);
+            }
+        }
+        first
     }
 
     pub fn decode(&self, kind: &str, row: &[u8]) -> Result<Element> {
         self.decode_in(kind, row, &self.context)
+    }
+
+    /// A row of the active configuration that a native apply promoted from a
+    /// stage: in the record format of the platform that staged it, which the
+    /// active compatibility mode may not store.
+    pub fn decode_stored(&self, kind: &str, row: &[u8]) -> Result<Element> {
+        self.decode_staged(kind, row).map(|(element, _)| element)
     }
 
     /// A staged row: in the active compatibility mode, else in another one;
@@ -440,7 +449,7 @@ impl Decoder {
         if let Ok(element) = first {
             return Ok((element, false));
         }
-        for context in &self.staged {
+        for context in &self.others {
             if let Ok(element) = self.decode_in(kind, row, context) {
                 return Ok((element, true));
             }

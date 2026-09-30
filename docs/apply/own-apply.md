@@ -933,7 +933,7 @@ SQL connections while a session is open). The backup policy
 Two remarks for the lab tools, not for this program: `register-ib.ps1 unregister -Platform 8.5` fails for an infobase
 whose administrator is «Администратор (обычное приложение)» (it falls back to the name `Администратор`); the twin was
 removed with `rac infobase drop` under its own name and uuid. And the drop-in keeps a refusal of 8.5 of its own
-(`src/dropin/apply.rs`); with this branch it can go.
+(`src/dropin/apply.rs`); with this branch it can go (it went in rcheck-6, together with the text matching of the errors).
 
 ## Limits and open points
 

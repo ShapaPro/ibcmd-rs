@@ -119,11 +119,24 @@ n11), and the platform run against a database always takes it, since it sees no 
 Own options (the platform has none of them): `--report=<file>` (the JSON report, also for a
 refusal), `--platform=<version>`, `--settings`, `--db-pwd-env`, `--exclusivity=<sql|assumed>`
 (`sql`, the default: look at the sessions SQL Server shows, needs `VIEW SERVER STATE`; `assumed`:
-the operator answers for it). `--sqlcmd` is refused: the apply runs on the built-in client.
+the operator answers for it), `--recovery-backup=<file>` and `--i-have-a-backup` (below). `--sqlcmd` is
+refused: the apply runs on the built-in client.
+
+**The way back before a restructuring.** The own apply drops the old tables of a restructured object inside its
+transaction, and its recovery artifact keeps the `Config` rows and the caches, not the tables (`own-apply.md`,
+"Backup policy"). So a stage that it restructures and writes is refused (`BackupRequired`, exit 1, in Russian, naming
+both options) unless the operator says how to go back: `--recovery-backup=<file>` (the apply takes `BACKUP DATABASE
+... WITH COPY_ONLY, COMPRESSION` to that file, a path the SQL Server service can write and that does not exist yet,
+before the transaction, and names it in the report) or `--i-have-a-backup` (the operator has one; recorded in the
+report). Both: the file. The platform has neither and needs no backup, so this is stricter than it. **In this build
+they are accepted and inert**: the drop-in does not choose the restructuring gate (`--allow-restructure` belongs to
+`mssql-config-apply`), so a stage that needs a restructuring is refused as `требуется штатный config apply` before
+the backup is looked at. They matter as soon as the gate of the restructure track (#391) can be chosen.
 
 The platform of the database is `--platform`, else the settings, else 8.3.27 (a release stands
 for the build the apply was measured on, `8.3.27.2214`). The storage layout is verified against
-the database by the apply. 8.5 is refused (exit 1): the apply is measured on 8.3.27 only.
+the database by the apply. 8.5 is served like 8.3.27 (the apply is measured on both, `own-apply.md`); the
+drop-in has no refusal of its own for it.
 
 ### Refusals
 
@@ -171,7 +184,7 @@ exit 1 for what this version does not serve).
 |---|---|
 | 0 | applied; nothing to apply |
 | 2 | a command-line error, the platform's words |
-| 1 | `требуется штатный config apply`; an option or platform this version does not serve; sessions connected together with `--session-terminate=force\|prompt` |
+| 1 | `требуется штатный config apply` (or `config repair`); a restructuring without `--recovery-backup` or `--i-have-a-backup`; an option this version does not serve; sessions connected together with `--session-terminate=force\|prompt` |
 | -1 | a failed operation: no database, no connection, no password, other sessions connected, the apply's own failure (255 in a POSIX shell) |
 
 `--report=<file>` receives `{"operation": "infobase config apply", "ok": ..., "nothing_to_apply": ...,
@@ -208,18 +221,41 @@ options (`apply_options`, `profile_of`); everything below it is the mapping of w
 default: its conservative gate today, `ApplyCheckGate` (a `StructuralGate` around
 `apply_check::check_staged`) after track apply's swap, with no change here.
 
-`classify` sorts an error by type where the apply gives one (`StructuralRefusal`) and by the words
-of its message where it does not (`exclusive access is not established`, `... cannot be proven`,
-`run the native `ibcmd infobase config ...``). Typed errors for the last two would replace the
-text matching (open point 2).
+`classify` sorts an error by the type the apply gives it (`mssql_config_apply::errors`, through any context
+around it) and reads no message:
+
+| error of the apply | the drop-in says | exit |
+|---|---|---|
+| `StructuralRefusal` | `требуется штатный config apply: <the gate's reasons>` | 1 |
+| `NeedsNativeApply` (`Apply`) | `требуется штатный config apply: <reason>` | 1 |
+| `NeedsNativeApply` (`Repair`, an interrupted operation) | `требуется штатный config repair: <reason>` | 1 |
+| `BackupRequired` | its words, naming `--recovery-backup` and `--i-have-a-backup` | 1 |
+| `ExclusiveAccessRefused` | the platform's lock words and its own list of sessions (the error carries them) | -1 (1 with `--session-terminate=prompt\|force`) |
+| `ExclusiveAccessUnprovable` | the reason and `укажите --exclusivity=assumed` | -1 |
+| any other | the error and its context | -1 |
+
+An error of no type is a failure, whatever its words say (a test holds the old marker phrases to it): a new
+refusal of the apply has to be a type to be told from a failure. `config repair` in the second row is new:
+the words used to say `config apply` for an operation that was never finished.
+
+### Where the drop-in stays stricter than the platform
+
+* **Sessions are looked for** (above), and a connected session is a failure, not a warning.
+* **A restructuring is refused** (`требуется штатный config apply`); the platform carries it out. With a gate that
+  admits S1 it will additionally need a backup option (above).
+* **`--dynamic=force`, `--extension`, `--sqlcmd`, `--pid`, `--remote`** are refused by name (exit 1).
+* **Stages of the platform's own `config import`** are exit 1 unless the check proves them (`restructuring-check.md`
+  3.6): the record-format noise of a whole native image is proven, a list of deleted files is not read.
+* It is **less** strict in one place: no metadata check (difference 1 below).
 
 ## Tests and lab evidence
 
 * Unit tests (`src/dropin/parse.rs`, `apply.rs`, `mod.rs`, `help.rs`; `cargo test --lib dropin`,
-  34 tests): the platform's line of the lab scripts, the defaults, every word, the errors as
-  measured, what is not served, the mapping of options and platform, the messages (sessions,
-  structural reasons), the generation as the platform prints it, the report file.
-* `tests/dropin_cli.rs` (9 tests): the process, without a database: every native command served
+  39 tests): the platform's line of the lab scripts, the defaults, every word, the errors as
+  measured, what is not served, the mapping of options and platform (the backup options too), the sorting of
+  the apply's typed errors and the messages (sessions, structural reasons, native apply and repair, backup), the
+  generation as the platform prints it, the report file.
+* `tests/dropin_cli.rs` (10 tests): the process, without a database: every native command served
   or refused by name, the words and refusals before anything runs (exit codes and streams), the
   accepted spellings, the failure shape and the `--report`.
 * Lab, [`evidence/dropin-apply/lab-runs.md`](evidence/dropin-apply/lab-runs.md): the drop-in on
@@ -240,15 +276,18 @@ text matching (open point 2).
 
 1. **Exit code of "sessions connected"**: -1 here; the platform's server mode exits 0 after
    cancelling. Its direct mode has no such case.
-2. **Typed refusals in `mssql_config_apply`**: a `NeedsNativeApply(reason)` and an
-   `ExclusiveAccessRefused { sessions }` error next to `StructuralRefusal` would replace the
-   text matching of `classify`.
+2. **Typed refusals in `mssql_config_apply`**: done (rcheck-6): `NeedsNativeApply`, `ExclusiveAccessRefused`,
+   `ExclusiveAccessUnprovable` and `BackupRequired` next to `StructuralRefusal`; `classify` reads types only.
 3. **`VIEW SERVER STATE`**: without the right the apply cannot see sessions and refuses;
    `--exclusivity=assumed` is the way out. A database login of an ordinary installation is not
    a sysadmin.
 4. **Sessions of the 1C cluster** hold SQL connections that a pooled working process keeps
    after the user left; the refusal then names the working process (`1CV8`), and stopping it
    is the operator's.
-5. **8.5**: the apply is measured on 8.3.27 only; the drop-in refuses 8.5 with exit 1.
+5. **8.5**: served (rcheck-6). Evidence on an 8.5 БСП clone (`--platform=8.5.1`): nothing staged, `не требуется`,
+   exit 0; a stage made by the drop-in's own import (a module comment, 9 622 rows in patch mode) reaches the apply and
+   is refused by the check for the known reason of the 8.5 stage (`restructuring-check.md`, finding 10: the 99 MB
+   body row of the configuration differs), exit 1, in the check's words and not in a refusal of 8.5. A neutral 8.5
+   stage that our importer can make and the apply can take is the import track's.
 6. **Dynamic update (`--dynamic=force`)** and **ending sessions** are the natural next steps
    (0.5, "смена поколения").
