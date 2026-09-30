@@ -28,6 +28,30 @@ from edit_cases_s3 import add_section_attribute, section_attribute, s  # noqa: E
 from edit_cases_s4 import CASH, INTAKE, PAYMENT, own, section_of  # noqa: E402
 
 NEWOBJ = os.environ.get("MIX_NEWOBJ", r"F:\ibcmd\lab\04\restructure\newobj")
+BOM = bytes([0xEF, 0xBB, 0xBF])
+
+
+def add_use(text):
+    """The attributes of a hand-made catalog file get the `<Use>ForItem</Use>` the exporter always writes (the platform's import takes a file
+    without it, ours does not: `descriptor: no <Use>`). Only the route through our import gets these files (stage_full/)."""
+    cr, lf, tab = chr(13), chr(10), chr(9)
+    nl = cr + lf if cr + lf in text else lf
+    lines = text.split(nl)
+    out = []
+    inside = False
+    has_use = False
+    for line in lines:
+        if line.startswith(tab * 3 + "<Attribute "):
+            inside, has_use = True, False
+        elif line.startswith(tab * 3 + "</Attribute>"):
+            inside = False
+        elif inside and line.strip().startswith("<Use>"):
+            has_use = True
+        elif inside and line.strip().startswith("<Indexing>") and not has_use:
+            out.append(line[: len(line) - len(line.lstrip())] + "<Use>ForItem</Use>")
+            has_use = True
+        out.append(line)
+    return nl.join(out)
 
 
 def new_objects(tree, case):
@@ -40,6 +64,14 @@ def new_objects(tree, case):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copyfile(os.path.join(source, "stage", rel), target)
         print("new", rel)
+        if rel.startswith("Catalogs/") and rel.count("/") == 1:
+            with open(target, "rb") as f:
+                raw = f.read()
+            fixed = add_use(raw.decode("utf-8-sig"))
+            full = os.path.join(tree.out, "stage_full", rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write((BOM if raw.startswith(BOM) else b"") + fixed.encode("utf-8"))
     tree.extra = files
 
 

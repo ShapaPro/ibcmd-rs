@@ -323,6 +323,12 @@ fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot)
         let name = update.row_name.as_str();
         let native_row = inflate(&after.row("Params", name).unwrap()).unwrap();
         let ours_row = inflate(&update.row).unwrap();
+        if update.what.contains("approximate") {
+            // `c4629235` of a created object: the entries are the platform's, their order is approximate (derived-caches.md 4;
+            // the twin protocol of S1-F counts it as the one row of 16 that differs). The length is exact.
+            assert_eq!(ours_row.len(), native_row.len(), "{name}");
+            continue;
+        }
         if ours_row != native_row {
             let at = ours_row
                 .iter()
@@ -376,12 +382,21 @@ native: {:?}",
         .filter(|(name, entry)| native_map[*name] != **entry)
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(differing, ["DbCopies", "DbCopiesUpdates"]);
-    // The rebuilt tables sit at the end, before ConfigChngR, in the order they were rebuilt.
+    // (A base that had a native apply already has them upgraded: nothing differs there.)
+    assert!(
+        differing
+            .iter()
+            .all(|name| ["DbCopies", "DbCopiesUpdates"].contains(name)),
+        "{differing:?}"
+    );
+    // The created tables (S1-F) and then the rebuilt ones sit at the end, before ConfigChngR (the last table of the БСП),
+    // in the order they were made (`DbSchema::insert_rebuilt`).
     assert_eq!(ours.position("ConfigChngR"), Some(ours.len() - 1));
     let rebuilt: Vec<&str> = plan
         .objects
         .iter()
+        .filter(|object| object.created)
+        .chain(plan.objects.iter().filter(|object| !object.created))
         .map(|object| object.object.as_str())
         .collect();
     let tail: Vec<String> = (ours.len() - 1 - rebuilt.len()..ours.len() - 1)
