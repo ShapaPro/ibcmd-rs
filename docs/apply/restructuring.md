@@ -771,7 +771,7 @@ string widening, a plain new catalog or document -- catalogs and documents only.
 
 | question | answer |
 |---|---|
-| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section, switch the index of an attribute, widen a variable string, add a plain object. **Built**: adding attributes of every primitive type (12.8), deleting an attribute and widening a string (12.11), switching the index of an attribute (12.13). Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
+| what is in S1 | on **catalogs and documents**: add / delete an attribute of a primitive type, add a tabular section (and attributes of one that was there), switch the index of an attribute, widen a variable string, add a plain object. **Built**: adding attributes of every primitive type (12.8), deleting an attribute and widening a string (12.11), switching the index of an attribute (12.13), a new tabular section and new attributes of the sections an object had (12.14). Everything else is a refusal that goes to the platform's own apply: other kinds (registers, charts, ...), other properties, types by reference and composite types, predefined data, subordination, data history, an extension that adopts the object, 8.5 |
 | where the structure work runs | **inside the apply's transaction**: the apply's locks and assertions, then the *structure phase*, then the fold of dynamic generations, the move of the staged rows, the resets and the caches, the postconditions, `COMMIT`. One SERIALIZABLE script; any failed assertion rolls the rebuilt tables back with everything else; no `Status 200/400/500` is ever visible and there is nothing to resume |
 | how the apply asks | the gate it already has (`StructuralGate::check`) plus `take_structure()` and `ScriptInputs.structure_sql`: about 100 lines in `mssql_config_apply` (half of them comments and a test), and no dependency of it on `restructure` (12.4) |
 | which caches | attribute operations change two `Params` rows -- the XDTO model and the object registry -- and `siVersions`; a new object needs three more. **Deleting a stale row is not a cheap route**: with `1a621f0f` or `a07b62f0` absent the server does not start (12.5) |
@@ -808,13 +808,14 @@ the ConfigSave of the twin); the code matches the *property path* and the first 
 | `...`: `ChildObjects/Attribute[A]`: `removed (a column is added or dropped)` | delete an attribute | **yes** |
 | `...`: `ChildObjects/Attribute[A]/Properties/Type/StringQualifiers/Length`: `50 -> 100 (a property of an attribute no rule covers)` | widen a string (the plan judges the direction: a shorter limit is refused) | **yes** |
 | `...`: `ChildObjects/Attribute[A]/Properties/Indexing`: `DontIndex -> Index (a property of an attribute no rule covers)`, and `DontIndex <-> IndexWithAdditionalOrder` | switch the index (`Index <-> IndexWithAdditionalOrder` is refused: not traced) | **yes** |
-| `...`: `ChildObjects/TabularSection[T]`: `added (a tabular section is added, dropped or moved)` | add a tabular section (its attributes are not separate reasons of a new section) | no |
+| `...`: `ChildObjects/TabularSection[T]`: `added (a tabular section is added, dropped or moved)` | add a tabular section (its attributes are not separate reasons of a new section) | **yes** |
+| `...`: `ChildObjects/TabularSection[T]/ChildObjects/Attribute[A]`: `added (a column of a tabular section is added, dropped or moved)` | add an attribute to a tabular section that was there (`AddSectionAttribute`; dropped or moved: refused) | **yes** |
 | `Catalog.X`: (no property): `added (Catalog; an object that owns tables or stored data is added or dropped)` **and** `Configuration`: `ChildObjects/Catalog[X]`: `added (...)` | add an object (the pair) | no |
 
 Refused, each with a message that names the reason: a `data` reason (predefined items, the content of an exchange plan) or
 an `unknown` one (a row the check cannot read, a row that "differs but both sides decode to the same XML"); any kind but
 catalog and document (case d: a register's dimension and resource); a property no operation covers (`CodeLength`,
-`HierarchyType`, the precision of a number, a column of an **existing** tabular section -- case h); an operation of the
+`HierarchyType`, the precision of a number, a column of an **existing** tabular section that is dropped, moved or changed); an operation of the
 table that is not built ("designed (12.3) but not built in this version"). One refused reason refuses the stage.
 
 #### 12.2.2 Two decoders must agree
@@ -853,7 +854,8 @@ rebuilds the tables whose `DBSchema` entry differs, and nothing else.
 | **delete an attribute** | the field entry removed; the indexes of the attribute go with it (`ByFieldFld<n>`, `ByOwnerFieldFld<n>`, `ByParentFieldFld<n>`); in a document with an additional-order attribute the date index `ByDocDate` **stays** and loses the field from its list (b2); the indexes that stay are **renumbered** (`_Document1564_5` -> `_4`) | unchanged: the entries of the removed attributes stay (b1: the header and the count as they were, plus the new numbers of the attributes the same stage adds) | the main table and **all its sub-tables** rebuilt without the column and its indexes (b1: 8 tables of 6 objects; b2: 4 tables of 2) | by column name; the dropped column's data is not carried | XDTO lines removed, registry records removed and the count decremented, `siVersions` | f, b1, b2 | **built** (S1-B). The stage's `deleted` row lists the removed attributes (12.2.3) and is consumed by the phase |
 | **widen a string** (variable length, `b > a`) | the type entry of the field `{"S",0x80000000\|a}` -> `\|b`; the field keeps its place, the declared indexes stay as they are | unchanged (g, c1) | the object's **main table and all its sub-tables rebuilt** (c1: 5 objects, 10 tables -- the platform rebuilds, it does not `ALTER COLUMN`); the column `nvarchar(a)` -> `nvarchar(b)` | the column copied as it is | **none**: the text of all 16 `.si` rows is the same before and after the platform's apply (c1, measured) | g, c1 | **built** (S1-C). Narrowing, a fixed string, an unlimited one (`nvarchar(max)` is another column type), a change between them and every other type change is data conversion (case k, done by the 1C engine): refuse |
 | **switch the index** (`DontIndex` <-> `Index`, `DontIndex` <-> `IndexWithAdditionalOrder`) | the declared indexes of the entry only, the fields are the same: `ByFieldFld<n> {2,"Fld<n>","ID"}` (a hierarchical catalog first gets `ByParentFieldFld<n> {4,"ParentID","Folder","Fld<n>","ID"}`), with the additional order the key goes on with `Description,ID,Marked` (a catalog) or `Date_Time,ID,Marked` (a document, whose date index `ByDocDate` also lists the field last); the entries sit among the attribute indexes in the order of their fields in the table, the physical indexes are renumbered; off is the reverse | unchanged: **no `ByField` entry** for a switch (d0, d1) | the object's **main table and all its sub-tables rebuilt** (d0: `_Reference2598`; d1: 6 objects, 11 tables), the columns as they were | as it is | **none** (the text of all 16 `.si` rows is the same before and after, d0 and d1) | g, d0, d1 | **built** (S1-D). `Index` <-> `IndexWithAdditionalOrder` and several additional-order attributes of one document are not traced: refused |
-| **add a tabular section** (with attributes) | a new sub-table entry in the object's entry: `_<Owner>_IDRRef`, the separator, `_KeyField`, `_LineNo<m>`, one field per attribute; a unique clustered index on the separator, the owner key and `_KeyField`, an index on its first attribute | `VT` and `LineNo` (the section's uuid) and one `Fld` per attribute: h: 11039, 11040, 11041, 11042 | **only the new table is created** (h: `_Reference15_VT11039`), empty; the object's main table is not rebuilt | none | XDTO (a `Row` object type and the property of the section), registry (kind 39 and kind 14 records), the per-class index `2203278d` (its tabular-section group) | h | designed. An attribute added to an *existing* section rebuilds that sub-table alone (h: `_Reference20_VT159`): the same machinery, a separate case |
+| **add a tabular section** (with attributes) | a new sub-table entry appended to the object's sub-table list: `{"VT<n>","I",0,"<Owner>",{k+1,{"LineNo<n+1>",0,{1,{"N",5,0,"",0}},"",0},<one field per attribute>},{0},{<declared indexes>},1,"S",{0},{0},"",0,0}`; an indexed attribute (`Index`) gets `ByFieldFld<m> {2,"Fld<m>","ID"}`, **not unique** (the 72 sub-tables of the БСП that have indexes: all `ByField*`, none unique) | per object, in the objects' order of the configuration's lists (changed objects before new ones, catalogs before documents): the object's own new attributes first, then each section in the order of the descriptor -- a section that was there one `Fld` per new attribute, a new one `VT` and `LineNo` (both keyed by the section's uuid, `LineNo` = `VT` + 1) and one `Fld` per attribute (e1: 11034 ... 11053; e4: 11034 ... 11047) | the object's **main table and all its old sub-tables are rebuilt** (the NG story of every rebuild: create, indexes, copy, drop the indexes, rename); the new sub-table is **created empty in the same generation** (`create table ...NG`, its unique clustered index, no `INSERT`, no `drop`) and renamed with the others. Case h looked as if only the new table were created: `snapdiff` does not show the rebuild of a table whose key is not an auto-named one (`_S_HPK`); the XE trace of e1, e3, e4, e5 and e6 shows it | by column name for the old tables (the new column gets the default of its type); nothing for the new one | registry (a record of kind 39 (catalog) / 43 (document) after the subtree of the owner's last section, or of its last attribute, and a record of kind 14 for each attribute), `2203278d` (the tabular-section group refilled in the hash order of *all* its keys, however many sections are new), XDTO (the row type `...TabularSectionRow.<Owner>.<Section>` and the property of the section in the object type), `siVersions` | h, e1, e4, e5 | **built** (S1-E, 12.14). Not built, refused: a section removed, moved, renamed or put before the old ones, a length of the line number other than 5, a section with no attribute, a `Use` of a catalog's section other than `ForItem` (a new section, or an old one that gets an attribute), an attribute of a section that is removed, moved, retyped or re-indexed, the additional order in a section attribute, a stage that also removes an attribute |
+| **add an attribute to a tabular section** (that was there) | the field inserted into the section's sub-table entry after the field of the attribute before it (the first one after the line number field); an indexed attribute adds `ByFieldFld<m>` among the section's other `ByField` entries in the order of the fields | one `Fld` per new attribute, after the object's own new attributes and before the numbers of the new sections (e3: 11034 ... 11039) | the object's **main table and all its sub-tables rebuilt** (e3: 4 objects, 9 tables), not "that sub-table alone" (case h) | by column name, the new column gets the default of its type (a section attribute is never nullable) | registry (kind 14 records), XDTO (a property line in the row type of the section), `siVersions`; **not** `2203278d` | h, e3, e4, e6 | **built** (S1-E, 12.14) |
 | **add an object** (plain catalog or document) | a new table entry before `ConfigChngR` (c: `_Reference11036` with its four indexes) | a `Reference` entry (c: 11036; no `ReferenceChngR` until an exchange plan lists the catalog; a `RefSInf` when the catalog has predefined data: refuse) numbered from the counter | a new table, empty | none | XDTO (three object types), registry, `2203278d`, `a07b62f0` and the rest of the derived rows; the `Config` rows of the object and its registration for the exchange-plan nodes (the apply's own new-object registration) | c | designed. The largest: 12.5 |
 
 Independent of the operation: the platform rebuilds the derived state it always rebuilds (`_ConfigChngR`, `.ui`, the
@@ -903,7 +905,7 @@ on top of it is small and additive (the port of wave 1, S1-B):
 |---|---|
 | `gate.rs` | `StructuralGate::judges_deleted_row(&self) -> bool`, default `false`: the stage's `deleted` row lists the removed attributes (ids, flag 1); the apply consumes an empty list and a list of the rows of a dynamic update itself and refuses every other, unless the gate says it judges the list. `StructurePhase::consumed_staged_rows`: the staged rows the phase answers for |
 | `mod.rs` | a `deleted` list the gate judges is consumed like an empty one -- but only when, after the gate, the phase answers for it (`consumed_staged_rows > 0`); otherwise the apply refuses it after all. `restructure_gate` builds `restructure::s1::S1Gate` for `--allow-restructure s1` |
-| `restructure/s1.rs` | `S1Gate`: conservative verdict -> `check_staged` (the reasons that name a consumed row are dropped, as the apply's own check gate does) -> `apply_check::s1::classify` -> plan -> `decide`; `take_structure`; `judges_deleted_row` is `true`. `AddAttribute`, `DeleteAttribute` and `WidenString` are built; `SwitchIndex`, `AddTabularSection` and `AddObject` are refused as designed but not built |
+| `restructure/s1.rs` | `S1Gate`: conservative verdict -> `check_staged` (the reasons that name a consumed row are dropped, as the apply's own check gate does) -> `apply_check::s1::classify` -> plan -> `decide`; `take_structure`; `judges_deleted_row` is `true`. `AddAttribute`, `DeleteAttribute`, `WidenString`, `SwitchIndex`, `AddTabularSection` and `AddSectionAttribute` are built; `AddObject` is refused as designed but not built |
 | `restructure/script.rs` | `Plan::phase_sql(now)`: the plan as T-SQL with `THROW` assertions (57400..57405) |
 | `restructure/reader.rs` | `RowSource`: the plan's input read through the apply's client (`ClientSource`) as well as through a dedicated connection |
 | CLI | `ibcmd-rs mssql-config-apply --allow-restructure s1 (--recovery-backup <path> \| --i-have-a-backup) [--dry-run \| --rehearse]`; `mssql-restructure --through-apply` is the same run driven from the research command (it takes the plan options of the kit: fixed `DBNamesVersion`, skipped caches) |
@@ -1044,7 +1046,7 @@ to three days, L ~ a week of an agent.
 | **S1-B** | Delete an attribute | the reverse of adding: field and its indexes out of the entry, XDTO line and registry record out, siVersions | S1-A | case f (indexed attribute, last / middle / only attribute of the object, a catalog and a document, several deletions in one stage, delete + add in one stage) | M, ddl |
 | **S1-C** | Widen a string | `Length a -> b` of a variable string, `b > a`; fixed / unlimited / narrowing refused | S1-A | case e / g without the index flag; catalog and document; an indexed attribute; the boundary `b` = 1024, 4000 | S, ddl |
 | **S1-D** | Switch the index | `Indexing` `DontIndex` <-> `Index` (and the additional-order value); first trace of the flag alone, then the plan | S1-A | case g alone; string and number attribute; catalog with and without hierarchy, document; on and off | M, ddl |
-| **S1-E** | Add a tabular section | the new sub-table only (h); then the attributes of an existing section (h: rebuilds that sub-table alone) | S1-A, the section rows of S1-G | case h (the section of `_ДемоКонтрагенты`, the attribute of `_ДемоПартнеры`); catalog and document; nested numbering | M, ddl |
+| **S1-E** | Add a tabular section | a new sub-table (created empty, the object's other tables rebuilt with it); then the new attributes of a section that was there (the object rebuilt) | S1-A, the section rows of S1-G | cases e1, e3, e4 (12.14): catalogs (flat, hierarchical, subordinate) and documents; nested numbering | M, ddl. **Done (12.14)** |
 | **S1-F** | Add a plain catalog or document | tables, `DBNames`, `DBSchema` before `ConfigChngR`, the object's `Config` rows and their registration for exchange-plan nodes, the pair of reasons | S1-A, S1-G | case c (catalog), a document; a new object with attributes; a new object and an attribute of an old one in one stage | L, ddl |
 | **S1-G** | The derived caches of a new object (W10) | decode and write `2203278d`, `a07b62f0`, `42ed49cc`, `c4629235`, `facbfffe`, `fe8acd6a`, `c77bc206`; the XDTO types of a new object; a tabular section's rows | none (decoders); S1-E / S1-F use it | each row equal to native's after inflate for cases c, h and the types case; the cache-necessity table of 12.5 repeated on the result | M-L, ddl or a second agent |
 | **S1-H** | The classification of a staged image (W11) and the refusal matrix | the noise of a whole native image (396 "same XML" rows, the `{68}` Configuration row, `deleted`); a corpus test: every rcheck probe case (`p1`-`p12`, `restructuring-check.md`) is expected S1 or refused with a named reason | S1-A | the a2 whole image is accepted only with a proof of the noise, or refused with the reasons; the matrix passes; no case of the rcheck corpus that is not S1 is let through | M, rcheck (+ ddl) |
@@ -1158,7 +1160,7 @@ types case from the ConfigSave, the other cases from `--tree`, and the whole nat
 checks of 12.6 on the types case, with the numbers of 12.8), `s1-t1-session.txt` (the job output of the cluster session, native and
 ours), `s1-cache-necessity.txt` (the cache experiment of 12.5), `s1-seam-script.sql` (the generated transaction with the
 binary values shortened), and for wave 1 (12.11) `s2-wave1-twin-compare.txt` (the checks of 12.6 for b1, b2, c1) and
-`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal), for S1-D (12.13) `s2-wave2-d-twin-compare.txt`, `s2-d0-session.txt`, `s2-d1-session.txt`. `s1-port-acceptance.txt` (12.12: the four cases through `mssql-config-apply --allow-restructure s1`). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
+`s2-b1-session.txt`, `s2-b2-session.txt`, `s2-c1-session.txt` (the cluster session outputs, native's and ours are equal), for S1-D (12.13) `s2-wave2-d-twin-compare.txt`, `s2-d0-session.txt`, `s2-d1-session.txt`, for S1-E (12.14) `s2-wave2-e-twin-compare.txt` (e4, e5, e6), `s2-e1-e3-twin-compare.txt`, `s2-e1-e3-extension-refusals.txt`, `s2-e{1,3,4,5,6}-session.txt`, `s2-e4-dropin-route.txt`, the native statements `e{1,3,4,5,6}-structure-statements.sql` and what the native apply changed in the entries (`e{1,3,4,5,6}-entries-diff.txt`). `s1-port-acceptance.txt` (12.12: the four cases through `mssql-config-apply --allow-restructure s1`). Lab (`F:\ibcmd\lab\04\restructure`): `out/diff_s1_t1_native.txt`, `out/diff_s1_t1_nat_vs_own.txt`,
 `out/except_*`, `out/si_diff_*`, `out/dbschema_cmp_*`, `out/config_cmp_*`, `out/export_diff_*`, `out/session_t1_*`, `logs/cache_bisect*.log`,
 `xe/s1_t1/`, `snap/ibcmd_rs_04_ddl_s1_*`. Tools: `scripts/restructure-lab/` (`compare_tables.ps1`, `compare_config.ps1`,
 `dbschema_cmp.py`, `params_row.ps1`, `cache_variant.ps1`, `edit_cases_s1.py`, `jobs/types_t1.bsl`). Tests: `tests_s1.rs` (the gate),
@@ -1275,3 +1277,99 @@ a second additional-order attribute of one document (the date index would list t
 catalog (`ByOwnerField...`), a hierarchical catalog without its `ParentDescr` index, an additional order of a catalog with no
 description. The gate takes `DontIndex` <-> `IndexWithAdditionalOrder` since `apply_check::s1` was widened by one variant for it
 (a separate commit).
+
+### 12.14 S1-E: a new tabular section and new attributes of the sections an object had (#401)
+
+Five cases, made on the pristine БСП 8.3.27 by `edit_cases_s3.py` and traced natively first (`entries_diff.py` on the snapshots of
+the staged state and of the native result, the XE trace, `si_diff.py`):
+
+* **e1**: five new sections in one stage -- three catalogs (`_ДемоСтавкиНДС` flat, `_ДемоМестаХранения` hierarchical,
+  `_ДемоКонтактныеЛицаПартнеров` subordinate to owners) and two documents; attributes of every primitive type, two of them indexed;
+* **e3**: new attributes of sections that were there -- first, in the middle and last, indexed and not, in a catalog of each shape
+  and a document (`Товары`: one attribute first, one indexed last);
+* **e4**: a catalog and a document that each get a new own attribute, a new attribute of the section they had and new sections (the
+  document two of them) at once: the numbering of one object with all three;
+* **e5**, **e6**: the shapes of e1 and of e3 on objects **no extension adopts**. The clone has four extensions and S1-I (`restructuring-extensions.md`)
+  refuses an object one of them adopts: `_ДемоМестаХранения` and `_ДемоСписаниеТоваров` of e1 and `_ДемоПартнеры` and `_ДемоОрганизации`
+  of e3 are adopted, so the gate that has S1-I refuses those two stages (`S1: catalog _ДемоПартнеры is adopted by the extension
+  _ДемоРасширение ...`, `s2-e1-e3-extension-refusals.txt`). e4 never touched an adopted object. e5: a flat catalog, a hierarchical one
+  that has a section already, a subordinate one and two documents (one has a section already), five new sections; e6: a hierarchical
+  catalog, a subordinate one whose section has indexed attributes already (a new indexed attribute first, another in the middle,
+  a plain one last) and a document.
+
+What the platform does (it corrects two claims of the first phase: the row "add a tabular section" of 12.3 said the object's main
+table is not rebuilt, and case h's reading was that an attribute of a section rebuilds "that sub-table alone"; both were the blind
+spot of `snapdiff`, which does not show a rebuild of a table whose primary key is not an auto-named one):
+
+* **any structural change of the object rebuilds all its tables** -- the main table and every sub-table the object had -- in the one
+  new generation; a new sub-table is created in the same generation, empty, and renamed with the rest (e4, the catalog: `create` of
+  `_Reference21NG`, `_Reference21_VT960NG` and the new `_Reference21_VT11036NG`, the indexes of all three, the copy of the first two,
+  the `drop` of the indexes and the old tables, the renames);
+* `DBSchema`: the field goes into the section's sub-table entry (after the field of the attribute before it; the first attribute of a
+  section after the line number field), a new section is a new sub-table entry appended to the object's list, with its own line
+  number field `LineNo<n+1>` (`numeric(5,0)`), its fields, and the declared indexes of the indexed attributes, **not unique**, among
+  the section's other attribute indexes **in the order of the fields** (e6, `_Reference14_VT67`: the new `Fld11034` first, then
+  the two stored ones, then `Fld11035`);
+* `DBNames`: the object's own new attributes first, then each section in the order of the descriptor: the new attributes of a
+  section that was there, or -- for a new section -- `VT`, `LineNo` (the section's uuid) and the attributes. The objects come in the
+  configuration's order, catalogs first, and the numbers go on from the shared counter;
+* the caches: a new section changes three rows (`1a621f0f`, `2203278d`, `ea13a2c9`), a new attribute of an old section two (`1a621f0f`,
+  `ea13a2c9`), and `siVersions`; the rows are made by `caches::change::rewrite` (S1-G), which now takes any number of new sections of
+  a kind in one refill of `2203278d` (`derived-caches.md`, 3).
+
+The plan (`src/restructure/`):
+
+* `catalog.rs`: a section's facts have its synonyms, its `Use` and its `LineNumberLength` (absent from the older record version, where
+  every section has 5), and the `Indexing` of its attributes;
+* `plan.rs::check_object` refuses what is not built (12.3) with the reason; `plan_sections` numbers, edits the sub-table entries
+  (`schema.rs`: `subtable_mut`, `add_subtable_field_index`, `subtable_entry`, `push_subtable`) and returns a `SectionPlan` for each
+  section that is new or grew; `plan_object` rebuilds every stored table and makes the new ones with `TablePlan::created`;
+  `section_cache_updates` asks `caches::change::rewrite`;
+* `reader.rs` also reads the stored descriptors of the catalogs and documents the configuration lists (the caches traverse the
+  sections of every object of the kind; a partial stage holds only the ones it changes; found on the first real run of e4);
+* the gate (`s1.rs`) takes `AddTabularSection` and `AddSectionAttribute` (`apply_check::s1`, a separate commit) and needs the plan to
+  name the same sections and the same `Section.Attribute` pairs; `command.rs` reports the sections and the created tables.
+
+The twin protocol (12.6) through `mssql-config-apply --allow-restructure s1 --i-have-a-backup`, ours against the native apply of the
+same stage, with the binary of the branch after the merge of feat/0.4 (`s2-wave2-e-twin-compare.txt`, `s2-e4-session.txt`,
+`s2-e5-session.txt`, `s2-e6-session.txt`, the native statements `e5-structure-statements.sql`, ...):
+
+| check | e4 | e5 | e6 |
+|---|---|---|---|
+| 1. the plan offline from the staged snapshot equals native's | `corpus_plan_of_new_sections_in_a_catalog_and_a_document_equals_the_native_result`: the `DBNames` text, every `DBSchema` entry, three cache rows; `case_e4_...every_row_is_native`: all sixteen rows | `corpus_plan_of_new_sections_on_objects_no_extension_adopts_...` | `corpus_plan_of_section_attributes_on_objects_no_extension_adopts_...` |
+| 2. tables, columns, indexes | identical but the drift list | the same | the same |
+| 3. data of the rebuilt tables, `EXCEPT` both ways | 0 rows (7 tables) | 0 rows (13 tables) | 0 rows (6 tables) |
+| 4. `Config` | 0 rows on either side | the same | the same |
+| 5. `DBSchema`, `DBNames` | equal but `DbCopies*`; the `DBNames` text equal | the same | the same |
+| 6. the `.si` rows | 16 of 16 | 16 of 16 | 16 of 16 |
+| 7. native `config apply` afterwards | «не требуется» | «не требуется» | «не требуется» |
+| 8. native export of both, `source-diff` | 12 198 of 12 198 identical | the same | the same |
+| 9. cluster session (the sections and their attributes with the indexing, the rows of each section with a digest, the XDTO serialization of a new object with a row in every section, write, read back, query through each section, the indexed attributes read in the order of their index) | identical, 80 lines | identical, 90 lines | identical, 71 lines |
+| 10. a rehearsal changes nothing | `snapdiff` empty | empty | empty |
+| 11. refusals on a real stage (a fresh twin of e4, `refusals_e.ps1`) | a stored section renamed: `S1: tabular-section-outside-s1` (its generated types change); a composite type in the attribute of a new section: `S1: attribute ДемоДата of tabular section ДемоТЧ2: a composite type (2 items) is not mapped to fields yet`; the precision of a stored section's attribute changed: `S1: tabular-section-outside-s1 ... Attribute[КоличествоДней]/Properties/Type/NumberQualifiers/Digits: 3 -> 4` | -- | -- |
+| 12. `THROW` before `COMMIT` on a fresh twin | the digest of the whole database (rows of `Config`, `ConfigSave`, `Params`, the schema storage, `DBSchema`, `DBNames`, the checksums of all columns and indexes, 2 234 tables, no `*NG`) unchanged | -- | -- |
+
+Case e5 was run once more with the binary of the last commit of the branch (feat/0.4 at 5e146f00 merged, `s2-e5-final-binary-run.txt`):
+the same result in every check (16 of 16 rows, `DBNames` text equal, «не требуется», 12 198 of 12 198 files, the session identical, 90 lines).
+
+Cases e1 and e3 ran the same twelve checks first, with the binary of commit `ad58c54d` (before S1-I was merged; `s2-e1-e3-twin-compare.txt`):
+e1 12 rebuilt tables, session 90 lines, e3 9 tables, session 69 lines, all checks equal; their plans equal native's in
+the offline tests of the merged code as well.
+
+The drop-in route once (`s2-e4-dropin-route.txt`, `dropin_run.ps1`): `ibcmd-rs infobase config apply` on a fresh twin of e4 with the
+merged binary -- without a backup option it is refused (exit 1, `BackupRequired`, the number of staged rows unchanged), with
+`--recovery-backup=<file>` it exits 0 (gate `s1`, a 269 MB backup), and the checks 2-8 come out as above: the data of the seven
+rebuilt tables equal, `Config` 0 rows, `DBSchema` and `DBNames` equal, 16 of 16 `.si` rows, «не требуется» afterwards, 12 198 of
+12 198 files of the native exports identical.
+
+The other refusals of the plan have unit tests on the fixtures of case a2 (`tests_sections.rs`): a section removed, moved, put before
+the old ones, renamed; an attribute of an old section removed, moved, retyped or switched off; a new section with a reference type,
+with no attribute, with a line number of 6, with an attribute the stored image has, with the additional order in an attribute; a stage
+that removes an attribute and adds a section; a stored sub-table the schema does not have. The owner field of a subordinate catalog
+(`_ДемоКонтактныеЛицаПартнеров`) is not covered for *attributes* of the object, so it stays a refusal for them; a stage that only adds
+sections or section attributes to it is let through (e1, e5, e6). A stage that creates an object (S1-F) and also adds sections to existing
+ones is refused: both rewrite the same cache rows.
+
+Not traced, therefore refused: the removal of a section or of an attribute of one (the caches of a removal are not composed with an
+addition), a section in the middle of the list (the order of the sub-tables of the entry is not known), `Use` of a section other than
+`ForItem`, the additional order in an attribute of a section, two new objects of a kind in one stage (S1-F).

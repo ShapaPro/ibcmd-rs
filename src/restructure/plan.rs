@@ -1,4 +1,4 @@
-//! The plan of the restructure: new attributes in catalogs and documents.
+//! The plan of the restructure: attributes and tabular sections of catalogs and documents.
 //!
 //! Input: the stored schema and names, and the staged image (`ConfigSave`) against the stored one
 //! (`Config`). Output: the new `DBSchema` text, the new `DBNames`, the derived caches (`Params` `*.si`)
@@ -9,26 +9,30 @@
 //! 1. the staged image holds the same files as the stored one (no object added or removed) plus the
 //!    `deleted` marker, which names removed attributes and nothing else;
 //! 2. across every descriptor row of every kind, the new, the removed, the retyped and the re-indexed
-//!    attributes all sit in the own attributes of catalogs or documents; none changes its use; a retyped one
-//!    is a variable string whose limit grows; a re-indexed one switches `DontIndex` <-> `Index` or
-//!    `DontIndex` <-> `IndexWithAdditionalOrder`;
+//!    attributes all sit in catalogs or documents (a new attribute also in a tabular section of one); none
+//!    changes its use; a retyped one is a variable string whose limit grows; a re-indexed one switches
+//!    `DontIndex` <-> `Index` or `DontIndex` <-> `IndexWithAdditionalOrder`; the attributes of a tabular
+//!    section only get new ones, and a new section stands after the ones the object has;
 //! 3. each such object is otherwise unchanged as far as its table goes (its shape: hierarchy, code and
-//!    description lengths, number length, ...; its tabular sections) and it has no predefined data, no data
-//!    history, no subordination;
+//!    description lengths, number length, ...; its tabular sections but for the new ones and the new
+//!    attributes of the old ones) and it has no predefined data, no data history, no subordination;
 //! 4. every stored attribute of it maps to the field the stored `DBSchema` entry has (the generator
 //!    reproduces the stored entry before it is trusted to extend it);
-//! 5. each new attribute has a supported type and is not indexed.
+//! 5. each new attribute has a supported type.
 //!
 //! Not checked (needs the decoders of the other kinds, that is the restructuring check's job): a changed
 //! property of another object that changes its table (a register's dimension order, ...). Run this only on
 //! an image the check has passed.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::metadata_model::brace::{Brace, parse_row};
+use crate::restructure::caches::change::{ChangedObject as ChangedForCaches, Staged, rewrite};
+use crate::restructure::caches::plan::rows as cache_rows;
 use crate::restructure::catalog::{AttributeFacts, type_entries};
 use crate::restructure::create;
 use crate::restructure::extensions::{ChangedObject, ExtensionInputs};
@@ -37,8 +41,9 @@ use crate::restructure::object::{ObjectFacts, ObjectKind};
 use crate::restructure::registry::{self, ObjectAdditions};
 use crate::restructure::schema::{
     Column, DbSchema, FieldEntry, PhysicalTable, SqlType, TableView, TypeEntry, add_field_indexes,
-    create_index_sql, create_table_sql, field_columns, insert_field, physical_tables, remove_field,
-    remove_field_indexes, replace_field,
+    add_subtable_field_index, create_index_sql, create_table_sql, field_columns, insert_field,
+    physical_tables, push_subtable, remove_field, remove_field_indexes, replace_field,
+    subtable_entry, subtable_mut,
 };
 use crate::restructure::storage::EMPTY_GENERATION;
 use crate::restructure::xdto;
@@ -193,6 +198,31 @@ pub struct IndexSwitch {
     pub removed: Vec<String>,
 }
 
+/// A tabular section of a rebuilt object that is new, or that gets new attributes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionPlan {
+    pub uuid: String,
+    pub name: String,
+    /// The sub-table, `VT155`.
+    pub table: String,
+    /// A new section: its table is created (not rebuilt) and its `VT` and `LineNo` entries are new in `DBNames`.
+    pub created: Option<CreatedSection>,
+    /// The attributes that are new (every attribute of a new section) and the fields they became; `position` is
+    /// the place in the sub-table's field list, whose first field is the line number.
+    pub additions: Vec<Addition>,
+    /// The declared indexes the sub-table got (`ByFieldFld12`).
+    pub indexes: Vec<String>,
+}
+
+/// The numbers a new tabular section took from the shared counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreatedSection {
+    /// `VT<table_number>`.
+    pub table_number: u64,
+    /// `LineNo<line_no>`.
+    pub line_no: u64,
+}
+
 pub(crate) fn indexing_word(mode: i64) -> &'static str {
     match mode {
         0 => "DontIndex",
@@ -241,6 +271,8 @@ pub struct ObjectPlan {
     pub removals: Vec<Removal>,
     pub widenings: Vec<Widening>,
     pub switches: Vec<IndexSwitch>,
+    /// The tabular sections that are new or got new attributes, in the order of the descriptor.
+    pub sections: Vec<SectionPlan>,
     pub tables: Vec<TablePlan>,
     /// The columns of `Method::AlterAdd`.
     pub alter: Vec<AlterColumn>,
@@ -346,12 +378,51 @@ impl ObjectPlan {
                     .join(", ")
             ));
         }
+        let created: Vec<String> = self
+            .sections
+            .iter()
+            .filter(|section| section.created.is_some())
+            .map(|section| {
+                format!(
+                    "{} = {} ({} attribute(s))",
+                    section.table,
+                    section.name,
+                    section.additions.len()
+                )
+            })
+            .collect();
+        if !created.is_empty() {
+            parts.push(format!("new tabular sections {}", created.join(", ")));
+        }
+        let grown: Vec<String> = self
+            .sections
+            .iter()
+            .filter(|section| section.created.is_none())
+            .map(|section| {
+                format!(
+                    "{}: {}",
+                    section.name,
+                    section
+                        .additions
+                        .iter()
+                        .map(|addition| format!("{} = {}", addition.field.name, addition.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect();
+        if !grown.is_empty() {
+            parts.push(format!(
+                "new attributes of tabular sections {}",
+                grown.join("; ")
+            ));
+        }
         parts.join("; ")
     }
 
     /// The attributes are added or removed (the derived caches list them), not only changed in place.
     pub fn changes_the_attribute_list(&self) -> bool {
-        !self.additions.is_empty() || !self.removals.is_empty()
+        !self.additions.is_empty() || !self.removals.is_empty() || !self.sections.is_empty()
     }
 }
 
@@ -359,6 +430,14 @@ impl Plan {
     /// Every physical table of every rebuilt object.
     pub fn tables(&self) -> impl Iterator<Item = &TablePlan> {
         self.objects.iter().flat_map(|object| object.tables.iter())
+    }
+
+    /// Every new attribute of every tabular section of every object.
+    pub fn section_additions(&self) -> impl Iterator<Item = &Addition> {
+        self.objects
+            .iter()
+            .flat_map(|object| object.sections.iter())
+            .flat_map(|section| section.additions.iter())
     }
 
     /// Every new attribute of every object.
@@ -398,7 +477,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A stored or staged row as text: raw deflate when it is, itself otherwise.
-fn row_bytes(stored: &[u8]) -> Vec<u8> {
+pub(crate) fn row_bytes(stored: &[u8]) -> Vec<u8> {
     inflate(stored).unwrap_or_else(|_| stored.to_vec())
 }
 
@@ -1107,11 +1186,30 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
     // say nothing of a string's limit: a stage that only widens strings leaves them as they are.
     let mut caches = Vec::new();
     let lists_change = objects.iter().any(ObjectPlan::changes_the_attribute_list);
-    if lists_change && !options.skip_xdto {
-        caches.push(xdto_update(inputs, &prepared, &objects)?);
+    if create_context.is_some() && objects.iter().any(|object| !object.sections.is_empty()) {
+        bail!(
+            "a new object together with new tabular sections (or attributes of them) of existing objects is not built: both rewrite the registry, the index of the generated types and the XDTO model"
+        );
     }
-    if lists_change && !options.skip_registry {
-        caches.push(registry_update(inputs, &prepared, &objects)?);
+    if objects.iter().any(|object| !object.sections.is_empty()) {
+        if objects.iter().any(|object| !object.removals.is_empty()) {
+            bail!(
+                "a stage that removes an attribute and adds a tabular section (or attributes of one) is not built: the caches are made for additions only"
+            );
+        }
+        // A tabular section reaches a third row (the index of the generated types) and the row types of the
+        // XDTO model: the rows are made by the caches module for the whole stage; with both the XDTO model
+        // and the registry left alone the index goes with them.
+        if !(options.skip_xdto && options.skip_registry) {
+            caches = section_cache_updates(inputs, &prepared, options)?;
+        }
+    } else {
+        if lists_change && !options.skip_xdto {
+            caches.push(xdto_update(inputs, &prepared, &objects)?);
+        }
+        if lists_change && !options.skip_registry {
+            caches.push(registry_update(inputs, &prepared, &objects)?);
+        }
     }
     if let Some(context) = &create_context {
         create::extend_caches(
@@ -1187,6 +1285,7 @@ fn plan_object(
     let old_view = stored.schema.view(old_position)?;
     let old_fields = old_view.fields()?;
     check_stored_fields(&item.old, &old_view, &old_fields, stored.main_names)?;
+    check_stored_sections(&item.old, &old_view, stored.main_names)?;
     let has_folder = old_fields.iter().any(|field| field.name == "Folder");
 
     let mut fields_now = old_fields.clone();
@@ -1331,14 +1430,6 @@ fn plan_object(
             usage: attribute.usage,
         });
     }
-    if additions.len() != item.change.added.len() {
-        bail!(
-            "some new attributes are not among the own attributes of {} {}",
-            kind.label(),
-            new_facts.name()
-        );
-    }
-
     for addition in &additions {
         insert_field(&mut entry, addition.position, &addition.field)?;
     }
@@ -1415,14 +1506,50 @@ fn plan_object(
         bail!("the alter method adds columns only");
     }
 
+    // The tabular sections, after the own attributes (the numbers come in that order): the new attributes of
+    // the sections that were there, and the tables of the new sections. The numbers of a new section are its
+    // `VT` and its `LineNo`, then one for each of its attributes.
+    let sections = plan_sections(stored, running, item, &object, &mut entry)?;
+    let section_added: usize = sections.iter().map(|section| section.additions.len()).sum();
+    if additions.len() + section_added != item.change.added.len() {
+        bail!(
+            "some new attributes are not among the attributes of {} {} or of its tabular sections",
+            kind.label(),
+            new_facts.name()
+        );
+    }
+    if method == Method::AlterAdd && !sections.is_empty() {
+        bail!("the alter method adds columns to the main table only");
+    }
+
     let new_view = TableView::new(&entry)?;
     let old_tables = physical_tables(&old_view)?;
     let new_tables = physical_tables(&new_view)?;
-    if old_tables.len() != new_tables.len() {
+    let created: Vec<String> = sections
+        .iter()
+        .filter(|section| section.created.is_some())
+        .map(|section| format!("_{object}_{}", section.table))
+        .collect();
+    if old_tables.len() + created.len() != new_tables.len() {
         bail!("the rebuild changes the number of tables of {object}");
     }
+    let every_addition: Vec<&Addition> = additions
+        .iter()
+        .chain(sections.iter().flat_map(|section| section.additions.iter()))
+        .collect();
     let mut tables = Vec::new();
-    for (index, (before, after)) in old_tables.into_iter().zip(new_tables).enumerate() {
+    for (index, after) in new_tables.into_iter().enumerate() {
+        let Some(before) = old_tables.get(index) else {
+            // A table the change creates: it stands after the old ones, in the order of its section.
+            if created.get(index - old_tables.len()) != Some(&after.name) {
+                bail!(
+                    "the new table {} is not one of the new sections' tables",
+                    after.name
+                );
+            }
+            tables.push(TablePlan::created(after));
+            continue;
+        };
         if before.name != after.name {
             bail!("table {} became {}", before.name, after.name);
         }
@@ -1446,7 +1573,7 @@ fn plan_object(
             }
             // The new field this column belongs to (`_Fld1`, `_Fld1_S`, ...): its first type entry
             // and the folder marker of a nullable one.
-            let new_field = additions.iter().find(|addition| {
+            let new_field = every_addition.iter().find(|addition| {
                 let base = format!("_{}", addition.field.name);
                 column.name == base || column.name.starts_with(&format!("{base}_"))
             });
@@ -1503,12 +1630,273 @@ fn plan_object(
             removals,
             widenings,
             switches,
+            sections,
             tables,
             alter,
             created: false,
         },
         entry,
     ))
+}
+
+/// The fields of the sub-table `name` of an object's table entry.
+fn subtable_fields(entry: &Brace, name: &str) -> Result<Vec<FieldEntry>> {
+    let view = TableView::new(entry)?;
+    view.subtables()?
+        .into_iter()
+        .find(|sub| sub.name() == name)
+        .with_context(|| format!("the table has no sub-table {name}"))?
+        .fields()
+}
+
+/// The tabular sections of a changed object: a section the object has got new attributes (their fields go
+/// into its sub-table), a section it did not have is a new sub-table. Traced (cases e1, e3, e4) and
+/// numbered in the order of the descriptor after the object's own attributes: a section that was there takes
+/// one number for each new attribute; a new one takes `VT`, `LineNo` and then one for each attribute.
+fn plan_sections(
+    stored: &Stored<'_>,
+    running: &mut Running,
+    item: &Prepared,
+    object: &str,
+    entry: &mut Brace,
+) -> Result<Vec<SectionPlan>> {
+    let mut plans = Vec::new();
+    let old_sections = item.old.sections();
+    for section in item.new.sections() {
+        let index_of = |attribute: &AttributeFacts| -> Result<bool> {
+            match attribute.indexing {
+                Some(0) => Ok(false),
+                Some(1) => Ok(true),
+                other => bail!(
+                    "attribute {} of tabular section {} has the indexing {other:?}: only DontIndex and Index are traced in a tabular section",
+                    attribute.name,
+                    section.name
+                ),
+            }
+        };
+        let is_new = |attribute: &AttributeFacts| item.change.added.contains(&attribute.uuid);
+        if old_sections.iter().any(|old| old.uuid == section.uuid) {
+            if !section.attributes.iter().any(is_new) {
+                continue;
+            }
+            let number = stored
+                .main_names
+                .number_of(&section.uuid, "VT")
+                .with_context(|| format!("tabular section {} has no table number", section.name))?;
+            let table = format!("VT{number}");
+            let mut additions = Vec::new();
+            let mut indexes = Vec::new();
+            for (position, attribute) in section.attributes.iter().enumerate() {
+                if !is_new(attribute) {
+                    continue;
+                }
+                let indexed = index_of(attribute)?;
+                let entries = type_entries(&attribute.pattern_node).with_context(|| {
+                    format!(
+                        "attribute {} of tabular section {}",
+                        attribute.name, section.name
+                    )
+                })?;
+                let number = running.allocate(&attribute.uuid, "Fld")?;
+                let field = FieldEntry::new(&format!("Fld{number}"), false, entries);
+                let fields = subtable_fields(entry, &table)?;
+                // After the field of the attribute before it; the first goes after the line number.
+                let at = match position
+                    .checked_sub(1)
+                    .map(|before| &section.attributes[before])
+                {
+                    Some(previous) => {
+                        let previous_number = running
+                            .names_after
+                            .number_of(&previous.uuid, "Fld")
+                            .with_context(|| {
+                                format!("attribute {} has no field number", previous.name)
+                            })?;
+                        fields
+                            .iter()
+                            .position(|candidate| candidate.name == format!("Fld{previous_number}"))
+                            .with_context(|| {
+                                format!("the sub-table {table} has no field Fld{previous_number}")
+                            })?
+                            + 1
+                    }
+                    None => 1,
+                };
+                let sub = subtable_mut(entry, &table)?;
+                insert_field(sub, at, &field)?;
+                if indexed {
+                    indexes.push(add_subtable_field_index(sub, &field.name)?);
+                }
+                additions.push(Addition {
+                    uuid: attribute.uuid.clone(),
+                    name: attribute.name.clone(),
+                    number,
+                    field,
+                    position: at,
+                    usage: None,
+                });
+            }
+            plans.push(SectionPlan {
+                uuid: section.uuid.clone(),
+                name: section.name.clone(),
+                table,
+                created: None,
+                additions,
+                indexes,
+            });
+        } else {
+            let table_number = running.allocate(&section.uuid, "VT")?;
+            let line_no = running.allocate(&section.uuid, "LineNo")?;
+            let mut fields = Vec::new();
+            let mut declared = Vec::new();
+            let mut additions = Vec::new();
+            for attribute in &section.attributes {
+                let indexed = index_of(attribute)?;
+                let entries = type_entries(&attribute.pattern_node).with_context(|| {
+                    format!(
+                        "attribute {} of tabular section {}",
+                        attribute.name, section.name
+                    )
+                })?;
+                let number = running.allocate(&attribute.uuid, "Fld")?;
+                let field = FieldEntry::new(&format!("Fld{number}"), false, entries);
+                if indexed {
+                    declared.push((
+                        format!("ByField{}", field.name),
+                        vec![field.name.clone(), "ID".to_owned()],
+                    ));
+                }
+                additions.push(Addition {
+                    uuid: attribute.uuid.clone(),
+                    name: attribute.name.clone(),
+                    number,
+                    field: field.clone(),
+                    position: fields.len() + 1,
+                    usage: None,
+                });
+                fields.push(field);
+            }
+            let table = format!("VT{table_number}");
+            push_subtable(
+                entry,
+                subtable_entry(
+                    &table,
+                    object,
+                    &format!("LineNo{line_no}"),
+                    &fields,
+                    &declared,
+                ),
+            )?;
+            plans.push(SectionPlan {
+                uuid: section.uuid.clone(),
+                name: section.name.clone(),
+                table,
+                created: Some(CreatedSection {
+                    table_number,
+                    line_no,
+                }),
+                additions,
+                indexes: declared.into_iter().map(|(name, _)| name).collect(),
+            });
+        }
+    }
+    Ok(plans)
+}
+
+/// The parsed descriptor of a uuid: from `first`, else from `second`; each is parsed once.
+fn memoized_descriptors<'a>(
+    first: &'a BTreeMap<String, Vec<u8>>,
+    second: &'a BTreeMap<String, Vec<u8>>,
+) -> impl Fn(&str) -> Option<Brace> + 'a {
+    let cache: RefCell<HashMap<String, Option<Brace>>> = RefCell::new(HashMap::new());
+    move |uuid: &str| {
+        let uuid = uuid.to_ascii_lowercase();
+        if let Some(hit) = cache.borrow().get(&uuid) {
+            return hit.clone();
+        }
+        let parsed = first
+            .get(&uuid)
+            .or_else(|| second.get(&uuid))
+            .and_then(|stored| parse_row(&row_bytes(stored)).ok());
+        cache.borrow_mut().insert(uuid, parsed.clone());
+        parsed
+    }
+}
+
+/// The cache rows of a stage that adds tabular sections or attributes of them: the object registry, the index of
+/// the generated types and the XDTO model, from the descriptors before and after (`caches::change::rewrite`,
+/// measured against the native result in cases e1, e3 and e4). The plan refuses a stage that also removes.
+fn section_cache_updates(
+    inputs: &Inputs,
+    prepared: &[Prepared],
+    options: &PlanOptions,
+) -> Result<Vec<CacheUpdate>> {
+    let configuration = configuration_uuid(&inputs.root_row)?;
+    // The descriptor rows parsed once: the traversal of the caches asks for every object of a kind, again and
+    // again.
+    let empty = BTreeMap::new();
+    let before_row = memoized_descriptors(&inputs.staged.old_descriptors, &empty);
+    let after_row = memoized_descriptors(
+        &inputs.staged.new_descriptors,
+        &inputs.staged.old_descriptors,
+    );
+    let root = after_row(&configuration)
+        .context("the configuration's own descriptor is not among the rows")?;
+    let changed: Vec<ChangedForCaches> = prepared
+        .iter()
+        .map(|item| ChangedForCaches {
+            kind: match item.new.kind() {
+                ObjectKind::Catalog => "Catalog",
+                ObjectKind::Document => "Document",
+            },
+            uuid: item.new.uuid().to_owned(),
+            table_number: None,
+            has_help: false,
+            has_predefined: false,
+        })
+        .collect();
+    let cache = |name: &str| -> Option<Vec<u8>> {
+        inputs
+            .cache_rows
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, stored)| inflate(stored).unwrap_or_else(|_| stored.clone()))
+    };
+    let rows = rewrite(&Staged {
+        root: &root,
+        before: &before_row,
+        after: &after_row,
+        changed: &changed,
+        cache: &cache,
+    })
+    .context("the cache rows of the tabular sections")?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let what = match row.name {
+            name if name == cache_rows::REGISTRY => {
+                "records of the new tabular sections and attributes in the object registry"
+            }
+            name if name == cache_rows::TYPE_INDEX => {
+                "entries of the new tabular sections in the index of the generated types"
+            }
+            name if name == cache_rows::XDTO => {
+                "row types, properties and property lines of the tabular sections in the XDTO model"
+            }
+            _ => "rewritten by the caches module",
+        };
+        if (options.skip_registry && row.name == cache_rows::REGISTRY)
+            || (options.skip_xdto && row.name == cache_rows::XDTO)
+        {
+            continue;
+        }
+        updates.push(CacheUpdate {
+            row_name: row.name.to_owned(),
+            row: deflate(&row.text)?,
+            what: what.to_owned(),
+            set_creation: true,
+        });
+    }
+    Ok(updates)
 }
 
 /// The cache row of the XDTO model: a property for each new attribute, after the property of the
@@ -1678,27 +2066,123 @@ fn check_object(old: &ObjectFacts, new: &ObjectFacts, change: &Change) -> Result
             names.join(", ")
         );
     }
-    old.check_supported()?;
-    let (old_sections, new_sections) = (old.sections(), new.sections());
-    let same_sections = old_sections.len() == new_sections.len()
-        && old_sections
+    let own = |uuid: &String| {
+        old.attributes()
             .iter()
-            .zip(new_sections)
-            .all(|(before, after)| {
-                before.uuid == after.uuid
-                    && before.attributes.len() == after.attributes.len()
-                    && before
-                        .attributes
-                        .iter()
-                        .zip(&after.attributes)
-                        .all(|(a, b)| a.uuid == b.uuid && a.pattern == b.pattern)
-            });
-    if !same_sections {
-        bail!(
-            "{} {} changes a tabular section: not supported",
+            .chain(new.attributes())
+            .any(|attribute| &attribute.uuid == uuid)
+    };
+    let touches_own_attributes = change
+        .added
+        .iter()
+        .chain(&change.removed)
+        .chain(&change.retyped)
+        .chain(&change.reindexed)
+        .any(own);
+    old.check_supported(touches_own_attributes)?;
+    // The tabular sections: the ones the object has stay, in their order and with their properties, and gain
+    // attributes at any place; the new ones stand after them (a table is created for each), with the line
+    // number of 5 digits the platform gives every section, used for the items of a hierarchy the default way and
+    // with at least one attribute. What is not built: a section removed, moved or renamed, one of the old
+    // ones that loses, moves, retypes or re-indexes an attribute.
+    let (old_sections, new_sections) = (old.sections(), new.sections());
+    let label = |what: &str| {
+        format!(
+            "{} {} {what}: not supported",
             new.kind().label(),
             new.name()
-        );
+        )
+    };
+    if new_sections.len() < old_sections.len() {
+        bail!("{}", label("removes a tabular section"));
+    }
+    for (before, after) in old_sections.iter().zip(new_sections) {
+        if before.uuid != after.uuid {
+            bail!(
+                "{}",
+                label("moves a tabular section or puts a new one before the old ones")
+            );
+        }
+        if before.name != after.name
+            || before.usage != after.usage
+            || before.line_number_length != after.line_number_length
+        {
+            bail!(
+                "{}",
+                label(&format!("changes the tabular section {}", before.name))
+            );
+        }
+        let kept: Vec<&AttributeFacts> = after
+            .attributes
+            .iter()
+            .filter(|attribute| !change.added.contains(&attribute.uuid))
+            .collect();
+        let same = kept.len() == before.attributes.len()
+            && kept.iter().zip(&before.attributes).all(|(after, before)| {
+                after.uuid == before.uuid
+                    && after.pattern == before.pattern
+                    && after.indexing == before.indexing
+            });
+        if !same {
+            bail!(
+                "{}",
+                label(&format!(
+                    "removes, moves or changes an attribute of the tabular section {}",
+                    before.name
+                ))
+            );
+        }
+        // Not traced: a section of a hierarchy used for folders only, or for both, that gets an attribute.
+        if before.usage.is_some_and(|usage| usage != 0)
+            && after
+                .attributes
+                .iter()
+                .any(|attribute| change.added.contains(&attribute.uuid))
+        {
+            bail!(
+                "{}",
+                label(&format!(
+                    "adds an attribute to the tabular section {}, whose use is not ForItem",
+                    before.name
+                ))
+            );
+        }
+    }
+    for section in &new_sections[old_sections.len()..] {
+        if old_sections.iter().any(|old| old.uuid == section.uuid) {
+            bail!("{}", label("moves a tabular section"));
+        }
+        if section.line_number_length != 5 || section.usage.is_some_and(|usage| usage != 0) {
+            bail!(
+                "{}",
+                label(&format!(
+                    "adds the tabular section {} with a line number length other than 5 or another use than ForItem",
+                    section.name
+                ))
+            );
+        }
+        if section.attributes.is_empty() {
+            bail!(
+                "{}",
+                label(&format!(
+                    "adds the tabular section {} with no attributes",
+                    section.name
+                ))
+            );
+        }
+        if let Some(known) = section
+            .attributes
+            .iter()
+            .find(|attribute| !change.added.contains(&attribute.uuid))
+        {
+            bail!(
+                "{}",
+                label(&format!(
+                    "puts the attribute {} of the stored image into the new tabular section {}",
+                    known.name, section.name
+                ))
+            );
+        }
     }
     // The attributes that stay are the same in both images, in the same order, with the same type (a
     // retyped one is judged by `widening`) and indexing: the stored ones without the removed against the
@@ -1739,8 +2223,51 @@ fn check_stored_fields(
     names: &DbNames,
 ) -> Result<()> {
     let has_folder = fields.iter().any(|field| field.name == "Folder");
+    check_attribute_fields(facts.attributes(), table, fields, names, &|attribute| {
+        facts.nullable(attribute, has_folder)
+    })
+}
+
+/// The same for the tabular sections of the stored object: each one has its sub-table (named by its `VT`
+/// entry), the line number field (its `LineNo` entry) first and the fields of its attributes after it, none
+/// of them nullable.
+fn check_stored_sections(
+    facts: &ObjectFacts,
+    table: &TableView<'_>,
+    names: &DbNames,
+) -> Result<()> {
+    let subtables = table.subtables()?;
+    for section in facts.sections() {
+        let number = names
+            .number_of(&section.uuid, "VT")
+            .with_context(|| format!("tabular section {} has no table number", section.name))?;
+        let name = format!("VT{number}");
+        let sub = subtables
+            .iter()
+            .find(|sub| sub.name() == name)
+            .with_context(|| format!("table {} has no sub-table {name}", table.name()))?;
+        let fields = sub.fields()?;
+        let line_no = names.number_of(&section.uuid, "LineNo").with_context(|| {
+            format!("tabular section {} has no line number entry", section.name)
+        })?;
+        if fields.first().map(|field| field.name.as_str()) != Some(&format!("LineNo{line_no}")) {
+            bail!("the sub-table {name} does not start with LineNo{line_no}");
+        }
+        check_attribute_fields(&section.attributes, sub, &fields, names, &|_| false)
+            .with_context(|| format!("tabular section {}", section.name))?;
+    }
+    Ok(())
+}
+
+fn check_attribute_fields(
+    attributes: &[AttributeFacts],
+    table: &TableView<'_>,
+    fields: &[FieldEntry],
+    names: &DbNames,
+    nullable: &dyn Fn(&AttributeFacts) -> bool,
+) -> Result<()> {
     let mut last = None;
-    for attribute in facts.attributes() {
+    for attribute in attributes {
         let number = names
             .number_of(&attribute.uuid, "Fld")
             .with_context(|| format!("attribute {} has no number in DBNames", attribute.name))?;
@@ -1763,7 +2290,7 @@ fn check_stored_fields(
         }
         last = Some(position);
         if let Ok(entries) = type_entries(&attribute.pattern_node) {
-            let expected_nullable = facts.nullable(attribute, has_folder);
+            let expected_nullable = nullable(attribute);
             let stored = &fields[position];
             if stored.types != entries || stored.nullable != expected_nullable {
                 bail!(

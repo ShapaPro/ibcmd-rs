@@ -339,6 +339,7 @@ pub fn plan_created(
             removals: Vec::new(),
             widenings: Vec::new(),
             switches: Vec::new(),
+            sections: Vec::new(),
             tables,
             alter: Vec::new(),
             created: true,

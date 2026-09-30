@@ -49,6 +49,24 @@ def main():
             for line in f2:
                 if line not in f1:
                     print("   + field", line[:200])
+        s1 = {str(sub[0]): sub for sub in before[name][5][1:]}
+        s2 = {str(sub[0]): sub for sub in after[name][5][1:]}
+        print("   sub-tables before %s after %s" % (list(s1), list(s2)))
+        for sub in s2:
+            if s1.get(sub) == s2[sub]:
+                continue
+            print("   sub-table %s (%s)" % (sub, "new" if sub not in s1 else "changed"))
+            for line in fields(s2[sub]):
+                if sub not in s1 or line not in fields(s1[sub]):
+                    print("     + field", line[:200])
+            if sub in s1:
+                for line in fields(s1[sub]):
+                    if line not in fields(s2[sub]):
+                        print("     - field", line[:200])
+            for line in indexes(s2[sub]):
+                print("     index", line[:200])
+            text = "".join(bf.dumps(s2[sub]).split())
+            print("     entry", text[:100], "...", text[-90:])
         i1, i2 = indexes(before[name]), indexes(after[name])
         print("   indexes before (%d):" % len(i1))
         for line in i1:
