@@ -85,6 +85,7 @@ pub struct ExtensionActivationPlan {
     staged_bytes: u64,
     service_marker: ExtensionServiceMarkerSnapshot,
     no_op: bool,
+    own_ras_processes: Vec<crate::mssql_platform_profile::OwnRasProcess>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,6 +128,17 @@ impl Error for ExtensionActivationError {}
 impl ExtensionActivationPlan {
     pub fn is_no_op(&self) -> bool {
         self.no_op
+    }
+
+    /// The plan with the worker processes whose idle SQL sessions the
+    /// `exclusive` session gate leaves out: the sessions the tool's own RAS
+    /// verification made the cluster open (#409 F-3).
+    pub fn with_own_ras_processes(
+        mut self,
+        own: Vec<crate::mssql_platform_profile::OwnRasProcess>,
+    ) -> Self {
+        self.own_ras_processes = own;
+        self
     }
 
     pub fn dry_run(&self) -> ExtensionActivationDryRun {
@@ -344,6 +356,7 @@ pub fn prepare_extension_activation(
         staged_bytes,
         service_marker,
         no_op: old_root == new_root,
+        own_ras_processes: Vec::new(),
     })
 }
 
@@ -368,7 +381,13 @@ pub fn render_extension_activation_sql(
     writeln!(sql, "SET NOCOUNT ON;\nSET XACT_ABORT ON;\nSET TRANSACTION ISOLATION LEVEL SERIALIZABLE;\nUSE {db};\nBEGIN TRANSACTION;").unwrap();
     writeln!(sql, "DECLARE @LockResult int; EXEC @LockResult = sys.sp_getapplock @Resource=N'{}', @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=0; IF @LockResult < 0 THROW 57200, 'Extension activation lock unavailable', 1;", quote_string(&format!("ibcmd-rs:extension-activation:{}", plan.namespace_prefix))).unwrap();
     if plan.mode == ExtensionActivationMode::Exclusive {
-        sql.push_str("IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID()) THROW 57212, 'exclusive extension activation requires no other database sessions', 1;\n");
+        let gate = crate::mssql_platform_profile::exclusive_session_gate(
+            57212,
+            "exclusive extension activation requires no other database sessions",
+            &plan.own_ras_processes,
+        );
+        sql.push_str(&gate);
+        sql.push('\n');
     }
     writeln!(sql, "DECLARE @ExtensionId binary(16)=0x{}; DECLARE @ExpectedVersion binary(8)=0x{}; DECLARE @Before varbinary(max)=0x{}; DECLARE @After varbinary(max)=0x{};", hex(&plan.snapshot.extension_id), hex(&plan.snapshot.version), hex(&plan.snapshot.zipped_info), hex(&plan.registry_after)).unwrap();
     sql.push_str("IF (SELECT COUNT_BIG(*) FROM dbo._ExtensionsInfo WITH (UPDLOCK,HOLDLOCK) WHERE _IDRRef=@ExtensionId AND _Version=@ExpectedVersion AND DATALENGTH(_ExtensionZippedInfo)=DATALENGTH(@Before) AND _ExtensionZippedInfo=@Before) <> 1 THROW 57201, 'Extension registry optimistic predicate failed', 1;\n");
@@ -633,6 +652,33 @@ mod tests {
         ] {
             assert!(!script.sql().contains(forbidden), "{forbidden}");
         }
+    }
+
+    #[test]
+    fn the_exclusive_gate_leaves_out_only_the_idle_sessions_of_the_own_ras_processes() {
+        let (snapshot, stage) = fixture();
+        let plan = prepare_extension_activation(
+            ExtensionActivationMode::Exclusive,
+            snapshot,
+            &stage,
+            ExtensionServiceMarkerSnapshot { present: true },
+            true,
+        )
+        .unwrap();
+        let counted = render_extension_activation_sql("db", &plan).unwrap();
+        assert!(counted.sql().contains(
+            "database_id=DB_ID()) THROW 57212, 'exclusive extension activation requires no other database sessions', 1;"
+        ));
+        let plan =
+            plan.with_own_ras_processes(vec![crate::mssql_platform_profile::OwnRasProcess {
+                host: "LAB-HOST".to_owned(),
+                pid: 22608,
+            }]);
+        let exempt = render_extension_activation_sql("db", &plan).unwrap();
+        assert!(exempt.sql().contains(
+            "AND status=N'sleeping' AND open_transaction_count=0 AND ((ISNULL(host_name,N'')=N'LAB-HOST' AND ISNULL(host_process_id,-1) IN (22608))))"
+        ));
+        assert!(exempt.sql().contains("THROW 57212"));
     }
 
     #[test]

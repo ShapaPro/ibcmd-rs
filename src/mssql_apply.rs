@@ -274,6 +274,16 @@ pub fn apply_source_change(
     if args.extension.is_none() {
         preflight_main_publication(args)?;
     }
+    // An exclusive activation is refused on the cluster's word when the infobase has
+    // clients (#409 F-3); asking before the stage keeps `ConfigSave` untouched.
+    if matches!(args.mode, MssqlMainActivationModeArg::Exclusive) {
+        crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+            &args.rac,
+            &args.ras_endpoint,
+            profile_verification.verified_cluster_id,
+            profile_verification.verified_infobase_id,
+        )?;
+    }
     prepare_compile_tree_for_selected_change(&proposed_root, &selected_path)?;
 
     let path_prefix = owner_prefix(&selected_path)?;

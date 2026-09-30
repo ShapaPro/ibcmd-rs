@@ -428,6 +428,24 @@ pub fn activate_staged_extension(
         },
         args.allow_non_lab,
     )?;
+    // The tool's own RAS verification made the cluster open idle SQL sessions on
+    // this database; the session gate of an exclusive activation must not count
+    // them (#409 F-3), and an infobase that has clients is refused before any
+    // write, on the cluster's word.
+    let plan = if mode == crate::mssql_extension_activation::ExtensionActivationMode::Exclusive
+        && !plan.is_no_op()
+    {
+        plan.with_own_ras_processes(
+            crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+                &args.rac,
+                &args.ras_endpoint,
+                profile_verification.verified_cluster_id,
+                profile_verification.verified_infobase_id,
+            )?,
+        )
+    } else {
+        plan
+    };
     let rendered =
         crate::mssql_extension_activation::render_extension_activation_sql(&args.database, &plan)?;
     let artifact_root = std::env::temp_dir().join("ibcmd-rs");
