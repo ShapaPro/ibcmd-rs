@@ -16,8 +16,15 @@
 //!   the platform's words for a lock it cannot take. `--session-terminate=force`
 //!   and `prompt` name what this version cannot do (end sessions), so they are
 //!   accepted while nobody is connected and refused when somebody is;
-//! - a stage that needs a restructuring, or anything else the own apply does
-//!   not do, is refused with `требуется штатный config apply: ...` (exit 1);
+//! - the structural gate is always the restructuring track's S1 gate
+//!   (`AllowRestructure::S1`; the platform has no option for it, and the backup
+//!   option is the operator's consent): what changes no table goes as a plain
+//!   apply; a restructuring of the S1 set (attributes of catalogs and
+//!   documents) is done inside the apply's transaction when the operator names
+//!   a way back (`--recovery-backup`, `--i-have-a-backup`) and refused as
+//!   `BackupRequired` (exit 1) when not; a stage that needs any other
+//!   restructuring, or anything else the own apply does not do, is refused
+//!   with `требуется штатный config apply: ...` (exit 1);
 //! - what the own apply refuses is sorted by the type of its error
 //!   (`mssql_config_apply::errors`), never by the words of its message; an
 //!   error of no type is a failure (exit -1).
@@ -33,9 +40,9 @@ use uuid::Uuid;
 use crate::infobase::{ConnectionRequest, PlatformNeed, ensure_mssql, resolve_connection};
 use crate::mssql_config_apply::gate::GateVerdict;
 use crate::mssql_config_apply::{
-    BackupRequired, ConfigApplyOptions, ConfigApplyReport, ExclusiveAccessRefused,
-    ExclusiveAccessUnprovable, Exclusivity, NativeCommand, NeedsNativeApply, OtherSession,
-    StructuralRefusal,
+    AllowRestructure, BackupRequired, ConfigApplyOptions, ConfigApplyReport,
+    ExclusiveAccessRefused, ExclusiveAccessUnprovable, Exclusivity, NativeCommand,
+    NeedsNativeApply, OtherSession, StructuralRefusal,
 };
 use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::platform::PlatformSpec;
@@ -186,7 +193,8 @@ fn connect(request: &ApplyRequest) -> Result<(SqlExec, ConfigApplyOptions)> {
 /// The options of the own apply for a request. The platform's `--force`
 /// (confirm warnings) and `--session-terminate-message` need nothing here:
 /// the apply raises no warning that asks for a confirmation and ends no
-/// session.
+/// session. The gate is always S1's: the drop-in has no option to choose one,
+/// and whether a restructuring of the S1 set may be done is the backup option.
 pub fn apply_options(
     request: &ApplyRequest,
     database: &str,
@@ -198,6 +206,7 @@ pub fn apply_options(
         ExclusivityMode::Assumed => Exclusivity::Assumed,
     };
     options.backup = request.backup.clone();
+    options.allow_restructure = Some(AllowRestructure::S1);
     options
 }
 
@@ -287,7 +296,14 @@ pub fn structural_text(verdict: &GateVerdict) -> String {
         .blockers
         .iter()
         .take(SHOWN)
-        .map(|blocker| format!("{}: {}", blocker.row, blocker.reason))
+        .map(|blocker| {
+            // a reason of the gate about the stage as a whole names no row
+            if blocker.row.is_empty() {
+                blocker.reason.clone()
+            } else {
+                format!("{}: {}", blocker.row, blocker.reason)
+            }
+        })
         .collect::<Vec<_>>();
     if total > parts.len() {
         parts.push(format!("и ещё {}", total - parts.len()));
@@ -672,6 +688,75 @@ mod tests {
             options.backup,
             BackupPolicy::File(std::path::PathBuf::from("F:/b/x.bak"))
         );
+    }
+
+    #[test]
+    fn the_gate_is_always_s1_and_the_backup_option_is_its_consent() {
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        for line in [
+            vec!["config", "apply"],
+            vec!["config", "apply", "--i-have-a-backup"],
+            vec!["config", "apply", "--recovery-backup=x.bak"],
+        ] {
+            let options = apply_options(&request(&line), "b", profile);
+            assert_eq!(
+                options.allow_restructure,
+                Some(AllowRestructure::S1),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_branches_of_a_stage_that_changes_a_descriptor_are_told_apart() {
+        // 1. an S1 change and no backup option: BackupRequired, exit 1, both options named
+        match classify(
+            &anyhow::Error::new(BackupRequired),
+            SessionTerminate::Disable,
+        ) {
+            Outcome::Refused(text) => {
+                assert!(text.contains("--recovery-backup") && text.contains("--i-have-a-backup"))
+            }
+            other => panic!("{other:?}"),
+        }
+        // 2. a change outside S1, or an S1 operation not built: the gate's reasons, exit 1, and a
+        // reason about the stage as a whole starts the sentence instead of an empty row
+        let verdict = GateVerdict {
+            restructuring_required: true,
+            blockers: vec![
+                GateBlocker {
+                    row: String::new(),
+                    reason: "S1: property-outside-s1: Catalog.X: Properties/CodeLength: 9 -> 12"
+                        .to_string(),
+                },
+                GateBlocker {
+                    row: "5eab8a1b".to_string(),
+                    reason: "S1: Catalog.X: the S1 operation \"add-tabular-section\" is designed but not built in this version"
+                        .to_string(),
+                },
+            ],
+            ..GateVerdict::default()
+        };
+        let text = structural_text(&verdict);
+        assert!(
+            text.starts_with("требуется штатный config apply: S1: property-outside-s1: Catalog.X"),
+            "{text}"
+        );
+        assert!(
+            text.contains("; 5eab8a1b: S1: Catalog.X: the S1 operation"),
+            "{text}"
+        );
+        let error = anyhow::Error::new(StructuralRefusal { verdict });
+        assert!(matches!(
+            classify(&error, SessionTerminate::Disable),
+            Outcome::Refused(_)
+        ));
+        // 3. a stage that needs no restructuring never gets here: the apply's own errors are the
+        // only ones classified, and a failure of the database stays a failure (exit -1)
+        assert!(matches!(
+            classify(&anyhow!("connection lost"), SessionTerminate::Disable),
+            Outcome::Failed(_)
+        ));
     }
 
     #[test]
