@@ -316,7 +316,8 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
         "ffffffff-0000-4000-8000-000000000000"
     );
 
-    // An operation of S1 that is designed but not built (an object).
+    // A new object that the stage does not hold (S1-F builds them; the plan finds none in this image): the two
+    // decoders disagree and the refusal stands.
     let object = check_of(vec![
         structure(
             RuleId::ObjectWithStorageAddedOrDropped,
@@ -336,7 +337,7 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
     let (verdict, phase) = decide(conservative(&[CATALOG]), &object, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        blocked_with(&verdict, "add-object"),
+        blocked_with(&verdict, "the two decoders disagree"),
         "{:?}",
         verdict.blockers
     );

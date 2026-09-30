@@ -1193,8 +1193,36 @@ pub fn plan_with_gate(
         removed_rows: &removed_names,
     })?;
     timings.gate_ms = ms(started);
+    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
+    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
+    let structure = structural_gate.take_structure();
+    // The catalogs and documents the structure phase creates (S1-F): the phase answers for the objects and
+    // their rows (the analysis above knows a new form or template only), this apply moves the rows like any
+    // staged row and registers the objects like a new form.
+    let created: Vec<gate::CreatedObject> = structure
+        .as_ref()
+        .map(|phase| phase.created.clone())
+        .unwrap_or_default();
+    let answered_rows: Vec<String> = structure
+        .as_ref()
+        .map(|phase| phase.answered_rows.clone())
+        .unwrap_or_default();
+    let answered_for = |row: &str| {
+        let row = row.to_ascii_lowercase();
+        answered_rows.contains(&row)
+            || created.iter().any(|object| {
+                let uuid = object.uuid.to_ascii_lowercase();
+                row == uuid
+                    || object
+                        .files
+                        .iter()
+                        .any(|file| file.to_ascii_lowercase() == row)
+            })
+    };
     for blocker in analysis_blockers {
-        verdict.block(&blocker.row, blocker.reason);
+        if !answered_for(&blocker.row) {
+            verdict.block(&blocker.row, blocker.reason);
+        }
     }
     if verdict.restructuring_required {
         report.gate = Some(verdict.clone());
@@ -1203,9 +1231,6 @@ pub fn plan_with_gate(
         return Err(anyhow::Error::new(StructuralRefusal { verdict }));
     }
     report.gate = Some(verdict);
-    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
-    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
-    let structure = structural_gate.take_structure();
     // A `deleted` list of removals is consumed only when a phase accounts for it.
     if judged_deleted
         && !structure
@@ -1307,6 +1332,20 @@ pub fn plan_with_gate(
     } else {
         registrations::RegistrationPlan::default()
     };
+    // The nodes a created object is registered at: every node of the exchange plans but the plans' own, the ones
+    // with no rows included (`objects::registration_nodes`, #412). Measured on 8.3.27 only, and on a register
+    // that has rows.
+    let created_nodes = if created.is_empty() || !has_change_registrations {
+        Vec::new()
+    } else {
+        if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
+            return Err(NeedsNativeApply::apply(
+                "a created object is measured on 8.3.27 only; on 8.5 the platform's own apply registers it",
+            )
+            .into());
+        }
+        objects::registration_nodes(client, &db).map_err(NeedsNativeApply::apply)?
+    };
 
     let mut touched = vec!["Config", "ConfigSave"];
     if config_marker.is_some() || params_marker.is_some() || !params_rewrites.is_empty() {
@@ -1317,6 +1356,7 @@ pub fn plan_with_gate(
         if !new.is_empty()
             || !registration.dropped_files.is_empty()
             || registration.added_file_rows > 0
+            || created.iter().any(|object| !object.files.is_empty())
         {
             touched.push("_ConfigChngR_ExtProps");
         }
@@ -1331,7 +1371,9 @@ pub fn plan_with_gate(
             .extend(["SchemaStorage", "DBSchema"].map(str::to_owned));
         report.tables_touched.extend(phase.tables.iter().cloned());
     }
-    let nodes_seen = if (new.is_empty() && registration.dropped_files.is_empty())
+    let nodes_seen = if (new.is_empty()
+        && created.is_empty()
+        && registration.dropped_files.is_empty())
         || !has_change_registrations
     {
         0
@@ -1363,7 +1405,7 @@ pub fn plan_with_gate(
                 .to_bytes_le(),
         ))
     };
-    let new_registrations = new
+    let mut new_registrations = new
         .objects
         .iter()
         .map(|object| {
@@ -1373,6 +1415,12 @@ pub fn plan_with_gate(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    for object in &created {
+        new_registrations.push(NewRegistration {
+            object_hex: object_hex(&object.uuid)?,
+            files: object.files.clone(),
+        });
+    }
     let mut appended_files = new
         .bodies
         .iter()
@@ -1393,10 +1441,12 @@ pub fn plan_with_gate(
         }
     }
     // the nodes registrations are made for: the plans' nodes, the ones with no rows included
-    let node_source = if registration.nodes.is_empty() {
+    let node_source = if !registration.nodes.is_empty() {
+        &registration.nodes
+    } else if !new.nodes.is_empty() {
         &new.nodes
     } else {
-        &registration.nodes
+        &created_nodes
     };
     let nodes = node_source
         .iter()
