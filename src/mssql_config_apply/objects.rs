@@ -57,6 +57,8 @@ pub struct NewBody {
 /// An exchange-plan node changes are registered for.
 #[derive(Debug, Clone, Serialize)]
 pub struct RegistrationNode {
+    /// The exchange plan's number: `_NodeTRef` as an integer, `_Node<plan>` is its node table.
+    pub plan: i64,
     /// `_NodeTRef`, 4 bytes as hex.
     pub type_ref: String,
     /// `_NodeRRef`, 16 bytes as hex.
@@ -642,9 +644,10 @@ pub fn analyze(input: &AnalysisInput<'_>) -> Result<Analysis> {
     Ok(analysis)
 }
 
-/// The nodes a new object is registered for: every node of an exchange plan
-/// that already registers changes and is not the plan's own node.
-fn registration_nodes(
+/// The nodes changes are registered for: every node of an exchange plan that already registers
+/// changes and is not the plan's own node -- **including the nodes that have no row in the
+/// register** (a node with an initial image has none; the native apply inserts the rows).
+pub(super) fn registration_nodes(
     client: &dyn SqlClient,
     db: &str,
 ) -> std::result::Result<Vec<RegistrationNode>, String> {
@@ -706,24 +709,39 @@ fn registration_nodes(
             .map_err(failed)?;
         tables.insert(*plan, map);
     }
-    for (plan, type_ref, reference) in seen {
-        let Some((is_own_node, marked)) = tables[&plan].get(&reference).copied() else {
+    // every registered node must be in its plan's node table
+    for (plan, _, reference) in &seen {
+        if !tables[plan].contains_key(reference) {
             return Err(format!(
                 "a registered node {reference} of the exchange plan {plan} has no row in its node table"
             ));
-        };
-        if is_own_node {
-            continue;
         }
-        if marked {
-            return Err(format!(
-                "the node {reference} is marked for deletion: whether it registers new objects is unknown"
-            ));
+    }
+    // the nodes of each plan, the registered ones and the ones without rows
+    let mut plan_types: Vec<(i64, String)> = Vec::new();
+    for (plan, type_ref, _) in &seen {
+        if !plan_types.iter().any(|(known, _)| known == plan) {
+            plan_types.push((*plan, type_ref.clone()));
         }
-        nodes.push(RegistrationNode {
-            type_ref,
-            reference,
-        });
+    }
+    for (plan, type_ref) in plan_types {
+        let mut references: Vec<(&String, &(bool, bool))> = tables[&plan].iter().collect();
+        references.sort();
+        for (reference, (is_own_node, marked)) in references {
+            if *is_own_node {
+                continue;
+            }
+            if *marked {
+                return Err(format!(
+                    "the node {reference} is marked for deletion: whether it registers changes is unknown"
+                ));
+            }
+            nodes.push(RegistrationNode {
+                plan,
+                type_ref: type_ref.clone(),
+                reference: reference.clone(),
+            });
+        }
     }
     Ok(nodes)
 }

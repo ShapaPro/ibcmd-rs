@@ -42,7 +42,7 @@ use crate::sql::{SqlClient, SqlValue};
 use super::RecoveryBlobs;
 use super::model::{RowMeta, quote_ident, quote_string};
 use super::objects::NewObjects;
-use super::sqlgen::{ParamsRewrite, staged_objects_predicate};
+use super::sqlgen::{ParamsRewrite, staged_objects_predicate_with};
 
 pub struct RecoveryRequest<'a> {
     pub database: &'a str,
@@ -56,6 +56,9 @@ pub struct RecoveryRequest<'a> {
     /// The new objects and body rows the apply registers, and the `Params`
     /// rows it rewrites for them.
     pub new_objects: &'a NewObjects,
+    /// The change registrations inserted for nodes that had none, and the owners of the rows a
+    /// `deleted` list names.
+    pub registration: &'a super::registrations::RegistrationPlan,
     /// Every `Params` row the script rewrites.
     pub params_rewrites: &'a [ParamsRewrite],
     /// The backup taken (or acknowledged) before a restructuring; the artifact
@@ -79,6 +82,8 @@ struct Manifest<'a> {
     change_registrations_reset: usize,
     params_rows_saved: usize,
     new_objects: usize,
+    /// `_ConfigChngR` rows inserted for nodes that had none (`added_registrations.tsv`).
+    registrations_added: usize,
     appended_files: usize,
     blobs: &'a str,
     /// The way back for the tables: a backup file, or the operator's word.
@@ -321,7 +326,10 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
                 .context("change_registrations_before.tsv")?,
         );
         writeln!(file, "node_type_ref\tnode_ref\tobject_id\tmessage_no")?;
-        let predicate = staged_objects_predicate(&format!("{db}.dbo."));
+        let predicate = staged_objects_predicate_with(
+            &format!("{db}.dbo."),
+            &request.registration.extra_objects,
+        );
         let query = format!(
             "SELECT CONVERT(varchar(16), r._NodeTRef, 2), CONVERT(varchar(64), r._NodeRRef, 2), CONVERT(varchar(64), r._MDObjID, 2), CONVERT(bigint, r._MessageNo) FROM {db}.dbo._ConfigChngR r              WHERE r._MessageNo IS NOT NULL AND {predicate} ORDER BY 1, 2, 3"
         );
@@ -415,6 +423,37 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         file.flush()?;
     }
 
+    // The change registrations inserted for nodes that had no row: undone by deleting these rows (and
+    // their file lists).
+    let mut added_registration_count = 0usize;
+    if !request.registration.missing.is_empty() {
+        let mut file = BufWriter::new(
+            fs::File::create(request.dir.join("added_registrations.tsv"))
+                .context("added_registrations.tsv")?,
+        );
+        writeln!(file, "node_type_ref\tnode_ref\tobject_id\tfiles")?;
+        for (index, object) in &request.registration.missing {
+            let node = &request.registration.nodes[*index];
+            let files = request
+                .registration
+                .additions
+                .iter()
+                .find(|addition| &addition.object_hex == object)
+                .map(|addition| addition.files.join("|"))
+                .unwrap_or_default();
+            added_registration_count += 1;
+            writeln!(
+                file,
+                "{}\t{}\t{}\t{}",
+                node.type_ref,
+                node.reference,
+                object,
+                tsv(&files)
+            )?;
+        }
+        file.flush()?;
+    }
+
     pack.finish()?;
 
     let manifest = Manifest {
@@ -433,6 +472,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         change_registrations_reset: reset_count,
         params_rows_saved: params_saved,
         new_objects: new_object_count,
+        registrations_added: added_registration_count,
         appended_files: appended_count,
         blobs: match request.blobs {
             RecoveryBlobs::Changed => "changed",
@@ -458,6 +498,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              change_registrations_before.tsv   _ConfigChngR rows whose _MessageNo was reset to NULL\n\
              params_replaced.tsv   the search-information rows of Params (and siVersions) rewritten for new forms/templates, with their old bytes\n\
              new_registrations.tsv the new objects registered in _ConfigChngR (per node) and the files listed for them\n\
+             added_registrations.tsv the change registrations inserted for nodes that had no row for a changed object (a node with an initial image has none): node, object, files\n\
              manifest.json `backup`  the backup taken before a restructuring (file, seconds) or the operator's word that one exists;\n\
                                    the rebuilt tables come back only from it\n\n\
              To take the apply back: stage the saved rows in ConfigSave (name, part, sizes, attributes,\n\
