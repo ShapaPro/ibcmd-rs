@@ -442,8 +442,17 @@ writes lists them -- takes those objects for unchanged since before the native g
 per process and database; when generations are active they read the row the platform reads: the plain row and every alias of it in
 one seek (`FileName = @name OR FileName LIKE '<stem>\_dynupdate\_<36 wildcards><suffix>' ESCAPE '\'`), and the alias of the newest
 generation in the history wins (`mssql_effective_row`, the rule the export's overlay applies). It covers every base row of the
-per-row stage -- headers, bodies, `versions`, `root`, the constants. The bulk prefetch of `--bulk` is unchanged and still reads the
-plain rows (a bulk stage of that size is not admitted on a marker base anyway: one object per online apply).
+per-row stage -- headers, bodies, `versions`, `root`, the constants.
+
+*One rule with the import's stage (#388 step 2).* The import's stage reads the whole table first (the bulk prefetch) and bases its
+rows on the aliases of a pending online update (`dynamic_generation_aliases`, `docs/import/override.md` section 1, item 6); the
+apply's stage asks row by row. Both apply the export's rule (`StorageGenerationOverlay`: the alias of the newest generation of the
+history that carries the name, an unlisted generation ignored, the plain row when none does). The row-by-row reader reaches it
+through `mssql_dump::stored_row_name` and adds only the seek that finds the candidates (`mssql_effective_row`); it does not keep a
+rule of its own, and a test gives both readers the same stored names and asserts that they name the same row for every name (an
+object the update added, an unlisted generation and a missing name included). Which one runs is decided by the prefetch:
+`fetch_config_blob` answers from the prefetched rows first (the import), and asks the database only when there are none (the
+apply); the two never read the same row in one process.
 
 Measured on a clone restored from the corpus (native generation of two objects), then generation 2 of ours (module A) and generation
 3 of ours (module B), with the fixed binary:
