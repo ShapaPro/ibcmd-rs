@@ -39576,9 +39576,7 @@ fn format_form_chart_settings_body_xml(
     // reads at `axes_position + 20`. `point_count` is zero on every
     // form-chart record of the stand, so the list has no point prefix here.
     let color_palette = form_chart_palette_name(t.get(tidx(179))?)?;
-    if form_chart_palette_name(t.get(tidx(180))?)?.is_some() {
-        return None;
-    }
+    let reference_bands_palette = form_chart_palette_name(t.get(tidx(180))?)?;
     let legend_start = tidx(147);
     let mut point_colors = Vec::with_capacity(point_count);
     for offset in 0..point_count {
@@ -40322,6 +40320,15 @@ fn format_form_chart_settings_body_xml(
             "{child_tab}<d4p1:colorPaletteDescription>\r\n\
 {child_tab}\t<d4p1:colorPalette>{name}</d4p1:colorPalette>\r\n\
 {child_tab}</d4p1:colorPaletteDescription>\r\n"
+        ));
+    }
+    // The reference-bands palette follows it, same shape (1C:Документооборот
+    // `Catalogs/УзлыКОД/Forms/ТрафикПоУзлам`, both `Palette32`).
+    if let Some(name) = reference_bands_palette {
+        xml.push_str(&format!(
+            "{child_tab}<d4p1:referenceBandsColorPaletteDescription>\r\n\
+{child_tab}\t<d4p1:colorPalette>{name}</d4p1:colorPalette>\r\n\
+{child_tab}</d4p1:referenceBandsColorPaletteDescription>\r\n"
         ));
     }
     Some(xml)

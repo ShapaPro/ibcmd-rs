@@ -79434,3 +79434,24 @@ fn a_version_0_mobile_table_reads_like_version_1() {
         .collect::<Vec<_>>();
     assert_eq!(used, ["Biometrics", "OSBackup"]);
 }
+
+/// Evidence: 1C:Документооборот `Catalogs/УзлыКОД/Forms/ТрафикПоУзлам`,
+/// whose chart names `Palette32` for its reference bands as well; 8.3.27.2214
+/// writes a `referenceBandsColorPaletteDescription` block after the colour
+/// palette one.
+#[test]
+fn a_chart_writes_its_reference_bands_palette() {
+    let raw = include_str!(
+        "../../tests/fixtures/native-evidence/8.3.27.2214/form-chart-series-count/raw/zero-series.txt"
+    )
+    .trim()
+    .to_owned();
+    let palette_14 = "{0,14,{3,4,{0}},{3,4,{0}},0,0}";
+    let palette_32 = "{0,1,{3,4,{0}},{3,4,{0}},0,0}";
+    let compact = raw.replace(['\r', '\n'], "");
+    let pair = format!("{palette_14},{palette_14}");
+    assert!(compact.contains(&pair));
+    let edited = compact.replacen(&pair, &format!("{palette_32},{palette_32}"), 1);
+    let xml = parse_and_render_form_chart_settings_for_test(&edited).unwrap();
+    assert!(xml.contains("<d4p1:referenceBandsColorPaletteDescription>"), "{xml}");
+}
