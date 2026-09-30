@@ -8,6 +8,7 @@ every element whose own `<DataPath>` is `Объект.<attribute>` or `Спис�
 usage as a module: drop_bindings(read, write, object_dir, names) with read(rel) -> text and write(rel, text); object_dir like `Catalogs/КлассификаторБанков`.
 """
 import os
+import re
 
 from edit_cases_s1 import REF, nl_of
 
@@ -54,6 +55,19 @@ def drop_paths(text, paths):
         dropped += 1
 
 
+def drop_query_columns(text, names):
+    """`text` without the columns of a manual query (`Таблица.<name> КАК <name>,`) that read a removed attribute; the number dropped.
+    A list form of a catalog keeps the query text: a query that reads a column that is gone would break every field of the list.
+    (The lines inside the query text end with a bare line feed, the lines of the form with the file's own.)"""
+    dropped = 0
+    for name in names:
+        column = r"Таблица\.%s КАК %s" % (re.escape(name), re.escape(name))
+        text, middle = re.subn(r"\n[ \t]*%s,(?=\r?\n)" % column, "", text)
+        text, last = re.subn(r",\n[ \t]*%s(?=\r?\n|</QueryText>)" % column, "", text)
+        dropped += middle + last
+    return text, dropped
+
+
 def drop_bindings(read, write, object_dir, names):
     total = 0
     for rel in forms_of(object_dir):
@@ -63,8 +77,9 @@ def drop_bindings(read, write, object_dir, names):
             paths.add("Объект.%s" % name)
             paths.add("Список.%s" % name)
         new, dropped = drop_paths(text, paths)
-        if dropped:
+        new, columns = drop_query_columns(new, names)
+        if dropped or columns:
             write(rel, new)
-            total += dropped
-            print("  form %s: %d element(s) bound to %s dropped" % (rel, dropped, ", ".join(sorted(names))))
+            total += dropped + columns
+            print("  form %s: %d element(s) bound to %s dropped, %d query column(s)" % (rel, dropped, ", ".join(sorted(names)), columns))
     return total

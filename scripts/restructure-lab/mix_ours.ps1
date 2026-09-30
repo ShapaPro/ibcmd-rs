@@ -130,6 +130,7 @@ foreach ($db in $own, $oursDb) {
 & $Exe source-diff "$lab\export\$own" "$lab\export\$oursDb" > "$o\ours_export_diff.json" 2>&1
 $diff = python -c "import json; d=json.load(open(r'$o\ours_export_diff.json',encoding='utf-8')); print(d['summary'])"
 Note "ours: check 8 (source-diff of the drop-in twin and ours): $diff"
+python "$kit\diff_paths.py" "$o\ours_export_diff.json" "$lab\tree_s2\$Case\forms.txt" "$lab\export\$oursDb" "$lab\tree_s2\$Case\stage_full" | ForEach-Object { Note "ours: check 8: $_" }
 
 if ($Cleanup) {
     Log 'cleanup'
