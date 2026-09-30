@@ -426,6 +426,51 @@ mod gate {
     }
 
     #[test]
+    fn the_gate_withdraws_the_blockers_of_the_module_rows_of_a_created_object() {
+        let before = lab_snap!("d_staged");
+        let mut inputs = inputs_of(&before);
+        let module = format!("{NEW_DOCUMENT}.0");
+        inputs.staged.new_files.insert(module.clone());
+        let mut verdict = conservative();
+        verdict.blockers.push(GateBlocker {
+            row: module.clone(),
+            reason: "the body's owner is not an object of the active configuration".to_owned(),
+        });
+        let (verdict, phase) = decide(verdict, &check("ДемоНовыйДокумент"), &inputs, &options());
+        assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+        let phase = phase.expect("a phase");
+        assert_eq!(phase.created[0].files, [module]);
+
+        // a row of another object stays a blocker
+        let mut verdict = conservative();
+        verdict.blockers.push(GateBlocker {
+            row: "11111111-1111-4111-8111-111111111111.0".to_owned(),
+            reason: "the body's owner is not an object of the active configuration".to_owned(),
+        });
+        let (verdict, phase) = decide(verdict, &check("ДемоНовыйДокумент"), &inputs, &options());
+        assert!(phase.is_none());
+        assert!(verdict.restructuring_required);
+    }
+
+    #[test]
+    fn a_created_object_with_a_file_that_is_no_module_or_help_page_is_not_built() {
+        let before = lab_snap!("d_staged");
+        let mut inputs = inputs_of(&before);
+        // a document has no such body
+        inputs.staged.new_files.insert(format!("{NEW_DOCUMENT}.9"));
+        let (verdict, phase) = decide(
+            conservative(),
+            &check("ДемоНовыйДокумент"),
+            &inputs,
+            &options(),
+        );
+        assert!(phase.is_none());
+        assert!(verdict.restructuring_required);
+        let text = format!("{:?}", verdict.blockers);
+        assert!(text.contains("not a module or a help page"), "{text}");
+    }
+
+    #[test]
     fn the_gate_refuses_a_new_object_the_plan_does_not_create() {
         let before = lab_snap!("d_staged");
         let inputs = inputs_of(&before);

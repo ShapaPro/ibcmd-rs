@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::compiler::families::assets::{SourceAssetRegistry, SourceAssetRole};
 use crate::metadata_model::brace::{Brace, parse_row};
 use crate::restructure::caches::facts::ObjectFacts as SlotFacts;
 use crate::restructure::caches::members::Members;
@@ -292,6 +293,25 @@ pub(crate) fn plan_created(
         .any(|file| file.to_ascii_lowercase().ends_with(".1c"))
     {
         bail!("the new {label} {name} has predefined items: not built");
+    }
+    // Its other files are modules and the help page: rows the apply moves without reading them.
+    for file in &item.files {
+        let suffix = file.rsplit('.').next().unwrap_or_default();
+        let admitted = SourceAssetRegistry
+            .route_by_suffix(kind_name(item.kind), suffix)
+            .is_some_and(|route| {
+                matches!(
+                    route.role(),
+                    SourceAssetRole::ObjectModule
+                        | SourceAssetRole::ManagerModule
+                        | SourceAssetRole::Help
+                )
+            });
+        if !admitted {
+            bail!(
+                "the new {label} {name} has the file {file}, which is not a module or a help page: not built"
+            );
+        }
     }
     if item.facts.number("DataHistory")? != 0 {
         bail!("the new {label} {name} keeps data history: not built");

@@ -281,9 +281,26 @@ pub fn decide(
     } else {
         None
     };
+    // The module, manager module and help rows of a created object have no active owner for the conservative
+    // gate's role check; the plan admitted their suffixes (`create::plan_created`).
+    let created_files: HashSet<String> = plan
+        .objects
+        .iter()
+        .filter(|object| object.created)
+        .flat_map(|object| {
+            let prefix = format!("{}.", object.object_uuid.to_ascii_lowercase());
+            inputs
+                .staged
+                .new_files
+                .iter()
+                .filter(move |name| name.to_ascii_lowercase().starts_with(&prefix))
+                .map(|name| name.to_ascii_lowercase())
+        })
+        .collect();
     verdict.blockers.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
         !planned.contains_key(&row)
+            && !created_files.contains(&row)
             && !(has_deleted && row == "deleted")
             && listing.as_deref() != Some(row.as_str())
     });
