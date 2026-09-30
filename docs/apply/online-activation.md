@@ -54,9 +54,9 @@ made it are `scripts/apply-trace/lab/online-live/`.
    overlay (`native-apply-trace.md`, section 5); ours does not. **Mitigated fail-closed by #408:** these modes now
    refuse before any write when a marker or a `_dynupdate_` row exists (`mssql_main_activation.rs`, `online_history_refusal`,
    SQL code `57208`) and point to `mssql-config-apply` or the native apply; the fold itself is still to be built.
-5. **`exclusive` cannot run against an infobase that has users** (F-3): the tool's own RAS verification
-   (`rac infobase info --infobase-user=...`, `mssql_platform_profile.rs:211-227`) opens two `1CV83 Server` SQL sessions
-   that the gate `mssql_main_activation.rs:427` (`57209`) then refuses.
+5. **`exclusive` cannot run against an infobase that has users** (F-3; fixed in 0.5, section 6.2): the tool's own RAS
+   verification (`rac infobase info --infobase-user=...`, `mssql_platform_profile.rs:211-227`) opens two `1CV83 Server` SQL
+   sessions that the gate (`57209`) then refused.
 6. **The `live` preflight does not protect the commit** (F-9): with a broken log chain the promotion is committed and only
    then `BACKUP LOG` fails (`4214`); the error does not say that the new generation is already in the ordinary rows.
 7. **Timing (ONLINE, measured):** 10.4 s in the tool (active export 2.0, classification 0.07, staging 1.0, activation
@@ -100,7 +100,8 @@ staged rows are `<owner uuid>`, `<owner uuid>.0`, `root`, `version`, `versions` 
    (`XACT_ABORT`, `CATCH`).
 
 The staged rows come from `ConfigSave`, written earlier by the staging step in its own transaction (368.8 ms in the
-measured run); a failure after that leaves the stage in `ConfigSave` (F-2 leaves exactly that).
+measured run); a failure after that leaves the stage in `ConfigSave` (F-2 left exactly that; since 0.5 the checks that
+need no staged row run before the stage, section 6.1).
 
 ### 3.2 `online` (`render_online_transition`, `mssql_main_activation.rs:448-478`)
 
@@ -203,7 +204,8 @@ not know the overlay see the old text (F-1, F-15).
 
 ### 4.2 ONLINE, second generation (another module; commit 17:32:07.480 UTC)
 
-The second generation could not be made for the same module (F-1) and, for another module, needed the two-step path (F-2).
+The second generation could not be made for the same module (F-1) and, for another module, needed the two-step path (F-2);
+both are fixed in 0.5 (section 6.1).
 The change added an exported function `IbcmdRsMarkerB` to `РаботаСКлассификаторамиКлиентСервер`.
 
 | session | opened | first module A / module B values |
@@ -279,9 +281,9 @@ Review findings (2026-09-29, "report, do not fix"; severity = effect on a user o
 | id | severity | finding | where | evidence |
 |---|---|---|---|---|
 | F-4 | **critical** | An ordinary promotion (`exclusive`, `live`, `worker`) replaces only the staged rows and deletes both markers. The `_dynupdate_` rows of the earlier online generations stay as orphans, so **what earlier online generations published is silently gone**. Native `exclusive` merges the overlay. **Mitigation (#408): the three modes refuse before any write when the database holds markers or `_dynupdate_` rows; the fold is not built.** Measured (before the mitigation): after a `live` promotion of an unrelated module on a base with two online generations and once every old session had ended, a new session saw the original `Telegram` (generation 1 gone) and no `IbcmdRsMarkerB` (generation 2 gone); on the corpus base the storage shows 5 alias rows, no marker, ordinary bodies of 1 522/2 244 B against 1 533/2 262 B in the aliases. | `mssql_main_activation.rs:421-446`, `525-537` | `analysis/h1-sessions.txt`, `live/h1-storage-b1.txt` |
-| F-1 | high | The second apply of an object that already has an online alias fails ("selected storage closure did not emit required source body") after 250-300 s. By the code (the symptom is measured, the mechanism was not tested separately): the headers are read for the plain names, then the overlay hides the plain rows and the aliases were never selected, so nothing remains. The dev loop "edit, apply online, edit, apply online" cannot be repeated. | `mssql_dump/mod.rs:3762-3765`, `44820-44834`; `mssql_apply.rs:1020-1030` | `online/online-v2-single.err`, `online-v2-dry.err` |
-| F-2 | high | The dynamic overlay is process-global (`STORAGE_GENERATION_OVERLAYS`), installed by the active export and cleared only by the next `dump_config`. `activate_staged_main`, run in the same process, reads the ordinary `Config` rows **through the overlay** (`qualified_storage_table`), takes the alias generation as the ordinary one, and is refused with "Params dynamic ordinary generation disagrees with versions" after staging, leaving a dirty `ConfigSave` (the same staged rows on the same database pass in a fresh process: `mssql-activate-staged-main --dry-run` on the corpus clone, and the real `online` run of generation 2). Any real apply on a base that has markers (native leftover of the corpus, or an earlier online generation) hits it. Workaround: `mssql-activate-staged-main` in a fresh process (measured). | `mssql_dump/dynamic_generation.rs:139-157`, `mssql_dump/mod.rs:2129`, `44845-44851`, `1008-1027`; `mssql.rs:957-976`; refusal `mssql_main_activation.rs:826-829` | `online/online-v2b-single.err`, `online/baseline-exclusive.err`, `live/live-v1-single.err` |
-| F-3 | high | `exclusive` is refused on every registered infobase that has users: the RAS verification with `--infobase-user` makes the cluster open two `1CV83 Server` SQL sessions (the RAS connection that holds them stayed for the whole observation, 56+ minutes; `rac connection disconnect` with the infobase user just creates another RAS connection, without it is refused) and the gate counts them. | `mssql_platform_profile.rs:211-227`; `mssql_main_activation.rs:427` | `online/baseline-act2.err`, `.sql` |
+| F-1 | high | **Fixed in 0.5 (#409), section 6.1.** The second apply of an object that already has an online alias fails ("selected storage closure did not emit required source body") after 250-300 s. By the code (the symptom is measured, the mechanism was not tested separately): the headers are read for the plain names, then the overlay hides the plain rows and the aliases were never selected, so nothing remains. The dev loop "edit, apply online, edit, apply online" cannot be repeated. | `mssql_dump/mod.rs:3762-3765`, `44820-44834`; `mssql_apply.rs:1020-1030` | `online/online-v2-single.err`, `online-v2-dry.err` |
+| F-2 | high | **Fixed in 0.5 (#409), section 6.1.** The dynamic overlay is process-global (`STORAGE_GENERATION_OVERLAYS`), installed by the active export and cleared only by the next `dump_config`. `activate_staged_main`, run in the same process, reads the ordinary `Config` rows **through the overlay** (`qualified_storage_table`), takes the alias generation as the ordinary one, and is refused with "Params dynamic ordinary generation disagrees with versions" after staging, leaving a dirty `ConfigSave` (the same staged rows on the same database pass in a fresh process: `mssql-activate-staged-main --dry-run` on the corpus clone, and the real `online` run of generation 2). Any real apply on a base that has markers (native leftover of the corpus, or an earlier online generation) hits it. Workaround: `mssql-activate-staged-main` in a fresh process (measured). | `mssql_dump/dynamic_generation.rs:139-157`, `mssql_dump/mod.rs:2129`, `44845-44851`, `1008-1027`; `mssql.rs:957-976`; refusal `mssql_main_activation.rs:826-829` | `online/online-v2b-single.err`, `online/baseline-exclusive.err`, `live/live-v1-single.err` |
+| F-3 | high | **Fixed in 0.5 (#409), section 6.2.** `exclusive` is refused on every registered infobase that has users: the RAS verification with `--infobase-user` makes the cluster open two `1CV83 Server` SQL sessions (the RAS connection that holds them stayed for the whole observation, 56+ minutes; `rac connection disconnect` with the infobase user just creates another RAS connection, without it is refused) and the gate counts them. | `mssql_platform_profile.rs:211-227`; `mssql_main_activation.rs:427` | `online/baseline-act2.err`, `.sql` |
 | F-5 | high | `live` aborts half-way when the 1C connections do not come back within 4 s (0 of 5 completed here). The promotion and markers are already committed, sessions may be left in a mixed generation or in a modal DB error, and **no command can run the second cycle**: a retry is a no-op (`executed=false`, 2.0 s). The manual second cycle is racy (`924`). The error text does not tell the operator any of this. | `mssql_main_activation.rs:587`, `607-609`; no-op `mssql_apply.rs:246-274`; `mssql.rs:1053-1065` | section 4.3, `live/live-v*.err`, `live/live-v2-retry.json` |
 | F-6 | low | The platform-profile verification (two `rac` calls, RAS authentication, SQL schema probe) runs **twice** in one high-level apply and also for `--dry-run` and before the `--allow-non-lab` check; each `rac infobase info --infobase-user` opens a cluster connection and SQL sessions on the infobase (1.7 s each under load). | `mssql_apply.rs:70-95`; `mssql.rs:910-931` | `online/online-v1.trace-summary.md` (statements of `1CV83 Server` sessions before the staging) |
 | F-9 | medium-high | The `live` preflight checks the recovery model, the state and the tail-file name, not the log chain or the destination directory. With `FULL` but no full backup the transaction commits and `BACKUP LOG` then fails with `4214`; the database is online with the new generation in the ordinary rows and no session switch. The design says a failure before a successful tail backup "leaves the database online and returns the bounded row recovery artifact"; the artifact path is not in the error. | `mssql_main_activation.rs:342-348`, `402-406` | `live/live-v6-nochain.err`, `live/break-log-chain.sql` |
@@ -296,6 +298,117 @@ Review findings (2026-09-29, "report, do not fix"; severity = effect on a user o
 | F-16 | info | `overlay_active_dynamic_module` (the older alias reader) is unreachable for an aliased object since the export overlay was added: the export fails first (F-1). Two mechanisms for one job. | `mssql_apply.rs:1116-1215` | code |
 | F-17 | info | OpenSpec `add-mssql-live-generation-switch` task 7 (readiness gate) is checked but has no evidence with the gate; the recorded live run is the fixed five-second delay it replaced. | `add-mssql-live-generation-switch/tasks.md` | section 4.3 |
 
+### 6.1 Fixed in 0.5 (#409): F-2 and F-1
+
+Both were reproduced first, by tests on the unfixed code (an export leaves its overlay behind; another database reads the
+overlay; a selected aliased object lists no row) and on a corpus clone with the unfixed binary, then fixed and proven on the
+same clone with the fixed one (`ibcmd_rs_05_ui_rf_a`, restored from the БСП 8.3.27 corpus backup, which already holds a native
+online generation of two objects: the common form `_ДемоПримечание` and the common module `_ДемоЗаметки`).
+
+**F-2, what was wrong and what is now.** `STORAGE_GENERATION_OVERLAYS` was keyed by table name only and cleared only by the
+next `dump_config`. The activation that follows the active export in the same process read its snapshot (`fetch_main_activation_rows`)
+through it, took the alias generation for the ordinary one and was refused after the stage. Now:
+
+- the overlay is kept per (database, table) and lives in a `StorageViewScope`; `dump_config` and `export_staged_state` open
+  one, so the overlay ends with the export, and another database or a step that opens its own scope never reads it;
+- `fetch_main_activation_rows` (the activation's reads: staged rows, the rows they replace, both markers) always reads the rows
+  as stored, whatever scope is open: the transaction compares them with `dbo.Config`, not with a view;
+- the checks that need no staged row are made **before** anything is staged, dry runs included: an ordinary mode (`exclusive`,
+  `live`, `worker`) on a database that holds markers (the #408 refusal), markers that are not one pair or do not agree with the
+  ordinary `versions` row, and the `--tail-log-output` argument (required for a real `live` run, absolute, no control
+  characters; refused for the other modes). The plan of the activation makes the same checks through the same function
+  (`check_publication_state`), so the two cannot disagree; a test runs both on the same input. The state preflight runs after the
+  no-op decision (a no-op is not refused) and before the compile tree and the stage; the tail-log check runs before the first `rac` call;
+- an `online` apply on a base with markers is now one step in one process: no `mssql-activate-staged-main` in a fresh process.
+
+`overlay_active_dynamic_module` (F-16) no longer rewrites the exported file from the alias row of the selected body: the export's
+view already publishes that row, and the function would have come back to life now that the view does not outlive the export.
+It is `active_dynamic_generation` and only names the generation the change applies to.
+
+**F-1, what was wrong and what is now.** A run that selects names lists the headers of the *stored* rows with those names. For an
+object with an alias that is the plain row, which the overlay hides, and none of the alias rows, so nothing was left to export
+("selected storage closure did not emit required source body"). The published headers of a selected run now come from the
+inventory of the table (already read to resolve the overlay), filtered by the published names.
+
+Measured on the clone (this machine, no other load on the database; times of the tool's own report, wall of the process):
+
+| step | unfixed binary | fixed binary |
+|---|---|---|
+| `online`, common module `ОбсужденияСлужебныйКлиентСервер` (no alias), base with the native marker | real run: refused after the stage, `Params dynamic ordinary generation disagrees with versions`, wall 2.4 s, `ConfigSave` holds 5 rows | real run: applied, generation 2 written, wall 2.8 s (export 1.1 s, stage 0.2 s, activation 0.7 s), `ConfigSave` empty |
+| `exclusive`, same change, real run | refused after the stage (the #408 refusal, raised by the plan), wall 4.4 s, `ConfigSave` holds 5 rows | refused **before** the stage, wall 1.5 s; row counts and checksums of `Config`, `ConfigSave` and `Params` identical to the state before |
+| `worker`, `live`, `exclusive`, dry run | not run | refused, wall 1.1-1.7 s, nothing written |
+| `online`, dry run, module with an alias | fails, `did not emit required source body`, wall 40.6 s | passes, wall 4.2 s (export 3.0 s) |
+| `online`, real run, module with an alias | (fails as above) | generation 3: wall 2.4 s (export 0.7 s, activation 0.9 s); the alias body holds the new text |
+| the same module again with another edit | (fails) | generation 4: wall 1.9 s; history `{1,4,...}` / `{0,5,...}` chains the four generations |
+| the same source once more | (fails) | `no_op`, wall 1.1 s: the active export of the module is the text just applied |
+
+The header rows of the new generations are byte-identical (inflated) to the native alias header of the same object. The 250-300 s
+of F-1 were measured under the load of the other runs; the unfixed binary needed 40.6 s here, on an idle database. F-15 is
+untouched: a bounded read of an object with an alias is still a scan of the table under a derived table (the export took 3.0 s
+cold and 0.7 s warm here), and would take longer under load.
+
+**Found while proving F-1, not changed here.** The stage reads its base rows and the `versions` blob with its own SQL on the
+ordinary `Config` rows (`fetch_config_blob`, `fetch_config_blobs_for_files`), never through the overlay. On a base with earlier
+generations the new `versions_dynupdate_<g>` is therefore built on the ordinary `versions`, not on the active generation's:
+in the clone, `versions_dynupdate_<native g1>` lists the form `a627e390-...` at `226957a7-...` and its body at `9fab40a2-...`,
+while the three generations written by this tool list `9947107e-...` and `f2422a32-...` (the ordinary values). Bodies are read from
+the aliases whatever `versions` says, and a session has not been opened on such a state, so the effect on a session (a reload of
+the objects whose stamp went back) is **unverified**.
+
+### 6.2 Fixed in 0.5 (#409): F-3
+
+**What was wrong, measured.** `rac infobase info` without the infobase user is refused ("Недостаточно прав пользователя на
+информационную базу"); with it the cluster's worker process loads the infobase and keeps **two idle `1CV83 Server` SQL sessions**
+(`sleeping`, `open_transaction_count = 0`, `host_process_id` = the pid `rac process list` gives for the worker) for as long as its
+RAS connection lives. `rac connection list` shows that connection: application `RAS`, session number 0. The gate `57209`
+(`57212` for an extension) counts every session, so `exclusive` was refused on every infobase that has users. On the marker-free
+clone `ibcmd_rs_05_ui_rf_b` the unfixed binary stops with `57209` after the stage, with exactly those two sessions on the database.
+
+**What is now.**
+
+- `read_infobase_clients` asks the cluster (`rac connection list`, `rac session list`, `rac process list`, no infobase login,
+  which would open another RAS connection). Every connection whose application is not `RAS` (or has none) and every session is a
+  client; a worker process that carries RAS connections of the infobase and no client is a RAS-only process (host, pid).
+- An `exclusive` apply is refused **before the stage** when the cluster lists a client, and the activation asks again before it
+  renders its script (a dry run included).
+- `exclusive_session_gate` builds the one statement both gates use. It leaves out the sessions that are `1CV83 Server`, `sleeping`,
+  without an open transaction, on a RAS-only process (host and pid match). A session of another program, another process, a running
+  one or one that holds a transaction still refuses. With no process named the text is the old one, and the dry-run report of the
+  activation lists the processes it left out (`own_ras_processes`).
+- The extension activation uses the same helper for its gate (`57212`). Unit tests cover it; it was not run on an extension in the lab.
+
+**What it does not cover.** A user who signs in through the same worker process in the seconds between the cluster query and the
+transaction, while the sessions stay idle, is not seen: the exemption is by process, not by session. The window is the time from the
+last `rac` call to the transaction (a few seconds in the runs below); the cluster's own list and the running/transaction condition
+narrow it, an infobase lock (`sessions-deny`) would close it and is not done here.
+
+Measured on the marker-free clone (the corpus backup with its markers and aliases deleted, so that the #408 refusal does not come
+first; the worker process 22608 held the RAS connection):
+
+| run | unfixed binary | fixed binary |
+|---|---|---|
+| `exclusive`, no users | refused `57209` after the stage, 6.9 s; `Config` unchanged, `ConfigSave` 5 rows; two idle `1CV83 Server` sessions of pid 22608 | applied, 13.4 s (activation 4.1 s); the report names `DESKTOP-SMI5N4O` / 22608 as left out; `ConfigSave` empty |
+| the same, with an idle non-1C SQL session on the database | - | refused `57209` after the stage, 3.1 s; `Config` unchanged (the gate still counts it) |
+| the same, with a thin client (`1cv8c`) connected | - | refused before the stage on the cluster's word, 2.0 s, five connections and sessions listed; `Config` and `ConfigSave` unchanged; the dry run is refused as well; `online` (dry run) passes |
+| the client killed, its session left in the cluster | - | refused the same way until the session was ended with `rac session terminate` (the cluster keeps the session of a killed client) |
+| after that | - | applied, 5.7 s, three idle sessions of the worker left out |
+
+A connected client also writes `Params` on its own (a row went away while the tool was refusing before any write), so a fingerprint
+of the whole database is only comparable without one.
+
+### 6.3 The export path after the scope guard (#409)
+
+`StorageViewScope` wraps `dump_config` and `export_staged_state`, the export every user runs and the guard of the import. Checked
+against the native platform, with the fixed binary (merged with feat/0.4 5e146f00):
+
+- `ibcmd_rs_04_rcheck_bsp_a` (active generations): the drop-in `infobase config export` (37 s) against the native `ibcmd infobase
+  config export` (40 s) of the same database: **12 198 of 12 198 files identical**.
+- `ibcmd_rs_05_ui_rf_a` after the three generations this tool wrote (F-1, F-2): ours 55 s, native 20 s, **12 198 of 12 198 identical**;
+  the native platform reads the text of the last generation (both markers are in `_ДемоЗаметки`).
+- БСП 8.3.27 from rows (`mssql-dump-config --rows-dir`), the binary before (feat/0.4 e672908c) against the binary after:
+  **12 199 of 12 199 identical**.
+- Tests: the whole `cargo test --locked -p ibcmd-rs --no-default-features` (lib and the integration tests, 46 binaries): 3 643 passed, 0 failed, 12 ignored; the lib alone 3 435, the import guard's `mssql::stage_guard` tests among them.
+
 ## 7. Recovery
 
 **ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from
@@ -305,9 +418,10 @@ Review findings (2026-09-29, "report, do not fix"; severity = effect on a user o
 `null`). New sessions then load the previous generation; open ones keep whatever they loaded. There is no script for it
 (F-8); the transaction has to be written by hand and has not been run.
 
-**A refused apply leaves `ConfigSave` staged** (F-2, F-3, any failure after staging). Run `mssql-activate-staged-main`
-with the same mode in a **fresh process** (works for online, live; for exclusive see F-3), or empty the stage by staging
-the next change (the staging replaces `ConfigSave`).
+**A refused apply leaves `ConfigSave` staged** (F-3, any failure after staging; the refusals that need no staged row
+- a marker base with an ordinary mode, disagreeing markers, the tail-log argument - come before the stage since 0.5, F-2).
+Run `mssql-activate-staged-main` with the same mode (for exclusive see F-3), or empty the stage by staging the next change (the
+staging replaces `ConfigSave`).
 
 **LIVE after `57234`** (database `ONLINE`, promotion committed, tail file holds cycle 1): the sessions are in a mixed
 state until every old session ends, or until the second cycle is run by hand, from `master`, the statements of
@@ -324,9 +438,11 @@ one generation, measured), or restart the working process (worker: the tool's ow
   any write (`mssql_apply.rs:591-619`); extensions: online/exclusive only.
 - Row limits: 128 staged rows, 16 MiB per row, 32 MiB per plan, 16 MiB inflated `versions` (`mssql_main_activation.rs:15-18`);
   `PartNo` must be 0 (multi-part rows are refused).
-- A base with a `DynamicallyUpdated` marker: a second apply of an already aliased object fails (F-1); any other real apply
-  needs the two-step path (F-2); `exclusive`/`live`/`worker` on it discard the earlier generations (F-4).
-- `exclusive` needs an infobase that the RAS verification can read without opening database sessions (F-3).
+- A base with a `DynamicallyUpdated` marker: `online` applies in one step, also to an object that already has an alias (F-1,
+  F-2, fixed in 0.5); `exclusive`/`live`/`worker` on it are refused before the stage, because they would discard the earlier
+  generations (F-4, #408).
+- `exclusive` needs an infobase on which the cluster lists no client connection or session; the idle SQL sessions of the tool's
+  own RAS verification are left out of its gate (F-3, fixed in 0.5). A session of another program, or a running one, still refuses.
 - `live` needs FULL/BULK_LOGGED recovery, a full backup taken after that, a tail-log path writable by the SQL Server account,
   and a machine on which the 1C SQL connections return within 4 s (F-5, F-9); it interrupts every database connection
   (F-10).
