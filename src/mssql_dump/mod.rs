@@ -45860,6 +45860,27 @@ fn generation_history(
         .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))
 }
 
+/// The generation history of `database`'s `Config` table, oldest first; empty
+/// when no online generation is active. A marker this reader cannot read is an
+/// error, as it is for the export.
+///
+/// Reads the rows as stored, whatever view an export of this process installed.
+pub(crate) fn active_generation_history(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<String>> {
+    let _stored = dynamic_generation::StorageViewScope::begin(database);
+    let marker = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
+    Ok(generation_history(
+        sql,
+        database,
+        MssqlConfigurationTableRole::Current.sql_name(),
+        &marker,
+        &[],
+    )?
+    .unwrap_or_default())
+}
+
 /// The row that lists a whole configuration, in `Config` and in a stage.
 const STAGE_INVENTORY_ROW: &str = "versions";
 
