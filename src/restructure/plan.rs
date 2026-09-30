@@ -1227,17 +1227,18 @@ pub fn plan(inputs: &Inputs, options: &PlanOptions) -> Result<Plan> {
         }
     }
 
-    // Publish: the schema with the entries moved before ConfigChngR (rebuilt tables sit at the end of the
-    // list in the order they were rebuilt, ConfigChngR last), the names with the new numbers.
+    // Publish: the schema with the entries moved to the end (rebuilt tables sit at the end of the list in the
+    // order they were rebuilt; ahead of ConfigChngR where that is the last table, `DbSchema::insert_rebuilt`), the
+    // names with the new numbers.
     // The tables of the created objects come first (the platform makes them before it rebuilds the changed ones:
     // N3, N6, N7).
     let mut new_schema = schema.clone();
     for entry in created_entries {
-        new_schema.insert_before("ConfigChngR", entry);
+        new_schema.insert_rebuilt(entry);
     }
     for (object, entry) in entries {
         new_schema.remove(&object)?;
-        new_schema.insert_before("ConfigChngR", entry);
+        new_schema.insert_rebuilt(entry);
     }
     let new_names_text = running.names_after.to_text();
     let new_names_row = deflate(&new_names_text)?;

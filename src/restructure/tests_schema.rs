@@ -119,6 +119,80 @@ fn a_rebuilt_table_moves_before_the_change_registration_table() {
     assert_eq!(moved.len(), staged.len());
 }
 
+/// The stored list with `ConfigChngR` where a test wants it (the entries are the four of case a2's excerpt).
+fn schema_in_order(order: &[&str]) -> DbSchema {
+    let staged = DbSchema::parse(STAGED).unwrap();
+    DbSchema::from_tables(
+        order
+            .iter()
+            .map(|name| staged.tables()[staged.position(name).unwrap()].clone())
+            .collect(),
+    )
+}
+
+/// Rebuilds the tables in the order given, as `plan()` does: out of their place, into the platform's.
+fn rebuild(schema: &mut DbSchema, tables: &[&str]) {
+    for name in tables {
+        let entry = schema.remove(name).unwrap();
+        schema.insert_rebuilt(entry);
+    }
+}
+
+#[test]
+fn rebuilt_tables_go_ahead_of_the_change_registration_table_when_that_is_the_last_table() {
+    // The БСП: the platform rebuilds ConfigChngR in every apply, after the others; it is the last table.
+    let mut schema =
+        schema_in_order(&["DbCopiesUpdates", "DbCopies", "Reference20", "ConfigChngR"]);
+    rebuild(&mut schema, &["Reference20", "DbCopiesUpdates"]);
+    assert_eq!(
+        names(&schema),
+        ["DbCopies", "Reference20", "DbCopiesUpdates", "ConfigChngR"]
+    );
+}
+
+#[test]
+fn rebuilt_tables_go_to_the_end_when_the_change_registration_table_is_in_the_middle() {
+    // The ERP УХ (track rcheck, `b1`, `c1`): the register is empty, the platform does not rebuild it, it stays where it
+    // is and the rebuilt tables are appended to the end of the list in the order they were rebuilt.
+    let mut schema =
+        schema_in_order(&["DbCopiesUpdates", "ConfigChngR", "Reference20", "DbCopies"]);
+    rebuild(&mut schema, &["Reference20", "DbCopiesUpdates"]);
+    assert_eq!(
+        names(&schema),
+        ["ConfigChngR", "DbCopies", "Reference20", "DbCopiesUpdates"]
+    );
+    // Without the named tables the order is the one it was (what rcheck's `schema_order.py` checks on the real lists).
+    let before = schema_in_order(&["DbCopiesUpdates", "ConfigChngR", "Reference20", "DbCopies"]);
+    let without = |schema: &DbSchema| -> Vec<String> {
+        names(schema)
+            .into_iter()
+            .filter(|name| name != "Reference20" && name != "DbCopiesUpdates")
+            .collect()
+    };
+    assert_eq!(without(&schema), without(&before));
+}
+
+#[test]
+fn created_tables_come_before_the_rebuilt_ones_in_both_placements() {
+    // S1-F: the tables the platform makes anew come first, the rebuilt ones after them; both take the place of the list.
+    for (order, expected) in [
+        (
+            ["DbCopiesUpdates", "DbCopies", "Reference20", "ConfigChngR"],
+            ["DbCopies", "DbCopiesUpdates", "Reference20", "ConfigChngR"],
+        ),
+        (
+            ["DbCopiesUpdates", "ConfigChngR", "Reference20", "DbCopies"],
+            ["ConfigChngR", "DbCopies", "DbCopiesUpdates", "Reference20"],
+        ),
+    ] {
+        let mut schema = schema_in_order(&order);
+        // DbCopiesUpdates stands for the created table, Reference20 for the rebuilt one.
+        rebuild(&mut schema, &["DbCopiesUpdates"]);
+        rebuild(&mut schema, &["Reference20"]);
+        assert_eq!(names(&schema), expected);
+    }
+}
+
 #[test]
 fn column_names_follow_the_type_entries() {
     let composite = FieldEntry::new(
