@@ -140,10 +140,13 @@ if ($Ours -and -not $Refused) {
     Log 'the route through our import'
     $tree = "$lab\tree_full\$Case"
     New-Item -ItemType Directory -Force "$lab\tree_full" | Out-Null
-    robocopy 'F:\ibcmd\lab\04\import\tree\base' $tree /MIR /NFL /NDL /NJH /NJS /NP /MT:16 | Out-Null
+    # MIX_BASE_BAK / MIX_BASE_TREE: the base that already had a native apply and its native export (the cases that create an object)
+    $baseTree = if ($env:MIX_BASE_TREE) { $env:MIX_BASE_TREE } else { 'F:\ibcmd\lab\04\import\tree\base' }
+    $baseArgs = if ($env:MIX_BASE_BAK) { @('-Corpus', 'bak', '-Bak', $env:MIX_BASE_BAK) } else { @('-Corpus', 'bsp8327') }
+    robocopy $baseTree $tree /MIR /NFL /NDL /NJH /NJS /NP /MT:16 | Out-Null
     robocopy "$lab\tree_s2\$Case\stage" $tree /E /NFL /NDL /NJH /NJS /NP | Out-Null
     if (Test-Path "$lab\tree_s2\$Case\stage_full") { robocopy "$lab\tree_s2\$Case\stage_full" $tree /E /NFL /NDL /NJH /NJS /NP | Out-Null }
-    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus bsp8327 -Name $oursDb -Track ddl -Purpose "S1 mix $Case : our import of the full tree, then the drop-in apply" | Select-Object -Last 1
+    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 @baseArgs -Name $oursDb -Track ddl -Purpose "S1 mix $Case : our import of the full tree, then the drop-in apply" | Select-Object -Last 1
     $oursData = "$lab\ibdata\$oursDb"
     New-Item -ItemType Directory -Force $oursData | Out-Null
     $sw = [Diagnostics.Stopwatch]::StartNew()
