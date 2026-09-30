@@ -182,6 +182,17 @@ impl Plan {
         );
         for table in self.tables() {
             let name = &table.table.name;
+            if table.create {
+                assert_that(
+                    &mut sql,
+                    &format!(
+                        "OBJECT_ID(N'dbo.{name}', N'U') IS NOT NULL OR OBJECT_ID(N'dbo.{name}NG', N'U') IS NOT NULL"
+                    ),
+                    code::TABLE_STATE,
+                    &format!("the table {name} to create exists already, or {name}NG is left over"),
+                );
+                continue;
+            }
             assert_that(
                 &mut sql,
                 &format!(
@@ -198,6 +209,9 @@ impl Plan {
         }
         for object in &self.objects {
             for (index, table) in object.tables.iter().enumerate() {
+                if table.create {
+                    continue;
+                }
                 writeln!(
                     sql,
                     "INSERT INTO dbo.{new}NG WITH(TABLOCK) ({columns}) SELECT\n{values}\nFROM dbo.{new} T{alias} WITH(NOLOCK);",
@@ -209,7 +223,7 @@ impl Plan {
                 .unwrap();
             }
         }
-        for table in self.tables() {
+        for table in self.tables().filter(|table| !table.create) {
             let name = &table.table.name;
             assert_that(
                 &mut sql,
@@ -228,7 +242,7 @@ impl Plan {
         for table in self.tables() {
             assert_structure(&mut sql, &table.table, "NG");
         }
-        for table in self.tables() {
+        for table in self.tables().filter(|table| !table.create) {
             writeln!(sql, "drop table dbo.{};", table.table.name).unwrap();
         }
         for table in self.tables() {
@@ -263,6 +277,14 @@ impl Plan {
                 &format!("{name}NG is left behind"),
             );
             assert_structure(&mut sql, &table.table, "");
+            if table.create {
+                assert_that(
+                    &mut sql,
+                    &format!("EXISTS (SELECT 1 FROM dbo.{name})"),
+                    code::COPY_COUNT,
+                    &format!("the created table {name} is not empty"),
+                );
+            }
         }
 
         writeln!(sql, "-- restructure: publication").unwrap();

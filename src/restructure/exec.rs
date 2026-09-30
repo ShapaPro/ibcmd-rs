@@ -183,7 +183,7 @@ fn after_phase(
             }
         }
         (Phase::Load, Method::Rebuild) => {
-            for table in plan.tables() {
+            for table in plan.tables().filter(|table| !table.create) {
                 let old = count(connection, &table.table.name)?;
                 let new = count(connection, &format!("{}NG", table.table.name))?;
                 if old != new {
