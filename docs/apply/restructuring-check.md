@@ -132,7 +132,10 @@ the list of plain rows (`sql::published_names`).
   the same items in another order (the platform keeps an order of its own, a stage writes them in another; six
   rows of the БСП differ in nothing else) and the same objects with another flag of automatic registration are
   harmless; an object that joins or leaves is `structure` (a registration table comes or goes).
-* **Service** (`root`, `version`, `versions`). `root` and `version` must not change; `versions` is the inventory,
+* **Service** (`root`, `version`, `versions`). `root` and `version` must not change (a `root` that differs from the
+  stored one in the final 16-byte block of its payload only is the 8.5 platform's re-stamp, which it applies on every
+  write, and passes with a note: `src/apply_check/root_row.rs`, `evidence/dropin-apply/s1-acceptance-85.md`);
+  `versions` is the inventory,
   and it also gives every file a version id. A file that the staged `versions` gives another version than the
   active one (or lists as new) and that the ConfigSave does not hold means a partial stage (the native import
   under load made some, see finding 6): `unknown`. (A base-free stage gives *every* file a new version id, so the
@@ -699,7 +702,10 @@ when `IBCMD_RS_APPLY_CHECK_DB` names one).
     configuration differ from the stored ones, and the flowchart of `Задание` as on 8.3.27; the check reports
     them (`unknown`, fail closed) and the platform's apply rebuilt the route-point table of `Задание` only. The
     8.5 БСП clones keep the administrator under the name `Администратор (обычное приложение)` with an empty
-    password (found by the ui track): `--user=Администратор` is refused there.
+    password (found by the ui track): `--user=Администратор` is refused there. **The `root` row is the platform's
+    stamp** (s185): a native `import files --partial` of one unchanged file rewrites the final 16-byte block of the row's
+    128-byte payload, and does so again on every later import; the check now reads it as unchanged (`root_row.rs`), so
+    the platform's own stage of a real change on 8.5 reaches the S1 classification.
 11. **Native `config import` is flaky on a busy machine** (import and ddl tracks): twice in a row the import of the
     unchanged native export of the БСП ended with "Ссылка на неизвестный предопределенный элемент -
     ChartOfCharacteristicTypes.ОбъектыАдресацииЗадач.ВсеОбъектыАдресации" while other native runs were queued
@@ -804,7 +810,7 @@ match is on `rule`, `kind`, the steps of `path` and `op`, never on words.
 | a name with a dot after the kind (`Catalog.X.Form.F`) | refused `nested-object-outside-s1` |
 | class `data` (predefined items, enumeration values, scheduled jobs, route points) | refused `data-change` |
 | class `unknown`: `row-decodes-to-same-xml`; `row-format-upgrade-unproven`; the rest | refused `row-unexplained`; `row-format-unproven`; `unknown-step` |
-| `root` or `version` row changed; a body row that carries data | refused `service-row-changed`; `body-data-outside-s1` |
+| `root` or `version` row changed (a `root` re-stamped in its final payload block on 8.5 is not a change); a body row that carries data | refused `service-row-changed`; `body-data-outside-s1` |
 | a verdict with `incomplete` set (a tree against a database left data out) | refused `incomplete-verdict` |
 
 `exactly_the_operations_of_s1_pass_and_nothing_else_does` holds `classify` to this table from outside: 62 rule ids x

@@ -155,6 +155,42 @@ fn a_planned_attribute_is_let_through_and_its_blocker_withdrawn() {
 }
 
 #[test]
+fn a_root_blocker_is_the_checks_to_answer() {
+    // The conservative rule compares the bytes of `root`; on 8.5 the platform re-stamps its payload on every
+    // write, and the check (which reads it) found the row the same: the blocker is withdrawn.
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG, "root"]),
+        &check_of_a2(),
+        &inputs(OLD_ROW, NEW_ROW),
+        &options(),
+    );
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    assert!(phase.is_some());
+
+    // A root the check found changed is a typed refusal, and the plan is not made.
+    let mut changed = check_of_a2();
+    changed.push_reason(Reason {
+        class: ReasonClass::Structure,
+        object: "Configuration".to_owned(),
+        file_name: "root".to_owned(),
+        rule: RuleId::RootRowChanged,
+        ..Reason::default()
+    });
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG, "root"]),
+        &changed,
+        &inputs(OLD_ROW, NEW_ROW),
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "service-row-changed"),
+        "{:?}",
+        verdict.blockers
+    );
+}
+
+#[test]
 fn a_widened_string_is_let_through_and_narrowing_is_not() {
     let widened = widen_client(
         &client_as_string(OLD_ROW, 50),

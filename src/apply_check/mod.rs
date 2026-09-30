@@ -39,6 +39,7 @@ mod descriptor;
 mod model;
 mod plan;
 pub mod roles;
+mod root_row;
 mod rule_id;
 pub mod rules;
 pub mod s1;
