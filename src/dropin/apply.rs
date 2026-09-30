@@ -17,7 +17,10 @@
 //!   and `prompt` name what this version cannot do (end sessions), so they are
 //!   accepted while nobody is connected and refused when somebody is;
 //! - a stage that needs a restructuring, or anything else the own apply does
-//!   not do, is refused with `требуется штатный config apply: ...` (exit 1).
+//!   not do, is refused with `требуется штатный config apply: ...` (exit 1);
+//! - what the own apply refuses is sorted by the type of its error
+//!   (`mssql_config_apply::errors`), never by the words of its message; an
+//!   error of no type is a failure (exit -1).
 //!
 //! THE SEAM is [`call_apply`]: the one place the own apply is called.
 
@@ -30,8 +33,9 @@ use uuid::Uuid;
 use crate::infobase::{ConnectionRequest, PlatformNeed, ensure_mssql, resolve_connection};
 use crate::mssql_config_apply::gate::GateVerdict;
 use crate::mssql_config_apply::{
-    ConfigApplyOptions, ConfigApplyReport, Exclusivity, OtherSession, StructuralRefusal,
-    other_sessions,
+    BackupRequired, ConfigApplyOptions, ConfigApplyReport, ExclusiveAccessRefused,
+    ExclusiveAccessUnprovable, Exclusivity, NativeCommand, NeedsNativeApply, OtherSession,
+    StructuralRefusal,
 };
 use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::platform::PlatformSpec;
@@ -66,15 +70,6 @@ struct ApplyReportFile<'a> {
 
 /// The sessions the messages list before "and N more".
 const SESSIONS_SHOWN: usize = 10;
-/// What the own apply's error says when it finds other sessions (before
-/// the transaction, and the transaction's own assertion when one connects in
-/// between).
-const SESSIONS_MARKERS: [&str; 2] = [
-    "exclusive access is not established",
-    "another session is connected to the database",
-];
-/// What it says when it cannot look for them.
-const SESSIONS_BLIND_MARKER: &str = "exclusive access cannot be proven";
 
 /// `ibcmd infobase config apply ...`: the exit code.
 pub fn run(mut request: ApplyRequest) -> i32 {
@@ -134,17 +129,10 @@ pub fn execute(request: &ApplyRequest) -> Outcome {
         Ok(connected) => connected,
         Err(error) => return Outcome::Failed(format!("{error:#}")),
     };
-    if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
-        return Outcome::Refused(unsupported_platform_text());
-    }
     match call_apply(&sql, &options) {
         Ok(report) if report.nothing_to_apply => Outcome::NothingToApply(Box::new(report)),
         Ok(report) => Outcome::Applied(Box::new(report)),
-        Err(error) => classify(&error, request.session_terminate, &|| {
-            sql.client()
-                .and_then(|client| other_sessions(client, &options.database).ok())
-                .unwrap_or_default()
-        }),
+        Err(error) => classify(&error, request.session_terminate),
     }
 }
 
@@ -209,6 +197,7 @@ pub fn apply_options(
         ExclusivityMode::Sql => Exclusivity::SqlSessions,
         ExclusivityMode::Assumed => Exclusivity::Assumed,
     };
+    options.backup = request.backup.clone();
     options
 }
 
@@ -244,45 +233,48 @@ pub fn profile_of(spec: PlatformSpec) -> Result<MssqlNativePlatformProfile> {
     }
 }
 
-fn unsupported_platform_text() -> String {
-    "Применение конфигурации базы платформы 8.5 не поддерживается в этой версии ibcmd-rs \
-(планируется в следующих): используйте штатный ibcmd infobase config apply"
-        .to_string()
-}
-
-/// Sorts an error of the own apply into what the platform would have said.
+/// Sorts an error of the own apply into what the platform would have said,
+/// by the type the apply gives it (`mssql_config_apply::errors`; every one is
+/// reached through any context the error was wrapped in). Nothing is read
+/// from the words of a message: an error of no type is a failure.
 ///
-/// `sessions_of` lists the sessions again when the apply refused because
-/// others are connected (the apply's error carries them as text only).
-pub fn classify(
-    error: &anyhow::Error,
-    terminate: SessionTerminate,
-    sessions_of: &dyn Fn() -> Vec<OtherSession>,
-) -> Outcome {
+/// | error | outcome | exit |
+/// |---|---|---|
+/// | `StructuralRefusal` | `требуется штатный config apply: <the gate's reasons>` | 1 |
+/// | `NeedsNativeApply` | `требуется штатный config apply` (or `config repair`): its reason | 1 |
+/// | `BackupRequired` | its words: name `--recovery-backup` or `--i-have-a-backup` | 1 |
+/// | `ExclusiveAccessRefused` | the platform's lock words and the sessions | -1 (1 when `--session-terminate` asked to end them) |
+/// | `ExclusiveAccessUnprovable` | the reason and `--exclusivity=assumed` | -1 |
+/// | anything else | the error and its context | -1 |
+pub fn classify(error: &anyhow::Error, terminate: SessionTerminate) -> Outcome {
     if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
         return Outcome::Refused(structural_text(&refusal.verdict));
     }
-    let text = format!("{error:#}");
-    if SESSIONS_MARKERS.iter().any(|marker| text.contains(marker)) {
-        return sessions_outcome(&sessions_of(), terminate, &text);
+    if let Some(native) = error.downcast_ref::<NeedsNativeApply>() {
+        return Outcome::Refused(native_text(native));
     }
-    if text.contains(SESSIONS_BLIND_MARKER) {
+    if error.downcast_ref::<BackupRequired>().is_some() {
+        return Outcome::Refused(BackupRequired.to_string());
+    }
+    if let Some(refusal) = error.downcast_ref::<ExclusiveAccessRefused>() {
+        return sessions_outcome(&refusal.sessions, terminate, &format!("{error:#}"));
+    }
+    if let Some(unprovable) = error.downcast_ref::<ExclusiveAccessUnprovable>() {
         return Outcome::Failed(format!(
-            "{text}\nЕсли с базой никто не работает, укажите --exclusivity=assumed"
+            "{unprovable}\nЕсли с базой никто не работает, укажите --exclusivity=assumed"
         ));
     }
-    if needs_native_apply(&text) {
-        return Outcome::Refused(format!("требуется штатный config apply: {text}"));
-    }
-    Outcome::Failed(text)
+    Outcome::Failed(format!("{error:#}"))
 }
 
-/// The own apply names a stage or a database it leaves to the platform's
-/// `config apply` (or `config repair`) in words of this shape.
-fn needs_native_apply(text: &str) -> bool {
-    text.contains("run the native `ibcmd infobase config")
-        || text.contains("need the native `ibcmd infobase config")
-        || text.contains("needs the platform's own")
+/// `требуется штатный config apply: <reason>`; `config repair` for a base
+/// with an operation that was never finished.
+pub fn native_text(native: &NeedsNativeApply) -> String {
+    let command = match native.command {
+        NativeCommand::Apply => "config apply",
+        NativeCommand::Repair => "config repair",
+    };
+    format!("требуется штатный {command}: {}", native.reason)
 }
 
 /// `требуется штатный config apply: <row>: <reason>; ...`, the way the check
@@ -380,6 +372,7 @@ mod tests {
 
     use super::*;
     use crate::dropin::parse::{Invocation, parse_infobase};
+    use crate::mssql_config_apply::BackupPolicy;
     use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
 
     fn request(list: &[&str]) -> ApplyRequest {
@@ -464,7 +457,7 @@ mod tests {
             ..GateVerdict::default()
         };
         let error = anyhow::Error::new(StructuralRefusal { verdict });
-        match classify(&error, SessionTerminate::Disable, &|| Vec::new()) {
+        match classify(&error, SessionTerminate::Disable) {
             Outcome::Refused(text) => {
                 assert_eq!(text, "требуется штатный config apply: row: restructuring")
             }
@@ -472,17 +465,22 @@ mod tests {
         }
     }
 
+    fn refused_by_sessions(sessions: Vec<OtherSession>, in_transaction: bool) -> anyhow::Error {
+        anyhow::Error::new(ExclusiveAccessRefused {
+            database: "db".to_string(),
+            sessions,
+            in_transaction,
+        })
+    }
+
     #[test]
     fn connected_sessions_are_refused_in_the_platforms_words() {
-        let error = anyhow!(
-            "exclusive access is not established: 2 other session(s) are connected to db:\n  session 57 (sa, PC, 1CV8, sleeping)"
-        );
         let sessions = vec![
             session(57, "DESKTOP-1", "1CV8"),
             session(61, "DESKTOP-1", "1CV8C"),
         ];
-        let outcome = classify(&error, SessionTerminate::Disable, &|| sessions.clone());
-        match outcome {
+        let error = refused_by_sessions(sessions, false);
+        match classify(&error, SessionTerminate::Disable) {
             Outcome::Failed(text) => {
                 assert!(text.starts_with(
                     "Ошибка исключительной блокировки информационной базы.\nАктивные сеансы и соединения:\n"
@@ -498,7 +496,7 @@ mod tests {
         }
         // a wish to terminate them is a wish this version cannot grant
         for terminate in [SessionTerminate::Prompt, SessionTerminate::Force] {
-            match classify(&error, terminate, &|| sessions.clone()) {
+            match classify(&error, terminate) {
                 Outcome::Refused(text) => {
                     assert!(
                         text.starts_with(&format!(
@@ -512,10 +510,17 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        // the list could not be read again: the apply's own words follow
-        match classify(&error, SessionTerminate::Disable, &|| Vec::new()) {
+        // the sessions could not be listed: the apply's own words follow
+        match classify(
+            &refused_by_sessions(Vec::new(), false),
+            SessionTerminate::Disable,
+        ) {
             Outcome::Failed(text) => {
-                assert!(text.contains("К базе подключены другие сеансы"), "{text}")
+                assert!(text.contains("К базе подключены другие сеансы"), "{text}");
+                assert!(
+                    text.contains("exclusive access is not established"),
+                    "{text}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -524,14 +529,11 @@ mod tests {
     #[test]
     fn a_session_that_connects_during_the_transaction_is_the_same_refusal() {
         // the script's own assertion (THROW 57302), reached when one connects
-        // between the look at the sessions and the transaction
-        let error = anyhow!("the config apply transaction failed; the database is unchanged")
-            .context(
-                "another session is connected to the database; the apply needs exclusive access",
-            );
-        match classify(&error, SessionTerminate::Disable, &|| {
-            vec![session(90, "PC", "1CV8C")]
-        }) {
+        // between the look at the sessions and the transaction; the apply
+        // lists the sessions itself, and the context around it changes nothing
+        let error = refused_by_sessions(vec![session(90, "PC", "1CV8C")], true)
+            .context("the config apply transaction failed");
+        match classify(&error, SessionTerminate::Disable) {
             Outcome::Failed(text) => {
                 assert!(text.contains("компьютер: PC, приложение: 1CV8C"), "{text}")
             }
@@ -551,11 +553,15 @@ mod tests {
 
     #[test]
     fn a_login_that_cannot_look_for_sessions_is_told_how_to_go_on() {
-        let error = anyhow!(
-            "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible"
-        );
-        match classify(&error, SessionTerminate::Disable, &|| Vec::new()) {
+        let error = anyhow::Error::new(ExclusiveAccessUnprovable {
+            reason: "exclusive access cannot be proven: the login lacks VIEW SERVER STATE, so other sessions are invisible".to_string(),
+        });
+        match classify(&error, SessionTerminate::Disable) {
             Outcome::Failed(text) => {
+                assert!(
+                    text.starts_with("exclusive access cannot be proven"),
+                    "{text}"
+                );
                 assert!(text.ends_with("укажите --exclusivity=assumed"), "{text}")
             }
             other => panic!("{other:?}"),
@@ -564,27 +570,68 @@ mod tests {
 
     #[test]
     fn what_the_own_apply_leaves_to_the_platform_is_exit_one_material() {
-        // the words of `mssql_config_apply` (c2d2de0f)
-        for text in [
+        let apply = anyhow::Error::new(NeedsNativeApply::apply(
             "Params holds 3 dynamic-update overlay row(s) (names with _dynupdate_): run the native `ibcmd infobase config apply`",
-            "SchemaStorage is not settled (1 row(s) with Status other than 100): an interrupted restructuring or apply; run the native `ibcmd infobase config repair` first",
-            "the own config apply is measured on 8.3.27 only; the 8.5 storage is not verified for it yet: run the native `ibcmd infobase config apply`",
+        ));
+        match classify(&apply, SessionTerminate::Disable) {
+            Outcome::Refused(text) => assert_eq!(
+                text,
+                "требуется штатный config apply: Params holds 3 dynamic-update overlay row(s) (names with _dynupdate_): run the native `ibcmd infobase config apply`"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // an interrupted operation is left to `config repair`, and says so
+        let repair = anyhow::Error::new(NeedsNativeApply::repair(
+            "SchemaStorage is not settled: run the native `ibcmd infobase config repair` first",
+        ));
+        match classify(&repair, SessionTerminate::Disable) {
+            Outcome::Refused(text) => assert!(
+                text.starts_with("требуется штатный config repair: SchemaStorage is not settled"),
+                "{text}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // through any context, still the type
+        let wrapped =
+            anyhow::Error::new(NeedsNativeApply::apply("a deleted list")).context("planning");
+        assert!(matches!(
+            classify(&wrapped, SessionTerminate::Disable),
+            Outcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn a_restructuring_without_a_backup_is_exit_one_and_names_both_options() {
+        match classify(
+            &anyhow::Error::new(BackupRequired),
+            SessionTerminate::Disable,
+        ) {
+            Outcome::Refused(text) => {
+                assert!(text.contains("--recovery-backup <путь>"), "{text}");
+                assert!(text.contains("--i-have-a-backup"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn errors_are_sorted_by_type_not_by_their_words() {
+        // the words the apply used to be recognised by, on an error of no
+        // type: a failure, whatever it says
+        for text in [
+            "exclusive access is not established: 2 other session(s) are connected to db",
+            "exclusive access cannot be proven: the login lacks VIEW SERVER STATE",
+            "Params holds 3 overlay row(s): run the native `ibcmd infobase config apply`",
+            "an unfinished operation: run the native `ibcmd infobase config repair` first",
         ] {
-            match classify(&anyhow!("{text}"), SessionTerminate::Disable, &|| {
-                Vec::new()
-            }) {
-                Outcome::Refused(refusal) => {
-                    assert!(
-                        refusal.starts_with("требуется штатный config apply: "),
-                        "{refusal}"
-                    )
-                }
+            match classify(&anyhow!("{text}"), SessionTerminate::Disable) {
+                Outcome::Failed(said) => assert_eq!(said, text),
                 other => panic!("{text}: {other:?}"),
             }
         }
         // anything else is a failure, with its context
         let error = anyhow!("connection refused").context("the config apply transaction failed");
-        match classify(&error, SessionTerminate::Disable, &|| Vec::new()) {
+        match classify(&error, SessionTerminate::Disable) {
             Outcome::Failed(text) => {
                 assert_eq!(
                     text,
@@ -608,6 +655,23 @@ mod tests {
             profile,
         );
         assert_eq!(options.exclusivity, Exclusivity::Assumed);
+        // the backup the operator names goes to the apply as it is
+        assert_eq!(options.backup, BackupPolicy::None);
+        let options = apply_options(
+            &request(&["config", "apply", "--i-have-a-backup"]),
+            "b",
+            profile,
+        );
+        assert_eq!(options.backup, BackupPolicy::Acknowledged);
+        let options = apply_options(
+            &request(&["config", "apply", "--recovery-backup=F:/b/x.bak"]),
+            "b",
+            profile,
+        );
+        assert_eq!(
+            options.backup,
+            BackupPolicy::File(std::path::PathBuf::from("F:/b/x.bak"))
+        );
     }
 
     #[test]
