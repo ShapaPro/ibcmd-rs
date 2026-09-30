@@ -28195,8 +28195,11 @@ pub fn pack_ext_picture_blob_from_xml_and_bytes(
 ///
 /// A pure partition over every common picture of both corpora (БСП 610 + 1,
 /// ERP УХ 3 060 + 187): `LoadTransparent` false with no `TransparentPixel`
-/// stores `{0,0,-1,-1}`, and `true` with a pixel stores `{1,0,x,y}`. The two
-/// mixed shapes never occur and are refused rather than guessed.
+/// stores `{0,0,-1,-1}`, and `true` with a pixel stores `{1,0,x,y}`. The
+/// extensions of the БСП 8.3.27 clone add one more shape: `true` with no pixel
+/// stores `{1,0,-1,-1}` (6 of 6 pictures, the SVG and PNG pictures of
+/// `ServiceDesk`). The remaining mixed shape (`false` with a pixel) never
+/// occurs and is refused rather than guessed.
 fn ext_picture_header_from_xml(xml: &[u8]) -> Result<String> {
     let text = std::str::from_utf8(xml).context("ExtPicture XML is not UTF-8")?;
     let load_transparent = match text
@@ -28233,6 +28236,7 @@ fn ext_picture_header_from_xml(xml: &[u8]) -> Result<String> {
     };
     match (load_transparent, pixel) {
         (false, None) => Ok("{0,0,-1,-1}".to_string()),
+        (true, None) => Ok("{1,0,-1,-1}".to_string()),
         (true, Some((x, y))) => Ok(format!("{{1,0,{x},{y}}}")),
         (load_transparent, pixel) => Err(anyhow!(
             "unobserved ExtPicture transparency: LoadTransparent {load_transparent}, TransparentPixel {pixel:?}"
@@ -46175,6 +46179,40 @@ aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,dddddd
         assert!(output.contains(&format!("\"file.5\",{}", addition.new_uuid)));
 
         Ok(())
+    }
+
+    #[test]
+    fn an_ext_picture_header_follows_the_declared_transparency() {
+        let xml = |body: &str| {
+            format!(
+                "<ExtPicture><Picture><xr:Abs>Picture.svg</xr:Abs>{body}</Picture></ExtPicture>"
+            )
+            .into_bytes()
+        };
+        let header = |body: &str| super::ext_picture_header_from_xml(&xml(body));
+        assert_eq!(header("").unwrap(), "{0,0,-1,-1}");
+        assert_eq!(
+            header("<xr:LoadTransparent>false</xr:LoadTransparent>").unwrap(),
+            "{0,0,-1,-1}"
+        );
+        // Six pictures of the БСП 8.3.27 extensions store it so.
+        assert_eq!(
+            header("<xr:LoadTransparent>true</xr:LoadTransparent>").unwrap(),
+            "{1,0,-1,-1}"
+        );
+        assert_eq!(
+            header(
+                "<xr:LoadTransparent>true</xr:LoadTransparent><xr:TransparentPixel x=\"3\" y=\"4\"/>"
+            )
+            .unwrap(),
+            "{1,0,3,4}"
+        );
+        assert!(
+            header(
+                "<xr:LoadTransparent>false</xr:LoadTransparent><xr:TransparentPixel x=\"3\" y=\"4\"/>"
+            )
+            .is_err()
+        );
     }
 
     #[test]

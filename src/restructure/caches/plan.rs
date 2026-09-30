@@ -415,45 +415,82 @@ pub struct NewSection<'a> {
     pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
+/// What the new tabular sections of one stage need: all of one kind together, because the index of the
+/// generated types is refilled in the hash order of *all* the keys of its section (the tabular sections of
+/// every catalog, or of every document).
+pub struct NewSections<'a> {
+    pub kind: &'a str,
+    pub root: &'a Brace,
+    /// The descriptors of the objects **after** the change, by uuid.
+    pub descriptor: &'a dyn Fn(&str) -> Option<Brace>,
+    /// `(owner, section)` of each new section, the sections of one owner in the order of its descriptor: the
+    /// section before a new one is there when the new one is placed.
+    pub sections: &'a [(&'a str, &'a str)],
+    pub cache: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+}
+
 /// The rows a new tabular section rewrites: the object registry, `2203278d` and the XDTO model.
 pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
+    new_tabular_sections(&NewSections {
+        kind: input.kind,
+        root: input.root,
+        descriptor: input.descriptor,
+        sections: &[(input.owner, input.section)],
+        cache: input.cache,
+    })
+}
+
+/// The rows the new tabular sections of a stage rewrite: the object registry, `2203278d` and the XDTO model.
+pub fn new_tabular_sections(input: &NewSections<'_>) -> Result<Vec<CacheRow>> {
     let kind = input.kind;
     let class =
         class_of_kind(kind).with_context(|| format!("the caches of {kind} are not measured"))?;
     let section_class = tabular_class(kind).context("the kind has no tabular sections")?;
     let collections = collections(input.root);
-    let row = (input.descriptor)(input.owner)
-        .with_context(|| format!("the descriptor of {} is not available", input.owner))?;
-    let owner = ObjectFacts::parse(kind, &row)?;
-    let position = owner
-        .sections
-        .iter()
-        .position(|section| section.uuid == input.section)
-        .with_context(|| format!("{kind} {} has no section {}", owner.name, input.section))?;
-    let section = &owner.sections[position];
-    let after = position
-        .checked_sub(1)
-        .map(|index| owner.sections[index].name.as_str());
-    let listed = Members::parse(kind, &row)?;
-    let member = listed
-        .sections
-        .get(position)
-        .filter(|member| member.uuid == input.section)
-        .context("the attribute lists and the section list of the descriptor disagree")?;
-
     let traversal = section_traversal(&collections, class, input.descriptor)?;
+    let refs = RefNames::build(&NamesTables::parse(&cached(
+        input.cache,
+        rows::NAMES_TABLES,
+    )?)?);
+    let mut registry_text = cached(input.cache, rows::REGISTRY)?;
+    let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
+    let mut entries = Vec::new();
+    for (owner_uuid, section_uuid) in input.sections {
+        let row = (input.descriptor)(owner_uuid)
+            .with_context(|| format!("the descriptor of {owner_uuid} is not available"))?;
+        let owner = ObjectFacts::parse(kind, &row)?;
+        let position = owner
+            .sections
+            .iter()
+            .position(|section| section.uuid == *section_uuid)
+            .with_context(|| format!("{kind} {} has no section {section_uuid}", owner.name))?;
+        let section = &owner.sections[position];
+        let after = position
+            .checked_sub(1)
+            .map(|index| owner.sections[index].name.as_str());
+        let listed = Members::parse(kind, &row)?;
+        let member = listed
+            .sections
+            .get(position)
+            .filter(|member| member.uuid == *section_uuid)
+            .context("the attribute lists and the section list of the descriptor disagree")?;
+
+        entries.push(section_entry(section));
+        registry_text =
+            registry::add_section(&registry_text, kind, owner_uuid, &listed.sections, position)?;
+        let row_lines = section_lines(member, &refs)?;
+        if kind == "Catalog" {
+            model.add_tabular_section(&owner.name, &section.name, after, &row_lines)?;
+        } else {
+            model.add_document_section(&owner.name, &section.name, after, &row_lines)?;
+        }
+    }
     let mut index = TypeIndex::parse(&cached(input.cache, rows::TYPE_INDEX)?)?;
-    index.refill_section(section_class, &traversal, vec![section_entry(section)])?;
-    let mut out = vec![
+    index.refill_section(section_class, &traversal, entries)?;
+    Ok(vec![
         CacheRow {
             name: rows::REGISTRY,
-            text: registry::add_section(
-                &cached(input.cache, rows::REGISTRY)?,
-                kind,
-                input.owner,
-                &listed.sections,
-                position,
-            )?,
+            text: registry_text,
             exact: true,
         },
         CacheRow {
@@ -461,23 +498,10 @@ pub fn new_tabular_section(input: &NewSection<'_>) -> Result<Vec<CacheRow>> {
             text: index.render(),
             exact: true,
         },
-    ];
-    let refs = RefNames::build(&NamesTables::parse(&cached(
-        input.cache,
-        rows::NAMES_TABLES,
-    )?)?);
-    let row_lines = section_lines(member, &refs)?;
-
-    let mut model = XdtoModel::parse(&cached(input.cache, rows::XDTO)?)?;
-    if kind == "Catalog" {
-        model.add_tabular_section(&owner.name, &section.name, after, &row_lines)?;
-    } else {
-        model.add_document_section(&owner.name, &section.name, after, &row_lines)?;
-    }
-    out.push(CacheRow {
-        name: rows::XDTO,
-        text: model.render(),
-        exact: true,
-    });
-    Ok(out)
+        CacheRow {
+            name: rows::XDTO,
+            text: model.render(),
+            exact: true,
+        },
+    ])
 }

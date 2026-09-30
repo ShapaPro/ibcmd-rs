@@ -33,8 +33,8 @@ pub struct AttributeFacts {
     pub name: String,
     /// The `{"Pattern",...}` text of the type.
     pub pattern: String,
-    /// `Indexing` (0 DontIndex, 1 Index, 2 IndexWithAdditionalOrder); `None` for a tabular section's
-    /// attribute, whose wrapper has another shape.
+    /// `Indexing` (0 DontIndex, 1 Index, 2 IndexWithAdditionalOrder). A tabular section's attribute
+    /// has it in the same place of its wrapper (`{v,<body>,<Indexing>,<FullTextSearch>,<DataHistory>}`).
     pub indexing: Option<i64>,
     /// `Use` (0 ForItem, 1 ForFolder, 2 ForFolderAndItem) of a catalog attribute.
     pub usage: Option<i64>,
@@ -50,6 +50,13 @@ pub struct AttributeFacts {
 pub struct SectionFacts {
     pub uuid: String,
     pub name: String,
+    /// The synonyms as the search information lists them.
+    pub synonyms: Vec<(String, String)>,
+    /// `Use` (0 ForItem, 1 ForFolder, 2 ForFolderAndItem) of a catalog's section; `None` for a document's.
+    pub usage: Option<i64>,
+    /// `LineNumberLength`; the line number field is a `numeric(5,0)` whatever it says, so a section of any
+    /// other length is not something the plan can build.
+    pub line_number_length: i64,
     pub attributes: Vec<AttributeFacts>,
 }
 
@@ -281,7 +288,7 @@ impl CatalogFacts {
                 }
             } else if class == TABULAR_SECTIONS {
                 for item in items.iter().skip(2) {
-                    sections.push(section(item).with_context(|| format!("catalog {name}"))?);
+                    sections.push(section(item, true).with_context(|| format!("catalog {name}"))?);
                 }
             }
         }
@@ -356,8 +363,11 @@ pub(crate) fn attribute_body(body: &Brace) -> Result<AttributeFacts> {
     })
 }
 
-/// A tabular section item: its own md header and every attribute body below it.
-pub(crate) fn section(item: &Brace) -> Result<SectionFacts> {
+/// A tabular section item: `{<wrapper>,1,<collection of attributes>}`, the wrapper `{v,<record>,<Use>,
+/// <LineNumberLength>}` of a catalog's section and `{v,<record>,<LineNumberLength>}` of a document's (the
+/// older record versions have neither the length nor, for a document, anything after the record); its own
+/// md header and every attribute below it.
+pub(crate) fn section(item: &Brace, catalog: bool) -> Result<SectionFacts> {
     let mut bodies = Vec::new();
     let mut headers = Vec::new();
     collect(item, &mut bodies, &mut headers);
@@ -366,31 +376,75 @@ pub(crate) fn section(item: &Brace) -> Result<SectionFacts> {
         .map(|header| md_base(header))
         .transpose()?
         .context("a tabular section has no md header")?;
+    let synonyms = headers
+        .first()
+        .map(|header| md_synonyms(header))
+        .unwrap_or_default();
+    let wrapper = item
+        .as_list()
+        .and_then(|items| items.first())
+        .and_then(Brace::as_list)
+        .with_context(|| format!("tabular section {name} has no wrapper"))?;
+    let (usage, length_at) = if catalog {
+        (Some(number_at(wrapper, 2, "Use")?), 3)
+    } else {
+        (None, 2)
+    };
+    // The older record versions (`{1,<record>[,<Use>]}`) have no length: it is the 5 every section has there.
+    let line_number_length = match wrapper.get(length_at) {
+        Some(_) => number_at(wrapper, length_at, "LineNumberLength")
+            .with_context(|| format!("tabular section {name}"))?,
+        None => 5,
+    };
     let attributes = bodies
         .into_iter()
-        .map(attribute_body)
+        .map(|(body, indexing)| {
+            let mut facts = attribute_body(body)?;
+            facts.indexing = indexing;
+            Ok(facts)
+        })
         .collect::<Result<Vec<_>>>()
         .with_context(|| format!("tabular section {name}"))?;
     Ok(SectionFacts {
         uuid,
         name,
+        synonyms,
+        usage,
+        line_number_length,
         attributes,
     })
 }
 
-/// Depth-first: every attribute body `{27,{2,...}}` and the first md header
-/// `{3,{1,0,<uuid>},"Name",...}` outside of the bodies.
-fn collect<'a>(node: &'a Brace, bodies: &mut Vec<&'a Brace>, headers: &mut Vec<&'a Brace>) {
+fn is_attribute_body(node: &Brace) -> bool {
+    node.as_list().is_some_and(|items| {
+        items.first().and_then(Brace::as_atom) == Some("27")
+            && items
+                .get(1)
+                .and_then(Brace::as_list)
+                .is_some_and(|typed| typed.first().and_then(Brace::as_atom) == Some("2"))
+    })
+}
+
+/// Depth-first: every attribute body `{27,{2,...}}` with the `Indexing` of the wrapper `{v,<body>,<Indexing>,
+/// ...}` it sits in, and the first md header `{3,{1,0,<uuid>},"Name",...}` outside of the bodies.
+fn collect<'a>(
+    node: &'a Brace,
+    bodies: &mut Vec<(&'a Brace, Option<i64>)>,
+    headers: &mut Vec<&'a Brace>,
+) {
     let Some(items) = node.as_list() else {
         return;
     };
-    let is_body = items.first().and_then(Brace::as_atom) == Some("27")
-        && items
-            .get(1)
-            .and_then(Brace::as_list)
-            .is_some_and(|typed| typed.first().and_then(Brace::as_atom) == Some("2"));
-    if is_body {
-        bodies.push(node);
+    if let Some(body) = items.get(1).filter(|body| is_attribute_body(body)) {
+        let indexing = items
+            .get(2)
+            .and_then(Brace::as_atom)
+            .and_then(|indexing| indexing.parse().ok());
+        bodies.push((body, indexing));
+        return;
+    }
+    if is_attribute_body(node) {
+        bodies.push((node, None));
         return;
     }
     if headers.is_empty()

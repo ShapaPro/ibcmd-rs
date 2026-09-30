@@ -175,6 +175,8 @@ pub fn decide(
                 | S1Operation::WidenString { .. }
                 | S1Operation::SwitchIndex { .. }
                 | S1Operation::AddObject { .. }
+                | S1Operation::AddTabularSection { .. }
+                | S1Operation::AddSectionAttribute { .. }
         ) {
             unbuilt = true;
             verdict.block(
@@ -204,9 +206,10 @@ pub fn decide(
         Err(error) => return refuse(verdict, "", format!("{error:#}")),
     };
 
-    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes.
-    type Names<'a> = [BTreeSet<&'a str>; 4];
-    let planned: BTreeMap<String, Names<'_>> = plan
+    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes, the
+    // same new tabular sections and new attributes of the sections there were (`Section.Attribute`).
+    type Names = [BTreeSet<String>; 6];
+    let planned: BTreeMap<String, Names> = plan
         .objects
         .iter()
         .map(|object| {
@@ -216,51 +219,78 @@ pub fn decide(
                     object
                         .additions
                         .iter()
-                        .map(|addition| addition.name.as_str())
+                        .map(|addition| addition.name.clone())
                         .collect(),
                     object
                         .removals
                         .iter()
-                        .map(|removal| removal.name.as_str())
+                        .map(|removal| removal.name.clone())
                         .collect(),
                     object
                         .widenings
                         .iter()
-                        .map(|widening| widening.name.as_str())
+                        .map(|widening| widening.name.clone())
                         .collect(),
                     object
                         .switches
                         .iter()
-                        .map(|switch| switch.name.as_str())
+                        .map(|switch| switch.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_some())
+                        .map(|section| section.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_none())
+                        .flat_map(|section| {
+                            section
+                                .additions
+                                .iter()
+                                .map(|addition| format!("{}.{}", section.name, addition.name))
+                        })
                         .collect(),
                 ],
             )
         })
         .collect();
-    let named_by_check: BTreeMap<String, Names<'_>> = classification
+    let named_by_check: BTreeMap<String, Names> = classification
         .by_object()
         .into_iter()
         .map(|(object, operations)| {
-            let names = |wanted: fn(&S1Operation) -> Option<&str>| -> BTreeSet<&str> {
+            let names = |wanted: fn(&S1Operation) -> Option<String>| -> BTreeSet<String> {
                 operations.iter().copied().filter_map(wanted).collect()
             };
             (
                 object.row.to_ascii_lowercase(),
                 [
                     names(|operation| match operation {
-                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::WidenString { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::WidenString { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddTabularSection { section, .. } => Some(section.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddSectionAttribute {
+                            section, attribute, ..
+                        } => Some(format!("{section}.{attribute}")),
                         _ => None,
                     }),
                 ],
@@ -279,7 +309,9 @@ pub fn decide(
 
     // The planned objects' descriptors are the blockers the plan answers for, and so is the stage's
     // `deleted` row (the plan checked that it names removed attributes only); another blocker is a
-    // change this gate does not cover.
+    // change this gate does not cover. The `root` row is answered for by the check: the conservative rule
+    // compares its bytes, the check reads it (the 8.5 platform re-stamps the last block of its payload on
+    // every write) and a root that really changed is a `service-row-changed` refusal above.
     let has_deleted = inputs.staged.deleted.is_some();
     // A created object is listed by the configuration's descriptor, which the stage changes for it (the check
     // paired the two reasons): the plan answers for that row when it creates something.
@@ -309,6 +341,7 @@ pub fn decide(
         !planned.contains_key(&row)
             && !created_files.contains(&row)
             && !(has_deleted && row == "deleted")
+            && row != "root"
             && listing.as_deref() != Some(row.as_str())
     });
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;

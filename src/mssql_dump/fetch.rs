@@ -381,9 +381,11 @@ pub(super) fn fetch_rows(
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRow>> {
     if let Some(offline) = offline_rows::active() {
-        return Ok(config_rows_from_binary(
-            offline.rows_named(table, selected_file_names)?,
-        ));
+        return Ok(config_rows_from_binary(offline.rows_named(
+            database,
+            table,
+            selected_file_names,
+        )?));
     }
     let SqlBackend::Tools(tools) = sql.backend() else {
         return fetch_config_rows(sql, database, table, selected_file_names);
@@ -410,9 +412,11 @@ pub(super) fn fetch_rows_direct_hex(
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRow>> {
     if let Some(offline) = offline_rows::active() {
-        return Ok(config_rows_from_binary(
-            offline.rows_named(table, selected_file_names)?,
-        ));
+        return Ok(config_rows_from_binary(offline.rows_named(
+            database,
+            table,
+            selected_file_names,
+        )?));
     }
     let SqlBackend::Tools(tools) = sql.backend() else {
         return fetch_config_rows(sql, database, table, selected_file_names);
@@ -441,7 +445,7 @@ pub(super) fn fetch_binary_rows(
         // from, so the folder answers the batch itself.
         return Ok(apply_row_overrides(
             table,
-            offline.rows_named(table, selected_file_names)?,
+            offline.rows_named(database, table, selected_file_names)?,
         ));
     }
     if !selected_file_names.is_empty() && !use_range_filter {
@@ -829,9 +833,11 @@ pub(super) fn fetch_metadata_rows_hex(
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
     if let Some(offline) = offline_rows::active() {
-        return Ok(config_rows_from_binary(
-            offline.rows(table, |file_name| !file_name.contains('.'))?,
-        ));
+        return Ok(config_rows_from_binary(offline.rows(
+            database,
+            table,
+            |file_name| !file_name.contains('.'),
+        )?));
     }
     let SqlBackend::Tools(tools) = sql.backend() else {
         return fetch_metadata_rows(sql, database, table);
@@ -857,7 +863,7 @@ pub(super) fn fetch_metadata_rows(
     table: &str,
 ) -> Result<Vec<ConfigRow>> {
     if let Some(offline) = offline_rows::active() {
-        let rows = offline.rows(table, |file_name| !file_name.contains('.'))?;
+        let rows = offline.rows(database, table, |file_name| !file_name.contains('.'))?;
         return Ok(config_rows_from_binary(apply_row_overrides(table, rows)));
     }
     let query = build_fetch_metadata_rows_bcp_query(database, table);
@@ -878,7 +884,7 @@ pub(super) fn fetch_metadata_owner_rows(
         // `FileName = N'<name>' OR FileName LIKE N'<name>.%'`; the names
         // carry no dot, so the owner of a dotted row is what precedes its
         // first dot.
-        let rows = offline.rows(table, |file_name| {
+        let rows = offline.rows(database, table, |file_name| {
             metadata_file_names.contains(file_name)
                 || file_name
                     .split_once('.')
@@ -1130,7 +1136,7 @@ pub(super) fn fetch_row_headers(
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<ConfigRowHeader>> {
     if let Some(offline) = offline_rows::active() {
-        return offline.headers(table, selected_file_names);
+        return offline.headers(database, table, selected_file_names);
     }
     if !selected_file_names.is_empty() {
         let batches = split_selected_file_names_for_row_headers_query(

@@ -499,7 +499,7 @@ ibcmd-rs cf load C:\src\MyConf C:\cf\MyConf-new.cf --base C:\cf\MyConf.cf
 |---|---|
 | `mssql-extension-list` | Список расширений базы. |
 | `mssql-dump-extension` | Выгрузить одно или все расширения в XML. |
-| `mssql-load-extension` | Собрать и записать одно или все расширения в ConfigCASSave. |
+| `mssql-load-extension` | Записать в ConfigCASSave дерево расширения (одно или все): отличия от выгрузки активного образа собирает штатный сборщик `cf load`, результат выгружается обратно и должен совпасть с деревом, иначе отказ по имени файла; `--path-prefix` ограничивает выбор. |
 | `mssql-activate-staged-extension` | Опубликовать записанное расширение без штатного `ibcmd`. |
 
 ### Изменения в работающей базе (смена поколения)

@@ -62,8 +62,8 @@ limit, naming the flag, the variable, or the file and line. `ibcmd-rs settings s
 the report of an apply prints the limit, where it came from, and what the stage rebuilds (`structure.size_check`).
 
 The drop-in `ibcmd infobase config apply` is the platform's syntax and gets no flag: `connect` in `dropin/apply.rs`
-reads the two settings from the chain and puts them into the apply's options. (The drop-in does not yet ask for the S1
-gate; when it does, the limit is already there.) A raised limit changes nothing else: the apply still refuses a
+reads the two settings from the chain and puts them into the apply's options; `restructure_gate` builds the S1 gate with
+that limit (`FirstThen(ApplyCheckGate, S1Gate)`, `mssql_config_apply/mod.rs`), so the drop-in exercises it. A raised limit changes nothing else: the apply still refuses a
 restructuring without `--recovery-backup` or `--i-have-a-backup` (`backup_required`); section 6 shows both.
 
 ## 4. The measurements
@@ -130,8 +130,9 @@ What the table says:
    log is small (0.18 to 0.26 GB, the promotion's part); the log reserved for it is 1 to 3% of the used log.
 6. **tempdb** (`SORT_IN_TEMPDB`) peaked at +1.0 GB at 3 million narrow rows, +0.9 GB at the wide case.
 7. **One failure.** The first LOB run ended with error 1205 (chosen as the deadlock victim) in
-   `copy _Reference20_VT159 into _Reference20_VT159NG`, rolled back cleanly (exit 1); the repeat succeeded. Not
-   investigated; a robustness note for the ddl track (the copy of a table with 20 KB `nvarchar(max)` values).
+   `copy _Reference20_VT159 into _Reference20_VT159NG`, rolled back cleanly (exit 1); the repeat succeeded. Seen once and
+   not reproduced; by decision (2026-09-30) it is not investigated. A robustness note for the ddl track (the copy of a
+   table with 20 KB `nvarchar(max)` values).
 8. **The УХ confirmation of the checkpoint-1 plan could not be made on real data.** `uha_parity2_20260924.bak` holds
    the configuration only: every table has 0 rows but 844 (`_Enum4473`) or fewer. The clone was restored, surveyed and
    dropped at once (4.3 GB). The calibration on real tables was made on the БСП demo instead (six probes above), whose data is
@@ -199,8 +200,7 @@ to write, 34% of the limit): native `config apply` on one (143 s), `mssql-config
 - The chunked copy is 0.5 (this issue is the refusal).
 - The guard does not adapt to the recovery model: a SIMPLE base writes 0.5% of the log and could rebuild far more; it
   raises the limit today. Reading `sys.databases.recovery_model_desc` is a small later change if wanted.
-- The drop-in reads the limit but does not yet ask for the S1 gate.
-- The error 1205 of section 4.2 (7).
+- The error 1205 of section 4.2 (7): seen once, not reproduced, not investigated.
 - `mssql-restructure --trial` needs `--skip-session-check` (the tool's own pool holds a second session on the database and
   its check counts it).
 

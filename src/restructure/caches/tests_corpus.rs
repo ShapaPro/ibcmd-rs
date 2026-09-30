@@ -11,6 +11,7 @@
 //! | `c2` | `bsp8327_c2` / `c2_now` | native after case c (a new catalog) |
 //! | `m` | `bsp8327_m` / `m_now` | native after case h (a new tabular section, among other changes) |
 //! | `t1_before`, `t1_nat` | `s1_base` / `t1_staged`, `s1_t1_nat` / `nat_after` | the types case |
+//! | `e1_*`, `e3_*`, `e4_*` | `s2_e1_base` / `e1_staged`, `s2_e1_nat` / `nat_after`, ... | S1-E: five new tabular sections; new attributes of old sections; own attributes, an old section's attribute and new sections of a catalog and a document at once |
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -77,6 +78,46 @@ impl Snap {
                 "nat_after".to_owned(),
             ),
             "d_staged" | "d_after" => ("ibcmd_rs_05_trace_d_base".to_owned(), name.to_owned()),
+            "e1_before" => (
+                "ibcmd_rs_04_ddl_s2_e1_base".to_owned(),
+                "e1_staged".to_owned(),
+            ),
+            "e1_nat" => (
+                "ibcmd_rs_04_ddl_s2_e1_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e3_before" => (
+                "ibcmd_rs_04_ddl_s2_e3_base".to_owned(),
+                "e3_staged".to_owned(),
+            ),
+            "e3_nat" => (
+                "ibcmd_rs_04_ddl_s2_e3_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e4_before" => (
+                "ibcmd_rs_04_ddl_s2_e4_base".to_owned(),
+                "e4_staged".to_owned(),
+            ),
+            "e4_nat" => (
+                "ibcmd_rs_04_ddl_s2_e4_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e5_before" => (
+                "ibcmd_rs_04_ddl_s2_e5_base".to_owned(),
+                "e5_staged".to_owned(),
+            ),
+            "e5_nat" => (
+                "ibcmd_rs_04_ddl_s2_e5_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
+            "e6_before" => (
+                "ibcmd_rs_04_ddl_s2_e6_base".to_owned(),
+                "e6_staged".to_owned(),
+            ),
+            "e6_nat" => (
+                "ibcmd_rs_04_ddl_s2_e6_nat".to_owned(),
+                "nat_after".to_owned(),
+            ),
             // the native cases of S1-F: the staged state `n1_staged` of the database `..._tw1_st` and the platform's
             // result `n1_after` (the snapshot `nat_after` of `..._tw1_nat`), from the twin runs of `twin_stage.ps1`
             other

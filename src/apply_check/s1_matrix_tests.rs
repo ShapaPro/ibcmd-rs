@@ -385,7 +385,7 @@ fn p5() -> Vec<Case> {
             &with_section("", ""),
             &with_section("", &column("")),
         ),
-        Outcome::Refused(RefusalCode::TabularSectionOutsideS1),
+        Outcome::Operation("add-section-attribute"),
     ));
     cases.push(case(
         "p5 tabular section added",
@@ -730,8 +730,8 @@ fn every_focused_case_comes_out_as_expected_and_nothing_native_acted_on_is_harml
             "{run}: {total} cases, native acted on {acted}, harmless {harmless},              S1 operations {ops}, refused {refused}"
         );
     }
-    // add attribute x2, delete, widen, index x2, tabular section, new object.
-    assert_eq!(operations, 8, "operations in the focused runs");
+    // add attribute x2, delete, widen, index x2, tabular section, attribute of a tabular section, new object.
+    assert_eq!(operations, 9, "operations in the focused runs");
 }
 
 #[test]
