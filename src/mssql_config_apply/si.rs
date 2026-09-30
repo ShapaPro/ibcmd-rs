@@ -488,9 +488,45 @@ pub struct Insertion {
 /// The row's text with the records inserted and the count raised; nothing
 /// else changes.
 pub fn insert_records(text: &[u8], main: &SiMain, insertions: &[Insertion]) -> Result<Vec<u8>> {
+    edit_records(text, main, insertions, &[])
+}
+
+/// The runs of consecutive removed items of a list, each as the span of text that goes. An
+/// item goes with the comma that follows it (the comma in front of it when the run closes the
+/// list), so what stays is what the platform writes for the smaller list. `spans` are the
+/// `(start, end)` of every item in list order, `removed` their indices, sorted and unique.
+fn cuts(spans: &[(usize, usize)], removed: &[usize]) -> Result<Vec<(usize, usize)>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < removed.len() {
+        let first = removed[at];
+        let mut last = first;
+        while at + 1 < removed.len() && removed[at + 1] == last + 1 {
+            at += 1;
+            last = removed[at];
+        }
+        at += 1;
+        if last + 1 < spans.len() {
+            out.push((spans[first].0, spans[last + 1].0));
+        } else {
+            ensure!(first > 0, "the edit would remove every item of a list");
+            out.push((spans[first - 1].1, spans[last].1));
+        }
+    }
+    Ok(out)
+}
+
+/// The row's text with records put in and records taken out (by their index in
+/// [`SiMain::records`]) and the count kept in step; nothing else changes.
+pub fn edit_records(
+    text: &[u8],
+    main: &SiMain,
+    insertions: &[Insertion],
+    removals: &[usize],
+) -> Result<Vec<u8>> {
     ensure!(
         !main.records.is_empty(),
-        "an empty record list has no place to insert"
+        "an empty record list has no place to edit"
     );
     let mut ordered: Vec<&Insertion> = insertions.iter().collect();
     ordered.sort_by_key(|insertion| insertion.at);
@@ -498,9 +534,21 @@ pub fn insert_records(text: &[u8], main: &SiMain, insertions: &[Insertion]) -> R
         .iter()
         .map(|insertion| insertion.records.len())
         .sum();
+    let mut removed: Vec<usize> = removals.to_vec();
+    removed.sort_unstable();
+    removed.dedup();
+    ensure!(
+        removed.iter().all(|index| *index < main.records.len()),
+        "a removal beyond the record list"
+    );
+    ensure!(
+        removed.len() < main.records.len(),
+        "the edit would remove every record"
+    );
     let mut out = Vec::with_capacity(text.len() + total * 200);
     let mut copied = 0usize;
-    let new_count = (main.records.len() + total).to_string();
+    let new_count = (main.records.len() + total - removed.len()).to_string();
+    // (start, end, replacement); an insertion has start == end
     let mut edits: Vec<(usize, usize, Vec<u8>)> =
         vec![(main.count_span.0, main.count_span.1, new_count.into_bytes())];
     for insertion in ordered {
@@ -522,7 +570,15 @@ pub fn insert_records(text: &[u8], main: &SiMain, insertions: &[Insertion]) -> R
             edits.push((at, at, format!(",{rendered}").into_bytes()));
         }
     }
-    edits.sort_by_key(|(start, _, _)| *start);
+    let spans: Vec<(usize, usize)> = main
+        .records
+        .iter()
+        .map(|record| (record.start, record.end))
+        .collect();
+    for (start, end) in cuts(&spans, &removed)? {
+        edits.push((start, end, Vec::new()));
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
     for (start, end, replacement) in edits {
         ensure!(start >= copied, "overlapping edits");
         out.extend_from_slice(&text[copied..start]);
@@ -531,6 +587,97 @@ pub fn insert_records(text: &[u8], main: &SiMain, insertions: &[Insertion]) -> R
     }
     out.extend_from_slice(&text[copied..]);
     Ok(out)
+}
+
+/// `c4629235-....si`, the properties of the objects the platform looks up by uuid:
+/// `{0,{<n>,<key>,<count>,(<property id>,<value>) x count,...}}`. The text with the
+/// entries of `keys` (lower-case uuids) taken out and the entry count lowered;
+/// nothing else changes. Returns the text and how many entries went. The
+/// entries after a removed one keep their order: a removal needs nothing of the
+/// hash order that an insertion would.
+pub fn remove_property_entries(text: &[u8], keys: &BTreeSet<String>) -> Result<(Vec<u8>, usize)> {
+    let mut scanner = Scanner::new(text);
+    scanner.expect(b'{')?;
+    let version = scanner.member()?;
+    ensure!(
+        atom(text, version)? == "0",
+        "not a property row: it starts with {}",
+        atom(text, version)?
+    );
+    ensure!(scanner.separator()?, "the property row has no body");
+    let members = scanner.list()?;
+    ensure!(
+        !scanner.separator()?,
+        "the property row has more than a body"
+    );
+    scanner.skip_ws();
+    ensure!(
+        scanner.pos == text.len(),
+        "text after the property row at byte {}",
+        scanner.pos
+    );
+    let count = atom(text, members[0])?
+        .parse::<usize>()
+        .map_err(|_| anyhow!("the property row has no entry count"))?;
+    // entries: key, property count, then that many (id, value) pairs
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(count);
+    let mut names: Vec<String> = Vec::with_capacity(count);
+    let mut index = 1;
+    while index < members.len() {
+        ensure!(
+            index + 1 < members.len(),
+            "the property row ends inside an entry"
+        );
+        let key = atom(text, members[index])?.to_ascii_lowercase();
+        let properties = atom(text, members[index + 1])?
+            .parse::<usize>()
+            .map_err(|_| anyhow!("an entry of the property row has no property count"))?;
+        let end = index + 2 + 2 * properties;
+        ensure!(
+            end <= members.len(),
+            "the property row ends inside the properties of {key}"
+        );
+        spans.push((members[index].0, members[end - 1].1));
+        names.push(key);
+        index = end;
+    }
+    ensure!(
+        spans.len() == count,
+        "the property row declares {count} entries and holds {}",
+        spans.len()
+    );
+    let doomed: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| keys.contains(*key))
+        .map(|(position, _)| position)
+        .collect();
+    if doomed.is_empty() {
+        return Ok((text.to_vec(), 0));
+    }
+    ensure!(
+        doomed.len() < spans.len(),
+        "the edit would remove every entry"
+    );
+    let mut edits: Vec<(usize, usize, Vec<u8>)> = vec![(
+        members[0].0,
+        members[0].1,
+        (count - doomed.len()).to_string().into_bytes(),
+    )];
+    for (start, end) in cuts(&spans, &doomed)? {
+        edits.push((start, end, Vec::new()));
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
+    let mut out = Vec::with_capacity(text.len());
+    let mut copied = 0usize;
+    for (start, end, replacement) in edits {
+        ensure!(start >= copied, "overlapping edits");
+        out.extend_from_slice(&text[copied..start]);
+        out.extend_from_slice(&replacement);
+        copied = end;
+    }
+    out.extend_from_slice(&text[copied..]);
+    Ok((out, doomed.len()))
 }
 
 /// `siVersions`: `{0,<count>,"<name>",<version>,...}`; gives the entry named
@@ -820,5 +967,182 @@ mod tests {
             "{0,2,\"aaaa.si\",11111111-1111-1111-1111-111111111111,\"BBBB.si\",33333333-3333-3333-3333-333333333333}"
         );
         assert!(set_si_version(text.as_bytes(), "cccc.si", new).is_err());
+    }
+
+    /// What the platform writes for the list without the records at `dropped`: the kept records joined
+    /// with commas between the same head and tail, and the count.
+    fn without(text: &str, main: &SiMain, dropped: &[usize]) -> String {
+        let kept: Vec<&str> = main
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !dropped.contains(index))
+            .map(|(_, record)| &text[record.start..record.end])
+            .collect();
+        let head = &text[..main.records[0].start];
+        let tail = &text[main.records[main.records.len() - 1].end..];
+        format!("{head}{}{tail}", kept.join(",")).replacen(
+            &format!("{{{},", main.records.len()),
+            &format!("{{{},", kept.len()),
+            1,
+        )
+    }
+
+    #[test]
+    fn records_are_taken_out_with_their_comma_and_the_count_follows() {
+        let text = sample();
+        let main = parse(text.as_bytes()).unwrap();
+        for dropped in [
+            vec![3usize],     // a template in the middle
+            vec![2],          // the first form of the first owner
+            vec![8],          // the last record: the comma in front of it goes
+            vec![2, 3],       // a run in the middle
+            vec![7, 8],       // a run that closes the list
+            vec![3, 5, 8],    // several cuts
+            vec![2, 4, 6, 7], // runs of one and two
+        ] {
+            let out = edit_records(text.as_bytes(), &main, &[], &dropped).unwrap();
+            let expected = without(&text, &main, &dropped);
+            assert_eq!(
+                String::from_utf8(out.clone()).unwrap(),
+                expected,
+                "{dropped:?}"
+            );
+            let again = parse(&out).unwrap();
+            assert_eq!(again.records.len(), 9 - dropped.len(), "{dropped:?}");
+            for index in &dropped {
+                assert!(again.index_of(&main.records[*index].uuid).is_none());
+            }
+        }
+        // nothing to do is the same text
+        assert_eq!(
+            edit_records(text.as_bytes(), &main, &[], &[]).unwrap(),
+            text.as_bytes()
+        );
+        // the platform's rows have a BOM and CRLF
+        let crlf = format!("\u{feff}{}", sample().replace('\n', "\r\n"));
+        let main = parse(crlf.as_bytes()).unwrap();
+        let out = edit_records(crlf.as_bytes(), &main, &[], &[4, 7]).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            without(&crlf, &main, &[4, 7])
+        );
+    }
+
+    #[test]
+    fn a_removal_that_would_leave_no_record_or_names_none_is_refused() {
+        let text = sample();
+        let main = parse(text.as_bytes()).unwrap();
+        assert!(edit_records(text.as_bytes(), &main, &[], &(0..9).collect::<Vec<_>>()).is_err());
+        assert!(edit_records(text.as_bytes(), &main, &[], &[9]).is_err());
+        // the first record with the rest is every record
+        assert!(edit_records(text.as_bytes(), &main, &[], &[0, 1, 2, 3, 4, 5, 6, 7, 8]).is_err());
+    }
+
+    #[test]
+    fn records_put_in_and_taken_out_in_one_pass_do_not_collide() {
+        let text = sample();
+        let main = parse(text.as_bytes()).unwrap();
+        let new_form = NewRecord {
+            uuid: F2.to_owned(),
+            parent: DP1.to_owned(),
+            kind: 2,
+            name: "Новая".to_owned(),
+            synonyms: vec![("ru".to_owned(), "Новая".to_owned())],
+            flags: (0, 0),
+        };
+        // in front of a record that goes (T1 is 3)
+        let out = edit_records(
+            text.as_bytes(),
+            &main,
+            &[Insertion {
+                at: 3,
+                records: vec![new_form.clone()],
+            }],
+            &[3],
+        )
+        .unwrap();
+        let again = parse(&out).unwrap();
+        let order: Vec<&str> = again
+            .records
+            .iter()
+            .map(|record| record.uuid.as_str())
+            .collect();
+        assert_eq!(order[..5], [CFG, DP1, F1, F2, C1]);
+        assert_eq!(again.records.len(), 9);
+        // at the end of the list, while the last record goes
+        let out = edit_records(
+            text.as_bytes(),
+            &main,
+            &[Insertion {
+                at: 9,
+                records: vec![new_form],
+            }],
+            &[8],
+        )
+        .unwrap();
+        let again = parse(&out).unwrap();
+        let order: Vec<&str> = again
+            .records
+            .iter()
+            .map(|record| record.uuid.as_str())
+            .collect();
+        assert_eq!(order.len(), 9);
+        assert_eq!(order[8], F2);
+        assert_ne!(order[7], DP3);
+    }
+
+    const PROPS: &str = "\u{feff}{0,\r\n{4,\r\n\
+        11111111-0000-4000-8000-000000000001,1,0,\r\n{\"S\",\"v8config://v8cfgHelp/mdobject/id11111111-0000-4000-8000-000000000001/x\"},\
+        22222222-0000-4000-8000-000000000002,2,2,\r\n{\"N\",0},5,\r\n{\"B\",1},\
+        33333333-0000-4000-8000-000000000003,1,3,\r\n{\"#\",fc01b5df-97fe-449b-83d4-218a090e681e,7},\
+        44444444-0000-4000-8000-000000000004,1,0,\r\n{\"S\",\"y\"}\r\n}\r\n}";
+
+    fn keys(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|key| (*key).to_owned()).collect()
+    }
+
+    #[test]
+    fn property_entries_are_taken_out_and_the_others_keep_their_bytes_and_order() {
+        let one = "11111111-0000-4000-8000-000000000001";
+        let two = "22222222-0000-4000-8000-000000000002";
+        let three = "33333333-0000-4000-8000-000000000003";
+        let four = "44444444-0000-4000-8000-000000000004";
+        // the first entry
+        let (out, removed) = remove_property_entries(PROPS.as_bytes(), &keys(&[one])).unwrap();
+        assert_eq!(removed, 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with("\u{feff}{0,\r\n{3,\r\n22222222-0000-4000-8000-000000000002,2,2,"));
+        assert!(!out.contains(one));
+        // the last one: the comma in front goes
+        let (out, removed) = remove_property_entries(PROPS.as_bytes(), &keys(&[four])).unwrap();
+        assert_eq!(removed, 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.ends_with("7}\r\n}\r\n}"), "{out:?}");
+        assert!(out.contains("{3,"));
+        // two neighbours and one more, in any order, and a key that is not there
+        let (out, removed) = remove_property_entries(
+            PROPS.as_bytes(),
+            &keys(&[three, two, four, "55555555-0000-4000-8000-000000000005"]),
+        )
+        .unwrap();
+        assert_eq!(removed, 3);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with("\u{feff}{0,\r\n{1,\r\n11111111-0000-4000-8000-000000000001,1,0,"));
+        assert!(!out.contains(two) && !out.contains(three) && !out.contains(four));
+        // a key that is not there: the same text
+        let (out, removed) = remove_property_entries(
+            PROPS.as_bytes(),
+            &keys(&["55555555-0000-4000-8000-000000000005"]),
+        )
+        .unwrap();
+        assert_eq!((removed, out.as_slice()), (0, PROPS.as_bytes()));
+        // every entry is not an edit this row survives
+        assert!(
+            remove_property_entries(PROPS.as_bytes(), &keys(&[one, two, three, four])).is_err()
+        );
+        // an entry that runs past the row, and a row that is no property row
+        assert!(remove_property_entries(b"{0,{2,a,1,0,{\"N\",0}}}", &keys(&["a"])).is_err());
+        assert!(remove_property_entries(b"{4,{1,a,0}}", &keys(&["a"])).is_err());
     }
 }

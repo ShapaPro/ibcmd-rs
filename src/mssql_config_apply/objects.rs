@@ -106,10 +106,10 @@ pub struct AnalysisInput<'a> {
     pub has_change_registrations: bool,
 }
 
-/// What the header of a new object's descriptor says.
+/// What the header of an object's descriptor says.
 #[derive(Debug)]
-struct Described {
-    name: String,
+pub(super) struct Described {
+    pub(super) name: String,
     synonyms: Vec<(String, String)>,
     /// A form's first flag after the header (`0` or `1`).
     form_flag: Option<u8>,
@@ -139,7 +139,11 @@ fn find_header(node: &Brace) -> Option<(&[Brace], usize)> {
     members.iter().find_map(find_header)
 }
 
-fn describe(kind: &str, uuid: &str, plain: &[u8]) -> std::result::Result<Described, String> {
+pub(super) fn describe(
+    kind: &str,
+    uuid: &str,
+    plain: &[u8],
+) -> std::result::Result<Described, String> {
     let tree =
         parse_row(plain).map_err(|error| format!("the descriptor does not parse: {error}"))?;
     let (members, index) =

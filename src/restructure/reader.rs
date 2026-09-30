@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
+use crate::metadata_model::brace::parse_row;
 use crate::mssql_config_apply::model::quote_ident;
-use crate::restructure::plan::{Inputs, StagedImage, configuration_uuid};
+use crate::restructure::caches::root::{class_of_kind, collections};
+use crate::restructure::plan::{Inputs, StagedImage, configuration_uuid, row_bytes};
 use crate::restructure::storage::SchemaStorageRow;
 use crate::sql::mssql::{TdsConnection, sql_row};
 use crate::sql::{SqlClient, SqlRow};
@@ -135,8 +137,9 @@ pub fn read_inputs(connection: &mut dyn RowSource) -> Result<(Inputs, Vec<Schema
 }
 
 /// The staged image against the stored one: the file lists of both, the descriptors of the staged
-/// image, and of the stored one only those the stage replaces and the configuration's own (which lists
-/// the objects in the order the platform walks them).
+/// image, and of the stored one only those the stage replaces, the configuration's own (which lists
+/// the objects in the order the platform walks them) and the catalogs and documents it lists (the caches of
+/// a tabular section traverse the sections of every object of the kind).
 fn read_staged(connection: &mut dyn RowSource, root_row: &[u8]) -> Result<StagedImage> {
     let mut image = StagedImage::default();
     let stored_filter = match configuration_uuid(root_row) {
@@ -163,6 +166,7 @@ fn read_staged(connection: &mut dyn RowSource, root_row: &[u8]) -> Result<Staged
         collect_files(connection, table, files)?;
         collect_descriptors(connection, table, filter, descriptors)?;
     }
+    collect_listed_objects(connection, root_row, &mut image)?;
     rows(
         connection,
         "SELECT BinaryData FROM dbo.ConfigSave WHERE FileName = N'deleted' AND PartNo = 0",
@@ -208,6 +212,61 @@ fn read_objects(
         .context("Config descriptors of the objects")?;
     }
     Ok(out)
+}
+
+/// The stored descriptors of the catalogs and documents the configuration's own descriptor lists that are not
+/// read yet. A configuration that cannot be read adds nothing (the plan refuses when it needs the listing).
+fn collect_listed_objects(
+    connection: &mut dyn RowSource,
+    root_row: &[u8],
+    image: &mut StagedImage,
+) -> Result<()> {
+    let Ok(configuration) = configuration_uuid(root_row) else {
+        return Ok(());
+    };
+    let Some(stored) = image.old_descriptors.get(&configuration) else {
+        return Ok(());
+    };
+    let Ok(tree) = parse_row(&row_bytes(stored)) else {
+        return Ok(());
+    };
+    let classes: Vec<&str> = ["Catalog", "Document"]
+        .into_iter()
+        .filter_map(class_of_kind)
+        .collect();
+    let wanted: Vec<String> = collections(&tree)
+        .into_iter()
+        .filter(|collection| classes.contains(&collection.class.as_str()))
+        .flat_map(|collection| collection.objects)
+        .map(|uuid| uuid.to_ascii_lowercase())
+        .filter(|uuid| {
+            uuid.len() == 36
+                && uuid.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+                && !image.old_descriptors.contains_key(uuid)
+        })
+        .collect();
+    for chunk in wanted.chunks(200) {
+        let list = chunk
+            .iter()
+            .map(|uuid| format!("N'{uuid}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows(
+            connection,
+            &format!(
+                "SELECT FileName, BinaryData FROM dbo.Config WHERE PartNo = 0 AND FileName IN ({list})"
+            ),
+            |mut row| {
+                let name = row.take_text(0)?;
+                image
+                    .old_descriptors
+                    .insert(name.to_ascii_lowercase(), row.take_binary(1)?);
+                Ok(())
+            },
+        )
+        .context("Config listed objects")?;
+    }
+    Ok(())
 }
 
 fn collect_files(

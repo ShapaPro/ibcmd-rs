@@ -218,7 +218,8 @@ The recovery artifact of the apply (the bytes it overwrote) goes to its default 
    is not (see above). It is stricter than the platform on purpose: it moves rows in one
    transaction, but a working process holds the configuration in memory.
 3. **Only stages of this repository's importers**; the stage of the platform's own `config import`
-   (a `deleted` row, records in another format, a `{68}` Configuration row) is exit 1.
+   (records in another format, a `{68}` Configuration row, a `deleted` list this apply cannot account for name by name:
+   the rows of a removed form or template it can, docs/apply/own-apply.md "Removals") is exit 1.
 4. **LF line ends** (the platform writes CRLF), like the drop-in's export and import.
 5. **Exit 1** is the platform's code for a failed metadata check and this version's code for what
    it does not serve. A script that tells them apart reads stderr.
@@ -261,7 +262,7 @@ the words used to say `config apply` for an operation that was never finished.
 * **`--dynamic=force`, `--extension`, `--sqlcmd`, `--pid`, `--remote`** are refused by name (exit 1).
 * **Stages of the platform's own `config import`** are exit 1 unless the check proves them (`restructuring-check.md`
   3.6): the record-format noise of a whole native image is proven; a `deleted` list of removed attributes is judged
-  by the S1 gate, any other list is not read.
+  by the S1 gate, the rows of a removed form or template are deleted by the apply itself, any other list is not read.
 * **Stages of this program's own import** do not carry a restructuring today (evidence:
   [`s1-acceptance.md`](evidence/dropin-apply/s1-acceptance.md)): the patch mode transfers no attribute, and the
   base-free stage of a changed descriptor is refused by S1 for the rows it rewrites (the business process flowchart, the
@@ -315,7 +316,11 @@ the words used to say `config apply` for an operation that was never finished.
    stage that our importer can make and the apply can take is the import track's. **S1 on 8.5 is proven** on the
    platform's own stages `b1`, `c1`, `d1` of the БСП 8.5.1.1150 (checks 3, 4, 5, 7, 8 equal to the native twin, the `*.si`
    rows the same up to order): `evidence/dropin-apply/s1-acceptance-85.md`. What it needed was the `root` row: the 8.5
-   platform re-stamps the final block of its payload on every write, and the check reads the row for that. ERP УХ is not
-   measured for S1 on either platform.
+   platform re-stamps the final block of its payload on every write, and the check reads the row for that. **S1 on the ERP
+   УХ 8.3.27** is proven on two cases (`b1` deletes and adds attributes, `c1` widens strings; checks 2, 3, 4, 5, 7, 8 equal to the
+   native twin, the 16 `*.si` rows identical): `evidence/dropin-apply/s1-acceptance-uha.md`. The УХ backup holds the configuration
+   only, so the rebuilt tables are empty: it proves the structure path at УХ's metadata scale, not the copy of data. One
+   difference from the platform: it appends the rebuilt tables at the end of the `DBSchema` list, ours are placed before
+   `ConfigChngR`, which is the end only on the БСП. ERP УХ 8.5 is not measured.
 6. **Dynamic update (`--dynamic=force`)** and **ending sessions** are the natural next steps
    (0.5, "смена поколения").

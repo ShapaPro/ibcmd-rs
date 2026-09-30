@@ -28,6 +28,7 @@ pub mod model;
 pub mod objects;
 pub mod recovery;
 pub mod registrations;
+pub mod removals;
 pub mod si;
 pub mod sqlgen;
 pub mod versions;
@@ -41,7 +42,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::mssql_platform_profile::MssqlNativePlatformProfile;
+use crate::mssql_platform_profile::{MssqlNativePlatformProfile, OwnRasProcess, session_exemption};
 use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam, SqlValue};
 
 use check_gate::ApplyCheckGate;
@@ -147,6 +148,11 @@ pub struct ConfigApplyOptions {
     /// The most rows and bytes of tables a restructuring may rebuild in the transaction (S1-J); the
     /// measured default unless a flag or the settings chain says otherwise.
     pub restructure_limit: crate::restructure::size_guard::LimitSetting,
+    /// The worker processes whose idle `1CV83 Server` SQL sessions the exclusivity check leaves out: the sessions the
+    /// tool's own RAS verification made the cluster open (#409 F-3; the old activation commands, #408). A session of
+    /// that program that runs or holds a transaction, and every session of another program or process, still counts.
+    /// Empty (the default): every session but this process's counts.
+    pub own_ras_processes: Vec<OwnRasProcess>,
 }
 
 /// The XML dialect the restructure check decodes descriptors with.
@@ -233,6 +239,7 @@ impl ConfigApplyOptions {
             backup: BackupPolicy::None,
             admit_unverified_roles: false,
             restructure_limit: Default::default(),
+            own_ras_processes: Vec::new(),
         }
     }
 }
@@ -312,6 +319,17 @@ pub struct NewObjectsSummary {
     pub search_info_records: usize,
 }
 
+/// The forms and templates a stage's `deleted` list removes (docs/apply/own-apply.md, "Removals").
+#[derive(Debug, Clone, Serialize)]
+pub struct RemovalsSummary {
+    pub objects: Vec<removals::RemovedObject>,
+    /// `Config` rows deleted.
+    pub rows_deleted: usize,
+    /// Records taken out of the main search information, and entries out of the properties row.
+    pub search_info_records: usize,
+    pub property_entries: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigApplyReport {
     pub schema_version: u32,
@@ -337,6 +355,7 @@ pub struct ConfigApplyReport {
     /// The change registrations for the exchange-plan nodes.
     pub registrations: Option<RegistrationSummary>,
     pub new_objects: Option<NewObjectsSummary>,
+    pub removals: Option<RemovalsSummary>,
     pub tables_touched: Vec<String>,
     /// Derived state the native apply also rewrites and this one does not
     /// (or only in part): the honest gaps.
@@ -461,20 +480,90 @@ fn is_dynamic_update_row(name: &str) -> bool {
     name == "DynamicallyUpdated" || name.contains("_dynupdate_")
 }
 
-/// Whether a `deleted` list asks for nothing this apply does not do already:
-/// no entry, or entries that all name (flag 0) a row of a dynamic update that
-/// `Config` carries now (`overlay_rows`, lower-cased). The fold removes those
-/// rows whether or not the stage lists them.
-fn removals_ask_for_nothing(
+/// The list, split: the rows of a dynamic update that `Config` carries and the list names (flag 0), as
+/// listed, and the names of other `Config` rows (flag 0). An entry with another flag names an element
+/// that has no row of its own (an attribute); it is in neither.
+fn split_removals(
     entries: &[(String, String)],
     overlay_rows: &std::collections::HashSet<String>,
-) -> bool {
-    entries.iter().all(|(name, flag)| {
-        flag == "0"
-            && is_dynamic_update_row(name)
-            && !name.to_ascii_lowercase().starts_with("deleted_dynupdate_")
-            && overlay_rows.contains(&name.to_ascii_lowercase())
-    })
+) -> (Vec<String>, Vec<String>) {
+    let mut overlay = Vec::new();
+    let mut objects = Vec::new();
+    for (name, flag) in entries {
+        if flag != "0" {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if is_dynamic_update_row(name) {
+            if !lower.starts_with("deleted_dynupdate_") && overlay_rows.contains(&lower) {
+                overlay.push(name.clone());
+            }
+        } else {
+            objects.push(name.clone());
+        }
+    }
+    (overlay, objects)
+}
+
+/// What is done with a `deleted` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListAnswer {
+    /// Every name is accounted for: the rows of the dynamic update (all of them, or none), the rows of
+    /// the removed forms and templates. The list is consumed.
+    Consumed,
+    /// What is left (the attributes the stage removes) is for the gate to judge; consumed only if it
+    /// hands over a phase that answers for it.
+    Judged,
+    /// The list is refused as a whole.
+    Refused(String),
+}
+
+/// The apply's answer to a `deleted` list: `accounted` are the lower-cased names of the removed
+/// objects' rows the analysis takes (`blockers` are its reasons against the rest), `gate_judges` says
+/// whether the gate takes the names that remain. A list that names some but not all of the rows of a
+/// dynamic update is refused (the native apply's answer is not measured), and so is any list with a
+/// reason against it: the list is answered whole or not at all.
+fn answer_removals(
+    entries: &[(String, String)],
+    overlay_rows: &std::collections::HashSet<String>,
+    accounted: &std::collections::HashSet<String>,
+    blockers: &[gate::GateBlocker],
+    gate_judges: bool,
+) -> ListAnswer {
+    let (overlay_listed, _) = split_removals(entries, overlay_rows);
+    let named: std::collections::HashSet<String> = overlay_listed
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    if !named.is_empty() && named != *overlay_rows {
+        return ListAnswer::Refused(format!(
+            "it names {} of the {} rows of the dynamic update that Config carries, and the native apply's answer to a partial list is not measured",
+            named.len(),
+            overlay_rows.len()
+        ));
+    }
+    if !blockers.is_empty() {
+        return ListAnswer::Refused(format!(
+            "{} reason(s) against removing the objects it names",
+            blockers.len()
+        ));
+    }
+    let remaining: Vec<&str> = entries
+        .iter()
+        .filter(|(name, flag)| {
+            let lower = name.to_ascii_lowercase();
+            !(flag == "0" && (accounted.contains(&lower) || named.contains(&lower)))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    match remaining.first() {
+        None => ListAnswer::Consumed,
+        Some(_) if gate_judges => ListAnswer::Judged,
+        Some(first) => ListAnswer::Refused(format!(
+            "{} name(s) not accounted for, the first {first}",
+            remaining.len()
+        )),
+    }
 }
 
 /// What a stage's `deleted` row lists, for the message that names it.
@@ -553,7 +642,21 @@ pub struct OtherSession {
     pub last_request_end: String,
 }
 
-pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<OtherSession>> {
+/// The query of [`other_sessions`]: `@P1` the database, `@P2` this process's id. The idle `1CV83 Server` sessions
+/// of `own_ras_processes` are left out ([`session_exemption`]).
+fn other_sessions_query(own_ras_processes: &[OwnRasProcess]) -> String {
+    format!(
+        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
+         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2{} ORDER BY session_id",
+        session_exemption(own_ras_processes)
+    )
+}
+
+pub fn other_sessions(
+    client: &dyn SqlClient,
+    database: &str,
+    own_ras_processes: &[OwnRasProcess],
+) -> Result<Vec<OtherSession>> {
     let permitted = scalar_i64(
         client,
         "SELECT CONVERT(bigint, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER STATE'))",
@@ -567,8 +670,7 @@ pub fn other_sessions(client: &dyn SqlClient, database: &str) -> Result<Vec<Othe
     let pid = i64::from(std::process::id());
     let mut sessions = Vec::new();
     client.read_rows(
-        "SELECT session_id, ISNULL(login_name, N''), ISNULL(host_name, N''), ISNULL(program_name, N''), status, ISNULL(CONVERT(varchar(27), last_request_end_time, 121), N'') \
-         FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND database_id = DB_ID(@P1) AND ISNULL(host_process_id, -1) <> @P2 ORDER BY session_id",
+        &other_sessions_query(own_ras_processes),
         &[SqlParam::Text(database), SqlParam::I64(pid)],
         &mut |row| {
             sessions.push(OtherSession {
@@ -595,6 +697,7 @@ pub struct ConfigApplyPlan {
     mobile_versions_before: Option<Vec<u8>>,
     new: objects::NewObjects,
     registration: registrations::RegistrationPlan,
+    removals: removals::Removals,
 }
 
 pub fn plan(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyPlan> {
@@ -646,6 +749,7 @@ pub fn plan_with_gate(
         backup: None,
         registrations: None,
         new_objects: None,
+        removals: None,
         tables_touched: Vec::new(),
         not_written: Vec::new(),
         warnings: Vec::new(),
@@ -669,6 +773,7 @@ pub fn plan_with_gate(
             mobile_versions_before: None,
             new: objects::NewObjects::default(),
             registration: registrations::RegistrationPlan::default(),
+            removals: removals::Removals::default(),
         });
     }
     let replaced = read_row_metas(
@@ -709,19 +814,32 @@ pub fn plan_with_gate(
         ))
         .into());
     }
-    // The stage's list of removals (`deleted`). This apply deletes no row that a
-    // staged row does not replace, as the native apply does not. A list that
-    // asks for nothing more -- empty, or naming only rows of a dynamic update
-    // that `Config` carries, which the fold removes anyway -- is consumed the
-    // way the native apply does it: not moved into `Config`, dropped with the
-    // rest of `ConfigSave`. Any other list is a removal and is refused
-    // (docs/apply/own-apply.md, "Removals").
+    // The change registrations exist with their file lists or not at all.
+    let has_change_registrations = scalar_i64(
+        client,
+        &format!(
+            "SELECT CASE WHEN OBJECT_ID(N'{db}.dbo._ConfigChngR', N'U') IS NULL OR OBJECT_ID(N'{db}.dbo._ConfigChngR_ExtProps', N'U') IS NULL THEN 0 ELSE 1 END"
+        ),
+    )? == 1;
+
+    // The stage's list of removals (`deleted`). The native apply never deletes a row that a staged
+    // row does not replace; a removal travels in this list. The list is answered name by name:
+    //
+    // - an empty list, or the rows of a dynamic update that `Config` carries (all of them): consumed,
+    //   the rows deleted without folding, as the native apply does;
+    // - the rows of a removed form or template ([`removals`]): deleted with the search-information
+    //   records, when the analysis accounts for every row of the object;
+    // - anything else (an attribute id, a name with a table, a body of an object that stays, a name the
+    //   analysis cannot place): the gate judges it when it says it can (the S1 gate, for the removed
+    //   attributes), and the list is consumed only if a structure phase accounts for the rest;
+    //   otherwise the list is refused as a whole (docs/apply/own-apply.md, "Removals").
     let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut consumed_note = None;
     // the dynamic-update rows the list names: dropped, not folded
     let mut dropped_rows: Vec<String> = Vec::new();
     // the list names removals and the gate said it judges them
     let mut judged_deleted = false;
+    let mut removals = removals::Removals::default();
     if staged
         .iter()
         .any(|row| row.name.eq_ignore_ascii_case("deleted"))
@@ -739,53 +857,91 @@ pub fn plan_with_gate(
             .iter()
             .map(|row| row.name.to_ascii_lowercase())
             .collect();
-        let entries = plain.as_deref().and_then(parse_removals);
-        match entries {
-            Some(entries) if removals_ask_for_nothing(&entries, &overlay_rows) => {
-                // A list that names dynamic-update rows must name every one that
-                // `Config` carries: the native apply then deletes them without
-                // folding (measured on E3 of docs/apply/own-apply.md), and what a
-                // list that names only some of them does is not measured.
-                let named: std::collections::HashSet<String> = entries
-                    .iter()
-                    .map(|(name, _)| name.to_ascii_lowercase())
-                    .collect();
-                if !entries.is_empty() && named != overlay_rows {
-                    return Err(NeedsNativeApply::apply(format!(
-                        "the stage's `deleted` list names {} of the {} rows of the dynamic update that Config carries; the native apply's answer to a partial list is not measured: run the native `ibcmd infobase config apply`",
-                        named.len(),
-                        overlay_rows.len()
-                    ))
-                    .into());
-                }
-                dropped_rows = entries.iter().map(|(name, _)| name.clone()).collect();
-                let mut note = describe_removals(plain.as_deref().unwrap_or_default());
+        let description = plain
+            .as_deref()
+            .map(describe_removals)
+            .unwrap_or_else(|| "a list this apply cannot read".to_owned());
+        let Some(entries) = plain.as_deref().and_then(parse_removals) else {
+            return Err(NeedsNativeApply::apply(format!(
+                "the stage carries a `deleted` row, the list of removals: {description}"
+            ))
+            .into());
+        };
+        let (overlay_listed, object_names) = split_removals(&entries, &overlay_rows);
+        let mut analysis = if object_names.is_empty() {
+            removals::RemovalAnalysis::default()
+        } else {
+            removals::analyze(&removals::RemovalInput {
+                client,
+                database,
+                names: &object_names,
+                overlay_rows: &overlay_rows,
+                staged: &staged,
+            })?
+        };
+        // Removals are measured on 8.3.27 only: the search-information records and the change register
+        // of a removed form were compared with the native apply there.
+        if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150
+            && !analysis.removals.is_empty()
+        {
+            analysis.blockers.push(gate::GateBlocker {
+                row: analysis.removals.rows.first().cloned().unwrap_or_default(),
+                reason: "a removed form or template is measured on 8.3.27 only; on 8.5 the platform's own apply removes it".to_owned(),
+            });
+        }
+        if !analysis.removals.is_empty() && analysis.blockers.is_empty() {
+            analysis.blockers.extend(removals::extension_blockers(
+                client,
+                sql,
+                database,
+                &analysis.removals,
+            )?);
+        }
+        let answer = answer_removals(
+            &entries,
+            &overlay_rows,
+            &analysis.removals.accounted,
+            &analysis.blockers,
+            structural_gate.judges_deleted_row(),
+        );
+        match answer {
+            ListAnswer::Consumed | ListAnswer::Judged => {
+                dropped_rows = overlay_listed;
+                let mut note = description;
                 if !dropped_rows.is_empty() {
                     note.push_str("; the dynamic-update rows it names are deleted, not folded");
                 }
+                if !analysis.removals.is_empty() {
+                    note.push_str(&format!(
+                        "; {} removed form(s) or template(s) ({} rows) are deleted with their search-information records",
+                        analysis.removals.objects.len(),
+                        analysis.removals.rows.len()
+                    ));
+                }
+                if answer == ListAnswer::Judged {
+                    judged_deleted = true;
+                    note.push_str("; the gate judges the rest");
+                }
                 consumed_note = Some(note);
                 consumed.insert("deleted".to_owned());
+                removals = analysis.removals;
             }
-            // A list of removals the gate judges itself (the S1 gate: the attributes the stage
-            // removes). It is consumed like an empty list, but only when the gate hands over a
-            // phase that accounts for it (checked once the gate has answered).
-            Some(_) if structural_gate.judges_deleted_row() => {
-                judged_deleted = true;
-                consumed_note = Some(format!(
-                    "{}; the gate judges it",
-                    describe_removals(plain.as_deref().unwrap_or_default())
-                ));
-                consumed.insert("deleted".to_owned());
-            }
-            _ => {
-                let description = plain
-                    .as_deref()
-                    .map(describe_removals)
-                    .unwrap_or_else(|| "a list this apply cannot read".to_owned());
-                return Err(NeedsNativeApply::apply(format!(
-                    "the stage carries a `deleted` row, the list of removals: {description}. This apply consumes an empty list and a list of the rows of a dynamic update, takes the stage of this repository's `infobase config import`, and removes nothing that a staged row does not replace; any other removal, and the stage of the platform's own `config import`, need the native `ibcmd infobase config apply`"
-                ))
-                .into());
+            ListAnswer::Refused(reason) => {
+                let removal_blockers = analysis.blockers;
+                let mut message = format!(
+                    "the stage carries a `deleted` row, the list of removals: {description}. This apply consumes an empty list, the rows of a dynamic update and the rows of a removed form or template that it can account for name by name ({}); a list it cannot account for as a whole, and the stage of the platform's own `config import`, need the native `ibcmd infobase config apply`",
+                    reason
+                );
+                for blocker in removal_blockers.iter().take(5) {
+                    message.push_str(&format!("; {}: {}", blocker.row, blocker.reason));
+                }
+                if removal_blockers.len() > 5 {
+                    message.push_str(&format!(
+                        " (and {} more reasons)",
+                        removal_blockers.len() - 5
+                    ));
+                }
+                return Err(NeedsNativeApply::apply(message).into());
             }
         }
     }
@@ -959,18 +1115,10 @@ pub fn plan_with_gate(
     });
     if let Some(description) = consumed_note {
         report.warnings.push(format!(
-            "the stage's `deleted` list asks for nothing this apply does not do ({description}); the row is consumed, not moved into Config, as the native apply does"
+            "the stage's `deleted` list is answered by this apply ({description}); the row is consumed, not moved into Config, as the native apply does"
         ));
     }
     report.stage = Some(stage);
-
-    // The change registrations exist with their file lists or not at all.
-    let has_change_registrations = scalar_i64(
-        client,
-        &format!(
-            "SELECT CASE WHEN OBJECT_ID(N'{db}.dbo._ConfigChngR', N'U') IS NULL OR OBJECT_ID(N'{db}.dbo._ConfigChngR_ExtProps', N'U') IS NULL THEN 0 ELSE 1 END"
-        ),
-    )? == 1;
 
     // New rows: a form or template an existing object gains, or a body row.
     let started = Instant::now();
@@ -1023,19 +1171,63 @@ pub fn plan_with_gate(
     }
 
     // The structural gate.
+    // The owners' descriptors that differ from the active ones by references only: to the new objects
+    // and from the removed ones. The names the apply deletes itself (the removed objects' rows and the
+    // rows of a dynamic update) are not for a gate that judges the list to look at.
+    let accepted_owners: std::collections::HashSet<String> = new
+        .owners
+        .iter()
+        .chain(removals.owners.iter())
+        .cloned()
+        .collect();
+    let removed_names: std::collections::HashSet<String> = removals
+        .accounted
+        .iter()
+        .cloned()
+        .chain(dropped_rows.iter().map(|name| name.to_ascii_lowercase()))
+        .collect();
     let mut verdict = structural_gate.check(&GateInput {
         client,
         database,
         staged: &staged,
         active: &active,
         accepted_new_rows: &new.rows,
-        accepted_owner_descriptors: &new.owners,
+        accepted_owner_descriptors: &accepted_owners,
         new_object_kinds: &new.kinds,
         consumed_rows: &consumed,
+        removed_rows: &removed_names,
     })?;
     timings.gate_ms = ms(started);
+    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
+    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
+    let structure = structural_gate.take_structure();
+    // The catalogs and documents the structure phase creates (S1-F): the phase answers for the objects and
+    // their rows (the analysis above knows a new form or template only), this apply moves the rows like any
+    // staged row and registers the objects like a new form.
+    let created: Vec<gate::CreatedObject> = structure
+        .as_ref()
+        .map(|phase| phase.created.clone())
+        .unwrap_or_default();
+    let answered_rows: Vec<String> = structure
+        .as_ref()
+        .map(|phase| phase.answered_rows.clone())
+        .unwrap_or_default();
+    let answered_for = |row: &str| {
+        let row = row.to_ascii_lowercase();
+        answered_rows.contains(&row)
+            || created.iter().any(|object| {
+                let uuid = object.uuid.to_ascii_lowercase();
+                row == uuid
+                    || object
+                        .files
+                        .iter()
+                        .any(|file| file.to_ascii_lowercase() == row)
+            })
+    };
     for blocker in analysis_blockers {
-        verdict.block(&blocker.row, blocker.reason);
+        if !answered_for(&blocker.row) {
+            verdict.block(&blocker.row, blocker.reason);
+        }
     }
     if verdict.restructuring_required {
         report.gate = Some(verdict.clone());
@@ -1044,9 +1236,6 @@ pub fn plan_with_gate(
         return Err(anyhow::Error::new(StructuralRefusal { verdict }));
     }
     report.gate = Some(verdict);
-    // A gate that lets a restructuring through hands over the structure work: T-SQL for this
-    // transaction and the cache rows it makes stale (docs/apply/own-apply.md, "Restructuring").
-    let structure = structural_gate.take_structure();
     // A `deleted` list of removals is consumed only when a phase accounts for it.
     if judged_deleted
         && !structure
@@ -1117,13 +1306,50 @@ pub fn plan_with_gate(
     if let Some(phase) = &structure {
         params_rewrites = merge_params_rewrites(params_rewrites, &phase.params_rewrites)?;
     }
+    // The removed forms and templates take their records out of the search information, on top of
+    // what the new objects and a restructuring of the same stage rewrite.
+    let mut search_info_removal = removals::SearchInfoRemoval::default();
+    if !removals.is_empty() {
+        let (rewrites, summary) =
+            removals::plan_search_info(client, database, &removals, params_rewrites).map_err(
+                |error| {
+                    anyhow::Error::from(NeedsNativeApply::apply(format!(
+                        "the search information cannot be edited for the removed forms and templates: {error:#}; run the native `ibcmd infobase config apply`"
+                    )))
+                },
+            )?;
+        params_rewrites = rewrites;
+        search_info_removal = summary;
+    }
 
     // The change registrations of the nodes of distributed infobases: the rows a node with no rows gets
     // for the objects this stage changes (docs/apply/own-apply.md, "Exchange plans").
+    // A removed object is registered like an object that owns a staged row: its message numbers are reset and a
+    // node with no row of it gets one, with its files -- as for the rows of a dynamic update a `deleted` list names
+    // (twins of a removed form and template with message numbers and a missing row, docs/apply/own-apply.md).
+    let registered_names: Vec<String> = dropped_rows
+        .iter()
+        .chain(removals.rows.iter())
+        .cloned()
+        .collect();
     let registration = if has_change_registrations {
-        registrations::plan(client, database, &staged, &dropped_rows)?
+        registrations::plan(client, database, &staged, &registered_names)?
     } else {
         registrations::RegistrationPlan::default()
+    };
+    // The nodes a created object is registered at: every node of the exchange plans but the plans' own, the ones
+    // with no rows included (`objects::registration_nodes`, #412). Measured on 8.3.27 only, and on a register
+    // that has rows.
+    let created_nodes = if created.is_empty() || !has_change_registrations {
+        Vec::new()
+    } else {
+        if options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150 {
+            return Err(NeedsNativeApply::apply(
+                "a created object is measured on 8.3.27 only; on 8.5 the platform's own apply registers it",
+            )
+            .into());
+        }
+        objects::registration_nodes(client, &db).map_err(NeedsNativeApply::apply)?
     };
 
     let mut touched = vec!["Config", "ConfigSave"];
@@ -1135,6 +1361,7 @@ pub fn plan_with_gate(
         if !new.is_empty()
             || !registration.dropped_files.is_empty()
             || registration.added_file_rows > 0
+            || created.iter().any(|object| !object.files.is_empty())
         {
             touched.push("_ConfigChngR_ExtProps");
         }
@@ -1149,7 +1376,9 @@ pub fn plan_with_gate(
             .extend(["SchemaStorage", "DBSchema"].map(str::to_owned));
         report.tables_touched.extend(phase.tables.iter().cloned());
     }
-    let nodes_seen = if (new.is_empty() && registration.dropped_files.is_empty())
+    let nodes_seen = if (new.is_empty()
+        && created.is_empty()
+        && registration.dropped_files.is_empty())
         || !has_change_registrations
     {
         0
@@ -1181,7 +1410,7 @@ pub fn plan_with_gate(
                 .to_bytes_le(),
         ))
     };
-    let new_registrations = new
+    let mut new_registrations = new
         .objects
         .iter()
         .map(|object| {
@@ -1191,6 +1420,12 @@ pub fn plan_with_gate(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    for object in &created {
+        new_registrations.push(NewRegistration {
+            object_hex: object_hex(&object.uuid)?,
+            files: object.files.clone(),
+        });
+    }
     let mut appended_files = new
         .bodies
         .iter()
@@ -1211,10 +1446,12 @@ pub fn plan_with_gate(
         }
     }
     // the nodes registrations are made for: the plans' nodes, the ones with no rows included
-    let node_source = if registration.nodes.is_empty() {
+    let node_source = if !registration.nodes.is_empty() {
+        &registration.nodes
+    } else if !new.nodes.is_empty() {
         &new.nodes
     } else {
-        &registration.nodes
+        &created_nodes
     };
     let nodes = node_source
         .iter()
@@ -1238,12 +1475,32 @@ pub fn plan_with_gate(
         );
     }
     report.not_written.extend([
-        "Params .si service-information rows and siVersions, except the main row and its version when a new form or template adds records or a restructuring changes a cache (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
+        "Params .si service-information rows and siVersions, except the main row, the properties row and their versions when a new or removed form or template changes the records, or a restructuring changes a cache (the native apply re-encodes every .si row with a new version; the content is unchanged otherwise)".to_owned(),
         "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*)".to_owned(),
         "the extension CAS garbage collection (ConfigCAS, Files CAS_GC_Info, extd_props_cached/gc.mrk)".to_owned(),
         "scratch rows of the extension restructure (_ExtensionsRestructNGS)".to_owned(),
     ]);
 
+    let removed_fp = if removals.rows.is_empty() {
+        Fingerprint::default()
+    } else {
+        let fingerprint =
+            read_fingerprint(client, &sqlgen::removed_source(database, &removals.rows)?)?;
+        if fingerprint.rows != removals.rows.len() as i64 {
+            bail!(
+                "Config changed while the plan was being made: {} of the {} rows of the removed objects are there",
+                fingerprint.rows,
+                removals.rows.len()
+            );
+        }
+        fingerprint
+    };
+    report.removals = (!removals.is_empty()).then(|| RemovalsSummary {
+        objects: removals.objects.clone(),
+        rows_deleted: removals.rows.len(),
+        search_info_records: search_info_removal.records_removed,
+        property_entries: search_info_removal.property_entries_removed,
+    });
     let consumed_row_count = staged
         .iter()
         .filter(|row| consumed.contains(&row.name.to_ascii_lowercase()))
@@ -1255,6 +1512,7 @@ pub fn plan_with_gate(
         client_pid: std::process::id(),
         rehearse: options.rehearse,
         require_exclusive: options.exclusivity == Exclusivity::SqlSessions,
+        session_exemption: session_exemption(&options.own_ras_processes),
         staged: staged_fp,
         replaced: replaced_fp,
         special_config: special_config_fp,
@@ -1279,6 +1537,8 @@ pub fn plan_with_gate(
         consumed_names,
         consumed_row_count,
         dropped_rows,
+        removed_rows: removals.rows.clone(),
+        removed: removed_fp,
         structure_sql: structure.as_ref().map(|phase| phase.sql.clone()),
     };
     report.structure = structure;
@@ -1297,6 +1557,7 @@ pub fn plan_with_gate(
         mobile_versions_before: mobile_before,
         new,
         registration,
+        removals,
     })
 }
 
@@ -1329,7 +1590,7 @@ pub fn apply_with_gate(
         plan.report.script_path = Some(path.clone());
     }
     if options.exclusivity == Exclusivity::SqlSessions {
-        let sessions = other_sessions(client, &options.database)?;
+        let sessions = other_sessions(client, &options.database, &options.own_ras_processes)?;
         if !sessions.is_empty() {
             return Err(ExclusiveAccessRefused {
                 database: options.database.clone(),
@@ -1423,6 +1684,7 @@ pub fn apply_with_gate(
                 .as_ref()
                 .is_some_and(|inputs| inputs.reset_change_registrations),
             new_objects: &plan.new,
+            removals: &plan.removals,
             registration: &plan.registration,
             params_rewrites: plan
                 .inputs
@@ -1441,7 +1703,8 @@ pub fn apply_with_gate(
         if let Some((number, message)) = errors::server_error_of(&error)
             && let Some(typed) =
                 errors::from_transaction_code(number, &message, &options.database, || {
-                    other_sessions(client, &options.database).unwrap_or_default()
+                    other_sessions(client, &options.database, &options.own_ras_processes)
+                        .unwrap_or_default()
                 })
         {
             return Err(typed);
@@ -1669,6 +1932,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_sessions_query_leaves_out_only_the_idle_sessions_of_the_own_ras_processes() {
+        // no own process (the default of every caller but the old activation commands): every session but ours counts
+        let plain = other_sessions_query(&[]);
+        assert!(plain.contains("ISNULL(host_process_id, -1) <> @P2 ORDER BY session_id"));
+        assert!(!plain.contains("1CV83 Server"));
+        assert!(
+            ConfigApplyOptions::new("db", MssqlNativePlatformProfile::Platform8_3_27_2214)
+                .own_ras_processes
+                .is_empty()
+        );
+        let own = [OwnRasProcess {
+            host: "wks".to_owned(),
+            pid: 4711,
+        }];
+        let query = other_sessions_query(&own);
+        assert!(query.contains("<> @P2 AND NOT (ISNULL(program_name,N'')=N'1CV83 Server'"));
+        assert!(query.contains("status=N'sleeping' AND open_transaction_count=0"));
+        assert!(query.contains("N'wks' AND ISNULL(host_process_id,-1) IN (4711)"));
+        assert!(query.ends_with(" ORDER BY session_id"));
+    }
+
+    #[test]
     fn the_8_5_profile_is_planned_like_any_other() {
         // it needs a server, and says so; it is not turned away by its version
         let sql = SqlExec::detached("no server in a unit test");
@@ -1715,6 +2000,21 @@ mod tests {
         assert!(describe_removals(b"{1,2}").contains("cannot read"));
     }
 
+    fn answer(
+        text: &str,
+        carried: &std::collections::HashSet<String>,
+        accounted: &[&str],
+        blockers: &[gate::GateBlocker],
+        gate_judges: bool,
+    ) -> Option<ListAnswer> {
+        let accounted: std::collections::HashSet<String> = accounted
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        parse_removals(text.as_bytes())
+            .map(|entries| answer_removals(&entries, carried, &accounted, blockers, gate_judges))
+    }
+
     #[test]
     fn a_deleted_list_asks_for_nothing_when_it_is_empty_or_only_a_dynamic_update() {
         let alias =
@@ -1724,36 +2024,182 @@ mod tests {
             .iter()
             .map(|name| name.to_ascii_lowercase())
             .collect();
-        let ask = |text: &str| {
-            parse_removals(text.as_bytes())
-                .map(|entries| removals_ask_for_nothing(&entries, &carried))
+        let asks_for_nothing = |text: &str| {
+            answer(text, &carried, &[], &[], false).map(|answer| answer == ListAnswer::Consumed)
         };
         // empty
-        assert_eq!(ask("\u{feff}0"), Some(true));
+        assert_eq!(asks_for_nothing("\u{feff}0"), Some(true));
         // the rows of a dynamic update that Config carries
         let overlay = format!("\u{feff}3,\"{alias}\",0,\"DynamicallyUpdated\",0,\"{versions}\",0");
-        assert_eq!(ask(&overlay), Some(true));
+        assert_eq!(asks_for_nothing(&overlay), Some(true));
         // a dynamic-update row Config does not carry now
         let other = "\u{feff}1,\"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0";
-        assert_eq!(ask(other), Some(false));
-        // an ordinary row: a removal
+        assert_eq!(asks_for_nothing(other), Some(false));
+        // an ordinary row: a removal the analysis has not accounted for
         assert_eq!(
-            ask("\u{feff}1,\"5ff28850-03db-4a0f-b95e-c2ea4d8c516d\",0"),
+            asks_for_nothing("\u{feff}1,\"5ff28850-03db-4a0f-b95e-c2ea4d8c516d\",0"),
             Some(false)
         );
         // a name with flag 1 (a nested object, not a row)
         let flagged = format!("\u{feff}1,\"{alias}\",1");
-        assert_eq!(ask(&flagged), Some(false));
+        assert_eq!(asks_for_nothing(&flagged), Some(false));
         // the removal list of a dynamic update itself is never folded
         let mut with_removals = carried.clone();
         with_removals.insert("deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b".to_owned());
         let entries =
             parse_removals(b"1,\"deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b\",0")
                 .unwrap();
-        assert!(!removals_ask_for_nothing(&entries, &with_removals));
+        assert_ne!(
+            answer_removals(
+                &entries,
+                &with_removals,
+                &std::collections::HashSet::new(),
+                &[],
+                false
+            ),
+            ListAnswer::Consumed
+        );
+        // some but not all of the rows of the update: not measured
+        let partial = format!("\u{feff}1,\"{alias}\",0");
+        match answer(&partial, &carried, &[], &[], false) {
+            Some(ListAnswer::Refused(reason)) => {
+                assert!(reason.contains("1 of the 3"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
         // text that is no list
-        assert_eq!(ask("{1,2}"), None);
-        assert_eq!(ask("2,\"a\",0"), None);
+        assert_eq!(asks_for_nothing("{1,2}"), None);
+        assert_eq!(asks_for_nothing("2,\"a\",0"), None);
+    }
+
+    const FORM: &str = "8a7546f4-bfc9-4732-bf60-43a41e2c8753";
+    const TEMPLATE: &str = "0384ec55-dc18-40ae-ae83-7defc28d8f3f";
+    const ATTRIBUTE: &str = "c1a2b3d4-0000-4000-8000-000000000001";
+
+    /// The list the platform's own import writes for a tree that loses a form and a template of a БСП
+    /// clone with a pending dynamic update, and `extra` entries behind it.
+    fn native_list(extra: &str, extra_count: usize) -> (String, std::collections::HashSet<String>) {
+        let alias =
+            "ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let versions = "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b";
+        let carried = [alias, versions, "DynamicallyUpdated"]
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        let text = format!(
+            "\u{feff}{},\"{TEMPLATE}\",0,\"{TEMPLATE}.0\",0,\"{FORM}\",0,\"{FORM}.0\",0,\"{FORM}.1\",0,\"{alias}\",0,\"DynamicallyUpdated\",0,\"{versions}\",0{extra}",
+            8 + extra_count
+        );
+        (text, carried)
+    }
+
+    fn form_and_template_rows() -> [String; 5] {
+        [
+            TEMPLATE.to_owned(),
+            format!("{TEMPLATE}.0"),
+            FORM.to_owned(),
+            format!("{FORM}.0"),
+            format!("{FORM}.1"),
+        ]
+    }
+
+    #[test]
+    fn the_rows_of_a_removed_form_and_template_are_answered_name_by_name() {
+        let (text, carried) = native_list("", 0);
+        let rows = form_and_template_rows();
+        let accounted: Vec<&str> = rows.iter().map(String::as_str).collect();
+        // every name is accounted for: the objects' rows and the rows of the update
+        assert_eq!(
+            answer(&text, &carried, &accounted, &[], false),
+            Some(ListAnswer::Consumed)
+        );
+        assert_eq!(
+            answer(&text, &carried, &accounted, &[], true),
+            Some(ListAnswer::Consumed),
+            "nothing is left for a gate that judges the list"
+        );
+        // the analysis accounts for nothing: the list is refused as a whole
+        match answer(&text, &carried, &[], &[], false) {
+            Some(ListAnswer::Refused(reason)) => {
+                assert!(reason.contains("5 name(s) not accounted for"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // one body of the form is left out: refused, not consumed in part
+        match answer(&text, &carried, &accounted[..4], &[], false) {
+            Some(ListAnswer::Refused(reason)) => {
+                assert!(reason.contains(&format!("{FORM}.1")), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // a reason against the objects refuses the list whole, whatever the gate says
+        let blocker = gate::GateBlocker {
+            row: FORM.to_owned(),
+            reason: "the owner's descriptor is not staged".to_owned(),
+        };
+        assert!(matches!(
+            answer(
+                &text,
+                &carried,
+                &accounted,
+                std::slice::from_ref(&blocker),
+                true
+            ),
+            Some(ListAnswer::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn a_mixed_list_of_a_removed_form_and_removed_attributes_is_the_gates_for_the_attributes_only()
+    {
+        // the platform's own import: the rows of the form with the flag 0, the id of a removed attribute
+        // with the flag 1
+        let (text, carried) = native_list(&format!(",\"{ATTRIBUTE}\",1"), 1);
+        let rows = form_and_template_rows();
+        let accounted: Vec<&str> = rows.iter().map(String::as_str).collect();
+        // a gate that judges the list takes what the analysis leaves: the attribute
+        assert_eq!(
+            answer(&text, &carried, &accounted, &[], true),
+            Some(ListAnswer::Judged)
+        );
+        // no gate takes it: the whole list goes to the native apply, the form included
+        match answer(&text, &carried, &accounted, &[], false) {
+            Some(ListAnswer::Refused(reason)) => {
+                assert!(reason.contains("1 name(s) not accounted for"), "{reason}");
+                assert!(reason.contains(ATTRIBUTE), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // the rows the analysis does not take go to the gate too, which refuses a name that is no
+        // attribute (the S1 plan: "the staged image deletes ..., which is not an attribute it removes")
+        assert_eq!(
+            answer(&text, &carried, &accounted[..2], &[], true),
+            Some(ListAnswer::Judged)
+        );
+        // the analysis's reasons stop the list before any gate
+        let blocker = gate::GateBlocker {
+            row: FORM.to_owned(),
+            reason: "the object has a table".to_owned(),
+        };
+        assert!(matches!(
+            answer(
+                &text,
+                &carried,
+                &accounted,
+                std::slice::from_ref(&blocker),
+                true
+            ),
+            Some(ListAnswer::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn the_list_is_split_into_the_rows_of_the_update_and_the_rows_of_objects() {
+        let (text, carried) = native_list(&format!(",\"{ATTRIBUTE}\",1"), 1);
+        let entries = parse_removals(text.as_bytes()).unwrap();
+        let (overlay, objects) = split_removals(&entries, &carried);
+        assert_eq!(overlay.len(), 3);
+        assert_eq!(objects, form_and_template_rows().to_vec());
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub mod code {
     pub const ALREADY_REGISTERED: u32 = 57317;
     pub const NODES_DRIFTED: u32 = 57318;
     pub const NEW_REGISTRATION: u32 = 57319;
+    pub const REMOVED_DRIFTED: u32 = 57320;
+    pub const REMOVE_COUNT: u32 = 57321;
 }
 
 /// Names whose presence means an earlier operation did not finish
@@ -122,6 +124,27 @@ pub fn special_config_source(database: &str) -> Result<String> {
     ))
 }
 
+/// The `Config` rows a stage's `deleted` list removes (the rows of removed forms and templates).
+pub fn removed_source(database: &str, names: &[String]) -> Result<String> {
+    let db = quote_ident(database)?;
+    Ok(format!(
+        "{db}.dbo.Config s WHERE s.FileName IN ({})",
+        name_list(names)
+    ))
+}
+
+/// `N'a', N'b'`: names as a SQL list. An empty list is `N''`, which matches no row name.
+fn name_list(names: &[String]) -> String {
+    if names.is_empty() {
+        return "N''".to_owned();
+    }
+    names
+        .iter()
+        .map(|name| format!("N'{}'", quote_string(name)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The `Params` marker row, when present.
 pub fn special_params_source(database: &str) -> Result<String> {
     let db = quote_ident(database)?;
@@ -197,6 +220,9 @@ pub struct ScriptInputs {
     pub rehearse: bool,
     /// Require that no other user session is connected to the database.
     pub require_exclusive: bool,
+    /// A condition to append to the session count (`" AND NOT (...)"`, or empty): the idle `1CV83 Server` sessions of
+    /// the worker processes that the tool's own RAS verification opened (#409 F-3, #408).
+    pub session_exemption: String,
     pub staged: Fingerprint,
     pub replaced: Fingerprint,
     pub special_config: Fingerprint,
@@ -239,6 +265,10 @@ pub struct ScriptInputs {
     /// not folded (the native apply deletes what the list names). Empty: the
     /// generations, if any, are folded.
     pub dropped_rows: Vec<String>,
+    /// The `Config` rows of the forms and templates the stage's `deleted` list removes, and the digest
+    /// of them the plan saw. Deleted outright; the stage holds no row of these names.
+    pub removed_rows: Vec<String>,
+    pub removed: Fingerprint,
     /// The structure phase of a restructuring the gate let through (T-SQL, see
     /// `gate::StructurePhase`): run after the assertions and `@now`, before the fold and the move.
     pub structure_sql: Option<String>,
@@ -387,8 +417,8 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         throw(
             &mut sql,
             &format!(
-                "EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND session_id <> @@SPID AND database_id = DB_ID() AND ISNULL(host_process_id, -1) <> {})",
-                input.client_pid
+                "EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process = 1 AND session_id <> @@SPID AND database_id = DB_ID() AND ISNULL(host_process_id, -1) <> {}{})",
+                input.client_pid, input.session_exemption
             ),
             code::OTHER_SESSIONS,
             "another session is connected to the database; the apply needs exclusive access",
@@ -460,6 +490,16 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         code::SPECIAL_DRIFTED,
         "Params.DynamicallyUpdated changed since the plan was made",
     );
+    if !input.removed_rows.is_empty() {
+        assert_fingerprint(
+            &mut sql,
+            "Config removed rows",
+            &removed_source_local(&input.removed_rows),
+            &input.removed,
+            code::REMOVED_DRIFTED,
+            "the Config rows the stage's deleted list removes changed since the plan was made",
+        );
+    }
 
     // Timestamps as the platform writes them: local time, shifted by the
     // infobase's year offset.
@@ -558,6 +598,25 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
             &left,
             code::MARKER_CLEANUP,
             "DynamicallyUpdated is left after the cleanup",
+        );
+    }
+
+    // The rows of the removed forms and templates go (every part of each). The stage holds no row of
+    // these names, and the fold above has not made one.
+    if !input.removed_rows.is_empty() {
+        let names = name_list(&input.removed_rows);
+        writeln!(sql, "DELETE FROM dbo.Config WHERE FileName IN ({names});").unwrap();
+        throw(
+            &mut sql,
+            &format!("@@ROWCOUNT <> {}", input.removed.rows),
+            code::REMOVE_COUNT,
+            "the number of Config rows removed differs from the plan's",
+        );
+        throw(
+            &mut sql,
+            &format!("EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({names}))"),
+            code::REMOVE_COUNT,
+            "a row of a removed form or template is left in Config",
         );
     }
 
@@ -1011,6 +1070,10 @@ fn special_params_local() -> String {
     "dbo.Params s WHERE s.FileName = N'DynamicallyUpdated'".to_owned()
 }
 
+fn removed_source_local(names: &[String]) -> String {
+    format!("dbo.Config s WHERE s.FileName IN ({})", name_list(names))
+}
+
 fn generation_filter(generations: &[Uuid]) -> String {
     let parts = generations
         .iter()
@@ -1034,6 +1097,7 @@ mod tests {
             client_pid: 4242,
             rehearse: false,
             require_exclusive: true,
+            session_exemption: String::new(),
             staged: Fingerprint {
                 rows: 3,
                 bytes: 300,
@@ -1067,6 +1131,8 @@ mod tests {
             consumed_names: Vec::new(),
             consumed_row_count: 0,
             dropped_rows: Vec::new(),
+            removed_rows: Vec::new(),
+            removed: Fingerprint::default(),
             structure_sql: None,
         }
     }
@@ -1106,6 +1172,36 @@ mod tests {
                 .unwrap()
                 .contains("-- structure phase")
         );
+    }
+
+    #[test]
+    fn the_exclusivity_check_leaves_out_the_idle_sessions_of_the_own_ras_processes() {
+        // #408 step 2: the old activation commands hand their exclusive mode to this apply, and the tool's own RAS
+        // verification made the cluster open idle SQL sessions on the database (#409 F-3).
+        let plain = render_apply_script(&inputs()).unwrap();
+        assert!(
+            !plain.contains("1CV83 Server"),
+            "no own process, no exemption"
+        );
+        let mut own = inputs();
+        own.session_exemption = crate::mssql_platform_profile::session_exemption(&[
+            crate::mssql_platform_profile::OwnRasProcess {
+                host: "wks".to_owned(),
+                pid: 4711,
+            },
+        ]);
+        let sql = render_apply_script(&own).unwrap();
+        let throw = sql.find("THROW 57302").unwrap();
+        let condition = &sql[..throw];
+        let start = condition
+            .rfind("EXISTS (SELECT 1 FROM sys.dm_exec_sessions")
+            .unwrap();
+        let condition = &condition[start..];
+        assert!(condition.contains("ISNULL(host_process_id, -1) <> 4242"));
+        assert!(condition.contains("program_name,N'')=N'1CV83 Server'"));
+        assert!(condition.contains("status=N'sleeping'"));
+        assert!(condition.contains("open_transaction_count=0"));
+        assert!(condition.contains("N'wks' AND ISNULL(host_process_id,-1) IN (4711)"));
     }
 
     #[test]
@@ -1526,5 +1622,47 @@ SELECT 1;"
         assert!(!drop.contains("UPDATE dbo.Config SET FileName = LEFT(FileName"));
         assert!(drop.contains("DELETE FROM dbo.Config WHERE FileName IN (N'ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e', N'versions_dynupdate_719baa18-69ed-439a-8962-1de53d98e05e', N'DynamicallyUpdated');"));
         assert!(drop.contains("that the stage''s deleted list names is left"));
+    }
+
+    #[test]
+    fn the_rows_of_removed_objects_are_fingerprinted_deleted_and_counted_before_the_move() {
+        let mut with = inputs();
+        with.removed_rows = vec![
+            "8a7546f4-bfc9-4732-bf60-43a41e2c8753".to_owned(),
+            "8a7546f4-bfc9-4732-bf60-43a41e2c8753.0".to_owned(),
+        ];
+        with.removed = Fingerprint {
+            rows: 2,
+            bytes: 100,
+            h1: 7,
+            h2: 8,
+            h3: 9,
+        };
+        with.dropped_rows = vec!["ab132638-5188-470d-9432-de85f2b2c7d8_dynupdate_x".to_owned()];
+        let sql = render_apply_script(&with).unwrap();
+        let names =
+            "N'8a7546f4-bfc9-4732-bf60-43a41e2c8753', N'8a7546f4-bfc9-4732-bf60-43a41e2c8753.0'";
+        // the digest of the rows the plan saw is asserted under the locks, ahead of anything written
+        let drift = sql.find("Config removed rows").unwrap();
+        assert!(sql.contains(&format!("dbo.Config s WHERE s.FileName IN ({names})")));
+        assert!(sql.contains("@n <> 2 OR @b <> 100 OR @h1 <> 7 OR @h2 <> 8 OR @h3 <> 9"));
+        assert!(drift < sql.find("DECLARE @now datetime2(6)").unwrap());
+        // deleted after the dynamic rows, before the move, counted and checked
+        let dynamic = sql.find("_dynupdate_x").unwrap();
+        let delete = sql
+            .find(&format!(
+                "DELETE FROM dbo.Config WHERE FileName IN ({names});"
+            ))
+            .unwrap();
+        let moved = sql.find("INSERT dbo.Config").unwrap();
+        assert!(dynamic < delete && delete < moved);
+        assert!(sql[delete..moved].contains("IF @@ROWCOUNT <> 2 THROW 57321"));
+        assert_eq!(sql.matches("THROW 57321").count(), 2);
+        assert!(sql.contains(&format!(
+            "IF EXISTS (SELECT 1 FROM dbo.Config WHERE FileName IN ({names})) THROW 57321"
+        )));
+        // a stage that removes nothing has none of it
+        let plain = render_apply_script(&inputs()).unwrap();
+        assert!(!plain.contains("Config removed rows") && !plain.contains("57321"));
     }
 }

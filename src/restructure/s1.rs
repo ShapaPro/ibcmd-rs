@@ -31,7 +31,8 @@ use sha2::{Digest, Sha256};
 use crate::apply_check::s1::{S1Operation, classify};
 use crate::apply_check::{RuleId, Verdict, check_staged};
 use crate::mssql_config_apply::gate::{
-    ConservativeGate, GateInput, GateVerdict, StructuralGate, StructurePhase,
+    ConservativeGate, CreatedObject, GateInput, GateVerdict, StructuralGate,
+    StructurePhase,
 };
 use crate::mssql_config_apply::sqlgen::ParamsRewrite;
 use crate::restructure::extensions::read_adoptions;
@@ -47,6 +48,25 @@ fn sha256_upper(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect()
+}
+
+/// The stored `deleted` row without the given names (lower-cased); `None` stays `None`.
+pub(super) fn without_names(
+    stored: Option<Vec<u8>>,
+    names: &HashSet<String>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let kept: Vec<(String, i64)> = crate::restructure::plan::parse_deleted(&stored)?
+        .into_iter()
+        .filter(|(id, _)| !names.contains(id))
+        .collect();
+    let mut text = format!("\u{feff}{}", kept.len());
+    for (id, flag) in &kept {
+        text.push_str(&format!(",\"{id}\",{flag}"));
+    }
+    Ok(Some(crate::restructure::names::deflate(text.as_bytes())?))
 }
 
 /// The plan as the apply takes it: T-SQL for its transaction and the cache rows as guarded rewrites. The
@@ -100,6 +120,36 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             .iter()
             .map(|cache| format!("Params.{}: {}", cache.row_name, cache.what))
             .collect(),
+        created: plan
+            .objects
+            .iter()
+            .filter(|object| object.created)
+            .map(|object| {
+                let prefix = format!("{}.", object.object_uuid.to_ascii_lowercase());
+                CreatedObject {
+                    uuid: object.object_uuid.clone(),
+                    kind: match object.kind {
+                        crate::restructure::object::ObjectKind::Catalog => "Catalog",
+                        crate::restructure::object::ObjectKind::Document => "Document",
+                    }
+                    .to_owned(),
+                    files: inputs
+                        .staged
+                        .new_files
+                        .iter()
+                        .filter(|name| name.to_ascii_lowercase().starts_with(&prefix))
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect(),
+        answered_rows: if plan.objects.iter().any(|object| object.created) {
+            crate::restructure::plan::configuration_uuid(&inputs.root_row)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        },
         size_check: None,
     })
 }
@@ -151,6 +201,9 @@ pub fn decide(
                 | S1Operation::DeleteAttribute { .. }
                 | S1Operation::WidenString { .. }
                 | S1Operation::SwitchIndex { .. }
+                | S1Operation::AddObject { .. }
+                | S1Operation::AddTabularSection { .. }
+                | S1Operation::AddSectionAttribute { .. }
         ) {
             unbuilt = true;
             verdict.block(
@@ -180,9 +233,10 @@ pub fn decide(
         Err(error) => return refuse(verdict, "", format!("{error:#}")),
     };
 
-    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes.
-    type Names<'a> = [BTreeSet<&'a str>; 4];
-    let planned: BTreeMap<String, Names<'_>> = plan
+    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes, the
+    // same new tabular sections and new attributes of the sections there were (`Section.Attribute`).
+    type Names = [BTreeSet<String>; 6];
+    let planned: BTreeMap<String, Names> = plan
         .objects
         .iter()
         .map(|object| {
@@ -192,51 +246,78 @@ pub fn decide(
                     object
                         .additions
                         .iter()
-                        .map(|addition| addition.name.as_str())
+                        .map(|addition| addition.name.clone())
                         .collect(),
                     object
                         .removals
                         .iter()
-                        .map(|removal| removal.name.as_str())
+                        .map(|removal| removal.name.clone())
                         .collect(),
                     object
                         .widenings
                         .iter()
-                        .map(|widening| widening.name.as_str())
+                        .map(|widening| widening.name.clone())
                         .collect(),
                     object
                         .switches
                         .iter()
-                        .map(|switch| switch.name.as_str())
+                        .map(|switch| switch.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_some())
+                        .map(|section| section.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_none())
+                        .flat_map(|section| {
+                            section
+                                .additions
+                                .iter()
+                                .map(|addition| format!("{}.{}", section.name, addition.name))
+                        })
                         .collect(),
                 ],
             )
         })
         .collect();
-    let named_by_check: BTreeMap<String, Names<'_>> = classification
+    let named_by_check: BTreeMap<String, Names> = classification
         .by_object()
         .into_iter()
         .map(|(object, operations)| {
-            let names = |wanted: fn(&S1Operation) -> Option<&str>| -> BTreeSet<&str> {
+            let names = |wanted: fn(&S1Operation) -> Option<String>| -> BTreeSet<String> {
                 operations.iter().copied().filter_map(wanted).collect()
             };
             (
                 object.row.to_ascii_lowercase(),
                 [
                     names(|operation| match operation {
-                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::WidenString { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::WidenString { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddTabularSection { section, .. } => Some(section.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddSectionAttribute {
+                            section, attribute, ..
+                        } => Some(format!("{section}.{attribute}")),
                         _ => None,
                     }),
                 ],
@@ -259,9 +340,36 @@ pub fn decide(
     // compares its bytes, the check reads it (the 8.5 platform re-stamps the last block of its payload on
     // every write) and a root that really changed is a `service-row-changed` refusal above.
     let has_deleted = inputs.staged.deleted.is_some();
+    // A created object is listed by the configuration's descriptor, which the stage changes for it (the check
+    // paired the two reasons): the plan answers for that row when it creates something.
+    let listing = if plan.objects.iter().any(|object| object.created) {
+        crate::restructure::plan::configuration_uuid(&inputs.root_row).ok()
+    } else {
+        None
+    };
+    // The module, manager module and help rows of a created object have no active owner for the conservative
+    // gate's role check; the plan admitted their suffixes (`create::plan_created`).
+    let created_files: HashSet<String> = plan
+        .objects
+        .iter()
+        .filter(|object| object.created)
+        .flat_map(|object| {
+            let prefix = format!("{}.", object.object_uuid.to_ascii_lowercase());
+            inputs
+                .staged
+                .new_files
+                .iter()
+                .filter(move |name| name.to_ascii_lowercase().starts_with(&prefix))
+                .map(|name| name.to_ascii_lowercase())
+        })
+        .collect();
     conservative.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
-        !planned.contains_key(&row) && !(has_deleted && row == "deleted") && row != "root"
+        !planned.contains_key(&row)
+            && !created_files.contains(&row)
+            && !(has_deleted && row == "deleted")
+            && row != "root"
+            && listing.as_deref() != Some(row.as_str())
     });
     verdict.blockers.extend(conservative);
     verdict.blockers_omitted = conservative_omitted;
@@ -361,6 +469,12 @@ impl StructuralGate for S1Gate<'_> {
             database: input.database,
         };
         let (mut inputs, storage) = read_inputs(&mut source)?;
+        // The names of the `deleted` list that the apply has executed itself (the rows of removed forms
+        // and templates) are not the plan's to judge: it reads the attributes that are left.
+        if !input.removed_rows.is_empty() {
+            inputs.staged.deleted =
+                without_names(inputs.staged.deleted.take(), input.removed_rows)?;
+        }
         // The objects the extensions adopt (S1-I): the plan refuses to change one. What cannot be read
         // is a refusal, not an error: the stage is then not one this gate can vouch for.
         if inputs.extensions.registered > 0 {

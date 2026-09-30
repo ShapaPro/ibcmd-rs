@@ -179,7 +179,8 @@ impl DocumentFacts {
                 }
             } else if class == DOCUMENT_TABULAR_SECTIONS {
                 for item in items.iter().skip(2) {
-                    sections.push(section(item).with_context(|| format!("document {name}"))?);
+                    sections
+                        .push(section(item, false).with_context(|| format!("document {name}"))?);
                 }
             }
         }
@@ -284,11 +285,13 @@ impl ObjectFacts {
         }
     }
 
-    /// What the plan does not cover: the object is refused before anything is planned.
-    pub fn check_supported(&self) -> Result<()> {
+    /// What the plan does not cover: the object is refused before anything is planned. `own_attributes`: the
+    /// change touches the object's own attributes (the place of a new field, the nullability of a field), not
+    /// only its tabular sections; the owner field of a subordinate catalog is not covered for those.
+    pub fn check_supported(&self, own_attributes: bool) -> Result<()> {
         match self {
             Self::Catalog(facts) => {
-                if facts.owners != 0 {
+                if facts.owners != 0 && own_attributes {
                     bail!(
                         "catalog {} is subordinate to owners: its owner field is not covered",
                         facts.name

@@ -68,7 +68,7 @@
 //! recompute the name for every row and every list entry.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 /// The infix an online update inserts before the storage suffix.
 const DYNAMIC_UPDATE_INFIX: &str = "_dynupdate_";
@@ -183,7 +183,6 @@ impl StorageGenerationOverlay {
         self
     }
 
-    #[cfg(test)]
     pub(super) fn renames(&self) -> &BTreeMap<String, String> {
         &self.renames
     }
@@ -292,34 +291,183 @@ pub(super) fn storage_generation_overlay<'a>(
     overlay
 }
 
+/// The table of a database an overlay describes: (database, table).
+type StorageKey = (String, String);
+
+/// The most names a bounded read may name for its selection to reach the scan
+/// under the table expression: a longer list is read the way an unbounded read
+/// is.
+const SELECTION_MAX: usize = 64;
+
+/// What a query on the table expression is going to keep, so that the scan under
+/// the aggregate can be limited to the stored rows that can publish it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Selection<'a> {
+    /// Every row: the scan reads the whole table.
+    All,
+    /// Rows with these published names (`FileName IN (...)`).
+    Names(&'a BTreeSet<String>),
+    /// The rows of these owners: the owner's own row and its `<owner>.<n>` rows
+    /// (`FileName = owner OR FileName LIKE 'owner.%'`).
+    Owners(&'a BTreeSet<String>),
+}
+
+/// `LIKE` with the wildcards of `text` escaped (`ESCAPE N'\'`).
+fn like_escaped(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(character, '\\' | '%' | '_' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// The condition on the stored rows (`alias.FileName`) that keeps every row that
+/// can publish a selected name, or `None` when the selection is not limited.
+///
+/// A published name is stored under itself and, in a generation, under
+/// `<stem>_dynupdate_<generation><suffix>` (the storage suffix stays last); the
+/// stem is what precedes the first dot. Each stem is one prefix range of the
+/// clustered key, each name one point of it: the scan seeks, instead of reading
+/// the table to throw most of it away after the aggregate (#409 F-15: 34.5 s
+/// under load against 1 ms for the plain read). The condition is only a
+/// narrowing: the query still filters on the published name.
+fn selection_condition(alias: &str, selection: Selection<'_>) -> Option<String> {
+    let names = match selection {
+        Selection::All => return None,
+        Selection::Names(names) | Selection::Owners(names) => names,
+    };
+    if names.is_empty() || names.len() > SELECTION_MAX {
+        return None;
+    }
+    let mut terms = Vec::new();
+    let mut stems = BTreeSet::new();
+    match selection {
+        Selection::Names(_) => {
+            let list = names.iter().map(|name| quote(name)).collect::<Vec<_>>();
+            terms.push(format!("{alias}.FileName IN ({})", list.join(", ")));
+        }
+        Selection::Owners(_) => {
+            for name in names {
+                terms.push(format!("{alias}.FileName = {}", quote(name)));
+                terms.push(format!(
+                    "{alias}.FileName LIKE {} ESCAPE N'\\'",
+                    quote(&format!("{}.%", like_escaped(name)))
+                ));
+            }
+        }
+        Selection::All => unreachable!("returned above"),
+    }
+    for name in names {
+        stems.insert(name.split('.').next().unwrap_or(name.as_str()));
+    }
+    for stem in stems {
+        terms.push(format!(
+            "{alias}.FileName LIKE {} ESCAPE N'\\'",
+            quote(&format!("{}\\_dynupdate\\_%", like_escaped(stem)))
+        ));
+    }
+    Some(terms.join(" OR "))
+}
+
 /// The overlays are shared, not copied: a query builder asks for the table's
 /// overlay once per statement and an overlay may name a hundred thousand rows.
+///
+/// An overlay is the view of one table of one database, so it is kept under
+/// both names, and whoever installs one does it inside a [`StorageViewScope`],
+/// which takes it away again. A step of a run that must read the rows as they
+/// are stored -- the activation compares them with the table inside its
+/// transaction -- and a run that handles another database never read it by
+/// accident (#409 F-2: the overlay was once process-global and outlived the
+/// export that installed it).
 static STORAGE_GENERATION_OVERLAYS: LazyLock<
-    RwLock<BTreeMap<String, Arc<StorageGenerationOverlay>>>,
+    RwLock<BTreeMap<StorageKey, Arc<StorageGenerationOverlay>>>,
 > = LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-/// Makes every query this run builds on `table` read the configuration the
-/// overlay describes. An empty overlay installs nothing.
+fn storage_key(database: &str, table: &str) -> StorageKey {
+    (database.to_owned(), table.to_owned())
+}
+
+/// Makes every query this run builds on `table` of `database` read the
+/// configuration the overlay describes, until the enclosing
+/// [`StorageViewScope`] ends. An empty overlay installs nothing.
 pub(super) fn install_storage_generation_overlay(
+    database: &str,
     table: &str,
     overlay: Arc<StorageGenerationOverlay>,
 ) {
     if overlay.is_empty() {
         return;
     }
-    if let Ok(mut overlays) = STORAGE_GENERATION_OVERLAYS.write() {
-        overlays.insert(table.to_owned(), overlay);
+    STORAGE_GENERATION_OVERLAYS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(storage_key(database, table), overlay);
+}
+
+/// The overlay installed for `table` of `database`, if there is one.
+pub(super) fn storage_generation_overlay_for(
+    database: &str,
+    table: &str,
+) -> Option<Arc<StorageGenerationOverlay>> {
+    STORAGE_GENERATION_OVERLAYS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&storage_key(database, table))
+        .cloned()
+}
+
+/// What the reads of one database see while the scope lives: the rows as they
+/// are stored, plus the overlays installed since it began.
+///
+/// Beginning a scope suspends the overlays already installed for the database
+/// -- an enclosing scope's -- and ending it takes away what was installed
+/// inside and gives the suspended ones back. An export begins one for its
+/// database, so the overlay it resolves is gone when it returns; the reads of
+/// the activation begin one to be sure they see the stored rows.
+#[must_use = "the scope ends when it is dropped"]
+pub(super) struct StorageViewScope {
+    database: String,
+    suspended: Vec<(String, Arc<StorageGenerationOverlay>)>,
+}
+
+impl StorageViewScope {
+    pub(super) fn begin(database: &str) -> Self {
+        let mut overlays = STORAGE_GENERATION_OVERLAYS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let tables = overlays
+            .keys()
+            .filter(|(installed, _)| installed == database)
+            .map(|(_, table)| table.clone())
+            .collect::<Vec<_>>();
+        let suspended = tables
+            .into_iter()
+            .filter_map(|table| {
+                overlays
+                    .remove(&storage_key(database, &table))
+                    .map(|overlay| (table, overlay))
+            })
+            .collect();
+        Self {
+            database: database.to_owned(),
+            suspended,
+        }
     }
 }
 
-pub(super) fn clear_storage_generation_overlays() {
-    if let Ok(mut overlays) = STORAGE_GENERATION_OVERLAYS.write() {
-        overlays.clear();
+impl Drop for StorageViewScope {
+    fn drop(&mut self) {
+        let mut overlays = STORAGE_GENERATION_OVERLAYS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        overlays.retain(|(installed, _), _| installed != &self.database);
+        for (table, overlay) in std::mem::take(&mut self.suspended) {
+            overlays.insert(storage_key(&self.database, &table), overlay);
+        }
     }
-}
-
-pub(super) fn storage_generation_overlay_for(table: &str) -> Option<Arc<StorageGenerationOverlay>> {
-    STORAGE_GENERATION_OVERLAYS.read().ok()?.get(table).cloned()
 }
 
 fn quote(value: &str) -> String {
@@ -397,6 +545,17 @@ pub(super) fn storage_table_expression(
     qualified_table: &str,
     overlay: Option<&StorageGenerationOverlay>,
 ) -> String {
+    storage_table_expression_for(qualified_table, overlay, Selection::All)
+}
+
+/// [`storage_table_expression`] for a query that keeps only `selection`: the same
+/// rows, and the scan under the aggregate limited to the stored rows that can
+/// publish them.
+pub(super) fn storage_table_expression_for(
+    qualified_table: &str,
+    overlay: Option<&StorageGenerationOverlay>,
+    selection: Selection<'_>,
+) -> String {
     let Some(overlay) = overlay.filter(|overlay| !overlay.is_empty()) else {
         return qualified_table.to_owned();
     };
@@ -424,7 +583,7 @@ pub(super) fn storage_table_expression(
         }
     };
     let own_side = if overlay.aliased {
-        generation_table(qualified_table, overlay, &leaving("w.FileName"))
+        generation_table(qualified_table, overlay, &leaving("w.FileName"), selection)
     } else {
         format!(
             "(SELECT {} FROM {qualified_table} p{})",
@@ -450,7 +609,11 @@ fn generation_table(
     qualified_table: &str,
     overlay: &StorageGenerationOverlay,
     leaving: &str,
+    selection: Selection<'_>,
 ) -> String {
+    let narrowing = selection_condition("c", selection)
+        .map(|condition| format!("\n\x20                         WHERE {condition}"))
+        .unwrap_or_default();
     let infix = quote(DYNAMIC_UPDATE_INFIX);
     let strip = DYNAMIC_UPDATE_INFIX.len() + GENERATION_LEN;
     let after_infix = DYNAMIC_UPDATE_INFIX.len();
@@ -469,7 +632,7 @@ fn generation_table(
          \x20                          FROM {qualified_table} c\n\
          \x20                         CROSS APPLY (SELECT CHARINDEX({infix}, c.FileName {bin}) AS Pos) a\n\
          \x20                          LEFT JOIN ({ranks}) g\n\
-         \x20                            ON a.Pos > 0 AND g.Gen {bin} = SUBSTRING(c.FileName, a.Pos + {after_infix}, {GENERATION_LEN}) {bin}) x\n\
+         \x20                            ON a.Pos > 0 AND g.Gen {bin} = SUBSTRING(c.FileName, a.Pos + {after_infix}, {GENERATION_LEN}) {bin}{narrowing}) x\n\
          \x20                 WHERE x.Rk IS NOT NULL) y\n\
          \x20         GROUP BY y.Pub {bin}) w\n\
          \x20  JOIN {qualified_table} t ON t.FileName = w.Src{leaving})",
@@ -785,6 +948,149 @@ mod tests {
         assert_eq!(text.matches("UNION ALL").count(), 2);
     }
 
+    #[test]
+    fn an_overlay_is_the_view_of_one_table_of_one_database() {
+        let overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let _scope = StorageViewScope::begin("keyed_a");
+        install_storage_generation_overlay("keyed_a", "Config", overlay.clone());
+        assert_eq!(
+            storage_generation_overlay_for("keyed_a", "Config"),
+            Some(overlay)
+        );
+        assert!(storage_generation_overlay_for("keyed_b", "Config").is_none());
+        assert!(storage_generation_overlay_for("keyed_a", "ConfigSave").is_none());
+    }
+
+    #[test]
+    fn a_scope_takes_away_what_it_installed_and_gives_back_what_it_suspended() {
+        let outer_overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let inner_overlay = Arc::new(overlay_of(&[G2], &["b".into(), alias("b", G2, "")]));
+        let outer = StorageViewScope::begin("nested");
+        install_storage_generation_overlay("nested", "Config", outer_overlay.clone());
+        {
+            let _inner = StorageViewScope::begin("nested");
+            assert!(
+                storage_generation_overlay_for("nested", "Config").is_none(),
+                "the inner scope reads the rows as they are stored"
+            );
+            install_storage_generation_overlay("nested", "Config", inner_overlay.clone());
+            assert_eq!(
+                storage_generation_overlay_for("nested", "Config"),
+                Some(inner_overlay)
+            );
+        }
+        assert_eq!(
+            storage_generation_overlay_for("nested", "Config"),
+            Some(outer_overlay),
+            "the suspended view is back"
+        );
+        drop(outer);
+        assert!(
+            storage_generation_overlay_for("nested", "Config").is_none(),
+            "nothing outlives the outermost scope"
+        );
+    }
+
+    #[test]
+    fn a_scope_leaves_the_views_of_other_databases_alone() {
+        let overlay = Arc::new(overlay_of(&[G1], &["a".into(), alias("a", G1, "")]));
+        let _other = StorageViewScope::begin("untouched");
+        install_storage_generation_overlay("untouched", "Config", overlay.clone());
+        drop(StorageViewScope::begin("another"));
+        assert_eq!(
+            storage_generation_overlay_for("untouched", "Config"),
+            Some(overlay)
+        );
+    }
+
+    fn selecting(names: &[&str], owners: bool) -> String {
+        let overlay = overlay_of(&[G1], &["a".into(), alias("a", G1, "")]);
+        let names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let selection = if owners {
+            Selection::Owners(&names)
+        } else {
+            Selection::Names(&names)
+        };
+        storage_table_expression_for("[db].dbo.[Config]", Some(&overlay), selection)
+    }
+
+    #[test]
+    fn a_selection_narrows_the_scan_under_the_aggregate_to_the_rows_that_can_publish_it() {
+        let text = selecting(
+            &["a627e390-8fad-4a95-afe6-674f54813188.0", "versions"],
+            false,
+        );
+        // The stored names: the published ones, and every alias of their stems.
+        assert!(
+            text.contains(
+                "WHERE c.FileName IN (N'a627e390-8fad-4a95-afe6-674f54813188.0', N'versions') OR c.FileName LIKE N'a627e390-8fad-4a95-afe6-674f54813188\\_dynupdate\\_%' ESCAPE N'\\' OR c.FileName LIKE N'versions\\_dynupdate\\_%' ESCAPE N'\\'"
+            ),
+            "{text}"
+        );
+        // Under the scan (the innermost select), not after the aggregate.
+        let narrowing = text.find("WHERE c.FileName IN").unwrap();
+        assert!(text.find("FROM [db].dbo.[Config] c").unwrap() < narrowing);
+        assert!(narrowing < text.find("GROUP BY").unwrap());
+        assert!(text.ends_with(") AS storage"));
+    }
+
+    #[test]
+    fn an_owner_selection_takes_the_owner_row_its_numbered_rows_and_its_aliases() {
+        let text = selecting(&["ab132638-5188-470d-9432-de85f2b2c7d8"], true);
+        assert!(
+            text.contains(
+                "WHERE c.FileName = N'ab132638-5188-470d-9432-de85f2b2c7d8' OR c.FileName LIKE N'ab132638-5188-470d-9432-de85f2b2c7d8.%' ESCAPE N'\\' OR c.FileName LIKE N'ab132638-5188-470d-9432-de85f2b2c7d8\\_dynupdate\\_%' ESCAPE N'\\'"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_selection_a_long_one_and_a_table_without_aliases_read_as_before() {
+        let plain = storage_table_expression(
+            "[db].dbo.[Config]",
+            Some(&overlay_of(&[G1], &["a".into(), alias("a", G1, "")])),
+        );
+        assert_eq!(
+            selecting(&[], false),
+            plain,
+            "an empty selection is no selection"
+        );
+        let many = (0..=SELECTION_MAX)
+            .map(|n| format!("{n:08x}-0000-0000-0000-000000000000"))
+            .collect::<Vec<_>>();
+        let many = many.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            selecting(&many, false),
+            plain,
+            "a long list is read the way an unbounded read is"
+        );
+        // Without an alias the expression has no aggregate to narrow.
+        let names = BTreeSet::from(["x".to_owned()]);
+        let no_alias =
+            StorageGenerationOverlay::default().dropping(BTreeSet::from(["gone".to_owned()]));
+        assert_eq!(
+            storage_table_expression_for(
+                "[db].dbo.[Config]",
+                Some(&no_alias),
+                Selection::Names(&names)
+            ),
+            storage_table_expression("[db].dbo.[Config]", Some(&no_alias))
+        );
+    }
+
+    #[test]
+    fn a_wildcard_in_a_name_is_escaped_in_the_prefix() {
+        let text = selecting(&["50%_off[1]"], false);
+        assert!(
+            text.contains("LIKE N'50\\%\\_off\\[1]\\_dynupdate\\_%' ESCAPE N'\\'"),
+            "{text}"
+        );
+    }
+
     const SAVED: &str = "[db].dbo.[ConfigSave]";
 
     #[test]
@@ -1012,7 +1318,7 @@ mod live {
         let staged = stored_rows(client, &saved)?;
 
         // What the export installs, exactly as `dump_table_rows_streamed` asks for it.
-        clear_storage_generation_overlays();
+        let _view = StorageViewScope::begin(&database);
         let headers = fetch_row_headers(&sql, &database, "Config", &BTreeSet::new())?;
         let listed = crate::mssql_dump::install_storage_overlay(
             &sql,
@@ -1022,7 +1328,8 @@ mod live {
             headers,
             main,
         )?;
-        let overlay = storage_generation_overlay_for("Config").expect("an overlay is installed");
+        let overlay =
+            storage_generation_overlay_for(&database, "Config").expect("an overlay is installed");
 
         // What the overlay says is published.
         let mut expected = Rows::new();
@@ -1054,6 +1361,74 @@ mod live {
         );
         assert_eq!(published.len(), expected.len());
         assert!(published == expected, "the server and the overlay disagree");
+
+        // The same rows through a selection (#409 F-15): a few aliased names, plain
+        // names, and a name that does not exist.
+        if !main {
+            let mut picked = BTreeSet::new();
+            for published in overlay.renames().values().take(6) {
+                picked.insert(published.clone());
+            }
+            for (name, _) in stored
+                .keys()
+                .filter(|(name, _)| !is_dynamic_generation_alias(name))
+                .take(6)
+            {
+                picked.insert(name.clone());
+            }
+            picked.insert("00000000-0000-0000-0000-000000000000.0".to_owned());
+            let read = |selection: Selection<'_>, filter: &str| -> anyhow::Result<Rows> {
+                let expression =
+                    crate::mssql_dump::qualified_storage_table_for(&database, "Config", selection);
+                stored_rows(
+                    client,
+                    &format!("(SELECT * FROM {expression} WHERE {filter}) sel"),
+                )
+            };
+            let values = picked
+                .iter()
+                .map(|name| quote(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let filter = format!("FileName IN ({values})");
+            let by_names = read(Selection::Names(&picked), &filter)?;
+            let unbounded = read(Selection::All, &filter)?;
+            assert!(
+                by_names == unbounded,
+                "a selection changed the rows it keeps"
+            );
+            assert!(!by_names.is_empty());
+            let owners = picked
+                .iter()
+                .filter(|name| !name.contains('.'))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !owners.is_empty() {
+                let filter = owners
+                    .iter()
+                    .map(|owner| {
+                        format!(
+                            "FileName = {} OR FileName LIKE N'{}.%'",
+                            quote(owner),
+                            owner.replace('\'', "''")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let by_owners = read(Selection::Owners(&owners), &filter)?;
+                let all = read(Selection::All, &filter)?;
+                assert!(
+                    by_owners == all,
+                    "an owner selection changed the rows it keeps"
+                );
+            }
+            eprintln!(
+                "{database}: {} rows through a selection of {} names and {} owners",
+                by_names.len(),
+                picked.len(),
+                owners.len()
+            );
+        }
 
         // What the export lists: the same names, parts and sizes.
         let listed = listed

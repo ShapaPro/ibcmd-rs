@@ -7,10 +7,11 @@
 //! attributes (of objects and of sections). The rows come back as inflated text, one per rewritten
 //! row; deflating, the `siVersions` guids and the guarded rewrite are the apply's.
 //!
-//! Built for one addition of each sort per stage: a new catalog and a new document may come together,
-//! but not two new catalogs, and one new tabular section per kind of owner (a new object's own sections
-//! count): the rows that list them are refilled in the platform's hash order of *all* the keys, which the
-//! sequential composition below has only for the last addition. Anything else is refused.
+//! Built for one new catalog and one new document per stage (not two of a kind: the rows that list them are
+//! refilled in the platform's hash order of *all* the keys, which a sequential composition has only for the
+//! last addition). The new tabular sections of existing objects come together, however many: all those of a
+//! kind are added in one refill of the index of the generated types (`plan::new_tabular_sections`), which is
+//! not composed with the sections of a new object of the same kind. Anything else is refused.
 
 use std::collections::BTreeMap;
 
@@ -23,8 +24,8 @@ use crate::restructure::caches::members::{
 };
 use crate::restructure::caches::names_tables::NamesTables;
 use crate::restructure::caches::plan::{
-    CacheRow, NewObject, NewSection, catalog_shape, document_shape, new_object,
-    new_tabular_section, rows,
+    CacheRow, NewObject, NewSections, catalog_shape, document_shape, new_object,
+    new_tabular_sections, rows,
 };
 use crate::restructure::caches::registry;
 use crate::restructure::caches::xdto_types::{
@@ -132,7 +133,10 @@ pub fn rewrite(staged: &Staged<'_>) -> Result<Vec<CacheRow>> {
         store(&mut rows_now, made);
     }
 
-    // new tabular sections and new attributes of existing objects
+    // new tabular sections and new attributes of existing objects: the checks and the list of what is added
+    // first; the sections of a kind together, then the attributes
+    let mut new_sections: BTreeMap<&'static str, Vec<(String, String)>> = BTreeMap::new();
+    let mut attribute_jobs: Vec<AttributeJob> = Vec::new();
     for object in &existing {
         let kind = object.kind;
         let before = (staged.before)(&object.uuid).expect("checked above");
@@ -183,51 +187,42 @@ pub fn rewrite(staged: &Staged<'_>) -> Result<Vec<CacheRow>> {
             .iter()
             .filter(|s| !was_sections.contains(&s.uuid.as_str()))
         {
-            *section_operations.entry(kind).or_default() += 1;
             ensure!(
-                section_operations[kind] <= 1,
-                "more than one addition of tabular sections to {kind} objects in one stage: the caches are built for one"
+                section_operations.get(kind).copied().unwrap_or(0) == 0,
+                "new tabular sections of {kind} objects together with the sections of a new {kind}: the index of the generated types is refilled once, for one of them"
             );
-            let snapshot = rows_now.clone();
-            let cache = |name: &str| current(&snapshot, name);
-            let made = new_tabular_section(&NewSection {
-                kind,
-                root: staged.root,
-                descriptor: staged.after,
-                owner: &object.uuid,
-                section: &section.uuid,
-                cache: &cache,
-            })?;
-            store(&mut rows_now, made);
+            new_sections
+                .entry(kind)
+                .or_default()
+                .push((object.uuid.clone(), section.uuid.clone()));
         }
         // new attributes of the object
-        let added: Vec<&Member> = is
+        let added: Vec<Member> = is
             .attributes
             .iter()
             .filter(|m| !known(&was.attributes, &m.uuid))
+            .cloned()
             .collect();
         if !added.is_empty() {
-            add_attributes(
-                &mut rows_now,
-                &current,
-                &mut store,
+            attribute_jobs.push(AttributeJob {
                 kind,
-                &object.uuid,
-                &after,
-                &is.attributes,
-                &added,
-                None,
-            )?;
+                owner: object.uuid.clone(),
+                descriptor: after.clone(),
+                all: is.attributes.clone(),
+                added,
+                section: None,
+            });
         }
         // new attributes of the sections that were there
         for section in &is.sections {
             let Some(old) = was.sections.iter().find(|s| s.uuid == section.uuid) else {
                 continue;
             };
-            let added: Vec<&Member> = section
+            let added: Vec<Member> = section
                 .attributes
                 .iter()
                 .filter(|m| !known(&old.attributes, &m.uuid))
+                .cloned()
                 .collect();
             let survivors: Vec<&str> = section
                 .attributes
@@ -247,21 +242,61 @@ pub fn rewrite(staged: &Staged<'_>) -> Result<Vec<CacheRow>> {
                 object.uuid
             );
             if !added.is_empty() {
-                add_attributes(
-                    &mut rows_now,
-                    &current,
-                    &mut store,
+                attribute_jobs.push(AttributeJob {
                     kind,
-                    &object.uuid,
-                    &after,
-                    &section.attributes,
-                    &added,
-                    Some((&section.uuid, &section.name)),
-                )?;
+                    owner: object.uuid.clone(),
+                    descriptor: after.clone(),
+                    all: section.attributes.clone(),
+                    added,
+                    section: Some((section.uuid.clone(), section.name.clone())),
+                });
             }
         }
     }
+    for (kind, sections) in &new_sections {
+        let snapshot = rows_now.clone();
+        let cache = |name: &str| current(&snapshot, name);
+        let pairs: Vec<(&str, &str)> = sections
+            .iter()
+            .map(|(owner, section)| (owner.as_str(), section.as_str()))
+            .collect();
+        let made = new_tabular_sections(&NewSections {
+            kind,
+            root: staged.root,
+            descriptor: staged.after,
+            sections: &pairs,
+            cache: &cache,
+        })?;
+        store(&mut rows_now, made);
+    }
+    for job in &attribute_jobs {
+        let added: Vec<&Member> = job.added.iter().collect();
+        add_attributes(
+            &mut rows_now,
+            &current,
+            &mut store,
+            job.kind,
+            &job.owner,
+            &job.descriptor,
+            &job.all,
+            &added,
+            job.section
+                .as_ref()
+                .map(|(uuid, name)| (uuid.as_str(), name.as_str())),
+        )?;
+    }
     Ok(rows_now.into_values().collect())
+}
+
+/// New attributes of an existing object (`section`: of one of its tabular sections), to be added once the new
+/// tabular sections of the stage are in.
+struct AttributeJob {
+    kind: &'static str,
+    owner: String,
+    descriptor: Brace,
+    all: Vec<Member>,
+    added: Vec<Member>,
+    section: Option<(String, String)>,
 }
 
 type Store<'s> = dyn FnMut(&mut BTreeMap<&'static str, CacheRow>, Vec<CacheRow>) + 's;

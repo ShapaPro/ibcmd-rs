@@ -12,6 +12,8 @@ use std::fmt::Write as _;
 use std::io::Read;
 use uuid::Uuid;
 
+use crate::mssql_platform_profile::{OwnRasProcess, exclusive_session_gate};
+
 const MAX_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAN_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ROWS: usize = 128;
@@ -31,6 +33,37 @@ pub enum MainActivationMode {
     /// Publish ordinary rows while sessions are connected. The caller must
     /// hand the dedicated 1C worker process off after the SQL commit.
     Worker,
+}
+
+/// Who carries out a promotion (#408 step 2, `docs/apply/online-activation.md` 6.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MainActivationExecutor {
+    /// The transaction this module renders ([`render_main_activation_sql`]): `online`, `live`, `worker`, and
+    /// `exclusive` where the built-in SQL client is not there (`--sqlcmd`).
+    #[default]
+    Script,
+    /// `mssql_config_apply`, which folds the rows of earlier online generations as the native apply does:
+    /// the `exclusive` mode.
+    ConfigApply,
+}
+
+impl MainActivationExecutor {
+    /// The executor of a mode: the config apply for `exclusive` where it can run (`config_apply_available`: the
+    /// built-in SQL client), the script for the rest.
+    pub fn for_mode(mode: MainActivationMode, config_apply_available: bool) -> Self {
+        if mode == MainActivationMode::Exclusive && config_apply_available {
+            Self::ConfigApply
+        } else {
+            Self::Script
+        }
+    }
+
+    /// Whether the executor folds the rows of online generations into the ordinary ones for this mode (only the
+    /// config apply does, and only for `exclusive`), so that a promotion does not lose them.
+    pub fn folds_online_generations(self, mode: MainActivationMode) -> bool {
+        self == Self::ConfigApply && mode == MainActivationMode::Exclusive
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +118,14 @@ pub struct MainActivationDryRunReport {
     pub live_session_switch_expected: bool,
     pub requires_tail_log_artifact: bool,
     pub recovery_token: String,
+    /// `exclusive` only: the worker processes whose idle `1CV83 Server` sessions
+    /// the session gate leaves out because the tool's own RAS verification
+    /// opened them (#409 F-3).
+    #[serde(default)]
+    pub own_ras_processes: Vec<OwnRasProcess>,
+    /// Who carries the promotion out (`config_apply`: the report of that run is `config_apply` of the command's report).
+    #[serde(default)]
+    pub executor: MainActivationExecutor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +142,8 @@ pub struct MainActivationPlan {
     params_marker: Option<MainStorageRow>,
     no_op: bool,
     recovery: MainActivationRecoverySnapshot,
+    own_ras_processes: Vec<OwnRasProcess>,
+    executor: MainActivationExecutor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,8 +194,35 @@ impl MainActivationPlan {
         self.no_op
     }
 
+    /// Who carries the promotion out: `mssql_config_apply` for `exclusive` (unless the plan was made for the
+    /// legacy runner), the rendered script for the rest. A no-op is always the script's: it only empties
+    /// `ConfigSave`.
+    pub fn executor(&self) -> MainActivationExecutor {
+        self.executor
+    }
+
+    /// Whether the promotion is handed to `mssql_config_apply`: it changes something and the plan's executor is
+    /// the apply.
+    pub fn is_carried_out_by_config_apply(&self) -> bool {
+        self.executor == MainActivationExecutor::ConfigApply && !self.no_op
+    }
+
     pub fn recovery(&self) -> &MainActivationRecoverySnapshot {
         &self.recovery
+    }
+
+    /// The worker processes the exclusive session gate leaves out (see [`Self::with_own_ras_processes`]).
+    pub fn own_ras_processes(&self) -> &[OwnRasProcess] {
+        &self.own_ras_processes
+    }
+
+    /// The plan with the worker processes whose idle SQL sessions the
+    /// `exclusive` session gate leaves out: the sessions the tool's own RAS
+    /// verification made the cluster open (#409 F-3). Without any, the gate
+    /// counts every session.
+    pub fn with_own_ras_processes(mut self, own: Vec<OwnRasProcess>) -> Self {
+        self.own_ras_processes = own;
+        self
     }
 
     pub fn dry_run_report(&self) -> MainActivationDryRunReport {
@@ -195,12 +265,15 @@ impl MainActivationPlan {
             ),
             requires_tail_log_artifact: self.mode == MainActivationMode::Live && !self.no_op,
             recovery_token: hex(&Sha256::digest(recovery_json)),
+            own_ras_processes: self.own_ras_processes.clone(),
+            executor: self.executor,
         }
     }
 }
 
 /// Builds an immutable plan only from an exact ConfigSave image and its
-/// matching ordinary Config/Params snapshot.
+/// matching ordinary Config/Params snapshot, for the transaction this module renders
+/// ([`MainActivationExecutor::Script`]).
 pub fn prepare_main_activation(
     mode: MainActivationMode,
     staged_rows: Vec<MainStorageRow>,
@@ -208,6 +281,32 @@ pub fn prepare_main_activation(
     allowed_non_structural_targets: &[String],
     allow_non_lab: bool,
 ) -> Result<MainActivationPlan, MainActivationError> {
+    prepare_main_activation_for(
+        MainActivationExecutor::Script,
+        mode,
+        staged_rows,
+        snapshot,
+        allowed_non_structural_targets,
+        allow_non_lab,
+    )
+}
+
+/// [`prepare_main_activation`] for a given executor. The config apply carries out `exclusive` only; the script
+/// carries out every mode, `exclusive` included where the built-in SQL client is not there.
+pub fn prepare_main_activation_for(
+    executor: MainActivationExecutor,
+    mode: MainActivationMode,
+    staged_rows: Vec<MainStorageRow>,
+    snapshot: MainActivationSnapshot,
+    allowed_non_structural_targets: &[String],
+    allow_non_lab: bool,
+) -> Result<MainActivationPlan, MainActivationError> {
+    if executor == MainActivationExecutor::ConfigApply && mode != MainActivationMode::Exclusive {
+        return Err(MainActivationError::SafetyGate(format!(
+            "the {} mode is not carried out by the config apply",
+            mode_name(mode)
+        )));
+    }
     if !allow_non_lab {
         return Err(MainActivationError::SafetyGate(
             "--allow-non-lab acknowledgement is required".to_owned(),
@@ -269,30 +368,29 @@ pub fn prepare_main_activation(
         ));
     }
 
-    let no_op = staged.iter().all(|(key, row)| {
+    let equal_to_active = staged.iter().all(|(key, row)| {
         active
             .get(key)
             .is_some_and(|current| current.binary_data == row.binary_data)
     });
-    // #408 (finding F-4 of #344): an ordinary promotion replaces only the staged rows and
-    // deletes both markers, so what earlier online generations published (their
-    // `_dynupdate_` rows) silently stops being the configuration. Refuse it before anything
-    // is written until the aliases are folded (`mssql-config-apply`, or the native apply).
-    if !no_op
-        && mode != MainActivationMode::Online
-        && (snapshot.config_dynamically_updated.is_some()
-            || snapshot.params_dynamically_updated.is_some())
-    {
-        return Err(MainActivationError::SafetyGate(online_history_refusal(
-            mode,
-            "Config/Params `DynamicallyUpdated` markers are present",
-        )));
-    }
-
-    let ordinary_generation =
-        generation_from_versions(&active[&("versions".to_owned(), 0)].binary_data)?;
-    let (old_generation, dynamic_history) = active_generation_from_markers(
+    // The ordinary rows are not the configuration of a database that holds online generations: a stage that equals
+    // them (an online change taken back to the original text) still changes the configuration, so a promotion is a
+    // no-op only on a database without markers. The config apply folds the generations; the script's promotion
+    // refuses such a database (#408 step 1). The online mode compares with the generation it extends and is never
+    // refused for a stage that changes nothing.
+    let no_op = equal_to_active
+        && !(mode != MainActivationMode::Online
+            && (snapshot.config_dynamically_updated.is_some()
+                || snapshot.params_dynamically_updated.is_some()));
+    let PublicationState {
         ordinary_generation,
+        old_generation,
+        dynamic_history,
+    } = check_publication_state(
+        mode,
+        executor,
+        !no_op,
+        &active[&("versions".to_owned(), 0)].binary_data,
         snapshot.config_dynamically_updated.as_ref(),
         snapshot.params_dynamically_updated.as_ref(),
     )?;
@@ -325,7 +423,107 @@ pub fn prepare_main_activation(
         params_marker: snapshot.params_dynamically_updated,
         no_op,
         recovery,
+        own_ras_processes: Vec::new(),
+        executor,
     })
+}
+
+/// What the ordinary `versions` row and the `DynamicallyUpdated` markers of a
+/// database say about how it is published.
+struct PublicationState {
+    ordinary_generation: Uuid,
+    old_generation: Uuid,
+    dynamic_history: Vec<Uuid>,
+}
+
+/// The checks of the publication state that need no staged row: the plan
+/// makes them ([`prepare_main_activation`]) and so does the preflight
+/// ([`preflight_publication`]), so the two cannot disagree.
+///
+/// `changes` is whether the promotion writes anything.
+fn check_publication_state(
+    mode: MainActivationMode,
+    executor: MainActivationExecutor,
+    changes: bool,
+    ordinary_versions: &[u8],
+    config_marker: Option<&MainStorageRow>,
+    params_marker: Option<&MainStorageRow>,
+) -> Result<PublicationState, MainActivationError> {
+    // #408 (finding F-4 of #344): a promotion by the script replaces only the staged rows and
+    // deletes both markers, so what earlier online generations published (their
+    // `_dynupdate_` rows) silently stops being the configuration. Refuse it before anything
+    // is written. The config apply folds the aliases as the native apply does (step 2), so the
+    // promotion it carries out (`exclusive`) is not refused.
+    if changes
+        && mode != MainActivationMode::Online
+        && !executor.folds_online_generations(mode)
+        && (config_marker.is_some() || params_marker.is_some())
+    {
+        return Err(MainActivationError::SafetyGate(online_history_refusal(
+            mode,
+            "Config/Params `DynamicallyUpdated` markers are present",
+        )));
+    }
+
+    let ordinary_generation = generation_from_versions(ordinary_versions)?;
+    let (old_generation, dynamic_history) =
+        active_generation_from_markers(ordinary_generation, config_marker, params_marker)?;
+    Ok(PublicationState {
+        ordinary_generation,
+        old_generation,
+        dynamic_history,
+    })
+}
+
+/// Refuses, before anything is staged, a promotion that changes something and
+/// that the state of the database alone rules out: an ordinary mode on a
+/// database that holds online generations (#408), markers that do not agree
+/// with each other or with the ordinary `versions` row.
+///
+/// `ordinary_versions` and the markers are the rows **as stored**, not the
+/// configuration an online update published (#409 F-2: an apply was refused
+/// only after the stage, on markers it had read through the export's view, and
+/// left `ConfigSave` filled). The plan the activation builds from the staged
+/// rows makes the same checks ([`prepare_main_activation`]).
+pub fn preflight_publication(
+    executor: MainActivationExecutor,
+    mode: MainActivationMode,
+    ordinary_versions: &MainStorageRow,
+    config_marker: Option<&MainStorageRow>,
+    params_marker: Option<&MainStorageRow>,
+) -> Result<(), MainActivationError> {
+    validate_rows("Config", std::slice::from_ref(ordinary_versions), false)?;
+    validate_optional_marker("Config", config_marker)?;
+    validate_optional_marker("Params", params_marker)?;
+    check_publication_state(
+        mode,
+        executor,
+        true,
+        &ordinary_versions.binary_data,
+        config_marker,
+        params_marker,
+    )
+    .map(|_| ())
+}
+
+/// Refuses, before anything is staged, a tail-log argument the activation
+/// would refuse after it: `live` needs one (`will_write`: a real run) and no
+/// other mode takes one.
+pub fn preflight_tail_log(
+    mode: MainActivationMode,
+    tail_log_output: Option<&str>,
+    will_write: bool,
+) -> Result<(), MainActivationError> {
+    match (mode, tail_log_output) {
+        (MainActivationMode::Live, Some(path)) => validate_tail_log_output(path).map(|_| ()),
+        (MainActivationMode::Live, None) if will_write => Err(MainActivationError::SafetyGate(
+            "--tail-log-output is required for live activation".to_owned(),
+        )),
+        (_, None) => Ok(()),
+        (_, Some(_)) => Err(MainActivationError::SafetyGate(
+            "--tail-log-output is only valid for live activation".to_owned(),
+        )),
+    }
 }
 
 pub fn render_main_activation_sql(
@@ -333,6 +531,11 @@ pub fn render_main_activation_sql(
     plan: &MainActivationPlan,
     tail_log_output: Option<&str>,
 ) -> Result<MainActivationScript, MainActivationError> {
+    if plan.is_carried_out_by_config_apply() {
+        return Err(MainActivationError::SafetyGate(
+            "an exclusive promotion is carried out by mssql_config_apply, not by a script of this module".to_owned(),
+        ));
+    }
     let database_name = database;
     let database_literal = quote_string(database_name);
     let database = quote_ident(database_name)?;
@@ -442,7 +645,16 @@ fn render_ordinary_transition(
     require_no_sessions: bool,
 ) {
     if require_no_sessions {
-        writeln!(sql, "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID()) THROW 57209, 'exclusive activation requires no other database sessions', 1;").unwrap();
+        writeln!(
+            sql,
+            "{}",
+            exclusive_session_gate(
+                57209,
+                "exclusive activation requires no other database sessions",
+                &plan.own_ras_processes
+            )
+        )
+        .unwrap();
     }
     for row in &plan.staged_rows {
         let name = quote_string(&row.file_name);
@@ -556,8 +768,15 @@ fn mode_name(mode: MainActivationMode) -> &'static str {
 }
 
 fn online_history_refusal(mode: MainActivationMode, evidence: &str) -> String {
+    // The exclusive mode is carried out by that apply where the built-in SQL client is (#408 step 2); it reaches
+    // this refusal only through `--sqlcmd`.
+    let hint = if mode == MainActivationMode::Exclusive {
+        " (the exclusive mode of this command does the same on the built-in SQL client: leave out --sqlcmd)"
+    } else {
+        ""
+    };
     format!(
-        "{} promotion refused before any write: this database holds online (dynamic) generations ({evidence}).          A {} promotion replaces only the staged rows and deletes the markers, so the earlier online changes          would be lost. Use `mssql-config-apply`, which folds them as the native apply does, or the native          apply; the staged ConfigSave is left as it is",
+        "{} promotion refused before any write: this database holds online (dynamic) generations ({evidence}).          A {} promotion replaces only the staged rows and deletes the markers, so the earlier online changes          would be lost. Use `mssql-config-apply`, which folds them as the native apply does, or the native          apply{hint}; the staged ConfigSave is left as it is",
         mode_name(mode),
         mode_name(mode)
     )
@@ -1083,6 +1302,41 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_leaves_out_only_the_idle_sessions_of_the_own_ras_processes() {
+        let own = vec![OwnRasProcess {
+            host: "LAB-HOST".to_owned(),
+            pid: 22608,
+        }];
+        let plan = fixture(MainActivationMode::Exclusive).with_own_ras_processes(own.clone());
+        let script = render_main_activation_sql("lab", &plan, None).unwrap();
+        assert!(
+            script
+                .sql
+                .contains("exclusive activation requires no other database sessions")
+        );
+        assert!(script.sql.contains(
+            "AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ((ISNULL(host_name,N'')=N'LAB-HOST' AND ISNULL(host_process_id,-1) IN (22608))))"
+        ));
+        assert_eq!(script.report.own_ras_processes, own);
+        // Without them, every session is counted, as before.
+        let plain =
+            render_main_activation_sql("lab", &fixture(MainActivationMode::Exclusive), None)
+                .unwrap();
+        assert!(plain.sql.contains(
+            "database_id=DB_ID()) THROW 57209, 'exclusive activation requires no other database sessions', 1;"
+        ));
+        assert!(!plain.sql.contains("1CV83 Server' AND status"));
+        // The other modes have no such gate, whatever they are told.
+        let online = fixture(MainActivationMode::Online).with_own_ras_processes(own);
+        assert!(
+            !render_main_activation_sql("lab", &online, None)
+                .unwrap()
+                .sql
+                .contains("no other database sessions")
+        );
+    }
+
+    #[test]
     fn online_preserves_ordinary_body_and_creates_evidenced_aliases() {
         let script =
             render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None).unwrap();
@@ -1170,6 +1424,211 @@ mod tests {
             script.report.touched_tables,
             ["Config", "ConfigSave", "Params"]
         );
+    }
+
+    fn markers(ordinary: &str, history: &[&str]) -> (MainStorageRow, MainStorageRow) {
+        let generations = history.join(",");
+        (
+            row(
+                "DynamicallyUpdated",
+                utf8_bom(&format!("{{1,{},{generations}}}", history.len())),
+            ),
+            row(
+                "DynamicallyUpdated",
+                utf8_bom(&format!(
+                    "{{0,{},{ordinary},{generations}}}",
+                    history.len() + 1
+                )),
+            ),
+        )
+    }
+
+    #[test]
+    fn preflight_refuses_an_ordinary_mode_on_a_database_with_online_generations() {
+        let ordinary = row("versions", versions(OLD));
+        let (config, params) = markers(OLD, &[NEW]);
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let error = preflight_publication(
+                MainActivationExecutor::Script,
+                mode,
+                &ordinary,
+                Some(&config),
+                Some(&params),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, MainActivationError::SafetyGate(_)),
+                "{error}"
+            );
+            assert!(error.to_string().contains("refused before any write"));
+            preflight_publication(MainActivationExecutor::Script, mode, &ordinary, None, None)
+                .unwrap();
+        }
+        preflight_publication(
+            MainActivationExecutor::Script,
+            MainActivationMode::Online,
+            &ordinary,
+            Some(&config),
+            Some(&params),
+        )
+        .unwrap();
+        // The config apply folds the generations: it is asked for the exclusive mode, and only for that one
+        // (#408 step 2). The live and worker modes keep refusing whatever executor is named.
+        preflight_publication(
+            MainActivationExecutor::ConfigApply,
+            MainActivationMode::Exclusive,
+            &ordinary,
+            Some(&config),
+            Some(&params),
+        )
+        .unwrap();
+        for mode in [MainActivationMode::Live, MainActivationMode::Worker] {
+            assert!(
+                preflight_publication(
+                    MainActivationExecutor::ConfigApply,
+                    mode,
+                    &ordinary,
+                    Some(&config),
+                    Some(&params),
+                )
+                .is_err(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_reads_the_markers_against_the_ordinary_versions() {
+        let ordinary = row("versions", versions(OLD));
+        // Markers of another ordinary generation: the state a stage made on the
+        // leaked view of an export used to be refused with.
+        let (config, params) = markers(NEW, &[NEW]);
+        let error = preflight_publication(
+            MainActivationExecutor::Script,
+            MainActivationMode::Online,
+            &ordinary,
+            Some(&config),
+            Some(&params),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ordinary generation disagrees with versions"),
+            "{error}"
+        );
+        // One marker alone.
+        let (config, _) = markers(OLD, &[NEW]);
+        let error = preflight_publication(
+            MainActivationExecutor::Script,
+            MainActivationMode::Online,
+            &ordinary,
+            Some(&config),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must both be present or both absent"),
+            "{error}"
+        );
+        // A versions row that is not one.
+        let broken = row("versions", b"not deflated".to_vec());
+        assert!(
+            preflight_publication(
+                MainActivationExecutor::Script,
+                MainActivationMode::Online,
+                &broken,
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_and_the_plan_make_the_same_checks() {
+        // The plan of an online promotion on a database with a generation.
+        let (config, params) = markers(OLD, &[BODY]);
+        let staged = vec![
+            row(BODY, b"new descriptor".to_vec()),
+            row(&format!("{BODY}.0"), b"new body".to_vec()),
+            row("root", b"new root".to_vec()),
+            row("version", b"new version".to_vec()),
+            row("versions", versions(NEW)),
+        ];
+        let active = vec![
+            row(BODY, b"old descriptor".to_vec()),
+            row(&format!("{BODY}.0"), b"old body".to_vec()),
+            row("root", b"old root".to_vec()),
+            row("version", b"old version".to_vec()),
+            row("versions", versions(OLD)),
+        ];
+        let snapshot = |config: &MainStorageRow, params: &MainStorageRow| MainActivationSnapshot {
+            config_rows: active.clone(),
+            config_dynamically_updated: Some(config.clone()),
+            params_dynamically_updated: Some(params.clone()),
+        };
+        let targets = [BODY.to_owned(), format!("{BODY}.0")];
+        for (executor, mode) in [
+            (MainActivationExecutor::Script, MainActivationMode::Online),
+            (
+                MainActivationExecutor::Script,
+                MainActivationMode::Exclusive,
+            ),
+            (MainActivationExecutor::Script, MainActivationMode::Live),
+            (MainActivationExecutor::Script, MainActivationMode::Worker),
+            (
+                MainActivationExecutor::ConfigApply,
+                MainActivationMode::Exclusive,
+            ),
+        ] {
+            let plan = prepare_main_activation_for(
+                executor,
+                mode,
+                staged.clone(),
+                snapshot(&config, &params),
+                &targets,
+                true,
+            );
+            let preflight =
+                preflight_publication(executor, mode, &active[4], Some(&config), Some(&params));
+            assert_eq!(plan.is_ok(), preflight.is_ok(), "{executor:?} {mode:?}");
+            if let (Err(plan), Err(preflight)) = (&plan, &preflight) {
+                assert_eq!(plan, preflight, "{executor:?} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_takes_a_tail_for_live_only() {
+        let tail = Some(r"C:\tail.trn");
+        assert!(preflight_tail_log(MainActivationMode::Live, tail, true).is_ok());
+        assert!(preflight_tail_log(MainActivationMode::Live, None, false).is_ok());
+        assert!(matches!(
+            preflight_tail_log(MainActivationMode::Live, None, true),
+            Err(MainActivationError::SafetyGate(_))
+        ));
+        assert!(matches!(
+            preflight_tail_log(MainActivationMode::Live, Some("bad\npath"), true),
+            Err(MainActivationError::SafetyGate(_))
+        ));
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Online,
+            MainActivationMode::Worker,
+        ] {
+            assert!(preflight_tail_log(mode, None, true).is_ok());
+            assert!(matches!(
+                preflight_tail_log(mode, tail, false),
+                Err(MainActivationError::SafetyGate(_))
+            ));
+        }
     }
 
     #[test]
@@ -1392,7 +1851,16 @@ mod tests {
     const EVIDENCE_G1: &str = "4832dd20-0b9e-45e3-a3e7-095525bf9b3f";
     const EVIDENCE_G2: &str = "96eee589-ca6c-4269-8b14-1ca1ee9b69ed";
 
+    /// The promotion the script of this module would carry out (`--sqlcmd`, live, worker).
     fn database_with_online_generations(
+        mode: MainActivationMode,
+        staged_is_noop: bool,
+    ) -> Result<MainActivationPlan, MainActivationError> {
+        database_with_online_generations_for(MainActivationExecutor::Script, mode, staged_is_noop)
+    }
+
+    fn database_with_online_generations_for(
+        executor: MainActivationExecutor,
         mode: MainActivationMode,
         staged_is_noop: bool,
     ) -> Result<MainActivationPlan, MainActivationError> {
@@ -1410,7 +1878,8 @@ mod tests {
         } else {
             base.staged_rows.clone()
         };
-        prepare_main_activation(
+        prepare_main_activation_for(
+            executor,
             mode,
             staged,
             MainActivationSnapshot {
@@ -1433,7 +1902,8 @@ mod tests {
 
     #[test]
     fn ordinary_promotion_refuses_a_database_with_online_generations() {
-        // #408 / F-4: exclusive, live and worker deleted both markers and left the
+        // The script of this module (the `--sqlcmd` exclusive route, live, worker) refuses it, as step 1 of #408
+        // made it. #408 / F-4: exclusive, live and worker deleted both markers and left the
         // `_dynupdate_` rows behind, so the earlier online changes vanished (measured on a
         // session: the original module text and no function of the second generation).
         for mode in [
@@ -1460,11 +1930,17 @@ mod tests {
             );
             assert!(message.contains("native"), "{mode:?}: {message}");
             assert!(message.contains(mode_name(mode)), "{mode:?}: {message}");
+            // only the exclusive mode has another way: the config apply on the built-in SQL client
+            assert_eq!(
+                message.contains("leave out --sqlcmd"),
+                mode == MainActivationMode::Exclusive,
+                "{mode:?}: {message}"
+            );
         }
     }
 
     #[test]
-    fn online_still_extends_the_history_and_a_noop_is_never_refused() {
+    fn online_still_extends_the_history_and_an_online_noop_is_never_refused() {
         let online = database_with_online_generations(MainActivationMode::Online, false).unwrap();
         assert_eq!(online.old_generation().to_string(), EVIDENCE_G2);
         let script = render_main_activation_sql("lab", &online, None).unwrap();
@@ -1472,15 +1948,190 @@ mod tests {
         assert!(script.sql.contains(&hex(&utf8_bom(&format!(
             "{{1,3,{EVIDENCE_G1},{EVIDENCE_G2},{NEW}}}"
         )))));
-        // Nothing is promoted when the stage equals the active rows, so nothing is lost.
+        // An online stage that equals the rows it extends changes nothing and is not refused.
+        let noop = database_with_online_generations(MainActivationMode::Online, true).unwrap();
+        assert!(noop.is_no_op());
+        // Step 1 called a promotion of a stage equal to the ordinary rows a no-op on a database with markers, too.
+        // The ordinary rows are not the configuration of such a database, though: the aliases are, so the stage
+        // (an online change taken back to the original text) does change it, and nothing reports "no change".
+        // The script refuses (it would delete the markers and leave the aliases), the config apply folds.
         for mode in [
             MainActivationMode::Exclusive,
             MainActivationMode::Live,
             MainActivationMode::Worker,
         ] {
-            let plan = database_with_online_generations(mode, true).unwrap();
-            assert!(plan.is_no_op(), "{mode:?}");
+            assert!(
+                database_with_online_generations(mode, true).is_err(),
+                "{mode:?}"
+            );
         }
+    }
+
+    // #408 step 2 (docs/apply/online-activation.md, 6.6): the `exclusive` mode is handed to `mssql_config_apply`.
+    //
+    // The F-4 database of the #344 evidence (an ordinary generation and two online generations) and the
+    // promotion of an unrelated module. What the user needs is that the earlier online changes are still
+    // the configuration afterwards: the apply that carries the `exclusive` mode out folds the `_dynupdate_`
+    // rows into the ordinary rows as the native apply does, so this module must accept the promotion, name
+    // that apply as its executor and never render it as a script. `live` and `worker` stay with the script
+    // and keep refusing until the worker lab cluster exists.
+    #[test]
+    fn f4_an_exclusive_promotion_on_a_database_with_online_generations_is_carried_out_by_the_config_apply()
+     {
+        let plan = database_with_online_generations_for(
+            MainActivationExecutor::ConfigApply,
+            MainActivationMode::Exclusive,
+            false,
+        )
+        .expect(
+            "an exclusive promotion is accepted on a database with online generations: the config apply folds them",
+        );
+        assert_eq!(plan.executor(), MainActivationExecutor::ConfigApply);
+        assert!(plan.is_carried_out_by_config_apply());
+        assert_eq!(
+            plan.old_generation().to_string(),
+            EVIDENCE_G2,
+            "the generation the promotion starts from is the last online one"
+        );
+        assert!(
+            render_main_activation_sql("lab", &plan, None).is_err(),
+            "no script of this module carries an exclusive promotion out"
+        );
+        for mode in [MainActivationMode::Live, MainActivationMode::Worker] {
+            assert!(
+                database_with_online_generations(mode, false).is_err(),
+                "{mode:?} keeps refusing on a database with online generations"
+            );
+        }
+        assert_eq!(
+            database_with_online_generations(MainActivationMode::Online, false)
+                .unwrap()
+                .executor(),
+            MainActivationExecutor::Script
+        );
+    }
+
+    #[test]
+    fn f4_a_stage_equal_to_the_ordinary_rows_is_no_noop_when_an_exclusive_promotion_has_to_fold() {
+        // The ordinary rows are not the configuration of a database with online generations: the aliases are. A stage
+        // that equals the ordinary rows (an online change taken back to the original text) still changes the
+        // configuration, and the fold has to run.
+        let plan = database_with_online_generations_for(
+            MainActivationExecutor::ConfigApply,
+            MainActivationMode::Exclusive,
+            true,
+        )
+        .unwrap();
+        assert!(!plan.is_no_op());
+        assert_eq!(plan.executor(), MainActivationExecutor::ConfigApply);
+        assert!(plan.is_carried_out_by_config_apply());
+    }
+
+    #[test]
+    fn the_config_apply_carries_out_the_exclusive_mode_only_where_the_built_in_client_is_there() {
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Online,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            assert_eq!(
+                MainActivationExecutor::for_mode(mode, true) == MainActivationExecutor::ConfigApply,
+                mode == MainActivationMode::Exclusive,
+                "{mode:?}"
+            );
+            // `--sqlcmd`: the script, whatever the mode
+            assert_eq!(
+                MainActivationExecutor::for_mode(mode, false),
+                MainActivationExecutor::Script,
+                "{mode:?}"
+            );
+            assert_eq!(
+                MainActivationExecutor::ConfigApply.folds_online_generations(mode),
+                mode == MainActivationMode::Exclusive
+            );
+            assert!(!MainActivationExecutor::Script.folds_online_generations(mode));
+        }
+        // a plan made for the legacy runner is a script plan
+        assert_eq!(
+            fixture(MainActivationMode::Exclusive).executor(),
+            MainActivationExecutor::Script
+        );
+    }
+
+    #[test]
+    fn a_config_apply_plan_is_made_for_the_exclusive_mode_only() {
+        for mode in [
+            MainActivationMode::Online,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let error = database_with_online_generations_for(
+                MainActivationExecutor::ConfigApply,
+                mode,
+                false,
+            )
+            .unwrap_err();
+            let MainActivationError::SafetyGate(message) = &error else {
+                panic!("{mode:?}: {error}");
+            };
+            assert!(
+                message.contains("not carried out by the config apply"),
+                "{message}"
+            );
+            assert!(message.contains(mode_name(mode)), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_marker_free_exclusive_promotion_is_carried_out_by_the_config_apply_too() {
+        // Native does more than the script replaced (`_MessageNo`, the registrations, `MobileVersions.dat`, its own
+        // recovery artifact); the apply does it on a database without online generations as well.
+        let base = fixture(MainActivationMode::Exclusive);
+        let plan = prepare_main_activation_for(
+            MainActivationExecutor::ConfigApply,
+            MainActivationMode::Exclusive,
+            base.staged_rows.clone(),
+            MainActivationSnapshot {
+                config_rows: base.active_rows.clone(),
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[BODY.to_owned(), format!("{BODY}.0")],
+            true,
+        )
+        .unwrap();
+        assert!(plan.is_carried_out_by_config_apply());
+        assert_eq!(
+            plan.dry_run_report().executor,
+            MainActivationExecutor::ConfigApply
+        );
+        assert!(
+            serde_json::to_string(&plan.dry_run_report())
+                .unwrap()
+                .contains("\"executor\":\"config_apply\"")
+        );
+        // no script of this module for it
+        let error = render_main_activation_sql("lab", &plan, None).unwrap_err();
+        assert!(error.to_string().contains("mssql_config_apply"), "{error}");
+        // a stage equal to the rows of a database without markers is a no-op: the script that clears the stage is
+        // all there is to do, and the apply is not asked
+        let noop = prepare_main_activation_for(
+            MainActivationExecutor::ConfigApply,
+            MainActivationMode::Exclusive,
+            base.active_rows.clone(),
+            MainActivationSnapshot {
+                config_rows: base.active_rows.clone(),
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[BODY.to_owned(), format!("{BODY}.0")],
+            true,
+        )
+        .unwrap();
+        assert!(noop.is_no_op());
+        assert!(!noop.is_carried_out_by_config_apply());
+        assert!(render_main_activation_sql("lab", &noop, None).is_ok());
     }
 
     #[test]

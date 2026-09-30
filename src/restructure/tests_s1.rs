@@ -7,7 +7,8 @@ use super::tests_plan::{
 };
 use crate::apply_check::{ChangeOp, Reason, ReasonClass, RuleId, Seg, Verdict};
 use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
-use crate::restructure::s1::{decide, own_refusal};
+use crate::restructure::s1::{decide, own_refusal, without_names};
+use std::collections::HashSet;
 
 fn seg(name: &str, label: Option<&str>) -> Seg {
     Seg {
@@ -385,21 +386,28 @@ fn nothing_is_let_through_that_the_gate_does_not_cover() {
         "ffffffff-0000-4000-8000-000000000000"
     );
 
-    // An operation of S1 that is designed but not built (a tabular section, an object).
-    let section = check_of(vec![structure(
-        RuleId::TabularSectionAddedDroppedMoved,
-        "Catalog",
-        OBJECT,
-        vec![
-            seg("ChildObjects", None),
-            seg("TabularSection", Some("ДемоНоваяТЧ")),
-        ],
-        Some(ChangeOp::Added),
-    )]);
-    let (verdict, phase) = decide(conservative(&[CATALOG]), &section, &base, &options());
+    // A new object that the stage does not hold (S1-F builds them; the plan finds none in this image): the two
+    // decoders disagree and the refusal stands.
+    let object = check_of(vec![
+        structure(
+            RuleId::ObjectWithStorageAddedOrDropped,
+            "Catalog",
+            "Catalog.Новый",
+            vec![],
+            Some(ChangeOp::Added),
+        ),
+        structure(
+            RuleId::ObjectWithStorageAddedOrDropped,
+            "Configuration",
+            "Configuration",
+            vec![seg("ChildObjects", None), seg("Catalog", Some("Новый"))],
+            Some(ChangeOp::Added),
+        ),
+    ]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &object, &base, &options());
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
-        blocked_with(&verdict, "add-tabular-section"),
+        blocked_with(&verdict, "the two decoders disagree"),
         "{:?}",
         verdict.blockers
     );
@@ -595,6 +603,190 @@ fn an_attribute_of_a_catalog_an_extension_adopts_is_refused_and_another_object_i
     assert!(verdict.restructuring_required && phase.is_none());
     assert!(
         blocked_with(&verdict, "were not read"),
+        "{:?}",
+        verdict.blockers
+    );
+}
+
+#[test]
+fn a_deleted_list_of_a_removed_form_and_a_removed_attribute_is_judged_for_the_attribute_only() {
+    let added = crate::restructure::plan::plan(&inputs(OLD_ROW, NEW_ROW), &options()).unwrap();
+    let mut back = inputs(NEW_ROW, OLD_ROW);
+    back.schema = added.new_schema.clone();
+    back.main_names = added.new_names_row.clone();
+    let form = "8a7546f4-bfc9-4732-bf60-43a41e2c8753";
+    let attribute_id = "c60cdc87-198a-4f6e-8f17-76bcb1b1914b";
+    // the platform's own import: the rows of the form with the flag 0, the attribute with the flag 1
+    let list = format!("\u{feff}4,\"{form}\",0,\"{form}.0\",0,\"{form}.1\",0,\"{attribute_id}\",1");
+    let stored = crate::restructure::names::deflate(list.as_bytes()).unwrap();
+    let check = check_of(vec![attribute("ДемоНовыйРеквизит", ChangeOp::Removed)]);
+
+    // the plan alone: the rows of a form are no attributes, the whole list is refused
+    back.staged.deleted = Some(stored.clone());
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, &format!("deletes {form}")),
+        "{:?}",
+        verdict.blockers
+    );
+
+    // the apply has executed the form's rows itself: the gate judges the attribute that is left
+    let executed: HashSet<String> = [form.to_owned(), format!("{form}.0"), format!("{form}.1")]
+        .into_iter()
+        .collect();
+    back.staged.deleted = without_names(Some(stored.clone()), &executed).unwrap();
+    let left =
+        crate::restructure::plan::parse_deleted(back.staged.deleted.as_deref().unwrap()).unwrap();
+    assert_eq!(left, vec![(attribute_id.to_owned(), 1)]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert!(phase.objects[0].contains("removed attributes Fld11034"));
+    assert_eq!(phase.consumed_staged_rows, 1);
+
+    // a row the apply did not execute stays in the list, and the plan refuses it
+    let partly: HashSet<String> = [form.to_owned(), format!("{form}.0")].into_iter().collect();
+    back.staged.deleted = without_names(Some(stored), &partly).unwrap();
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &back, &options());
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, &format!("deletes {form}.1")),
+        "{:?}",
+        verdict.blockers
+    );
+
+    // a stage with no list has nothing to strip
+    assert_eq!(without_names(None, &executed).unwrap(), None);
+}
+
+fn section_reason(name: &str) -> Reason {
+    structure(
+        RuleId::TabularSectionAddedDroppedMoved,
+        "Catalog",
+        OBJECT,
+        vec![seg("ChildObjects", None), seg("TabularSection", Some(name))],
+        Some(ChangeOp::Added),
+    )
+}
+
+fn section_attribute(section: &str, name: &str) -> Reason {
+    structure(
+        RuleId::TabularSectionColumnAddedDroppedMoved,
+        "Catalog",
+        OBJECT,
+        vec![
+            seg("ChildObjects", None),
+            seg("TabularSection", Some(section)),
+            seg("ChildObjects", None),
+            seg("Attribute", Some(name)),
+        ],
+        Some(ChangeOp::Added),
+    )
+}
+
+#[test]
+fn a_new_section_and_a_new_attribute_of_an_old_one_are_let_through_and_the_decoders_must_agree() {
+    use super::tests_sections::{
+        SECTIONS, attributes_of, collection, fresh, recount, rename, staged, with_new_section,
+    };
+    use crate::restructure::object::ObjectFacts;
+
+    // The new section НоваяТЧ of the helper, and a new attribute in the second stored section.
+    let mut root = with_new_section();
+    let stored = ObjectFacts::parse(&super::tests_sections::tree()).unwrap();
+    let old_section = stored.sections()[1].name.clone();
+    let template = stored.sections()[1].attributes[0].name.clone();
+    let sections = collection(&mut root, SECTIONS);
+    let attributes = attributes_of(&mut sections[3]);
+    let mut added = fresh(&attributes[2], 7, true);
+    rename(&mut added, &template, "ДемоРеквизитТЧ");
+    attributes.push(added);
+    recount(attributes);
+    let inputs = staged(&root);
+
+    let check = check_of(vec![
+        section_reason("НоваяТЧ"),
+        section_attribute(&old_section, "ДемоРеквизитТЧ"),
+    ]);
+    let (verdict, phase) = decide(conservative(&[CATALOG]), &check, &inputs, &options());
+    assert!(!verdict.restructuring_required, "{:?}", verdict.blockers);
+    let phase = phase.expect("a structure phase");
+    assert_eq!(
+        phase.tables,
+        [
+            "_Reference20",
+            "_Reference20_VT155",
+            "_Reference20_VT159",
+            "_Reference20_VT11035"
+        ]
+    );
+    assert!(phase.objects[0].contains("new tabular sections VT11035 = НоваяТЧ"));
+    assert!(phase.objects[0].contains("new attributes of tabular sections"));
+    assert!(
+        phase
+            .sql
+            .contains("create table dbo._Reference20_VT11035NG")
+    );
+    assert!(
+        phase
+            .sql
+            .contains("the created table _Reference20_VT11035 is not empty")
+    );
+    assert!(!phase.sql.contains("drop table dbo._Reference20_VT11035;"));
+    assert!(phase.params_rewrites.is_empty());
+
+    // The check names the section but not the attribute, or another section, or another attribute.
+    for (what, reasons) in [
+        ("without the attribute", vec![section_reason("НоваяТЧ")]),
+        (
+            "another section",
+            vec![
+                section_reason("Другая"),
+                section_attribute(&old_section, "ДемоРеквизитТЧ"),
+            ],
+        ),
+        (
+            "another attribute",
+            vec![
+                section_reason("НоваяТЧ"),
+                section_attribute(&old_section, "Другой"),
+            ],
+        ),
+        (
+            "another section of the attribute",
+            vec![
+                section_reason("НоваяТЧ"),
+                section_attribute("Другая", "ДемоРеквизитТЧ"),
+            ],
+        ),
+    ] {
+        let (verdict, phase) = decide(
+            conservative(&[CATALOG]),
+            &check_of(reasons),
+            &inputs,
+            &options(),
+        );
+        assert!(verdict.restructuring_required && phase.is_none(), "{what}");
+        assert!(
+            blocked_with(&verdict, "disagree"),
+            "{what}: {:?}",
+            verdict.blockers
+        );
+    }
+
+    // A section attribute dropped or moved is the classification's refusal, however the plan reads it.
+    let mut dropped = section_attribute(&old_section, "ДемоРеквизитТЧ");
+    dropped.op = Some(ChangeOp::Removed);
+    let (verdict, phase) = decide(
+        conservative(&[CATALOG]),
+        &check_of(vec![section_reason("НоваяТЧ"), dropped]),
+        &inputs,
+        &options(),
+    );
+    assert!(verdict.restructuring_required && phase.is_none());
+    assert!(
+        blocked_with(&verdict, "tabular-section-outside-s1"),
         "{:?}",
         verdict.blockers
     );
