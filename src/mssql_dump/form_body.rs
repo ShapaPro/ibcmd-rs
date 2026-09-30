@@ -18684,10 +18684,20 @@ fn parse_form_choice_parameter_design_time_reference(
     if type_uuid.is_nil() || value_uuid.is_nil() {
         return None;
     }
-    // The type must be one this export can name on its own; only then is the
-    // unresolved half exactly the value.
-    unique_metadata_type_reference(type_index, type_index_collisions, type_id.trim())
-        .and_then(parse_generated_metadata_reference_owner)?;
+    // A type this export names ambiguously (a collision) is refused: the
+    // platform does name it, so the pair would be a guess. A type the
+    // configuration does not carry at all is written as the pair too --
+    // ISL 2.8.1.13 `Catalogs/ШаблоныСообщений/Forms/ФормаЭлемента`
+    // `Отбор.Вид` names a type no object of the configuration has and the
+    // platform writes `09ca57b0-….a89ee622-…`.
+    let type_key = type_id.trim();
+    if type_index_collisions.contains(type_key) {
+        return None;
+    }
+    if type_index.contains_key(type_key) {
+        unique_metadata_type_reference(type_index, type_index_collisions, type_key)
+            .and_then(parse_generated_metadata_reference_owner)?;
+    }
     Some(format!("{type_uuid}.{value_uuid}"))
 }
 

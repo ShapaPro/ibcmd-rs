@@ -25262,16 +25262,22 @@ fn writes_an_unnamed_choice_parameter_reference_as_its_identifier_pair() {
         )
         .is_none()
     );
-    // So is a type this configuration does not carry at all.
-    assert!(
-        parse_form_input_field_choice_parameters(
-            &collection,
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            &object_refs,
-        )
-        .is_none()
-    );
+    // A type this configuration does not carry at all is written as the pair
+    // as well: ISL 2.8.1.13 `Catalogs/ШаблоныСообщений/Forms/ФормаЭлемента`
+    // `Отбор.Вид` names a type no object of the configuration has, and
+    // 8.3.27.2214 writes `<type>.<value>`.
+    let parameters = parse_form_input_field_choice_parameters(
+        &collection,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &object_refs,
+    )
+    .unwrap();
+    assert!(matches!(
+        parameters.items()[0].value(),
+        ibcmd_schema::FormChoiceParameterValue::FixedArray(values)
+            if values.iter().any(|value| value.value_ref() == format!("{enum_type}.{unnamed_value}"))
+    ));
 }
 
 #[test]
