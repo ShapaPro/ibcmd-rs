@@ -89,6 +89,39 @@ fn metadata_use_standard_commands(kind: &str, text: &str, header: &MetadataHeade
         }
         return parse_1c_bool_field(fields.get(7).copied());
     }
+    if kind == "CommonForm" {
+        // Slot 4 of the `{4,...}` object record, as `form_metadata_properties`
+        // reads it for the form's own `CommonForms/<name>.xml`.
+        let fields = metadata_object_fields(text)?;
+        if fields.first().map(|value| value.trim()) != Some("4") {
+            return None;
+        }
+        return parse_1c_bool_field(fields.get(4).copied());
+    }
+    if kind == "DataProcessor" {
+        // Slot 5 (`UseStandardCommands`) of the `{17,...}` record. `Open`
+        // exists only with a default form: ERP 2.5 `DataProcessor.
+        // НастройкаСпособовОбеспеченияПотребностей` declares
+        // `UseStandardCommands=true` with an empty `<DefaultForm/>` and the
+        // platform keeps its `0:<uuid>` sentinel; across erpwe, erp, bsp, do
+        // and dm no processor with an empty default form is named with a
+        // `.StandardCommand.Open`.
+        let fields = metadata_object_fields(text)?;
+        if fields.first().map(|value| value.trim()) != Some("17") {
+            return None;
+        }
+        let uses = parse_1c_bool_field(fields.get(5).copied())?;
+        return Some(uses && parse_non_zero_uuid(fields.get(4)?.trim()).is_some());
+    }
+    if kind == "Constant" {
+        // Slot 7 of the constant object record, as
+        // `parse_constant_properties_from_text` reads it.
+        let marker = format!("{{1,0,{}}}", header.uuid);
+        let marker_start = text.find(&marker)?;
+        let start = text[..marker_start].rfind("{16,")?;
+        let fields = split_1c_braced_fields(text, start)?;
+        return parse_1c_bool_flag(fields.get(7)?.trim());
+    }
     let family = match kind {
         "Catalog" => owner_graph::OwnerGraphFamily::Catalog,
         // Same slot `parse_document_properties_from_text` reads for the

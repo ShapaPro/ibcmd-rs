@@ -19228,6 +19228,14 @@ fn parse_data_processor_empty_ref_fill_values(
         }
         let pattern = data_processor_code27_type_pattern(&fields, &header)?;
         let pattern_type_ids = data_processor_reference_pattern_type_ids(pattern)?;
+        // A reference naming neither owner nor value is left to the generic
+        // reader, which writes an empty `xr:DesignTimeRef` (ERP 2.5
+        // `DataProcessors/РедактированиеЭтаповПроизводства`).
+        if split_information_register_braced_fields(fill_value)
+            .is_some_and(|fields| design_time_ref_value_is_zero(&fields))
+        {
+            continue;
+        }
         let (fill_owner_type_id, fill_value_id) =
             parse_data_processor_design_time_fill_reference(fill_value)?;
         // Only the owner's *empty* reference has to be rebuilt here, because
@@ -20970,12 +20978,28 @@ fn parse_information_register_fill_value(
         r#""B""# if fields.len() == 2 => {
             information_register_bool(fields.get(1)?).map(MetadataChildFillValue::Boolean)
         }
+        r##""#""## if fields.len() == 3 && design_time_ref_value_is_zero(&fields) => {
+            Some(MetadataChildFillValue::DesignTimeRef(String::new()))
+        }
         r##""#""## if fields.len() == 3 => {
             parse_information_register_design_time_ref(value, type_index, object_refs)
                 .map(MetadataChildFillValue::DesignTimeRef)
         }
         _ => None,
     }
+}
+
+/// `{"#",<type>,{0,<nil>,<nil>}}`: a design-time value naming no object at
+/// all, which the platform writes as an empty `xr:DesignTimeRef` (ERP 2.5
+/// `DataProcessors/РедактированиеЭтаповПроизводства`, two attributes).
+fn design_time_ref_value_is_zero(fields: &[&str]) -> bool {
+    let Some(inner) = fields.get(2).and_then(|value| split_1c_braced_fields(value.trim(), 0)) else {
+        return false;
+    };
+    inner.len() == 3
+        && inner[0].trim() == "0"
+        && information_register_uuid_is_zero(inner[1].trim())
+        && information_register_uuid_is_zero(inner[2].trim())
 }
 
 fn information_register_decimal_is_valid(value: &str) -> bool {
@@ -22355,7 +22379,9 @@ fn parse_document_link_by_type(
         data_path_owner_proof,
         true,
     )
-    .filter(|path| path.contains(':'))
+    // A bare `0` segment is kept raw too (ERP 2.5
+    // `Documents/ВводОстатковВнеоборотныхАктивов2_4`, `LinkItem` 0).
+    .filter(|path| path.contains(':') || path == "0")
     .or_else(|| {
         resolve_document_data_path(
             fields.get(2..path_end)?,
@@ -22662,6 +22688,31 @@ fn parse_catalog_link_by_type(
             link_item,
         }),
     ))
+}
+
+/// A `{3,<n>,<segment>..,<item>}` link-by-type record of an attribute whose
+/// owner is `owner_kind.owner_name`, with at least one path segment.
+fn parse_owner_link_by_type(
+    value: &str,
+    owner_kind: &str,
+    owner_name: &str,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<MetadataChildLinkByType> {
+    let fields = split_1c_braced_fields(value.trim(), 0)?;
+    if fields.first()?.trim() != "3" {
+        return None;
+    }
+    let path_count = fields.get(1)?.trim().parse::<usize>().ok()?;
+    if path_count == 0 || path_count.checked_add(3) != Some(fields.len()) {
+        return None;
+    }
+    let link_item = fields.last()?.trim().parse::<u32>().ok()?;
+    if link_item > 3 {
+        return None;
+    }
+    let data_path =
+        resolve_owner_data_path(&fields[2..2 + path_count], owner_kind, owner_name, object_refs)?;
+    Some(MetadataChildLinkByType { data_path, link_item })
 }
 
 fn resolve_catalog_data_path(
@@ -23485,6 +23536,9 @@ fn parse_metadata_child_fill_value(
                     .get(1)
                     .and_then(|field| format_1c_date_time(field.trim()))
                     .map(MetadataChildFillValue::DateTime);
+            }
+            Some("\"#\"") if fields.len() == 3 && design_time_ref_value_is_zero(&fields) => {
+                return Some(MetadataChildFillValue::DesignTimeRef(String::new()));
             }
             Some("\"#\"") => {
                 return parse_design_time_reference(value, object_refs)
@@ -25912,12 +25966,22 @@ fn parse_cct_attribute_properties(
             Vec::new()
         }
     };
-    if !information_register_uuid_is_zero(&choice_form_uuid)
-        || link_by_type.len() != 3
-        || link_by_type.first()?.trim() != "3"
-        || link_by_type.get(1)?.trim() != "0"
-        || link_by_type.get(2)?.trim() != "0"
-    {
+    let link_by_type_empty = link_by_type.len() == 3
+        && link_by_type.first()?.trim() == "3"
+        && link_by_type.get(1)?.trim() == "0"
+        && link_by_type.get(2)?.trim() == "0";
+    // A non-empty link resolves inside the named owner exactly as a
+    // catalog's does; a segment naming nothing in this configuration stays
+    // the platform's raw `0:<uuid>` (ERP 2.5 `ChartsOfCharacteristicTypes.
+    // СтатьиАктивовПассивов`, `Субконто1..3`).
+    let resolved_link_by_type = match (link_by_type_empty, owner_scope) {
+        (true, _) => None,
+        (false, Some((owner_kind, owner_name, object_refs))) => {
+            Some(parse_owner_link_by_type(payload.get(15)?, owner_kind, owner_name, object_refs)?)
+        }
+        (false, None) => return None,
+    };
+    if !information_register_uuid_is_zero(&choice_form_uuid) {
         return None;
     }
     let fill_value =
@@ -25966,8 +26030,8 @@ fn parse_cct_attribute_properties(
         quick_choice: Some(catalog_quick_choice_xml(payload.get(12)?.trim())?),
         create_on_input: Some(catalog_create_on_input_xml(payload.get(21)?.trim())?),
         choice_form: Some(MetadataChoiceForm::Empty),
-        link_by_type_empty: true,
-        link_by_type: None,
+        link_by_type_empty,
+        link_by_type: resolved_link_by_type,
         choice_history_on_input: Some(catalog_choice_history_on_input_xml(
             payload.get(22)?.trim(),
         )?),
@@ -28787,14 +28851,22 @@ fn parse_document_register_records_collection(
     object_refs: &BTreeMap<String, String>,
     allowed_prefixes: &[&str],
 ) -> Option<Vec<String>> {
-    let mut pairs =
-        parse_metadata_object_reference_collection_with_uuids(value, object_refs, |reference| {
+    // A register named twice is written twice: ERP 2.5
+    // `Documents/ВнутреннееПотреблениеТоваров` lists
+    // `AccumulationRegister.ДвиженияПоПрочимАктивамПассивам` two times in
+    // storage and the platform's `<RegisterRecords>` repeats it.
+    let mut pairs = parse_metadata_object_reference_collection_members(
+        value,
+        object_refs,
+        |reference| {
             allowed_prefixes.iter().any(|prefix| {
                 reference
                     .strip_prefix(prefix)
                     .is_some_and(|name| !name.is_empty() && !name.contains('.'))
             })
-        })?;
+        },
+        true,
+    )?;
     pairs.sort_by(|left, right| left.0.cmp(&right.0));
     Some(pairs.into_iter().map(|(_, reference)| reference).collect())
 }
@@ -28819,6 +28891,15 @@ fn parse_metadata_object_reference_collection_with_uuids(
     value: &str,
     object_refs: &BTreeMap<String, String>,
     accepts: impl Fn(&str) -> bool,
+) -> Option<Vec<(String, String)>> {
+    parse_metadata_object_reference_collection_members(value, object_refs, accepts, false)
+}
+
+fn parse_metadata_object_reference_collection_members(
+    value: &str,
+    object_refs: &BTreeMap<String, String>,
+    accepts: impl Fn(&str) -> bool,
+    allow_repeats: bool,
 ) -> Option<Vec<(String, String)>> {
     // The same declared counter the field-declaration index reads off this
     // very slot, so `<Owners/>` means the same zero on both sides. It lives
@@ -28845,7 +28926,8 @@ fn parse_metadata_object_reference_collection_with_uuids(
             }
             let uuid = parse_information_register_non_zero_uuid(payload.get(1)?)?;
             let reference = resolve_exchange_plan_index_reference(&uuid, object_refs)?;
-            (accepts(&reference) && seen.insert(reference.to_ascii_lowercase()))
+            (accepts(&reference)
+                && (seen.insert(reference.to_ascii_lowercase()) || allow_repeats))
                 .then_some((uuid, reference))
         })
         .collect()
