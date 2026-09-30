@@ -4938,6 +4938,18 @@ enum ConfigurationRootFooter {
 fn classify_configuration_root_footer(field: &str) -> Option<ConfigurationRootFooter> {
     let fields = split_1c_braced_fields(field, 0)?;
     let marker = split_1c_braced_fields(fields.first()?.trim(), 0)?;
+    // A root signed by its vendor spells the two strings of the bare footer
+    // as a public key and a signature (1C:ЗУП 3.1.18, `{{0,"MIIB…","MC0C…"}}`);
+    // it is the same bare footer otherwise.
+    if marker.len() == 3
+        && fields.len() == 1
+        && marker.first().map(|value| value.trim()) == Some("0")
+        && marker[1..]
+            .iter()
+            .all(|field| parse_1c_quoted_string(field.trim()).is_some_and(|value| !value.is_empty()))
+    {
+        return Some(ConfigurationRootFooter::Bare);
+    }
     let marker_tail_valid = marker.len() == 3
         && marker
             .get(1)
