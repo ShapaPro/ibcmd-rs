@@ -68,7 +68,8 @@ before, and the message is the second run's.
 the twin is a fresh clone, the platform's `import files --partial` of the edited files and the platform's apply; ours
 is a fresh clone, `ibcmd-rs infobase config import` of the whole tree with the default flags, and the apply (the
 drop-in `config apply --recovery-backup` where S1 serves the change, the platform's otherwise).
-`scripts/import-lab/run_s1_case.ps1` (`-NativeTwin` reuses a twin), `tools`-side `compare_config_content.py` for check 4.
+`scripts/import-lab/run_s1_case.ps1` (`-NativeTwin` reuses a twin) and `compare_config_content.py` (check 4, by class:
+identical, same text, other text), `row_diff.py` for where two rows differ.
 
 | case | rows staged (before) | our apply | check 4: rows of Config identical to the twin's, of 9 838 | export |
 |---|---|---|---|---|
