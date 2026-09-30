@@ -192,3 +192,375 @@ fn sql_types_follow_the_entry_tags() {
     assert_eq!(sql_type(&wide).unwrap(), SqlType::BigInt);
     assert_eq!(SqlType::Numeric(7, 0).ddl(), "numeric(7, 0)");
 }
+
+/// The entry of `Reference20` of the fixture with the given index list (in the platform's layout).
+fn entry_with_indexes(indexes: &str) -> crate::metadata_model::brace::Brace {
+    let mut entry = DbSchema::parse(STAGED).unwrap().tables()[0].clone();
+    entry.as_list_mut().unwrap()[6] =
+        crate::metadata_model::brace::parse_row(indexes.as_bytes()).unwrap();
+    entry
+}
+
+#[test]
+fn deleting_a_field_takes_its_own_index_out_and_the_field_out_of_the_date_index() {
+    // The index list of a document with an additional-order attribute (case b2): the date index lists the
+    // attribute last, the attribute has an index of its own.
+    let indexes = "{3,\r\n{\"ByDocNum\",1,\r\n{2,\"Number\",\"ID\"},0,0,0,\r\n{0},0,0},\r\n{\"ByDocDate\",1,\r\n{4,\"Date_Time\",\"ID\",\"Marked\",\"Fld154\"},0,0,0,\r\n{0},0,0},\r\n{\"ByFieldFld154\",1,\r\n{4,\"Fld154\",\"Date_Time\",\"ID\",\"Marked\"},0,0,0,\r\n{0},0,0}}";
+    let mut entry = entry_with_indexes(indexes);
+    let removed = remove_field_indexes(&mut entry, "Fld154").unwrap();
+    assert_eq!(removed, ["ByDocDate (- Fld154)", "ByFieldFld154"]);
+    let list = entry.as_list().unwrap()[6].clone();
+    let text = crate::metadata_model::brace::serialize(&list);
+    assert!(text.starts_with("{2,"), "{text}");
+    assert!(text.contains("\"ByDocDate\""), "{text}");
+    assert!(
+        text.contains("{3,\"Date_Time\",\"ID\",\"Marked\"}"),
+        "{text}"
+    );
+    assert!(!text.contains("Fld154"), "{text}");
+
+    // An index of another kind that names the field is refused.
+    let other = "{2,\r\n{\"ByDocNum\",1,\r\n{2,\"Number\",\"ID\"},0,0,0,\r\n{0},0,0},\r\n{\"ByOther\",1,\r\n{2,\"Fld154\",\"ID\"},0,0,0,\r\n{0},0,0}}";
+    let mut refused = entry_with_indexes(other);
+    assert!(
+        remove_field_indexes(&mut refused, "Fld154")
+            .unwrap_err()
+            .to_string()
+            .contains("not one of the indexes of an indexed attribute")
+    );
+}
+
+/// A table entry (the one of `Reference20` of the fixture) with the given fields, all booleans, and the given
+/// index list.
+fn entry_with(fields: &[&str], indexes: &str) -> crate::metadata_model::brace::Brace {
+    let mut entry = entry_with_indexes(indexes);
+    let mut list = vec![crate::metadata_model::brace::Brace::atom(fields.len())];
+    list.extend(fields.iter().map(|name| {
+        FieldEntry::new(name, false, vec![TypeEntry::new("L", 0, 0, "", 0)]).to_brace()
+    }));
+    entry.as_list_mut().unwrap()[4] = crate::metadata_model::brace::Brace::List(list);
+    entry
+}
+
+fn index_names(entry: &crate::metadata_model::brace::Brace) -> Vec<String> {
+    TableView::new(entry)
+        .unwrap()
+        .indexes()
+        .unwrap()
+        .into_iter()
+        .map(|index| format!("{} {}", index.name, index.fields.join(",")))
+        .collect()
+}
+
+/// An index list from `(name, fields)`.
+fn index_list(indexes: &[(&str, &str)]) -> String {
+    let mut text = format!("{{{}", indexes.len());
+    for (name, fields) in indexes {
+        let count = fields.split(',').count();
+        text.push_str(&format!(
+            ",\r\n{{\"{name}\",1,\r\n{{{count},{}}},0,0,0,\r\n{{0}},0,0}}",
+            fields
+                .split(',')
+                .map(|field| format!("\"{field}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    text.push('}');
+    text
+}
+
+const CATALOG_FIELDS: &[&str] = &[
+    "ID",
+    "Version",
+    "Marked",
+    "PredefinedID",
+    "ParentID",
+    "Folder",
+    "Code",
+    "Description",
+    "Fld1",
+    "Fld2",
+    "Fld3",
+    "Fld4",
+    "Fld5",
+];
+const DOCUMENT_FIELDS: &[&str] = &[
+    "ID",
+    "Version",
+    "Marked",
+    "Date_Time",
+    "Number",
+    "Posted",
+    "Fld1",
+    "Fld2",
+    "Fld3",
+    "Fld4",
+];
+
+#[test]
+fn an_index_of_a_hierarchical_attribute_is_a_pair_in_the_order_of_the_fields() {
+    let existing = index_list(&[
+        ("ByPredefinedIDNotUniq", "PredefinedID"),
+        ("ParentDescr", "ParentID,Folder,Description,ID"),
+        ("Descr", "Description,ID"),
+        ("ByParentFieldFld2", "ParentID,Folder,Fld2,ID"),
+        ("ByFieldFld2", "Fld2,ID"),
+        ("ByParentFieldFld5", "ParentID,Folder,Fld5,ID"),
+        ("ByFieldFld5", "Fld5,ID"),
+    ]);
+    // Between the pairs of Fld2 and Fld5 (by the position of the field in the table).
+    let mut entry = entry_with(CATALOG_FIELDS, &existing);
+    let added = add_field_indexes(&mut entry, "Fld3", false).unwrap();
+    assert_eq!(added, ["ByParentFieldFld3", "ByFieldFld3"]);
+    assert_eq!(
+        index_names(&entry),
+        [
+            "ByPredefinedIDNotUniq PredefinedID",
+            "ParentDescr ParentID,Folder,Description,ID",
+            "Descr Description,ID",
+            "ByParentFieldFld2 ParentID,Folder,Fld2,ID",
+            "ByFieldFld2 Fld2,ID",
+            "ByParentFieldFld3 ParentID,Folder,Fld3,ID",
+            "ByFieldFld3 Fld3,ID",
+            "ByParentFieldFld5 ParentID,Folder,Fld5,ID",
+            "ByFieldFld5 Fld5,ID",
+        ]
+    );
+    // Before the first pair, and after the last one.
+    let added = add_field_indexes(&mut entry, "Fld1", true).unwrap();
+    assert_eq!(added, ["ByParentFieldFld1", "ByFieldFld1"]);
+    let names = index_names(&entry);
+    assert_eq!(
+        &names[3..5],
+        [
+            "ByParentFieldFld1 ParentID,Folder,Fld1,Description,ID,Marked",
+            "ByFieldFld1 Fld1,Description,ID,Marked"
+        ]
+    );
+    // The reverse is the removal of the pair.
+    let mut back = entry.clone();
+    assert_eq!(
+        remove_field_indexes(&mut back, "Fld1").unwrap(),
+        ["ByParentFieldFld1", "ByFieldFld1"]
+    );
+    assert_eq!(index_names(&back).len(), names.len() - 2);
+    // A table with no attribute index yet takes the pair at the end.
+    let mut bare = entry_with(
+        CATALOG_FIELDS,
+        &index_list(&[
+            ("ByPredefinedIDNotUniq", "PredefinedID"),
+            ("ParentDescr", "ParentID,Folder,Description,ID"),
+        ]),
+    );
+    add_field_indexes(&mut bare, "Fld4", false).unwrap();
+    assert_eq!(index_names(&bare).len(), 4);
+    assert_eq!(index_names(&bare)[3], "ByFieldFld4 Fld4,ID");
+    // The count in the list follows.
+    let text = crate::metadata_model::brace::serialize(&entry.as_list().unwrap()[6].clone());
+    assert!(text.starts_with("{11,"), "{text}");
+}
+
+#[test]
+fn an_index_of_a_flat_catalog_or_a_document_is_one_entry() {
+    let flat_fields: Vec<&str> = CATALOG_FIELDS
+        .iter()
+        .copied()
+        .filter(|name| !matches!(*name, "ParentID" | "Folder"))
+        .collect();
+    let mut flat = entry_with(
+        &flat_fields,
+        &index_list(&[
+            ("ByPredefinedIDNotUniq", "PredefinedID"),
+            ("Descr", "Description,ID"),
+            ("ByFieldFld2", "Fld2,ID"),
+        ]),
+    );
+    assert_eq!(
+        add_field_indexes(&mut flat, "Fld1", false).unwrap(),
+        ["ByFieldFld1"]
+    );
+    assert_eq!(
+        index_names(&flat),
+        [
+            "ByPredefinedIDNotUniq PredefinedID",
+            "Descr Description,ID",
+            "ByFieldFld1 Fld1,ID",
+            "ByFieldFld2 Fld2,ID"
+        ]
+    );
+
+    // A document: a plain index, and the additional order that the date index lists last.
+    let existing = index_list(&[
+        ("ByDocNum", "Number,ID"),
+        ("ByDocDate", "Date_Time,ID,Marked"),
+        ("ByField5561", "Fld3,ID"),
+    ]);
+    let mut document = entry_with(DOCUMENT_FIELDS, &existing);
+    assert_eq!(
+        add_field_indexes(&mut document, "Fld4", false).unwrap(),
+        ["ByFieldFld4"]
+    );
+    assert_eq!(
+        add_field_indexes(&mut document, "Fld1", true).unwrap(),
+        ["ByFieldFld1", "ByDocDate (+ Fld1)"]
+    );
+    assert_eq!(
+        index_names(&document),
+        [
+            "ByDocNum Number,ID",
+            "ByDocDate Date_Time,ID,Marked,Fld1",
+            "ByFieldFld1 Fld1,Date_Time,ID,Marked",
+            "ByField5561 Fld3,ID",
+            "ByFieldFld4 Fld4,ID"
+        ]
+    );
+    // A second additional-order attribute is not traced; neither is removing the first out of order.
+    assert!(
+        add_field_indexes(&mut document, "Fld2", true)
+            .unwrap_err()
+            .to_string()
+            .contains("several are not traced")
+    );
+    // The reverse of the additional order is the removal of the entry and of the tail.
+    assert_eq!(
+        remove_field_indexes(&mut document, "Fld1").unwrap(),
+        ["ByDocDate (- Fld1)", "ByFieldFld1"]
+    );
+    assert_eq!(index_names(&document)[1], "ByDocDate Date_Time,ID,Marked");
+}
+
+#[test]
+fn an_index_that_the_platform_was_not_traced_on_is_refused() {
+    let hierarchical = index_list(&[
+        ("ByPredefinedIDNotUniq", "PredefinedID"),
+        ("Descr", "Description,ID"),
+    ]);
+    // A hierarchical catalog without the parent index to take the prefix from.
+    let mut entry = entry_with(CATALOG_FIELDS, &hierarchical);
+    assert!(
+        add_field_indexes(&mut entry, "Fld1", false)
+            .unwrap_err()
+            .to_string()
+            .contains("ParentDescr")
+    );
+    // A field that is not there, one that is indexed already, a subordinate catalog.
+    let mut entry = entry_with(
+        CATALOG_FIELDS,
+        &index_list(&[
+            ("ParentDescr", "ParentID,Folder,Description,ID"),
+            ("ByParentFieldFld1", "ParentID,Folder,Fld1,ID"),
+            ("ByFieldFld1", "Fld1,ID"),
+        ]),
+    );
+    assert!(add_field_indexes(&mut entry, "Fld99", false).is_err());
+    assert!(
+        add_field_indexes(&mut entry, "Fld1", false)
+            .unwrap_err()
+            .to_string()
+            .contains("already names")
+    );
+    let mut owned: Vec<&str> = CATALOG_FIELDS.to_vec();
+    owned.push("OwnerID");
+    let mut entry = entry_with(
+        &owned,
+        &index_list(&[("ParentDescr", "ParentID,Folder,Description,ID")]),
+    );
+    assert!(
+        add_field_indexes(&mut entry, "Fld1", false)
+            .unwrap_err()
+            .to_string()
+            .contains("subordinate")
+    );
+}
+
+#[test]
+fn a_subtable_entry_is_the_one_the_platform_stores() {
+    // Both sub-tables of the fixture's catalog are rebuilt from their parts: the line number field, the fields,
+    // the declared indexes (not unique).
+    let schema = DbSchema::parse(STAGED).unwrap();
+    let object = schema.tables()[schema.position("Reference20").unwrap()].clone();
+    let view = TableView::new(&object).unwrap();
+    for stored in view.subtables().unwrap() {
+        let fields = stored.fields().unwrap();
+        let line = fields[0].name.clone();
+        let indexes: Vec<(String, Vec<String>)> = stored
+            .indexes()
+            .unwrap()
+            .into_iter()
+            .map(|index| {
+                assert!(!index.unique && !index.clustered);
+                (index.name, index.fields)
+            })
+            .collect();
+        let built = subtable_entry(stored.name(), "Reference20", &line, &fields[1..], &indexes);
+        let position = view
+            .subtables()
+            .unwrap()
+            .iter()
+            .position(|other| other.name() == stored.name())
+            .unwrap();
+        let original = object.as_list().unwrap()[5].as_list().unwrap()[1 + position].clone();
+        assert_eq!(built, original, "{}", stored.name());
+    }
+}
+
+#[test]
+fn a_subtable_is_pushed_to_the_list_and_counted() {
+    let schema = DbSchema::parse(STAGED).unwrap();
+    let mut object = schema.tables()[schema.position("Reference20").unwrap()].clone();
+    let before = TableView::new(&object).unwrap().subtables().unwrap().len();
+    let fields = [FieldEntry::new(
+        "Fld9001",
+        false,
+        vec![TypeEntry::new("S", 0x8000_0000 | 10, 0, "", 0)],
+    )];
+    let indexes = [(
+        "ByFieldFld9001".to_owned(),
+        vec!["Fld9001".to_owned(), "ID".to_owned()],
+    )];
+    push_subtable(
+        &mut object,
+        subtable_entry("VT9000", "Reference20", "LineNo9002", &fields, &indexes),
+    )
+    .unwrap();
+    let view = TableView::new(&object).unwrap();
+    let subtables = view.subtables().unwrap();
+    assert_eq!(subtables.len(), before + 1);
+    let added = subtables.last().unwrap();
+    assert_eq!(
+        (added.name(), added.kind(), added.owner_name()),
+        ("VT9000", "I", "Reference20")
+    );
+    assert_eq!(
+        added
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        ["LineNo9002", "Fld9001"]
+    );
+    assert_eq!(added.indexes().unwrap()[0].fields, ["Fld9001", "ID"]);
+    // The physical table follows: the owner key and the separator first, the line number last of the keys.
+    let tables = physical_tables(&view).unwrap();
+    let created = tables.last().unwrap();
+    assert_eq!(created.name, "_Reference20_VT9000");
+    let columns: Vec<&str> = created.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        columns,
+        [
+            "_Reference20_IDRRef",
+            "_Fld2683",
+            "_KeyField",
+            "_LineNo9002",
+            "_Fld9001"
+        ]
+    );
+    assert!(
+        created
+            .indexes
+            .iter()
+            .any(|index| index.columns == ["_Fld2683", "_Fld9001", "_Reference20_IDRRef"])
+    );
+}

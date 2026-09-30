@@ -77,6 +77,13 @@ pub trait RowProvider {
 pub trait Describe {
     fn describe_row(&self, kind: &str, row: &[u8]) -> Result<Element>;
 
+    /// A row of the active configuration. It may be in a newer record format
+    /// than the compatibility mode stores: a native apply promotes what the
+    /// native import staged, and the object stays in that format.
+    fn describe_stored(&self, kind: &str, row: &[u8]) -> Result<Element> {
+        self.describe_row(kind, row)
+    }
+
     /// A row of the staged configuration; the flag says it is in a record
     /// format the active configuration does not store.
     fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
@@ -95,6 +102,10 @@ pub trait Describe {
 impl Describe for Decoder {
     fn describe_row(&self, kind: &str, row: &[u8]) -> Result<Element> {
         self.decode(kind, row)
+    }
+
+    fn describe_stored(&self, kind: &str, row: &[u8]) -> Result<Element> {
+        self.decode_stored(kind, row)
     }
 
     fn describe_staged(&self, kind: &str, row: &[u8]) -> Result<(Element, bool)> {
@@ -753,7 +764,7 @@ fn unlisted_as(label: &str, name: &str, op: ObjectOp, verdict: &mut Verdict) {
     );
 }
 
-fn compare_descriptor(
+pub(super) fn compare_descriptor(
     name: &str,
     old: &[u8],
     staged: &[u8],
@@ -776,7 +787,7 @@ fn compare_descriptor(
         unlisted_as(&label, name, ObjectOp::Changed, verdict);
         return;
     };
-    let old_element = describe.describe_row(kind, old);
+    let old_element = describe.describe_stored(kind, old);
     let new_element = describe.describe_staged(kind, staged);
     match (old_element, new_element) {
         (Ok(old_element), Ok((new_element, upgraded))) => {

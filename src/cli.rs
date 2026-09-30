@@ -2166,7 +2166,8 @@ pub struct MssqlConfigApplyArgs {
     /// postconditions on this database without changing it.
     #[arg(long, conflicts_with = "dry_run")]
     pub rehearse: bool,
-    /// Required acknowledgement for a database write.
+    /// Acknowledgement for a write to a database outside the lab (the lab's own are
+    /// `ibcmd_rs_04_*` and `ibcmd_rs_05_*`: no flag needed there).
     #[arg(long)]
     pub allow_non_lab: bool,
     /// How exclusive access is established.

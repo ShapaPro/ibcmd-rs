@@ -50,6 +50,8 @@ mod upgrade;
 #[cfg(test)]
 mod corpus_tests;
 #[cfg(test)]
+mod record_format_tests;
+#[cfg(test)]
 mod s1_matrix_tests;
 #[cfg(test)]
 mod s1h_corpus_tests;

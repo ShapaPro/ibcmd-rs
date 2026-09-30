@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::restructure::exec::{ExecOptions, ExecReport, run as run_plan};
-use crate::restructure::plan::{Inputs, Method, Plan, PlanOptions, plan};
+use crate::restructure::plan::{Inputs, Method, Plan, PlanOptions, indexing_word, plan};
 use crate::restructure::reader::{database_name, read_inputs};
 use crate::restructure::storage::STATUS_IDLE;
 use crate::sql::mssql::TdsPool;
@@ -51,12 +51,42 @@ pub struct MssqlRestructureArgs {
     /// serialization until the platform rebuilds the cache.
     #[arg(long)]
     pub skip_xdto: bool,
+    /// Leave the object registry (`Params` `1a621f0f-....si`) as it is, stale: the new attribute is not
+    /// listed in the search information until the platform rebuilds it.
+    #[arg(long)]
+    pub skip_registry: bool,
     /// Write the JSON report here as well.
     #[arg(long)]
     pub report: Option<PathBuf>,
     /// Write the new DBSchema text, the new DBNames text and the statements into this folder.
     #[arg(long)]
     pub dump_plan: Option<PathBuf>,
+    /// Write what is known of the extensions (how many, the tables of their schema, the objects they
+    /// adopt) here as JSON, before the plan is made.
+    #[arg(long)]
+    pub extensions_report: Option<PathBuf>,
+    /// Run as the structural gate of the own config apply (docs/apply/restructuring.md, section 12): one
+    /// SERIALIZABLE transaction rebuilds the tables, publishes the schema and moves the staged rows.
+    /// With --dry-run it plans and checks and writes nothing.
+    #[arg(long)]
+    pub through_apply: bool,
+    /// With --through-apply: run the whole script and roll it back.
+    #[arg(long)]
+    pub rehearse: bool,
+    /// With --through-apply: write the T-SQL of the transaction here.
+    #[arg(long)]
+    pub script_output: Option<PathBuf>,
+    /// With --through-apply: the folder of the apply's recovery artifact.
+    #[arg(long)]
+    pub recovery_dir: Option<PathBuf>,
+    /// With --through-apply: a structural apply drops the old tables in its transaction and is taken back
+    /// from a backup only, so it refuses unless it has one. This takes a COPY_ONLY backup of the database
+    /// into the file (a path on the SQL Server host) before the apply runs (recommended)...
+    #[arg(long)]
+    pub recovery_backup: Option<PathBuf>,
+    /// ...and this says that the caller has taken one.
+    #[arg(long)]
+    pub i_have_a_backup: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +96,36 @@ pub struct AdditionReport {
     pub field: String,
     pub number: u64,
     pub position: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovalReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub number: u64,
+    pub indexes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WideningReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub number: u64,
+    pub from: u64,
+    pub to: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SwitchReport {
+    pub attribute: String,
+    pub uuid: String,
+    pub field: String,
+    pub from: String,
+    pub to: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,18 +144,32 @@ pub struct StatementReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ObjectReport {
+    pub kind: String,
+    pub object: String,
+    pub name: String,
+    pub uuid: String,
+    pub additions: Vec<AdditionReport>,
+    pub removals: Vec<RemovalReport>,
+    pub widenings: Vec<WideningReport>,
+    pub switches: Vec<SwitchReport>,
+    pub tables: Vec<TableReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct RestructureReport {
     pub database: String,
     pub mode: String,
     pub summary: String,
-    pub object: String,
-    pub additions: Vec<AdditionReport>,
-    pub tables: Vec<TableReport>,
+    pub objects: Vec<ObjectReport>,
+    pub caches: Vec<String>,
     pub old_schema_sha256: String,
     pub new_schema_sha256: String,
     pub new_names_sha256: String,
     pub statements: Vec<StatementReport>,
     pub execution: Option<ExecReport>,
+    /// `--through-apply`: the apply's report (its structure phase, gate verdict, timings).
+    pub through_apply: Option<serde_json::Value>,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -135,20 +209,34 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
             args.sql_pwd_env
         );
     }
+    if args.through_apply {
+        return run_through_apply(args, password.as_deref());
+    }
     let target = SqlTarget {
         server: args.server.clone(),
         database: Some(args.database.clone()),
         login: SqlLogin::from_user(args.sql_user.as_deref(), password.as_deref()),
         trust_server_certificate: true,
     };
-    let pool = TdsPool::new(target, 1)?;
+    let pool = TdsPool::new(target.clone(), 1)?;
     let mut connection = pool.dedicated()?;
     let connected = database_name(&mut connection)?;
     if !connected.eq_ignore_ascii_case(&args.database) {
         bail!("connected to {connected}, not {}", args.database);
     }
 
-    let (inputs, storage) = read_inputs(&mut connection)?;
+    let (mut inputs, storage) = read_inputs(&mut connection)?;
+    if inputs.extensions.registered > 0 {
+        let sql = crate::sql::SqlExec::sql_server(target)?;
+        inputs.extensions.adoptions =
+            crate::restructure::extensions::read_adoptions(&sql, &args.database)
+                .context("the objects the extensions adopt")?;
+        inputs.extensions.adoptions_read = true;
+    }
+    if let Some(path) = &args.extensions_report {
+        std::fs::write(path, serde_json::to_string_pretty(&inputs.extensions)?)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
     let main = storage
         .iter()
         .find(|row| row.schema_id == 0)
@@ -192,19 +280,118 @@ pub fn run(args: &MssqlRestructureArgs) -> Result<RestructureReport> {
     Ok(report)
 }
 
-fn make_plan(inputs: &Inputs, args: &MssqlRestructureArgs) -> Result<Plan> {
-    plan(
-        inputs,
-        &PlanOptions {
-            names_version: args.names_version.clone(),
-            skip_xdto: args.skip_xdto,
-            method: if args.alter_add {
-                Method::AlterAdd
-            } else {
-                Method::Rebuild
-            },
+fn plan_options(args: &MssqlRestructureArgs) -> PlanOptions {
+    PlanOptions {
+        names_version: args.names_version.clone(),
+        skip_xdto: args.skip_xdto,
+        skip_registry: args.skip_registry,
+        method: if args.alter_add {
+            Method::AlterAdd
+        } else {
+            Method::Rebuild
         },
-    )
+    }
+}
+
+fn make_plan(inputs: &Inputs, args: &MssqlRestructureArgs) -> Result<Plan> {
+    plan(inputs, &plan_options(args))
+}
+
+/// `--through-apply`: the own config apply with the S1 gate. The apply reads the stage, asks the gate,
+/// and runs ONE script: locks, assertions, the structure phase, the promotion of the rows, the caches.
+fn run_through_apply(
+    args: &MssqlRestructureArgs,
+    password: Option<&str>,
+) -> Result<RestructureReport> {
+    use crate::mssql_config_apply::{
+        BackupPolicy, ConfigApplyOptions, Exclusivity, StructuralRefusal, apply_with_gate,
+    };
+    use crate::mssql_platform_profile::MssqlNativePlatformProfile;
+    use crate::restructure::s1::S1Gate;
+    use crate::sql::{SqlExec, SqlOptions};
+
+    if args.alter_add {
+        bail!("--alter-add is a research switch of the direct command, not of the apply");
+    }
+    let sql = SqlExec::from_options(SqlOptions {
+        sqlcmd: None,
+        bcp: None,
+        server: &args.server,
+        user: args.sql_user.as_deref(),
+        password,
+        password_env: &args.sql_pwd_env,
+        trust_server_certificate: true,
+    })?;
+    let mut options = ConfigApplyOptions::new(
+        args.database.clone(),
+        MssqlNativePlatformProfile::Platform8_3_27_2214,
+    );
+    options.dry_run = args.dry_run;
+    options.rehearse = args.rehearse;
+    options.exclusivity = if args.skip_session_check {
+        Exclusivity::Assumed
+    } else {
+        Exclusivity::SqlSessions
+    };
+    options.recovery_dir = args.recovery_dir.clone();
+    options.script_output = args.script_output.clone();
+    // The apply owns the backup policy: a structural apply that writes refuses unless it has a
+    // `--recovery-backup` (it takes the COPY_ONLY backup first) or an `--i-have-a-backup`.
+    options.backup = match (&args.recovery_backup, args.i_have_a_backup) {
+        (Some(file), _) => BackupPolicy::File(file.clone()),
+        (None, true) => BackupPolicy::Acknowledged,
+        (None, false) => BackupPolicy::None,
+    };
+    let gate = S1Gate::new(&sql, options.conservative_gate(), plan_options(args))
+        .xml_version(Some("2.20"));
+    let mode = if args.dry_run {
+        "through-apply, dry-run"
+    } else if args.rehearse {
+        "through-apply, rehearsal"
+    } else {
+        "through-apply"
+    };
+    let write_report = |json: &str| -> Result<()> {
+        if let Some(path) = &args.report {
+            std::fs::write(path, json)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    };
+    match apply_with_gate(&sql, &options, &gate) {
+        Ok(applied) => {
+            let report = RestructureReport {
+                database: args.database.clone(),
+                mode: mode.to_owned(),
+                summary: applied
+                    .structure
+                    .as_ref()
+                    .map(|phase| phase.objects.join("; "))
+                    .unwrap_or_else(|| "no restructuring in the stage".to_owned()),
+                caches: applied
+                    .structure
+                    .as_ref()
+                    .map(|phase| phase.caches.clone())
+                    .unwrap_or_default(),
+                through_apply: Some(serde_json::to_value(&applied)?),
+                ..RestructureReport::default()
+            };
+            write_report(&serde_json::to_string_pretty(&report)?)?;
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
+                let json = serde_json::to_string_pretty(&serde_json::json!({
+                    "refused": "needs_native_apply",
+                    "database": args.database,
+                    "gate": refusal.verdict,
+                }))?;
+                write_report(&json)?;
+                println!("{json}");
+            }
+            Err(error)
+        }
+    }
 }
 
 fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
@@ -212,44 +399,94 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
         database: database.to_owned(),
         mode: mode.to_owned(),
         summary: plan.summary(),
-        object: plan.object.clone(),
-        additions: plan
-            .additions
+        objects: plan
+            .objects
             .iter()
-            .map(|addition| AdditionReport {
-                attribute: addition.name.clone(),
-                uuid: addition.uuid.clone(),
-                field: addition.field.name.clone(),
-                number: addition.number,
-                position: addition.position,
-            })
-            .collect(),
-        tables: plan
-            .tables
-            .iter()
-            .map(|table| TableReport {
-                table: table.table.name.clone(),
-                columns: table.table.columns.len(),
-                indexes: table
-                    .table
-                    .indexes
+            .map(|object| ObjectReport {
+                kind: object.kind.label().to_owned(),
+                object: object.object.clone(),
+                name: object.object_name.clone(),
+                uuid: object.object_uuid.clone(),
+                additions: object
+                    .additions
                     .iter()
-                    .map(|index| {
-                        format!(
-                            "{}{}{} ({})",
-                            if index.unique { "unique " } else { "" },
-                            if index.clustered { "clustered " } else { "" },
-                            if index.name.is_empty() {
-                                "primary key"
-                            } else {
-                                &index.name
-                            },
-                            index.columns.join(", ")
-                        )
+                    .map(|addition| AdditionReport {
+                        attribute: addition.name.clone(),
+                        uuid: addition.uuid.clone(),
+                        field: addition.field.name.clone(),
+                        number: addition.number,
+                        position: addition.position,
                     })
                     .collect(),
-                copy_columns: table.insert_columns.len(),
+                removals: object
+                    .removals
+                    .iter()
+                    .map(|removal| RemovalReport {
+                        attribute: removal.name.clone(),
+                        uuid: removal.uuid.clone(),
+                        field: removal.field.name.clone(),
+                        number: removal.number,
+                        indexes: removal.indexes.clone(),
+                    })
+                    .collect(),
+                widenings: object
+                    .widenings
+                    .iter()
+                    .map(|widening| WideningReport {
+                        attribute: widening.name.clone(),
+                        uuid: widening.uuid.clone(),
+                        field: widening.after.name.clone(),
+                        number: widening.number,
+                        from: widening.from,
+                        to: widening.to,
+                    })
+                    .collect(),
+                switches: object
+                    .switches
+                    .iter()
+                    .map(|switch| SwitchReport {
+                        attribute: switch.name.clone(),
+                        uuid: switch.uuid.clone(),
+                        field: switch.field.clone(),
+                        from: indexing_word(switch.from).to_owned(),
+                        to: indexing_word(switch.to).to_owned(),
+                        added: switch.added.clone(),
+                        removed: switch.removed.clone(),
+                    })
+                    .collect(),
+                tables: object
+                    .tables
+                    .iter()
+                    .map(|table| TableReport {
+                        table: table.table.name.clone(),
+                        columns: table.table.columns.len(),
+                        indexes: table
+                            .table
+                            .indexes
+                            .iter()
+                            .map(|index| {
+                                format!(
+                                    "{}{}{} ({})",
+                                    if index.unique { "unique " } else { "" },
+                                    if index.clustered { "clustered " } else { "" },
+                                    if index.name.is_empty() {
+                                        "primary key"
+                                    } else {
+                                        &index.name
+                                    },
+                                    index.columns.join(", ")
+                                )
+                            })
+                            .collect(),
+                        copy_columns: table.insert_columns.len(),
+                    })
+                    .collect(),
             })
+            .collect(),
+        caches: plan
+            .caches
+            .iter()
+            .map(|cache| format!("{}: {}", cache.row_name, cache.what))
             .collect(),
         old_schema_sha256: plan.old_schema_sha256.clone(),
         new_schema_sha256: sha256_hex(&plan.new_schema),
@@ -264,6 +501,7 @@ fn describe(plan: &Plan, database: &str, mode: &str) -> RestructureReport {
             })
             .collect(),
         execution: None,
+        through_apply: None,
     }
 }
 

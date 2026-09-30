@@ -18,6 +18,8 @@ pub struct ObjectFacts {
     pub kind: String,
     pub uuid: String,
     pub name: String,
+    /// The object's synonym, `(language, text)`.
+    pub synonym: Vec<(String, String)>,
     /// The generated types in layout order.
     pub generated: Vec<GeneratedType>,
     record: Vec<Brace>,
@@ -55,6 +57,7 @@ impl ObjectFacts {
         let (record, tag) = owner_record(row)?;
         let map = RecordMap::new(kind, tag)?;
         let (uuid, name) = object_identity(row, kind)?;
+        let synonym = header_synonym(record, &map).with_context(|| format!("{kind} {name}"))?;
         let generated = map.generated_types(record)?;
         let items = row.as_list().context("a descriptor row is not a list")?;
         let count: usize = items
@@ -77,11 +80,17 @@ impl ObjectFacts {
             kind: kind.to_owned(),
             uuid,
             name,
+            synonym,
             generated,
             record: record.to_vec(),
             map,
             sections,
         })
+    }
+
+    /// The names of the record's slots.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.map.names.keys().copied()
     }
 
     /// The slot named `name` of the owner record.
@@ -114,6 +123,22 @@ impl ObjectFacts {
             .find(|generated| generated.category == category)
             .with_context(|| format!("{} {} has no {category} type", self.kind, self.name))
     }
+}
+
+/// The synonym in the md header of an owner record.
+fn header_synonym(record: &[Brace], map: &RecordMap) -> Result<Vec<(String, String)>> {
+    let header = record
+        .get(map.header)
+        .context("the record is too short for its header")?;
+    let base = match header.as_list() {
+        Some([first, second]) if first.as_atom() == Some("0") => second,
+        _ => header,
+    };
+    let node = base
+        .as_list()
+        .and_then(|items| items.get(3))
+        .context("the md header has no synonym")?;
+    localized_pairs(node)
 }
 
 /// `{N,"lang","text",...}` -> pairs. `{0}` -> none.

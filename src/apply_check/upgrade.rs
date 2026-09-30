@@ -100,6 +100,10 @@ pub struct Upgrade {
     pub filled: usize,
     /// Extension compatibility modes moved to the staging edition.
     pub compatibility_moves: usize,
+    /// The stored row is the one in the newer format (a native apply
+    /// promoted it) and the staged row is the older: the same table read the
+    /// other way round.
+    pub reversed: bool,
 }
 
 impl Upgrade {
@@ -110,6 +114,7 @@ impl Upgrade {
             inserted: self.inserted + other.inserted,
             filled: self.filled + other.filled,
             compatibility_moves: self.compatibility_moves + other.compatibility_moves,
+            reversed: self.reversed || other.reversed,
         }
     }
 
@@ -129,6 +134,9 @@ impl Upgrade {
                     if count == 1 { "" } else { "s" }
                 ));
             }
+        }
+        if self.reversed {
+            parts.push("the staged row is the older format".to_string());
         }
         parts.join(", ")
     }
@@ -184,9 +192,12 @@ struct Rules {
     configuration: bool,
 }
 
-/// Proves that `new` is `old` in the record format of a later platform: see
-/// the module. `kind` is the object's kind (`Configuration` has one more
-/// rule). The rows are the inflated bytes as stored.
+/// Proves that the rows are one in two record formats: `new` is `old` in the
+/// format of a later platform (a native import staged it), or the other way
+/// round (a native apply promoted a stage into `Config`, and what is staged
+/// now is written for the compatibility mode). See the module. `kind` is the
+/// object's kind (`Configuration` has one more rule). The rows are the
+/// inflated bytes as stored.
 pub fn prove(kind: &str, old: &[u8], new: &[u8]) -> Result<Upgrade, Deviation> {
     let read = |bytes: &[u8], side: &str| {
         parse_row(bytes).map_err(|error| Deviation {
@@ -200,6 +211,21 @@ pub fn prove(kind: &str, old: &[u8], new: &[u8]) -> Result<Upgrade, Deviation> {
 }
 
 pub(crate) fn prove_trees(kind: &str, old: &Brace, new: &Brace) -> Result<Upgrade, Deviation> {
+    match prove_forward(kind, old, new) {
+        Ok(upgrade) => Ok(upgrade),
+        Err(first) => match prove_forward(kind, new, old) {
+            Ok(upgrade) => Ok(Upgrade {
+                reversed: true,
+                ..upgrade
+            }),
+            // The message is about the direction a native import goes.
+            Err(_) => Err(first),
+        },
+    }
+}
+
+/// `new` is `old` upgraded.
+fn prove_forward(kind: &str, old: &Brace, new: &Brace) -> Result<Upgrade, Deviation> {
     let rules = Rules {
         configuration: kind == "Configuration",
     };
@@ -423,7 +449,9 @@ mod tests {
         let refused = proof("{56,\"a\"}", "{58,\"a\"}").unwrap_err();
         assert_eq!(refused.old, "56");
         assert_eq!(refused.new, "58");
-        assert!(proof("{56,\"a\"}", "{55,\"a\"}").is_err());
+        // One lower is the older format, read the other way round; two lower is not.
+        assert!(proof("{56,\"a\"}", "{55,\"a\"}").unwrap().reversed);
+        assert!(proof("{56,\"a\"}", "{54,\"a\"}").is_err());
     }
 
     #[test]
@@ -483,6 +511,22 @@ mod tests {
     #[test]
     fn removed_entries_are_never_an_upgrade() {
         assert!(proof("{56,a,b}", "{57,a}").is_err());
+        assert!(proof("{57,a,b}", "{56,a}").is_err());
+    }
+
+    #[test]
+    fn a_staged_row_in_the_older_format_is_proven_the_other_way_round() {
+        // The stored row was promoted by a native apply (57); what is staged
+        // now is written for the compatibility mode (56).
+        let upgrade = proof("{57,\"a\",0,{3,x}}", "{56,\"a\",{3,x}}").unwrap();
+        assert!(upgrade.reversed);
+        assert_eq!(upgrade.inserted, 1);
+        assert!(upgrade.describe().contains("older format"));
+        // Not a licence for anything: an entry the older row has and the
+        // newer lacks, or a value that is not a default, is still refused.
+        assert!(proof("{57,\"a\",{3,x}}", "{56,\"a\",{3,y}}").is_err());
+        assert!(proof("{57,\"a\",7,{3,x}}", "{56,\"a\",{3,x}}").is_err());
+        assert!(!proof("{56,\"a\"}", "{57,\"a\",0}").unwrap().reversed);
     }
 
     #[test]
@@ -492,8 +536,9 @@ mod tests {
         let upgrade = prove_trees("Configuration", &old, &new).unwrap();
         assert_eq!(upgrade.compatibility_moves, 1);
         assert!(prove_trees("Catalog", &old, &new).is_err());
-        // The compatibility mode going down is never that.
-        assert!(prove_trees("Configuration", &new, &old).is_err());
+        // Read the other way round (the stored row is the newer): the same.
+        assert!(prove_trees("Configuration", &new, &old).unwrap().reversed);
+        assert!(prove_trees("Catalog", &new, &old).is_err());
     }
 
     #[test]

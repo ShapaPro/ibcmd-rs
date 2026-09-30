@@ -27,6 +27,11 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 | `snapdiff.py`, `schemadiff.py`, `dbnames_diff.py` | diffs of two snapshots: tables/columns/indexes, service rows, `DBSchema` entries, `DBNames` |
 | `xe_read.py`, `xe_shapes.py`, `timeline.py`, `extract_ddl.py` | XE file -> JSONL, normalised statement story per session, phase timeline, the structure statements as a readable SQL log |
 | `si_diff.py` | the `Params` `*.si` cache rows between two snapshots, after inflate (the XDTO model row is shown decoded from its base64 block) |
+| `compare_tables.ps1`, `compare_config.ps1`, `dbschema_cmp.py` | twin comparison (S1): the rows of tables of two databases with `EXCEPT` both ways (every column but the row version); the `Config` rows one twin has and the other has not, by name; `DBSchema` entries and `DBNames` text of two snapshots of two databases |
+| `edit_cases_s2.py`, `stage_case.ps1` | S1 wave 1 (issues #398-#400): `edit_cases_s2.py <out> b1\|b2\|c1\|d0\|d1` makes the edited files of a case on the pristine БСП (delete attributes, delete an additional-order attribute, widen strings, the index flag alone, the index flag on and off); `stage_case.ps1 -Case <c>` restores a pristine clone, stages the case with the native partial import, snapshots and backs up the staged state and restores the two twins (`_nat`, `_own`) from the backup |
+| `twin_run.ps1`, `entries_diff.py`, `assemble_evidence_run.py` | S1 wave 2 (S1-D and after): `twin_run.ps1` runs the whole twin protocol of 12.6 for a case whose native twin is applied: dry run, rehearsal (+ snapshot: nothing changed), the real run through `mssql-config-apply --allow-restructure s1 --i-have-a-backup`, `twin_check.ps1`, a native apply on our twin, native exports + `source-diff`, a session job on both; `entries_diff.py` prints what a native apply changed in the `DBSchema` entries (fields and declared indexes) and in `DBNames` between two snapshots of two databases (the first thing to run on a new case); `assemble_evidence_run.py` makes the evidence file from the out files |
+| `twin_check.ps1`, `inject_failure.ps1`, `tamper_stage.py` | the twin protocol of 12.6 for a case whose twins are both applied: `twin_check.ps1` = checks 2-6 in one run (snapshot, tables / columns / indexes, `EXCEPT` of every rebuilt table taken from the report, `Config`, `DBSchema` / `DBNames`, the `.si` rows); `inject_failure.ps1` = check 12 (the generated script with a `THROW` before `COMMIT` on a fresh twin, a digest of the whole database before and after); `tamper_stage.py` changes one staged row (inflate, edit, deflate) to make the refusals of check 11 testable |
+| `params_row.ps1`, `cache_variant.ps1` | S1 cache experiments: read / replace / delete one `Params` `*.si` row of a lab database; start a server on a variant (a row absent or stale) and run a probe job (what the platform needs of each cache row, section 12.5) |
 
 ## Decode and check
 
@@ -51,7 +56,9 @@ prefix) and reads other databases with `SELECT`. The paths default to the lab of
 b: document attribute, c: new catalog, d: dimension + resource, e/g/f: widen / index / delete, h: attribute
 types and tabular sections). Each edit keeps the original and the edited file under `tree/patches/<case>/`.
 `edit85.py` makes case a on the 8.5 (2.21) dialect, `edit_second.py <tree> <catalog> <name> ...` adds a second / third attribute
-(the `ALTER TABLE` experiment).
+(the `ALTER TABLE` experiment). `edit_cases_s1.py` makes the types case of S1 (T1): attributes of every primitive type
+(boolean, strings of every kind, integer / fractional / non-negative numbers, dates, time) in five catalogs and a document,
+one stage; `jobs/types_t1.bsl` is the session job that reads, serializes, writes and queries them. `jobs/s2_b1.bsl` and `jobs/s2_c1.bsl` are the session jobs of the deletion and widening cases (rows and a digest of the kept values, XDTO, write and read back, query by the widened attribute).
 
 ## Typical run
 
@@ -65,6 +72,20 @@ python scripts\restructure-lab\snapdiff.py <db> <before-label> <db> <after-label
 Every native write goes through the lab `native` lock (`native_lock.ps1`), one command per hold. A native `config import` is complete when
 `ConfigSave` has a `versions` row, no `commit` and no `*.new` rows, and every staged `versions` entry that differs from `Config`'s has its
 row (a complete stage of the БСП is about 9 618 rows in a full import, 4 rows with `--partial`; the row count alone is not the test).
+
+## S1: the same run through the apply (issue #391)
+
+```powershell
+# the S1 gate lets the stage through and the apply runs ONE transaction: the structure phase, then the promotion
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --dry-run                 # plan and check, write nothing
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --rehearse               # run everything, roll it back
+ibcmd-rs mssql-restructure --database ibcmd_rs_04_ddl_X --through-apply --report r.json --script-output t.sql --recovery-dir rec
+# compare with the native twin (docs/apply/restructuring.md, 12.6)
+pwsh -NoProfile -File scripts/restructure-lab/compare_tables.ps1 -A <nat> -B <ours> -Tables _Reference20,_Document39
+pwsh -NoProfile -File scripts/restructure-lab/compare_config.ps1 -A <nat> -B <ours>
+python scripts/restructure-lab/dbschema_cmp.py <nat> <label> <ours> <label>
+python scripts/restructure-lab/si_diff.py <nat> <label> <ours> <label>
+```
 
 ## The prototype's twin run (checkpoint 2)
 
