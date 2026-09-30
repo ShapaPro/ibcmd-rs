@@ -19,9 +19,7 @@ use crate::cli::{
     MssqlActivateStagedExtensionArgs, MssqlExtensionListArgs, MssqlExtensionListFormat,
     MssqlLoadExtensionArgs,
 };
-use crate::compiler::bootstrap::{
-    BootstrapCompileError, compile_extension_module_overlay, compile_extension_overlay_source_tree,
-};
+use crate::compiler::bootstrap::{BootstrapCompileError, compile_extension_module_overlay};
 use crate::mssql_dump::cas::{CasHash, MssqlStorageTable, fetch_cas_storage_image_with_manifest};
 use crate::mssql_extension_stage::{
     ConfigInfoIdentity, ExtensionRegistrySnapshot, ExtensionStagePlan, ExtensionStageRow,
@@ -46,6 +44,10 @@ pub struct MssqlExtensionLoadReport {
     pub dry_run: bool,
     pub executed: bool,
     pub extensions: Vec<MssqlExtensionLoadEntry>,
+    /// `--all-extensions` of whole trees: the extensions whose tree is the
+    /// export of their active image, so nothing was staged for them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unchanged_extensions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +59,16 @@ pub struct MssqlExtensionLoadEntry {
     pub proposed_cas_root: String,
     pub compiled_targets: usize,
     pub retained_base_targets: usize,
+    /// `tree` (the whole tree compared with the active image's export) or
+    /// `bounded` (a `--path-prefix` selection).
+    pub selection: &'static str,
+    /// Whole-tree load: the files of the tree that differ from the active
+    /// image's export.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    /// Whole-tree load: the objects compiled, as source prefixes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub compiled_objects: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +91,9 @@ struct PreparedLoad {
     plan: ExtensionStagePlan,
     compiled_targets: usize,
     retained_base_targets: usize,
+    selection: &'static str,
+    changed_files: Vec<String>,
+    compiled_objects: Vec<String>,
 }
 
 /// Read-only precheck for callers that stage and publish in one command.
@@ -175,6 +190,7 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
     // prevents --all-extensions from publishing a prefix after a later source
     // tree has already failed validation.
     let mut prepared = Vec::with_capacity(selected.len());
+    let mut unchanged = Vec::<String>::new();
     for extension in selected {
         let input_dir = if args.all_extensions {
             args.input_dir.join(&extension.name)
@@ -189,36 +205,74 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
             root,
         )
         .with_context(|| format!("failed to fetch active extension {:?}", extension.name))?;
-        let tree = ibcmd_xml::source_tree::read_source_tree(&input_dir).with_context(|| {
-            format!(
-                "failed to read extension source tree {}",
-                input_dir.display()
+        // A bounded selection of module bodies (`--path-prefix`, which
+        // `mssql-apply-source-change --extension` always passes) is overlaid
+        // on the active rows without comparing anything. Anything else -- or
+        // a selection the bounded route cannot read -- is the whole-tree
+        // route's to decide.
+        if !args.path_prefix.is_empty()
+            && let Ok(Some((patch, retained_metadata))) =
+                bounded_module_overlay(&input_dir, &args.path_prefix, target_profile, &active)
+        {
+            let (plan, compiled_targets, retained_base_targets) = overlay_stage_plan(
+                extension.physical_registry_id,
+                manifest.identity(),
+                &active,
+                &patch,
+                &retained_metadata,
             )
-        })?;
-        let (compile_tree, retained_metadata) = sanitize_extension_tree(&tree)?;
-        let compile_tree = filter_extension_tree(&compile_tree, &args.path_prefix)?;
-        let patch = compile_overlay_patch(
-            &compile_tree,
-            !args.path_prefix.is_empty(),
-            args.source_version.version_axes().xml_dialect().clone(),
-            target_profile,
+            .with_context(|| format!("failed to prepare extension {:?}", extension.name))?;
+            prepared.push(PreparedLoad {
+                extension: extension.clone(),
+                input_dir,
+                plan,
+                compiled_targets,
+                retained_base_targets,
+                selection: "bounded",
+                changed_files: Vec::new(),
+                compiled_objects: Vec::new(),
+            });
+            continue;
+        }
+        // The whole tree, or a selection of more than module bodies: compared
+        // with the export of the active image, only the objects of changed
+        // files are compiled.
+        let Some(edit) = crate::mssql_extension_tree_load::compile_tree_edit(
+            &sql,
+            &args.database,
+            args.source_version,
+            &input_dir,
             &active,
+            &args.path_prefix,
         )
-        .with_context(|| format!("failed to compile extension {:?}", extension.name))?;
-        let (plan, compiled_targets, retained_base_targets) = overlay_stage_plan(
+        .with_context(|| format!("failed to load the tree of extension {:?}", extension.name))?
+        else {
+            // The tree is the export of the active image: nothing to stage.
+            if args.all_extensions {
+                unchanged.push(extension.name.clone());
+                continue;
+            }
+            bail!(
+                "the tree of extension {:?} has no changes against its active image; nothing to \
+                 load",
+                extension.name
+            );
+        };
+        let plan = prepare_extension_stage(
             extension.physical_registry_id,
             manifest.identity(),
-            &active,
-            &patch,
-            &retained_metadata,
+            edit.rows,
         )
         .with_context(|| format!("failed to prepare extension {:?}", extension.name))?;
         prepared.push(PreparedLoad {
             extension: extension.clone(),
             input_dir,
             plan,
-            compiled_targets,
-            retained_base_targets,
+            compiled_targets: edit.replaced_rows,
+            retained_base_targets: 0,
+            selection: "tree",
+            changed_files: edit.changed_files,
+            compiled_objects: edit.compiled_objects,
         });
     }
 
@@ -270,6 +324,9 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
             proposed_cas_root,
             compiled_targets: item.compiled_targets,
             retained_base_targets: item.retained_base_targets,
+            selection: item.selection,
+            changed_files: item.changed_files,
+            compiled_objects: item.compiled_objects,
         });
     }
     Ok(MssqlExtensionLoadReport {
@@ -283,6 +340,7 @@ pub fn load_extensions(args: &MssqlLoadExtensionArgs) -> Result<MssqlExtensionLo
         dry_run: args.dry_run,
         executed: !args.dry_run,
         extensions: reports,
+        unchanged_extensions: unchanged,
     })
 }
 
@@ -428,6 +486,24 @@ pub fn activate_staged_extension(
         },
         args.allow_non_lab,
     )?;
+    // The tool's own RAS verification made the cluster open idle SQL sessions on
+    // this database; the session gate of an exclusive activation must not count
+    // them (#409 F-3), and an infobase that has clients is refused before any
+    // write, on the cluster's word.
+    let plan = if mode == crate::mssql_extension_activation::ExtensionActivationMode::Exclusive
+        && !plan.is_no_op()
+    {
+        plan.with_own_ras_processes(
+            crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+                &args.rac,
+                &args.ras_endpoint,
+                profile_verification.verified_cluster_id,
+                profile_verification.verified_infobase_id,
+            )?,
+        )
+    } else {
+        plan
+    };
     let rendered =
         crate::mssql_extension_activation::render_extension_activation_sql(&args.database, &plan)?;
     let artifact_root = std::env::temp_dir().join("ibcmd-rs");
@@ -685,51 +761,66 @@ fn bounded_subprocess_text(bytes: &[u8]) -> String {
     value
 }
 
-/// The compiled overlay of a source tree.
-///
-/// A bounded load (`--path-prefix`) whose selection holds nothing but module
-/// bodies compiles them without decoding the metadata documents: the document
-/// of an adopted object lists only the properties the extension records, which
-/// the metadata decoders refuse, and an overlay retains every metadata row of
-/// the active image anyway. A module body replaces an existing row; adding a
-/// body to an object that has none changes the object's structure and is
-/// refused. Any other selection (a form, a picture, a template) takes the full
-/// compile.
-fn compile_overlay_patch(
-    tree: &SourceTree,
-    bounded: bool,
-    xml_dialect: ibcmd_core::version::XmlDialect,
+/// The overlay of a `--path-prefix` selection that holds nothing but module
+/// bodies, with the objects whose metadata rows it retains; `None` when the
+/// selection holds anything else.
+fn bounded_module_overlay(
+    input_dir: &Path,
+    prefixes: &[String],
     target_profile: &ibcmd_core::profile::EffectiveProfile,
     active: &StorageImage,
-) -> Result<StoragePatch> {
-    if bounded {
-        match compile_extension_module_overlay(tree, target_profile) {
-            Ok(compilation) => {
-                let patch = compilation.into_patch();
-                let existing = active
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.logical_key().as_str())
-                    .collect::<std::collections::BTreeSet<_>>();
-                for entry in patch.entries() {
-                    let key = entry.target().key().as_str();
-                    if !existing.contains(key) {
-                        bail!(
-                            "module body {key:?} has no row in the active extension; adding a body to an object that has none is a structural change"
-                        );
-                    }
+) -> Result<Option<(StoragePatch, std::collections::BTreeSet<String>)>> {
+    let tree = ibcmd_xml::source_tree::read_source_tree(input_dir).with_context(|| {
+        format!(
+            "failed to read extension source tree {}",
+            input_dir.display()
+        )
+    })?;
+    let (compile_tree, retained_metadata) = sanitize_extension_tree(&tree)?;
+    let compile_tree = filter_extension_tree(&compile_tree, prefixes)?;
+    Ok(module_overlay_patch(&compile_tree, target_profile, active)?
+        .map(|patch| (patch, retained_metadata)))
+}
+
+/// The overlay of a bounded selection (`--path-prefix`) that holds nothing but
+/// module bodies, compiled without decoding the metadata documents: the
+/// document of an adopted object lists only the properties the extension
+/// records, which the metadata decoders refuse, and an overlay retains every
+/// metadata row of the active image anyway. A module body replaces an existing
+/// row; adding a body to an object that has none changes the object's
+/// structure and is refused. `None` when the selection holds anything else (a
+/// form, a picture, a template): that is the whole-tree route's
+/// (`crate::mssql_extension_tree_load`).
+fn module_overlay_patch(
+    tree: &SourceTree,
+    target_profile: &ibcmd_core::profile::EffectiveProfile,
+    active: &StorageImage,
+) -> Result<Option<StoragePatch>> {
+    match compile_extension_module_overlay(tree, target_profile) {
+        Ok(compilation) => {
+            let patch = compilation.into_patch();
+            let existing = active
+                .entries()
+                .iter()
+                .map(|entry| entry.logical_key().as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            for entry in patch.entries() {
+                let key = entry.target().key().as_str();
+                if !existing.contains(key) {
+                    bail!(
+                        "module body {key:?} has no row in the active extension; adding a body to an object that has none is a structural change"
+                    );
                 }
-                return Ok(patch);
             }
-            // Something other than module bodies is selected.
-            Err(
-                BootstrapCompileError::UnconsumedSource { .. }
-                | BootstrapCompileError::UnsupportedAssetCodec { .. },
-            ) => {}
-            Err(error) => return Err(error.into()),
+            Ok(Some(patch))
         }
+        // Something other than module bodies is selected.
+        Err(
+            BootstrapCompileError::UnconsumedSource { .. }
+            | BootstrapCompileError::UnsupportedAssetCodec { .. },
+        ) => Ok(None),
+        Err(error) => Err(error.into()),
     }
-    Ok(compile_extension_overlay_source_tree(tree, xml_dialect, target_profile)?.into_patch())
 }
 
 fn overlay_stage_plan(
@@ -1252,34 +1343,50 @@ EndProcedure",
     #[test]
     fn a_bounded_module_change_of_an_adopted_object_compiles_to_its_module_row() {
         let tree = adopted_module_selection();
-        let dialect = ibcmd_core::version::XmlDialect::parse("2.20").unwrap();
         let active = active_image(&[
             "20000000-0000-4000-8000-000000000001",
             "20000000-0000-4000-8000-000000000001.0",
         ]);
-        let patch =
-            compile_overlay_patch(&tree, true, dialect.clone(), &overlay_profile(), &active)
-                .unwrap();
+        let patch = module_overlay_patch(&tree, &overlay_profile(), &active)
+            .unwrap()
+            .expect("module bodies alone are a bounded overlay");
         let keys = patch
             .entries()
             .iter()
             .map(|entry| entry.target().key().as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, ["20000000-0000-4000-8000-000000000001.0"]);
+    }
 
-        // An unbounded load still takes the full compile, which refuses the
-        // adopted object's document.
-        assert!(compile_overlay_patch(&tree, false, dialect, &overlay_profile(), &active).is_err());
+    #[test]
+    fn a_selection_of_more_than_module_bodies_is_left_to_the_whole_tree_route() {
+        let mut entries = adopted_module_selection().entries().to_vec();
+        entries.push(
+            SourceEntry::from_bytes(
+                ibcmd_xml::source_tree::SourcePath::new("CommonModules/Portable/Ext/Help.xml")
+                    .unwrap(),
+                b"<Help/>".to_vec(),
+            )
+            .unwrap(),
+        );
+        let tree = SourceTree::new(entries).unwrap();
+        let active = active_image(&[
+            "20000000-0000-4000-8000-000000000001",
+            "20000000-0000-4000-8000-000000000001.0",
+        ]);
+        assert!(
+            module_overlay_patch(&tree, &overlay_profile(), &active)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn a_module_body_without_an_active_row_is_a_structural_change() {
         let tree = adopted_module_selection();
-        let dialect = ibcmd_core::version::XmlDialect::parse("2.20").unwrap();
         // The owner's row exists; its module row does not.
         let active = active_image(&["20000000-0000-4000-8000-000000000001"]);
-        let error =
-            compile_overlay_patch(&tree, true, dialect, &overlay_profile(), &active).unwrap_err();
+        let error = module_overlay_patch(&tree, &overlay_profile(), &active).unwrap_err();
         assert!(error.to_string().contains("structural change"), "{error:#}");
     }
 

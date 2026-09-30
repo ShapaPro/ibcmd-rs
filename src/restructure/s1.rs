@@ -37,6 +37,7 @@ use crate::mssql_config_apply::sqlgen::ParamsRewrite;
 use crate::restructure::extensions::read_adoptions;
 use crate::restructure::plan::{Inputs, Plan, PlanOptions, plan};
 use crate::restructure::reader::{ClientSource, read_inputs};
+use crate::restructure::size_guard::{LimitSetting, guard_phase};
 use crate::sql::SqlExec;
 
 pub const GATE_NAME: &str = "s1";
@@ -118,6 +119,7 @@ fn phase_of(plan: &Plan, inputs: &Inputs) -> Result<StructurePhase> {
             .iter()
             .map(|cache| format!("Params.{}: {}", cache.row_name, cache.what))
             .collect(),
+        size_check: None,
     })
 }
 
@@ -161,6 +163,8 @@ pub fn decide(
                 | S1Operation::DeleteAttribute { .. }
                 | S1Operation::WidenString { .. }
                 | S1Operation::SwitchIndex { .. }
+                | S1Operation::AddTabularSection { .. }
+                | S1Operation::AddSectionAttribute { .. }
         ) {
             unbuilt = true;
             verdict.block(
@@ -190,9 +194,10 @@ pub fn decide(
         Err(error) => return refuse(verdict, "", format!("{error:#}")),
     };
 
-    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes.
-    type Names<'a> = [BTreeSet<&'a str>; 4];
-    let planned: BTreeMap<String, Names<'_>> = plan
+    // The two decoders agree: the same objects, the same new, removed, widened and re-indexed attributes, the
+    // same new tabular sections and new attributes of the sections there were (`Section.Attribute`).
+    type Names = [BTreeSet<String>; 6];
+    let planned: BTreeMap<String, Names> = plan
         .objects
         .iter()
         .map(|object| {
@@ -202,51 +207,78 @@ pub fn decide(
                     object
                         .additions
                         .iter()
-                        .map(|addition| addition.name.as_str())
+                        .map(|addition| addition.name.clone())
                         .collect(),
                     object
                         .removals
                         .iter()
-                        .map(|removal| removal.name.as_str())
+                        .map(|removal| removal.name.clone())
                         .collect(),
                     object
                         .widenings
                         .iter()
-                        .map(|widening| widening.name.as_str())
+                        .map(|widening| widening.name.clone())
                         .collect(),
                     object
                         .switches
                         .iter()
-                        .map(|switch| switch.name.as_str())
+                        .map(|switch| switch.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_some())
+                        .map(|section| section.name.clone())
+                        .collect(),
+                    object
+                        .sections
+                        .iter()
+                        .filter(|section| section.created.is_none())
+                        .flat_map(|section| {
+                            section
+                                .additions
+                                .iter()
+                                .map(|addition| format!("{}.{}", section.name, addition.name))
+                        })
                         .collect(),
                 ],
             )
         })
         .collect();
-    let named_by_check: BTreeMap<String, Names<'_>> = classification
+    let named_by_check: BTreeMap<String, Names> = classification
         .by_object()
         .into_iter()
         .map(|(object, operations)| {
-            let names = |wanted: fn(&S1Operation) -> Option<&str>| -> BTreeSet<&str> {
+            let names = |wanted: fn(&S1Operation) -> Option<String>| -> BTreeSet<String> {
                 operations.iter().copied().filter_map(wanted).collect()
             };
             (
                 object.row.to_ascii_lowercase(),
                 [
                     names(|operation| match operation {
-                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::AddAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::DeleteAttribute { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::WidenString { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::WidenString { attribute, .. } => Some(attribute.clone()),
                         _ => None,
                     }),
                     names(|operation| match operation {
-                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.as_str()),
+                        S1Operation::SwitchIndex { attribute, .. } => Some(attribute.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddTabularSection { section, .. } => Some(section.clone()),
+                        _ => None,
+                    }),
+                    names(|operation| match operation {
+                        S1Operation::AddSectionAttribute {
+                            section, attribute, ..
+                        } => Some(format!("{section}.{attribute}")),
                         _ => None,
                     }),
                 ],
@@ -265,11 +297,13 @@ pub fn decide(
 
     // The planned objects' descriptors are the blockers the plan answers for, and so is the stage's
     // `deleted` row (the plan checked that it names removed attributes only); another blocker is a
-    // change this gate does not cover.
+    // change this gate does not cover. The `root` row is answered for by the check: the conservative rule
+    // compares its bytes, the check reads it (the 8.5 platform re-stamps the last block of its payload on
+    // every write) and a root that really changed is a `service-row-changed` refusal above.
     let has_deleted = inputs.staged.deleted.is_some();
     verdict.blockers.retain(|blocker| {
         let row = blocker.row.to_ascii_lowercase();
-        !planned.contains_key(&row) && !(has_deleted && row == "deleted")
+        !planned.contains_key(&row) && !(has_deleted && row == "deleted") && row != "root"
     });
     verdict.restructuring_required = !verdict.blockers.is_empty() || verdict.blockers_omitted > 0;
     if verdict.restructuring_required {
@@ -304,6 +338,8 @@ pub struct S1Gate<'a> {
     options: PlanOptions,
     /// The XML dialect the check decodes descriptors with (`2.20` for 8.3); `None` lets it infer it.
     xml_version: Option<&'static str>,
+    /// The limit on the rows and bytes the stage may rebuild (S1-J, `size_guard`).
+    limit: LimitSetting,
     prepared: RefCell<Option<StructurePhase>>,
 }
 
@@ -314,8 +350,15 @@ impl<'a> S1Gate<'a> {
             conservative,
             options,
             xml_version: None,
+            limit: LimitSetting::default(),
             prepared: RefCell::new(None),
         }
+    }
+
+    /// The limit on the rebuilt tables; the measured default when not given.
+    pub fn size_limit(mut self, limit: LimitSetting) -> Self {
+        self.limit = limit;
+        self
     }
 
     /// The XML dialect the restructure check decodes the descriptors with.
@@ -387,7 +430,16 @@ impl StructuralGate for S1Gate<'_> {
             );
             return Ok(verdict);
         }
-        let (verdict, phase) = decide(verdict, &check, &inputs, &self.options);
+        let (mut verdict, mut phase) = decide(verdict, &check, &inputs, &self.options);
+        // S1-J: the tables the plan rebuilds are copied in one transaction; above the limit the stage is
+        // refused and goes to the native apply.
+        guard_phase(
+            &mut source,
+            self.options.method,
+            &self.limit,
+            &mut verdict,
+            &mut phase,
+        )?;
         *self.prepared.borrow_mut() = phase;
         Ok(verdict)
     }

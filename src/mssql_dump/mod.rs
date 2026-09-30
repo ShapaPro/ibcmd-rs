@@ -1021,6 +1021,10 @@ pub(crate) fn fetch_main_activation_rows(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<crate::mssql_main_activation::MainStorageRow>> {
+    // The activation compares these rows with the table inside its transaction
+    // (`dbo.Config`, no view), so they are the rows as stored: never the
+    // generation an export of this process resolved (#409 F-2).
+    let _stored = dynamic_generation::StorageViewScope::begin(database);
     fetch::fetch_binary_rows(sql, database, table, selected_file_names, false)?
         .into_iter()
         .map(|row| {
@@ -2137,8 +2141,10 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         &selected_file_names,
     )?;
     prepare_output_dir(&args.output_dir, args.overwrite)?;
-    // Each run resolves the dynamic generation of the database it was given.
-    dynamic_generation::clear_storage_generation_overlays();
+    // Each run resolves the dynamic generation of the database it was given and
+    // its view ends with it: the reads that follow in this process (the
+    // activation's) see the rows as they are stored (#409 F-2).
+    let _views = dynamic_generation::StorageViewScope::begin(&args.database);
 
     let mut table_roles = vec![MssqlConfigurationTableRole::Current];
     if args.include_config_save {
@@ -2334,16 +2340,21 @@ pub(crate) fn export_staged_state(
     sink: Arc<dyn FileSink>,
 ) -> Result<StateExportReport> {
     let started = Instant::now();
-    // Each run resolves the dynamic generation of the state it was given.
-    dynamic_generation::clear_storage_generation_overlays();
+    // The state is exported from memory under no database's name; whatever that
+    // export resolves ends with it.
+    let _detached = dynamic_generation::StorageViewScope::begin("");
     let stored = match base {
         StateBase::Nothing => offline_rows::OfflineRows::from_memory(std::iter::empty()),
         StateBase::Folder(dir) => offline_rows::OfflineRows::load(dir)?,
-        StateBase::Database { sql, database } => offline_rows::OfflineRows::from_memory(
-            fetch_all_config_rows(sql, database)?
-                .into_iter()
-                .map(|row| (row.file_name, Arc::new(row.binary))),
-        ),
+        StateBase::Database { sql, database } => {
+            // Every stored row: `with_staged` folds the generation history itself.
+            let _stored = dynamic_generation::StorageViewScope::begin(database);
+            offline_rows::OfflineRows::from_memory(
+                fetch_all_config_rows(sql, database)?
+                    .into_iter()
+                    .map(|row| (row.file_name, Arc::new(row.binary))),
+            )
+        }
     };
     let state = stored.with_staged(
         staged
@@ -2383,7 +2394,6 @@ pub(crate) fn export_staged_state(
             false,
         )
     };
-    dynamic_generation::clear_storage_generation_overlays();
     dumped?;
     Ok(StateExportReport {
         state_rows,
@@ -45708,7 +45718,7 @@ fn install_storage_overlay(
         main_configuration,
     )?;
     if let Some(overlay) = overlay {
-        dynamic_generation::install_storage_generation_overlay(table, overlay);
+        dynamic_generation::install_storage_generation_overlay(database, table, overlay);
     }
     Ok(headers)
 }
@@ -45740,13 +45750,12 @@ fn resolve_storage_overlay(
 
     // The overlay is a property of the whole table, so a run that selected a
     // few rows by name still resolves it against every row there is.
-    let inventory;
-    let names: &[ConfigRowHeader] = if selected_file_names.is_empty() {
-        &headers
+    let inventory = if selected_file_names.is_empty() {
+        None
     } else {
-        inventory = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
-        &inventory
+        Some(fetch_row_headers(sql, database, table, &BTreeSet::new())?)
     };
+    let names: &[ConfigRowHeader] = inventory.as_deref().unwrap_or(&headers);
     let generations = match &history {
         Some(history) => dynamic_generation::storage_generation_overlay(
             history,
@@ -45793,21 +45802,32 @@ fn resolve_storage_overlay(
     }
     let overlay = std::sync::Arc::new(overlay);
 
-    let mut published = headers
-        .into_iter()
-        .filter_map(|mut row| {
-            if let Some(published) = overlay.published_name(&row.file_name) {
-                row.file_name = published.to_owned();
-                return Some(row);
-            }
-            if dynamic_generation::is_dynamic_generation_alias(&row.file_name)
-                || overlay.hides(&row.file_name)
-            {
-                return None;
-            }
-            Some(row)
-        })
-        .collect::<Vec<_>>();
+    let publish = |mut row: ConfigRowHeader| {
+        if let Some(published) = overlay.published_name(&row.file_name) {
+            row.file_name = published.to_owned();
+            return Some(row);
+        }
+        if dynamic_generation::is_dynamic_generation_alias(&row.file_name)
+            || overlay.hides(&row.file_name)
+        {
+            return None;
+        }
+        Some(row)
+    };
+    let mut published = match inventory {
+        None => headers.into_iter().filter_map(publish).collect::<Vec<_>>(),
+        // A run that selected names read the headers of the *stored* rows with
+        // those names: for an object an online update changed, the plain rows
+        // its alias hides and none of the alias rows that hold what the
+        // infobase reads -- so nothing was left to export (#409 F-1). The
+        // inventory lists every stored row; the selection is made on the
+        // published names.
+        Some(inventory) => inventory
+            .into_iter()
+            .filter_map(publish)
+            .filter(|row| selected_file_names.contains(&row.file_name))
+            .collect(),
+    };
     published.extend(staged_headers);
     Ok((Some(overlay), published))
 }
@@ -45960,7 +45980,7 @@ fn qualified_storage_table(database: &str, table: &str) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
     dynamic_generation::storage_table_expression(
         &qualified,
-        dynamic_generation::storage_generation_overlay_for(table).as_deref(),
+        dynamic_generation::storage_generation_overlay_for(database, table).as_deref(),
     )
 }
 

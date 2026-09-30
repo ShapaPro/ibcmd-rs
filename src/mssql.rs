@@ -1007,6 +1007,22 @@ pub fn activate_staged_main(
         args.allow_non_lab,
     )
     .map_err(anyhow::Error::new)?;
+    // The tool's own RAS verification made the cluster open idle SQL sessions on
+    // this database; the session gate of an exclusive activation must not count
+    // them (#409 F-3), and an infobase that has clients is refused before any
+    // write, on the cluster's word.
+    let plan = if mode == MainActivationMode::Exclusive && !plan.is_no_op() {
+        plan.with_own_ras_processes(
+            crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+                &args.rac,
+                &args.ras_endpoint,
+                profile_verification.verified_cluster_id,
+                profile_verification.verified_infobase_id,
+            )?,
+        )
+    } else {
+        plan
+    };
     if matches!(args.mode, MssqlMainActivationModeArg::Live)
         && args
             .tail_log_output
@@ -1106,7 +1122,7 @@ pub fn activate_staged_main(
     })
 }
 
-fn exactly_one_optional_marker(
+pub(crate) fn exactly_one_optional_marker(
     table: &str,
     mut rows: Vec<MainStorageRow>,
 ) -> Result<Option<MainStorageRow>> {

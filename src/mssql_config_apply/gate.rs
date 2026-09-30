@@ -159,6 +159,10 @@ pub struct StructurePhase {
     pub objects: Vec<String>,
     /// One line per cache row the phase rewrites (`Params.<row>: what`).
     pub caches: Vec<String>,
+    /// The size guard's verdict on the tables the phase rebuilds: the limit and where it came from, the
+    /// totals, the largest table (`restructure::size_guard`, S1-J). A gate without one leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_check: Option<serde_json::Value>,
 }
 
 pub trait StructuralGate {

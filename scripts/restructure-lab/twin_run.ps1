@@ -60,7 +60,10 @@ if ($Skip -notcontains 'noop') {
 if ($Skip -notcontains 'export') {
     Log 'check 8: native exports and source-diff'
     foreach ($db in $Nat, $Own) {
+        # a folder of an earlier run would be compared instead of a failed export
+        Remove-Item -Recurse -Force "$lab\export\$db" -ErrorAction SilentlyContinue
         pwsh -NoProfile -File "$kit\export_tree.ps1" -Database $db -Out "$lab\export\$db" 2>&1 | Select-Object -Last 1
+        if ($LASTEXITCODE -ne 0) { throw "the native export of $db failed" }
     }
     & $Exe source-diff "$lab\export\$Nat" "$lab\export\$Own" > "$o\export_diff.json" 2>&1
     python -c "import json; d=json.load(open(r'$o\export_diff.json',encoding='utf-8')); print('export diff', d['summary'])"

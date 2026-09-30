@@ -62,6 +62,7 @@ pub(super) fn inputs(old: &[u8], new: &[u8]) -> Inputs {
             new_descriptors: [(CATALOG.to_owned(), new.to_vec())].into(),
             deleted: Some(deflate("\u{feff}0".as_bytes()).unwrap()),
         },
+        objects: Default::default(),
         extensions: Default::default(),
     }
 }
@@ -598,10 +599,13 @@ fn a_widening_is_refused_when_the_stored_field_disagrees() {
 
 #[test]
 fn a_widening_of_a_tabular_section_attribute_is_refused() {
-    // The first limited string of the fixture sits in a tabular section: not supported (the section is
-    // its own case).
+    // The first limited string of the fixture sits in a tabular section: an attribute of an old section
+    // may not change its type (only new ones join).
     let staged = retype_after(OLD_ROW, "", "{\"S\",50,1}", "{\"S\",60,1}");
-    assert!(error_of(&inputs(OLD_ROW, &staged)).contains("changes a tabular section"));
+    assert!(
+        error_of(&inputs(OLD_ROW, &staged))
+            .contains("removes, moves or changes an attribute of the tabular section")
+    );
 }
 
 #[test]

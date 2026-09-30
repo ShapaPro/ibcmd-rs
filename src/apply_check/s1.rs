@@ -18,6 +18,7 @@
 //! | widen a string | `attribute-property-not-covered`, `.../Properties/Type/StringQualifiers/Length`, `n -> m`, `m > n` |
 //! | switch the index | `attribute-property-not-covered`, `.../Properties/Indexing`, `DontIndex <-> Index` or `DontIndex <-> IndexWithAdditionalOrder` |
 //! | add a tabular section | `tabular-section-added-dropped-moved`, `ChildObjects/TabularSection[T]`, added |
+//! | add an attribute to a tabular section | `tabular-section-column-added-dropped-moved`, `ChildObjects/TabularSection[T]/ChildObjects/Attribute[A]`, added |
 //! | add a plain object | `object-with-storage-added-or-dropped` on the object, added, **and** the same rule on `Configuration`, `ChildObjects/<Kind>[Name]`, added |
 //!
 //! An operation says what the descriptors changed by. It does not vouch for
@@ -111,6 +112,12 @@ pub enum S1Operation {
         object: ObjectId,
         section: String,
     },
+    /// A new attribute in a tabular section the object had.
+    AddSectionAttribute {
+        object: ObjectId,
+        section: String,
+        attribute: String,
+    },
     /// A new catalog or document, and the configuration's listing of it.
     AddObject {
         object: ObjectId,
@@ -126,6 +133,7 @@ impl S1Operation {
             Self::WidenString { .. } => "widen-string",
             Self::SwitchIndex { .. } => "switch-index",
             Self::AddTabularSection { .. } => "add-tabular-section",
+            Self::AddSectionAttribute { .. } => "add-section-attribute",
             Self::AddObject { .. } => "add-object",
         }
     }
@@ -138,6 +146,7 @@ impl S1Operation {
             | Self::WidenString { object, .. }
             | Self::SwitchIndex { object, .. }
             | Self::AddTabularSection { object, .. }
+            | Self::AddSectionAttribute { object, .. }
             | Self::AddObject { object } => object,
         }
     }
@@ -187,7 +196,7 @@ refusal_codes! {
     AttributeMoved => "attribute-moved", "the attributes changed order";
     LengthNotWidened => "length-not-widened", "the length of a string is not a number that grew";
     IndexModeOutsideS1 => "index-mode-outside-s1", "the index of an attribute changed between Index and IndexWithAdditionalOrder, or to or from a value that is none of the three modes";
-    TabularSectionOutsideS1 => "tabular-section-outside-s1", "a tabular section was dropped or moved, or changed inside";
+    TabularSectionOutsideS1 => "tabular-section-outside-s1", "a tabular section was dropped or moved, or changed inside but for a new attribute";
     ObjectRemoved => "object-removed", "an object with tables was dropped";
     ObjectListMismatch => "object-list-mismatch", "a new object and the configuration's listing of it do not match";
     IncompleteVerdict => "incomplete-verdict", "the check did not compare every file that carries data";
@@ -502,8 +511,33 @@ fn one(reason: &Reason) -> Taken {
                 )),
             }
         }
-        RuleId::TabularSectionColumnAddedDroppedMoved
-        | RuleId::TabularSectionPropertyNotCovered
+        RuleId::TabularSectionColumnAddedDroppedMoved => {
+            let names = [
+                "ChildObjects",
+                "TabularSection",
+                "ChildObjects",
+                "Attribute",
+            ];
+            match (
+                labelled_path(reason, &names, 1),
+                labelled_path(reason, &names, 3),
+                &reason.op,
+            ) {
+                (Some(section), Some(attribute), Some(ChangeOp::Added)) => {
+                    Taken::Operation(S1Operation::AddSectionAttribute {
+                        object,
+                        section: section.to_string(),
+                        attribute: attribute.to_string(),
+                    })
+                }
+                _ => Taken::Refused(refuse(
+                    RefusalCode::TabularSectionOutsideS1,
+                    reason,
+                    &reason.property,
+                )),
+            }
+        }
+        RuleId::TabularSectionPropertyNotCovered
         | RuleId::TabularSectionStandardAttributeNotCovered
         | RuleId::TabularSectionAttributePropertyNotCovered
         | RuleId::TabularSectionPartNotCovered => Taken::Refused(refuse(
@@ -835,21 +869,51 @@ mod tests {
                 RefusalCode::TabularSectionOutsideS1
             );
         }
-        // A column of an existing section is another case.
-        let column = classify(&verdict(vec![reason(
-            RuleId::TabularSectionColumnAddedDroppedMoved,
-            "Catalog",
-            "Catalog.X",
-            vec![
-                seg("ChildObjects", None),
-                seg("TabularSection", Some("T")),
-                seg("ChildObjects", None),
-                seg("Attribute", Some("C")),
-            ],
-            Some(ChangeOp::Added),
-        )]));
+    }
+
+    #[test]
+    fn a_new_attribute_of_a_tabular_section_is_an_operation_and_a_dropped_or_moved_one_is_not() {
+        let column = |op| {
+            reason(
+                RuleId::TabularSectionColumnAddedDroppedMoved,
+                "Catalog",
+                "Catalog.X",
+                vec![
+                    seg("ChildObjects", None),
+                    seg("TabularSection", Some("T")),
+                    seg("ChildObjects", None),
+                    seg("Attribute", Some("C")),
+                ],
+                Some(op),
+            )
+        };
+        let class = classify(&verdict(vec![column(ChangeOp::Added)]));
+        match class.operations.as_slice() {
+            [
+                S1Operation::AddSectionAttribute {
+                    section, attribute, ..
+                },
+            ] => assert_eq!((section.as_str(), attribute.as_str()), ("T", "C")),
+            other => panic!("{other:?} {:?}", class.refusals),
+        }
+        assert_eq!(class.operations[0].name(), "add-section-attribute");
+        for op in [ChangeOp::Removed, ChangeOp::Reordered] {
+            let refused = classify(&verdict(vec![column(op)]));
+            assert_eq!(
+                refused.refusals[0].code,
+                RefusalCode::TabularSectionOutsideS1
+            );
+        }
+        // Without the labels of the path nothing is taken.
+        let mut unlabelled = column(ChangeOp::Added);
+        unlabelled.path = vec![
+            seg("ChildObjects", None),
+            seg("TabularSection", None),
+            seg("ChildObjects", None),
+            seg("Attribute", None),
+        ];
         assert_eq!(
-            column.refusals[0].code,
+            classify(&verdict(vec![unlabelled])).refusals[0].code,
             RefusalCode::TabularSectionOutsideS1
         );
     }
@@ -1078,6 +1142,16 @@ mod tests {
                     ["ChildObjects", "TabularSection"],
                     Some(ChangeOp::Added),
                 ) => named,
+                (
+                    RuleId::TabularSectionColumnAddedDroppedMoved,
+                    [
+                        "ChildObjects",
+                        "TabularSection",
+                        "ChildObjects",
+                        "Attribute",
+                    ],
+                    Some(ChangeOp::Added),
+                ) => named && path.get(3).is_some_and(|seg| seg.label.is_some()),
                 _ => false,
             }
     }
@@ -1182,8 +1256,9 @@ mod tests {
         }
         assert!(checked > 10_000, "{checked} combinations");
         // Two kinds x (add and delete an attribute, widen, switch the index
-        // both ways, add a section): the table above and nothing else.
-        assert_eq!(passed, 12, "of {checked} combinations");
+        // both ways, add a section, add an attribute to a section): the table
+        // above and nothing else.
+        assert_eq!(passed, 14, "of {checked} combinations");
     }
 
     #[test]
