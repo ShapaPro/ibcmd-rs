@@ -4133,55 +4133,12 @@ fn is_root_metadata_xml(path: &str) -> bool {
     parts.len() == 2 && is_stage_root_metadata_collection(parts[0])
 }
 
+/// The root folders whose objects a patch stage prepares: the model's table of root families and the
+/// 8.5 palette colors (`source::is_metadata_collection`), less the common modules, which have a path of
+/// their own (`prepare_common_module_object_stage`). It was a hand-written list that lacked the 8.5
+/// `PaletteColors` and `ExternalDataSources` (#419).
 fn is_stage_root_metadata_collection(value: &str) -> bool {
-    matches!(
-        value,
-        "catalogs"
-            | "documents"
-            | "informationregisters"
-            | "accumulationregisters"
-            | "accountingregisters"
-            | "calculationregisters"
-            | "chartsofcharacteristictypes"
-            | "chartsofaccounts"
-            | "chartsofcalculationtypes"
-            | "chartsofcalculationregisters"
-            | "commonforms"
-            | "commonpictures"
-            | "commontemplates"
-            | "commonattributes"
-            | "commandgroups"
-            | "documentjournals"
-            | "reports"
-            | "dataprocessors"
-            | "enums"
-            | "exchangeplans"
-            | "eventsubscriptions"
-            | "filtercriteria"
-            | "functionaloptions"
-            | "functionaloptionsparameters"
-            | "httpservices"
-            | "languages"
-            | "scheduledjobs"
-            | "sessionparameters"
-            | "settingsstorages"
-            | "styleitems"
-            | "styles"
-            | "subsystems"
-            | "roles"
-            | "commoncommands"
-            | "businessprocesses"
-            | "bots"
-            | "definedtypes"
-            | "tasks"
-            | "constants"
-            | "documentnumerators"
-            | "integrationservices"
-            | "sequences"
-            | "webservices"
-            | "wsreferences"
-            | "xdtopackages"
-    )
+    value != "commonmodules" && crate::source::is_metadata_collection(value)
 }
 
 fn is_template_metadata_xml(path: &str) -> bool {
@@ -10662,6 +10619,23 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_patch_stage_prepares_the_objects_of_every_root_folder_but_the_common_modules() {
+        for (folder, _) in crate::metadata_model::index::ROOT_COLLECTIONS {
+            let path = format!("{folder}/Object.xml");
+            assert_eq!(
+                super::is_root_metadata_xml(&path),
+                *folder != "CommonModules",
+                "{folder}"
+            );
+        }
+        // The 8.5 folder of the palette colors, at any case; nested and stray folders are not roots.
+        assert!(super::is_root_metadata_xml("PaletteColors/Color.xml"));
+        assert!(super::is_root_metadata_xml("palettecolors/Color.xml"));
+        assert!(!super::is_root_metadata_xml("Forms/Form.xml"));
+        assert!(!super::is_root_metadata_xml("Catalogs/X/Ext/Y.xml"));
     }
 
     #[test]
