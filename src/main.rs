@@ -75,6 +75,8 @@ fn run() -> Result<()> {
         Commands::Infobase(args) => std::process::exit(ibcmd_rs::dropin::run_infobase(&args.args)),
         Commands::Help(args) => std::process::exit(ibcmd_rs::dropin::run_help(&args.args)),
         Commands::Server(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("server")),
+        Commands::Serve(_) => std::process::exit(ibcmd_rs::server::run_stdio()),
+        Commands::Objects(args) => ibcmd_rs::commands::objects::run(args)?,
         Commands::Eventlog(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("eventlog")),
         Commands::Config(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("config")),
         Commands::Extension(_) => std::process::exit(ibcmd_rs::dropin::run_other_mode("extension")),

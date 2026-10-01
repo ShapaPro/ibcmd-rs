@@ -513,6 +513,7 @@ fn dump_args(
         main_configuration: true,
         file_names,
         file_name_lists: Vec::new(),
+        objects: Vec::new(),
         inflate: false,
         extract_module_text: true,
         extract_metadata_xml: true,

@@ -482,6 +482,10 @@ impl OutputWriter {
     }
 
     fn submit(&self, job: Job) -> Result<()> {
+        // A caller that may be stopped (`crate::cancel`) stops here, at the
+        // next file: no file is handed to the writers after the request to
+        // stop (the ones already queued still land).
+        crate::cancel::check()?;
         if self.shared.failed.load(Ordering::SeqCst) {
             return Err(anyhow!(
                 "an earlier output write failed: {}",

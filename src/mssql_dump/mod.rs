@@ -2067,6 +2067,100 @@ struct MssqlDumpRowManifest {
 }
 
 pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    dump_config_with(args, DumpHooks::default())
+}
+
+/// What a long-lived caller (the editor server, `crate::server`, through
+/// `crate::stored_objects`) hands the export besides its arguments. The
+/// default is the command line's export.
+#[derive(Default)]
+pub(crate) struct DumpHooks {
+    /// The database handle to read with, whose connections the caller keeps
+    /// between runs, instead of one built from the arguments' login. Not
+    /// used with `--rows-dir`.
+    pub(crate) sql: Option<crate::sql::SqlExec>,
+    /// Where the files go instead of `output_dir`: nothing is written to the
+    /// disk -- no folder prepared, no manifest, no raw rows -- and
+    /// `output_dir` only names the files the sink receives.
+    pub(crate) sink: Option<Arc<dyn FileSink>>,
+}
+
+/// The Config table as a reader outside the export (`crate::stored_objects`,
+/// the tree of a configuration) reads it: through the export's own reads, so
+/// a `--rows-dir` folder answers as SQL Server does and an active dynamic
+/// generation's rows are read under their plain names.
+pub(crate) struct ConfigTable<'a> {
+    sql: &'a crate::sql::SqlExec,
+    database: &'a str,
+}
+
+impl<'a> ConfigTable<'a> {
+    /// The table a running export reads: its folder active, its view begun.
+    pub(crate) fn active(sql: &'a crate::sql::SqlExec, database: &'a str) -> Self {
+        Self { sql, database }
+    }
+
+    /// Every published row name. Installs the table's view for the reads
+    /// that follow in the scope (see [`with_rows_dir_table`]).
+    pub(crate) fn names(&self) -> Result<BTreeSet<String>> {
+        let table = MssqlConfigurationTableRole::Current.sql_name();
+        let headers = fetch_row_headers(self.sql, self.database, table, &BTreeSet::new())?;
+        let headers = install_storage_overlay(
+            self.sql,
+            self.database,
+            table,
+            &BTreeSet::new(),
+            headers,
+            false,
+        )?;
+        Ok(headers.into_iter().map(|header| header.file_name).collect())
+    }
+
+    /// The named rows as stored (raw deflate for most), each assembled from
+    /// its parts; a name the table lacks is left out.
+    pub(crate) fn rows(&self, names: &BTreeSet<String>) -> Result<BTreeMap<String, Vec<u8>>> {
+        let mut rows = BTreeMap::<String, Vec<u8>>::new();
+        if names.is_empty() {
+            return Ok(rows);
+        }
+        let table = MssqlConfigurationTableRole::Current.sql_name();
+        for row in fetch_binary_rows(self.sql, self.database, table, names, false)? {
+            rows.entry(row.file_name).or_default().extend(row.binary);
+        }
+        Ok(rows)
+    }
+}
+
+/// Runs `read` on the Config table of a folder of stored rows
+/// (`--rows-dir`): the folder answers every read while it runs, and the view
+/// it installs ends with it.
+pub(crate) fn with_rows_dir_table<T>(
+    dir: &Path,
+    read: impl FnOnce(&ConfigTable<'_>) -> Result<T>,
+) -> Result<T> {
+    let _active = offline_rows::activate(dir)?;
+    let _views = dynamic_generation::StorageViewScope::begin("");
+    let sql = crate::sql::SqlExec::detached("a rows folder answers every read itself");
+    read(&ConfigTable::active(&sql, ""))
+}
+
+/// Runs `read` on the Config table of `database`; the view it installs ends
+/// with it.
+pub(crate) fn with_database_table<T>(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    read: impl FnOnce(&ConfigTable<'_>) -> Result<T>,
+) -> Result<T> {
+    let _views = dynamic_generation::StorageViewScope::begin(database);
+    read(&ConfigTable::active(sql, database))
+}
+
+/// [`dump_config`] with the caller's [`DumpHooks`]: the same export, the
+/// same arguments.
+pub(crate) fn dump_config_with(
+    args: &MssqlDumpConfigArgs,
+    hooks: DumpHooks,
+) -> Result<MssqlDumpConfigReport> {
     let password_marker = if args.sql_user.is_none() {
         password_source_marker(PASSWORD_SOURCE_NONE)
     } else if args.sql_pwd.as_ref().is_some_and(|value| !value.is_empty()) {
@@ -2080,7 +2174,7 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
         &args.database,
         args.runtime_journal.as_deref(),
     )?;
-    match dump_config_inner(args) {
+    match dump_config_inner(args, hooks) {
         Ok(report) => {
             subprocess_journal.finish_passed()?;
             Ok(report)
@@ -2096,7 +2190,10 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
     }
 }
 
-fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+fn dump_config_inner(
+    args: &MssqlDumpConfigArgs,
+    hooks: DumpHooks,
+) -> Result<MssqlDumpConfigReport> {
     // Lab aid: `IBCMD_RS_EXTENSION_MODE=1` runs this export as an extension
     // export's converters run (rows written by `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT`),
     // to probe one row without a database.
@@ -2127,7 +2224,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             legacy_adapter.xml_dialect()
         )
     })?;
-    let selected_file_names =
+    let mut selected_file_names =
         selected_file_names_from_args(&args.file_names, &args.file_name_lists)?;
     validate_root_metadata_gate_options(
         args.require_complete_root_metadata,
@@ -2146,12 +2243,18 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         args.no_binary_rows,
         &selected_file_names,
     )?;
-    let write_binary_rows = args.write_binary_rows && !args.no_binary_rows;
+    // Into a sink nothing is written: the output folder only names the files.
+    let to_disk = hooks.sink.is_none();
+    let write_binary_rows = to_disk && args.write_binary_rows && !args.no_binary_rows;
     // `--base`/`--sync` (#362), read before anything is written: the base may
     // be the folder's own ConfigDumpInfo.xml.
     let incremental = incremental::IncrementalExport::load(args.base.as_deref(), args.sync)?;
     if incremental.is_some() {
+        if !to_disk {
+            bail!("--base and --sync update an output folder; an export into memory has none");
+        }
         if !selected_file_names.is_empty()
+            || !args.objects.is_empty()
             || !args.extract_metadata_xml
             || !args.extract_module_text
             || write_binary_rows
@@ -2161,11 +2264,11 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             bail!(
                 "--base and --sync update a source export of the whole configuration: give \
                  --extract-metadata-xml --extract-module-text --no-binary-rows, and no \
-                 --file-name, --file-name-list, --include-config-save or --overwrite"
+                 --file-name, --file-name-list, --object, --include-config-save or --overwrite"
             );
         }
         incremental::prepare_output_dir(&args.output_dir)?;
-    } else {
+    } else if to_disk {
         prepare_output_dir(&args.output_dir, args.overwrite)?;
     }
     // Each run resolves the dynamic generation of the database it was given and
@@ -2186,6 +2289,8 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
     // `--rows-dir` answers every read from its folder; no login is needed.
     let sql = if args.rows_dir.is_some() {
         crate::sql::SqlExec::detached("--rows-dir reads every row from its folder")
+    } else if let Some(sql) = hooks.sql.clone() {
+        sql
     } else {
         crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
             sqlcmd: args.sqlcmd.as_deref(),
@@ -2198,10 +2303,21 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         })?
     };
 
+    // `--object`: the rows of the named objects, as the editor server
+    // selects them (`crate::stored_objects`), read through the view just
+    // begun.
+    if !args.objects.is_empty() {
+        selected_file_names.extend(crate::stored_objects::stored_rows_of(
+            &ConfigTable::active(&sql, &args.database),
+            &args.objects,
+        )?);
+    }
+
     let mut reports = Vec::new();
     let mut manifest_tables = Vec::new();
     let mut total_timings = MssqlDumpTimingReport::default();
     let mut incremental_summary = None;
+    let write_manifest = to_disk && args.write_manifest;
     for role in table_roles {
         let inventory_plan = MssqlExportInventoryPlan::new(
             role,
@@ -2225,7 +2341,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             source_version,
             args.collect_all_source_asset_diagnostics,
             model_export::requested(args.model_export, args.legacy_export),
-            None,
+            hooks.sink.clone(),
             args.main_configuration && !args.include_config_save,
             incremental
                 .as_ref()
@@ -2260,7 +2376,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             timings: dumped.timings.clone(),
         });
         total_timings.add_assign(&dumped.timings);
-        if args.write_manifest {
+        if write_manifest {
             manifest_tables.push(MssqlDumpTableManifest {
                 table: table.to_string(),
                 source_assets: dumped.source_assets,
@@ -2278,7 +2394,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         source_assets.merge(&report.source_assets);
     }
 
-    if args.write_manifest {
+    if write_manifest {
         let manifest = MssqlDumpManifest {
             server: args.server.clone(),
             database: args.database.clone(),
@@ -5556,6 +5672,7 @@ fn dump_table_rows_streamed(
     let mut fetch_batch = |chunk: &Vec<String>,
                            timings: &mut MssqlDumpTimingReport|
      -> Result<Vec<BinaryConfigRow>> {
+        crate::cancel::check()?;
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
         let fetch_cpu = process_cpu_ms();
@@ -6417,6 +6534,8 @@ fn dump_table_row(context: &DumpRowContext<'_>, row: &ConfigRow) -> Result<Dumpe
 }
 
 fn dump_table_binary_row(context: &DumpRowContext<'_>, row: &BinaryConfigRow) -> Result<DumpedRow> {
+    // A stopped operation (`crate::cancel`) converts no further row.
+    crate::cancel::check()?;
     dump_table_row_bytes(
         context,
         &row.file_name,

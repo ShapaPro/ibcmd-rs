@@ -924,6 +924,7 @@ mod tests {
             main_configuration: false,
             file_names: Vec::new(),
             file_name_lists: Vec::new(),
+            objects: Vec::new(),
             inflate: false,
             extract_module_text: false,
             extract_metadata_xml: false,

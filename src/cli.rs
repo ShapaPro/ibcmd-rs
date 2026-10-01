@@ -35,6 +35,14 @@ pub enum Commands {
     /// The platform ibcmd's other modes, refused with a clear message.
     #[command(hide = true, disable_help_flag = true)]
     Server(NativeModeArgs),
+    /// Serve a code editor (VS Code and its kin): JSON-RPC 2.0 over stdin and
+    /// stdout in Content-Length frames, as a language server; one process per
+    /// editor window. Not the platform's `ibcmd server`.
+    Serve(ServeArgs),
+    /// What `serve --stdio` does with the objects of a configuration, from
+    /// the command line: its tree, the comparison with a source folder, one
+    /// file as the export writes it, the export of selected objects.
+    Objects(crate::commands::objects::ObjectsArgs),
     #[command(hide = true, disable_help_flag = true)]
     Eventlog(NativeModeArgs),
     #[command(hide = true, disable_help_flag = true)]
@@ -1685,6 +1693,14 @@ pub struct MssqlLoadConfigArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Talk to the editor over stdin and stdout (the only transport: no
+    /// network, no port).
+    #[arg(long, required = true)]
+    pub stdio: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct MssqlDumpConfigArgs {
     /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
     /// client, as ibcmd-rs 0.2 did; for scripts that still pass it.
@@ -1746,6 +1762,16 @@ pub struct MssqlDumpConfigArgs {
     /// Read selected Config/ConfigSave FileName values from a text file. Can be repeated.
     #[arg(long = "file-name-list")]
     pub file_name_lists: Vec<PathBuf>,
+    /// Dump only the rows of this metadata object, by full name
+    /// (`Catalog.Банки`, `Catalog.Банки.Form.ФормаЭлемента`, `Configuration`):
+    /// its own rows and those of the objects it owns (forms, templates,
+    /// recalculations, nested subsystems). Can be repeated; adds to --file-name.
+    #[arg(
+        long = "object",
+        value_name = "FULL_NAME",
+        conflicts_with = "include_config_save"
+    )]
+    pub objects: Vec<String>,
     /// Try to inflate raw deflate blobs and write readable *.txt files.
     #[arg(long)]
     pub inflate: bool,
@@ -1759,21 +1785,21 @@ pub struct MssqlDumpConfigArgs {
     #[arg(
         long,
         requires = "extract_metadata_xml",
-        conflicts_with_all = ["file_names", "file_name_lists"]
+        conflicts_with_all = ["file_names", "file_name_lists", "objects"]
     )]
     pub require_complete_root_metadata: bool,
     /// Fail when a reconstructed source asset omits an opaque property.
     #[arg(
         long,
         requires_all = ["extract_metadata_xml", "no_binary_rows"],
-        conflicts_with_all = ["file_names", "file_name_lists"]
+        conflicts_with_all = ["file_names", "file_name_lists", "objects"]
     )]
     pub require_complete_source_assets: bool,
     /// Continue a full diagnostic export after form writer rejections that have structured source-asset diagnostics.
     #[arg(
         long,
         requires_all = ["extract_metadata_xml", "no_binary_rows"],
-        conflicts_with_all = ["file_names", "file_name_lists"]
+        conflicts_with_all = ["file_names", "file_name_lists", "objects"]
     )]
     pub collect_all_source_asset_diagnostics: bool,
     /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build

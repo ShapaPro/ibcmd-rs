@@ -189,6 +189,7 @@ pub fn apply_source_change(
             main_configuration: false,
             file_names: selected_storage_file_names.clone(),
             file_name_lists: Vec::new(),
+            objects: Vec::new(),
             inflate: false,
             extract_module_text: true,
             extract_metadata_xml: true,
