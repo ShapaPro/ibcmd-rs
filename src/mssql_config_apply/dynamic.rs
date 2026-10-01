@@ -666,9 +666,6 @@ fn same_semantic_text(
     staged_bytes: &[u8],
     profile: MssqlNativePlatformProfile,
 ) -> Result<bool> {
-    if staged_bytes == active_bytes {
-        return Ok(true);
-    }
     let staged_plain = dynamic_metadata::inflate(staged_bytes)?;
     let active_plain = dynamic_metadata::inflate(active_bytes)?;
     Ok(staged_plain == active_plain
@@ -1931,6 +1928,59 @@ mod tests {
         let other_large = encoder.finish().unwrap();
         assert_ne!(valid_large, other_large);
         assert!(same_semantic_text("common-form.1", &valid_large, &other_large, profile).is_err());
+    }
+
+    fn identical_invalid_semantic_rows() -> Vec<Vec<u8>> {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"\xef\xbb\xbf{1,0}").unwrap();
+        encoder.flush().unwrap();
+        vec![
+            encoder.get_ref().clone(),
+            versions::deflate_row(&vec![b'x'; dynamic_metadata::MAX_PLAIN_ROW + 1]).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn identical_invalid_semantic_bytes_are_not_an_equality_shortcut() {
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        for invalid in identical_invalid_semantic_rows() {
+            for name in ["descriptor", "common-form.1", "root"] {
+                assert!(
+                    same_semantic_text(name, &invalid, &invalid, profile).is_err(),
+                    "{name}: identical bytes still require bounded complete decoding"
+                );
+            }
+        }
+        let valid = versions::deflate_row(b"\xef\xbb\xbf{1,0}").unwrap();
+        for name in ["descriptor", "common-form.1", "root"] {
+            assert!(same_semantic_text(name, &valid, &valid, profile).unwrap());
+        }
+    }
+
+    #[test]
+    fn identical_descriptor_and_help_judgment_require_strict_semantic_decoding() {
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        for invalid in identical_invalid_semantic_rows() {
+            for name in [MODULE.to_owned(), format!("{FORM}.1")] {
+                let rows = vec![
+                    meta("root", "same"),
+                    meta("version", "same"),
+                    meta("versions", "same"),
+                    meta(&name, &hex_lower(&Sha256::digest(&invalid))),
+                ];
+                let active = rows.iter().cloned().map(|row| (row.key(), row)).collect();
+                let mut compare = |row_name: &str| {
+                    assert_eq!(row_name, name);
+                    same_semantic_text(row_name, &invalid, &invalid, profile)
+                };
+                assert!(
+                    judge_rows(&rows, &active, &kinds(), &mut compare).is_err(),
+                    "{name}: production judge must propagate the strict semantic refusal even with identical SHA"
+                );
+            }
+        }
     }
 
     #[test]

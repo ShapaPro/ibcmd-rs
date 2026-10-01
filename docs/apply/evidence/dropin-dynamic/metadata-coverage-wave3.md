@@ -60,6 +60,11 @@ blob of that batch is requested. Each decode also uses the remaining aggregate
 budget, capped at 8 MiB per row. Descriptor/body/help semantic comparisons and
 the pending-deletion check use complete, bounded DEFLATE decoding. The historical
 global Versions parser and its 64 MiB contract are unchanged.
+Raw equality does not bypass descriptor/body/help decoding: even identical
+compressed bytes must satisfy that complete-stream and per-row size contract.
+The existing SHA-identical root/version service judgment remains unchanged;
+the ownership graph independently decodes its root strictly, and changed root
+semantic comparisons use the same bounded decoder before profile restamp rules.
 
 Retaining a prior generation also requires admission. Every non-service pending
 alias is checked against exactly one ordinary row, using its bound full physical
@@ -123,6 +128,14 @@ Raw evidence is preserved under `F:/ibcmd/lab/05/wave3/metadata`:
 - `gates-budget-repair/summary.txt` passes all four mandatory gates with 3,709
   tests passed, zero failed and ten ignored. The earlier import and executable
   remain historical pre-repair evidence and are not activation authority.
+- `logs/semantic-identical-RED.log` reproduces the remaining equality-shortcut
+  gap in both the comparison helper and actual descriptor/help judgment. The
+  repaired comparison refuses identical unfinished streams and identical rows
+  expanding to 8 MiB + 1 byte; valid identical rows still compare equal.
+  `logs/semantic-identical-GREEN.log` passes all 46 focused dynamic tests.
+  `gates-semantic-identical/summary.txt` passes all four mandatory quick gates:
+  3,711 tests passed, zero failed and ten ignored. Both earlier clean binaries
+  remain historical pre-repair candidates; fresh activation proof is pending.
 
 The fresh native/own activation twins and their real old/new session controls
 are required before claiming the expanded cohort accepted. Source comparisons
