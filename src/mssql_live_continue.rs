@@ -189,9 +189,16 @@ impl LiveArtifact {
             Path::new(&self.tail).is_absolute(),
             "live artifact tail must be absolute"
         );
-        let token = format!("{:x}", Sha256::digest(serde_json::to_vec(&self.recovery)?));
         ensure!(
-            token == self.recovery_token,
+            self.recovery_token.len() == 64
+                && self.recovery_token.bytes().all(|ch| ch.is_ascii_hexdigit()),
+            "invalid saved live recovery token"
+        );
+        let token = format!("{:x}", Sha256::digest(serde_json::to_vec(&self.recovery)?));
+        // The production renderer uses uppercase hex. Preserve its spelling for
+        // backup names, while comparing the exact digest rather than hex case.
+        ensure!(
+            token.eq_ignore_ascii_case(&self.recovery_token),
             "live recovery token does not match its snapshot"
         );
         ensure!(
@@ -303,7 +310,7 @@ pub fn require_idle_ras(
     args.push(endpoint);
     let binding = rac_bounded(rac, &args, Duration::from_secs(5))?;
     validate_ras_binding(&binding, artifact)?;
-    let text = rac_bounded(
+    let text = rac_bounded_bytes(
         rac,
         &[
             "session",
@@ -325,15 +332,22 @@ fn require_saved_build(profile: &str, build: &str) -> Result<()> {
     Ok(())
 }
 
-fn idle_session_inventory(text: &str) -> Result<()> {
+fn idle_session_inventory(text: &[u8]) -> Result<()> {
     ensure!(
-        text.trim().is_empty(),
+        text.iter().all(u8::is_ascii_whitespace),
         "warm/session readiness is not yet measured: RAS lists sessions; cycle 1 is retained, cycle 2 was not started. End the owned sessions and run mssql-live-continue"
     );
     Ok(())
 }
 
 fn rac_bounded(rac: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    let stdout = rac_bounded_bytes(rac, args, timeout)?;
+    Ok(String::from_utf8(stdout).context("RAS readiness output is not UTF-8")?)
+}
+
+/// RAS session presence needs no decoding of OEM user names. Only an empty,
+/// successful, bounded response admits cycle 2; identity/version stay strict UTF-8.
+fn rac_bounded_bytes(rac: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
     let mut child = Command::new(rac)
         .args(args)
         .stdout(Stdio::piped())
@@ -381,7 +395,7 @@ fn rac_bounded(rac: &Path, args: &[&str], timeout: Duration) -> Result<String> {
         "RAS session readiness failed: {}",
         String::from_utf8_lossy(&stderr)
     );
-    Ok(String::from_utf8(stdout).context("RAS readiness output is not UTF-8")?)
+    Ok(stdout)
 }
 
 fn render_continuation_sessions_check(database: &str, interrupt: bool) -> String {
@@ -627,6 +641,77 @@ mod tests {
     }
 
     #[test]
+    fn recovery_token_rejects_wrong_digest_nonhex_and_wrong_length() {
+        for token in ["0".repeat(64), "z".repeat(64), "a".repeat(63)] {
+            let mut artifact = fixture();
+            artifact.recovery_token = token;
+            assert!(artifact.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn real_checkpoint_renderer_token_roundtrips_without_changing_backup_names() {
+        use crate::mssql_main_activation::{
+            MainActivationMode, MainActivationSnapshot, prepare_main_activation,
+            render_main_activation_checkpoint,
+        };
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+
+        let body = Uuid::from_u128(9).to_string();
+        let rows = |generation: Uuid, text: &[u8]| {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
+            write!(encoder, "{{1,4,\"\",{generation},\"root\",x}}").unwrap();
+            [
+                (body.clone(), text.to_vec()),
+                ("root".into(), vec![1]),
+                ("version".into(), vec![2]),
+                ("versions".into(), encoder.finish().unwrap()),
+            ]
+            .into_iter()
+            .map(|(file_name, binary_data)| MainStorageRow {
+                file_name,
+                part_no: 0,
+                creation: String::new(),
+                modified: String::new(),
+                attributes: 0,
+                data_size: binary_data.len() as u64,
+                binary_data,
+            })
+            .collect()
+        };
+        let plan = prepare_main_activation(
+            MainActivationMode::Live,
+            rows(Uuid::from_u128(11), b"new body"),
+            MainActivationSnapshot {
+                config_rows: rows(Uuid::from_u128(10), b"old body"),
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[body],
+            true,
+        )
+        .unwrap();
+        let mut artifact = fixture();
+        let script =
+            render_main_activation_checkpoint("lab]db", &plan, Some(&artifact.tail), false)
+                .unwrap();
+        artifact.recovery = script.recovery;
+        artifact.recovery_token = script.report.recovery_token;
+        artifact.validate().unwrap();
+        let saved: LiveArtifact =
+            serde_json::from_slice(&serialize_artifact(&artifact).unwrap()).unwrap();
+        saved.validate().unwrap();
+        assert_eq!(saved.recovery_token, artifact.recovery_token);
+        assert!(script.sql.contains(&quote_string(&saved.backup_name(1))));
+        assert!(
+            render_continue(&saved, false, true)
+                .unwrap()
+                .contains(&quote_string(&saved.backup_name(2)))
+        );
+    }
+
+    #[test]
     fn serialized_artifact_boundary_matches_the_continuation_reader_limit() {
         let artifact = fixture();
         let bytes = serialize_artifact(&artifact).unwrap();
@@ -795,14 +880,69 @@ mod tests {
 
     #[test]
     fn idle_inventory_refuses_every_nonempty_or_unrecognized_ras_response() {
-        idle_session_inventory("\r\n").unwrap();
+        idle_session_inventory(b"\r\n \t").unwrap();
         for response in [
             "session : 123\napp-id : 1CV8\nlast-active-at : 2026-10-01T12:00:00",
             "ERROR",
             "app-id : RAS",
         ] {
-            assert!(idle_session_inventory(response).is_err());
+            assert!(idle_session_inventory(response.as_bytes()).is_err());
         }
+    }
+
+    #[test]
+    fn actual_oem_user_name_and_unknown_bytes_never_admit_cycle_two() {
+        // Exact Администратор bytes from successful native RAC stdout on the
+        // wave2 service83 fixture; decoding this CP866 row as UTF-8 fails.
+        let oem = b"user-name : \x80\xA4\xAC\xA8\xAD\xA8\xE1\xE2\xE0\xA0\xE2\xAE\xE0\r\n".to_vec();
+        assert!(std::str::from_utf8(&oem).is_err());
+        for response in [oem.as_slice(), b"\0", b"\xFF", b"\xC2\xA0"] {
+            assert!(
+                idle_session_inventory(response)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cycle 2 was not started")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_rac_or_stderr_cannot_become_an_empty_session_inventory() {
+        // This tests the protocol, not pwsh startup speed on a busy Windows CI host.
+        let call = |command| {
+            rac_bounded_bytes(
+                Path::new("pwsh"),
+                &["-NoProfile", "-Command", command],
+                Duration::from_secs(20),
+            )
+        };
+        idle_session_inventory(&call("exit 0").unwrap()).unwrap();
+        for command in [
+            "exit 7",
+            "[Console]::Error.Write('fixture failure'); exit 0",
+        ] {
+            assert!(
+                call(command)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("RAS session readiness failed")
+            );
+        }
+        assert!(
+            rac_bounded(
+                Path::new("pwsh"),
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "[Console]::OpenStandardOutput().WriteByte(128)"
+                ],
+                Duration::from_secs(20)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not UTF-8")
+        );
     }
 
     #[test]

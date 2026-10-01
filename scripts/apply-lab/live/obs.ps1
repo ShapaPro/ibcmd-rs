@@ -14,6 +14,7 @@ param(
     [ValidateSet('poll', 'writer', 'txn', 'lazy')][string]$Mode = 'poll',
     [switch]$All,
     [string]$LabRoot = 'F:\ibcmd\lab\05\wave1\live',
+    [ValidatePattern('^localhost:(2541|5541)$')][string]$Srvr = 'localhost:5541',
     [int]$TimeoutSec = 120,
     [int]$PrimeAfterSec = 30
 )
@@ -22,7 +23,6 @@ $ErrorActionPreference = 'Stop'
 $obsDir = Join-Path $LabRoot 'obs'
 $epf = Join-Path $LabRoot 'observer\IbcmdRsObserver.epf'
 $client = 'C:\Program Files\1cv8\8.3.27.2214\bin\1cv8c.exe'
-$srvr = 'localhost:5541'
 New-Item -ItemType Directory -Force $obsDir | Out-Null
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
