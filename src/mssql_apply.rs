@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -606,6 +606,12 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
     let selected_path = normalize_relative_path(&args.source_path)?;
     let paths = selected_source_closure_paths(&source_root, &selected_path)?;
     let mut observed = source_closure_fingerprint(&source_root, &paths)?;
+    let mut fingerprint_cache = SourceWatchFingerprint {
+        metadata: source_closure_metadata(&source_root, &paths)?,
+        digest: observed,
+        last_full_read: Instant::now(),
+        needs_full_read: false,
+    };
     let debounce = Duration::from_millis(args.watch_debounce_ms.clamp(50, 10_000));
     let mut changed_at = None;
     eprintln!(
@@ -616,7 +622,7 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
 
     loop {
         thread::sleep(Duration::from_millis(100));
-        let current = match source_closure_fingerprint(&source_root, &paths) {
+        let current = match fingerprint_cache.sample(&source_root, &paths, Instant::now()) {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("watch fingerprint error: {error:#}");
@@ -689,6 +695,64 @@ fn source_closure_fingerprint(source_root: &Path, paths: &[String]) -> Result<[u
         digest.update(&bytes);
     }
     Ok(digest.finalize().into())
+}
+
+// Metadata is an inexpensive change hint, never proof that content is unchanged.
+// A periodic full read catches edits with preserved size and modification time.
+const WATCH_FULL_READ_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(PartialEq, Eq)]
+struct SourceWatchMetadata {
+    length: u64,
+    modified: SystemTime,
+}
+
+fn source_closure_metadata(root: &Path, paths: &[String]) -> Result<Vec<SourceWatchMetadata>> {
+    paths
+        .iter()
+        .map(|relative| {
+            let path = root.join(path_from_slashes(relative));
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to stat watched source {}", path.display()))?;
+            anyhow::ensure!(metadata.is_file(), "watched source is not a regular file");
+            Ok(SourceWatchMetadata {
+                length: metadata.len(),
+                modified: metadata.modified()?,
+            })
+        })
+        .collect()
+}
+
+struct SourceWatchFingerprint {
+    metadata: Vec<SourceWatchMetadata>,
+    digest: [u8; 32],
+    last_full_read: Instant,
+    needs_full_read: bool,
+}
+
+impl SourceWatchFingerprint {
+    fn sample(&mut self, root: &Path, paths: &[String], now: Instant) -> Result<[u8; 32]> {
+        let metadata = match source_closure_metadata(root, paths) {
+            Ok(value) => value,
+            Err(error) => {
+                self.needs_full_read = true;
+                return Err(error);
+            }
+        };
+        if self.needs_full_read
+            || metadata != self.metadata
+            || now.saturating_duration_since(self.last_full_read) >= WATCH_FULL_READ_INTERVAL
+        {
+            self.needs_full_read = true;
+            let digest = source_closure_fingerprint(root, paths)?;
+            // Commit cache state only after the complete read succeeds.
+            self.metadata = metadata;
+            self.digest = digest;
+            self.last_full_read = now;
+            self.needs_full_read = false;
+        }
+        Ok(self.digest)
+    }
 }
 
 fn export_active_managed_form_fast(
@@ -1729,5 +1793,107 @@ mod tests {
         fs::write(root.join("Module.bsl"), "v2").unwrap();
         assert_ne!(source_closure_fingerprint(&root, &paths).unwrap(), first);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn watch_cache_periodically_catches_same_size_same_timestamp_edit() {
+        let root = std::env::temp_dir().join(format!("ibcmd-rs-watch-cache-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("Module.bsl");
+        fs::write(&file, "v1").unwrap();
+        let paths = vec!["Module.bsl".to_owned()];
+        let now = Instant::now();
+        let first = source_closure_fingerprint(&root, &paths).unwrap();
+        let mut cache = SourceWatchFingerprint {
+            metadata: source_closure_metadata(&root, &paths).unwrap(),
+            digest: first,
+            last_full_read: now,
+            needs_full_read: false,
+        };
+        for tick in 1..10 {
+            assert_eq!(
+                cache
+                    .sample(&root, &paths, now + Duration::from_millis(tick * 100))
+                    .unwrap(),
+                first
+            );
+            assert_eq!(cache.last_full_read, now, "idle polling reread contents");
+        }
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "v2").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert!(source_closure_metadata(&root, &paths).unwrap() == cache.metadata);
+        assert_ne!(
+            cache
+                .sample(&root, &paths, now + WATCH_FULL_READ_INTERVAL)
+                .unwrap(),
+            first
+        );
+        let canonical = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            canonical.parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
+        assert!(
+            canonical
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("ibcmd-rs-watch-cache-")
+        );
+        fs::remove_dir_all(canonical).unwrap();
+    }
+
+    #[test]
+    fn watch_cache_read_failure_requires_a_fresh_successful_digest() {
+        let root = std::env::temp_dir().join(format!("ibcmd-rs-watch-cache-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("Module.bsl");
+        fs::write(&file, "v1").unwrap();
+        let paths = vec!["Module.bsl".to_owned()];
+        let now = Instant::now();
+        let first = source_closure_fingerprint(&root, &paths).unwrap();
+        let mut cache = SourceWatchFingerprint {
+            metadata: source_closure_metadata(&root, &paths).unwrap(),
+            digest: first,
+            last_full_read: now,
+            needs_full_read: false,
+        };
+        fs::remove_file(&file).unwrap();
+        assert!(
+            cache
+                .sample(&root, &paths, now + Duration::from_millis(100))
+                .is_err()
+        );
+        assert!(cache.needs_full_read);
+        assert_eq!(cache.digest, first);
+        fs::write(&file, "v2").unwrap();
+        assert_ne!(
+            cache
+                .sample(&root, &paths, now + Duration::from_millis(200))
+                .unwrap(),
+            first
+        );
+        assert!(!cache.needs_full_read);
+        let canonical = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            canonical.parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
+        assert!(
+            canonical
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("ibcmd-rs-watch-cache-")
+        );
+        fs::remove_dir_all(canonical).unwrap();
     }
 }
