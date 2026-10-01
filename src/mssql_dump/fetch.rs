@@ -392,11 +392,12 @@ pub(super) fn fetch_rows(
         return fetch_config_rows(sql, database, table, selected_file_names);
     };
     let query = build_fetch_rows_sql(database, table, selected_file_names);
-    let stdout = run_sql_capture_tsv(
+    let stdout = run_sql_capture_tsv_with_policy(
         &tools.sqlcmd,
         sql.server(),
         sql.user(),
         sql.password(),
+        sql.trust_server_certificate(),
         &query,
     )?;
     let chunks = parse_config_chunk_rows(&stdout)
@@ -423,11 +424,12 @@ pub(super) fn fetch_rows_direct_hex(
         return fetch_config_rows(sql, database, table, selected_file_names);
     };
     let query = build_fetch_rows_direct_hex_sql(database, table, selected_file_names);
-    let stdout = run_sql_capture_tsv(
+    let stdout = run_sql_capture_tsv_with_policy(
         &tools.sqlcmd,
         sql.server(),
         sql.user(),
         sql.password(),
+        sql.trust_server_certificate(),
         &query,
     )?;
     parse_config_direct_rows(&stdout)
@@ -720,10 +722,12 @@ fn bcp_queryout_row_parts(
         "-S".to_owned(),
         server.to_owned(),
         "-n".to_owned(),
-        "-u".to_owned(),
         "-a".to_owned(),
         "65535".to_owned(),
     ];
+    if sql.trust_server_certificate() {
+        arguments.push("-u".to_owned());
+    }
     let mut sanitized_arguments = arguments.clone();
     sanitized_arguments[0] = query_marker(query);
     match user {
@@ -844,11 +848,12 @@ pub(super) fn fetch_metadata_rows_hex(
         return fetch_metadata_rows(sql, database, table);
     };
     let query = build_fetch_metadata_rows_sql(database, table);
-    let stdout = run_sql_capture_tsv(
+    let stdout = run_sql_capture_tsv_with_policy(
         &tools.sqlcmd,
         sql.server(),
         sql.user(),
         sql.password(),
+        sql.trust_server_certificate(),
         &query,
     )?;
     let chunks = parse_config_chunk_rows(&stdout)
@@ -1193,11 +1198,12 @@ fn fetch_row_headers_query(sql: &SqlExec, query: &str) -> Result<Vec<ConfigRowHe
                 .collect()
         }),
         SqlBackend::Tools(tools) => {
-            let stdout = run_sql_capture_tsv(
+            let stdout = run_sql_capture_tsv_with_policy(
                 &tools.sqlcmd,
                 sql.server(),
                 sql.user(),
                 sql.password(),
+                sql.trust_server_certificate(),
                 query,
             )?;
             parse_config_row_headers(&stdout)
@@ -2347,6 +2353,61 @@ mod tests {
         split_selected_file_names_for_row_headers_query, start_subprocess_call,
     };
     use crate::sql::{SqlExec, SqlOptions};
+
+    #[test]
+    fn tools_export_reads_obey_certificate_policy_in_actual_arguments() {
+        use crate::sql::{SqlLogin, SqlTarget, SqlTools};
+        for trust in [false, true] {
+            let missing = std::env::temp_dir().join(format!(
+                "ibcmd-certificate-tool-missing-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let sql = SqlExec::with_tools(
+                SqlTarget {
+                    server: "must-not-connect".into(),
+                    database: None,
+                    login: SqlLogin::Integrated,
+                    trust_server_certificate: trust,
+                },
+                SqlTools {
+                    sqlcmd: missing.clone(),
+                    bcp: missing,
+                },
+            );
+            let guard =
+                begin_subprocess_journal("<password-source:none>", "fake", "db", None).unwrap();
+            let names = BTreeSet::from(["root".to_owned()]);
+            assert!(super::fetch_rows(&sql, "db", "Config", &names).is_err());
+            assert!(super::fetch_rows_direct_hex(&sql, "db", "Config", &names).is_err());
+            assert!(super::fetch_metadata_rows_hex(&sql, "db", "Config").is_err());
+            assert!(super::fetch_row_headers_query(&sql, "SELECT 1").is_err());
+            assert!(super::fetch_binary_row_parts(&sql, "db", "Config", "SELECT 1").is_err());
+            let calls = super::current_subprocess_calls();
+            assert_eq!(calls.len(), 5);
+            for call in &calls[..4] {
+                assert_eq!(
+                    call.arguments.iter().any(|x| x == "-C"),
+                    trust,
+                    "actual sqlcmd arguments: {:?}",
+                    call.arguments
+                );
+            }
+            assert_eq!(
+                calls[4].arguments.iter().any(|x| x == "-u"),
+                trust,
+                "actual bcp arguments: {:?}",
+                calls[4].arguments
+            );
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| call.status == "failed" && call.exit_code.is_none())
+            );
+            guard
+                .finish_failed(&anyhow::anyhow!("intentional missing tools"))
+                .unwrap();
+        }
+    }
 
     #[test]
     fn subprocess_journal_uses_query_hashes_and_password_source_markers() {

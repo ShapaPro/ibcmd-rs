@@ -28,3 +28,17 @@ Both built-in/tool constructor choices are checked without opening a connection.
 The first test fixture omitted required CommonModule properties and failed before
 the stage SQL read; a valid XML fixture corrected that test setup. No product
 fallback or certificate validation was relaxed to pass the test.
+
+Independent review found that four export TSV reads and binary `bcp queryout`
+still used their legacy trust setting despite the supplied handle. These reads
+now use the handle policy: sqlcmd receives `-C` and bcp receives `-u` only when
+trust is explicitly enabled. Standalone callers still supply their legacy trusted
+handles. A regression enters all five actual fetch paths with uniquely missing
+tool executables and captures the real journalled arguments for false/true;
+it reproduced the old forced `-C` failure, then passed after the repair. No SQL
+connection or successful subprocess launch is involved.
+
+The extension CAS aggregate preflight also uses that supplied handle policy;
+its actual sqlcmd argument capture is checked for both choices separately.
+The meaning of bcp `-u` is documented by
+[Microsoft's bcp reference](https://learn.microsoft.com/en-us/sql/tools/bcp/bcp-utility?view=sql-server-ver17#-u).
