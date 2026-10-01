@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 $env:PYTHONUTF8 = '1'
 $kit = $PSScriptRoot
 . "$kit\native_lock.ps1"
+. "$kit\verdicts.ps1"
 $lab = if ($env:DDL_LAB) { $env:DDL_LAB } else { 'F:\ibcmd\lab\04\restructure' }
 $base = "ibcmd_rs_04_ddl_s2_${Case}_base"
 $oursDb = "ibcmd_rs_04_ddl_s2_${Case}_ours"
@@ -120,6 +121,10 @@ if ($Refused) {
     Log 'checks 2-6'
     $env:TWIN_OUT = "$lab\out"
     pwsh -NoProfile -File "$kit\twin_check.ps1" -Case $Case -Nat $nat -Own $own -Report "$o\dry.json" -NatLabel nat_after *> "$o\twin_check.txt"
+    Assert-LabCommand $LASTEXITCODE 'twin checks'
+    $expectedTables = @((Get-Content "$o\dry.json" -Raw -Encoding UTF8 | ConvertFrom-Json).structure.tables)
+    Assert-LabExcept "$lab\out\${Case}_twin\except.txt" $expectedTables
+    Assert-LabConfig "$lab\out\${Case}_twin\config.txt"
     Get-Content "$o\twin_check.txt" | Select-String -Pattern '^(rebuilt|changed|\d+ of 16|DBNames text|entries that differ|only in)' | ForEach-Object { Note $_.Line }
     # twin_check prints the first lines of the .si comparison only; its own file has the count (S1-F: 15 of 16, c4629235 in the approximate order)
     Get-Content "$lab\out\${Case}_twin\si.txt" -ErrorAction SilentlyContinue | Select-String -Pattern '\d+ of \d+ `\.si` rows' | ForEach-Object { Note $_.Line }
@@ -129,13 +134,16 @@ if ($Refused) {
     Note ("check 4 (Config rows): " + $(if ($config) { 'DIFFERENCES' } else { 'no row differs' }))
     Log 'check 7: the platform apply on our twin'
     pwsh -NoProfile -File "$kit\apply_only.ps1" -Database $own *> "$o\native_noop.txt"
+    Assert-LabNoop $LASTEXITCODE "$o\native_noop.txt"
     Get-Content "$o\native_noop.txt" | Select-String -Pattern 'не требуется|exit=' | ForEach-Object { Note "check 7: $($_.Line)" }
     Log 'check 8: exports'
     foreach ($db in $nat, $own) {
         Remove-Item -Recurse -Force "$lab\export\$db" -ErrorAction SilentlyContinue
         pwsh -NoProfile -File "$kit\export_tree.ps1" -Database $db -Out "$lab\export\$db" 2>&1 | Select-Object -Last 1 | ForEach-Object { Note "export $db : $_" }
+        Assert-LabCommand $LASTEXITCODE "native export of $db"
     }
     & $Exe source-diff "$lab\export\$nat" "$lab\export\$own" > "$o\export_diff.json" 2>&1
+    Assert-LabExport $LASTEXITCODE "$o\export_diff.json"
     $diff = python -c "import json; d=json.load(open(r'$o\export_diff.json',encoding='utf-8')); print(d['summary'])"
     Note "check 8 (source-diff): $diff"
 }
@@ -158,7 +166,7 @@ if ($Ours -and -not $Refused) {
     $importOut | ForEach-Object { "$_" } | Set-Content "$o\ours_import.log" -Encoding UTF8
     $rows = sqlcmd -S localhost -E -C -h -1 -W -d $oursDb -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM ConfigSave"
     Note "our import exit $importExit in $([math]::Round($sw.Elapsed.TotalSeconds, 1))s, $($rows.Trim()) rows in ConfigSave"
-    if ($importExit -ne 0) { $importOut | Select-Object -Last 12 | ForEach-Object { Note "  ours import: $_" } }
+    if ($importExit -ne 0) { $importOut | Select-Object -Last 12 | ForEach-Object { Note "  ours import: $_" }; throw 'our import failed' }
     else {
         $backupOurs = "$lab\bak\mix_${Case}_ours_$([Guid]::NewGuid().ToString('N').Substring(0, 8)).bak"
         $oursArgs = @('infobase', 'config', 'apply', '--dbms=MSSQLServer', '--db-server=localhost', "--db-name=$oursDb", "--data=$oursData",
@@ -169,18 +177,26 @@ if ($Ours -and -not $Refused) {
         Get-Content "$o\ours_apply.out" -Tail 3 -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object { Note "  ours apply.out: $_" }
         Get-Content "$o\ours_apply.err" -Tail 4 -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { Note "  ours apply.err: $_" }
         if (Test-Path $backupOurs) { Remove-Item -Force $backupOurs }
+        Assert-LabCommand $rc2 'drop-in apply after our import'
         if ($rc2 -eq 0) {
             $tables = @((Get-Content "$o\dry.json" -Raw -Encoding UTF8 | ConvertFrom-Json).structure.tables) -join ','
             pwsh -NoProfile -File "$kit\compare_tables.ps1" -A $nat -B $oursDb -Tables $tables -Out "$o\ours_except.txt" *> $null
+            Assert-LabCommand $LASTEXITCODE 'rebuilt-table comparison'
+            Assert-LabExcept "$o\ours_except.txt" @($tables -split ',')
             $except2 = Get-Content "$o\ours_except.txt" | Select-String -Pattern 'only in A [1-9]|only in B [1-9]'
             Note ("ours: check 3 (EXCEPT both ways): " + $(if ($except2) { "DIFFERENCES: $($except2.Count) tables" } else { 'no row differs' }))
             pwsh -NoProfile -File "$kit\apply_only.ps1" -Database $oursDb *> "$o\ours_noop.txt"
+            Assert-LabNoop $LASTEXITCODE "$o\ours_noop.txt"
             Get-Content "$o\ours_noop.txt" | Select-String -Pattern 'не требуется|exit=' | ForEach-Object { Note "ours: check 7: $($_.Line)" }
             Remove-Item -Recurse -Force "$lab\export\$oursDb" -ErrorAction SilentlyContinue
             pwsh -NoProfile -File "$kit\export_tree.ps1" -Database $oursDb -Out "$lab\export\$oursDb" 2>&1 | Select-Object -Last 1 | ForEach-Object { Note "ours: export : $_" }
+            Assert-LabCommand $LASTEXITCODE "native export of $oursDb"
             & $Exe source-diff "$lab\export\$nat" "$lab\export\$oursDb" > "$o\ours_export_diff.json" 2>&1
+            Assert-LabExport $LASTEXITCODE "$o\ours_export_diff.json" -AllowDifferences
             $diff2 = python -c "import json; d=json.load(open(r'$o\ours_export_diff.json',encoding='utf-8')); print(d['summary'])"
             Note "ours: check 8 (source-diff against the platform's twin): $diff2"
+            python "$kit\diff_paths.py" "$o\ours_export_diff.json" "$lab\tree_s2\$Case\forms.txt" "$lab\export\$oursDb" "$lab\tree_s2\$Case\stage_full" | ForEach-Object { Note "ours: check 8: $_" }
+            Assert-LabCommand $LASTEXITCODE 'expected export paths after our import'
         }
     }
 }
