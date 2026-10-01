@@ -28,6 +28,11 @@ The separate LIVE checkpoint reader, embedded snapshot and token bytes stay
 compatible with format 1; their numeric arrays are not compacted by this change.
 Generic guarded undo and compact LIVE checkpoints remain open parts of F8.
 
+The later [opt-in compact LIVE envelope](compact-live-recovery-2026-10-01.md)
+adds a separate format-2 representation and legacy reader compatibility.
+It preserves the default format-1 branch; actual format-2 cycle acceptance
+and generic guarded undo still require their own evidence.
+
 Regressions exercise exact header/byte roundtrip and identical repeat;
 conflicting publication; missing, truncated and altered packs; rechecksummed
 overlapping references, invalid tokens/database, foreign pack paths and budgets;

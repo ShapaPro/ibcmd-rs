@@ -103,7 +103,7 @@ impl MssqlNativePlatformProfile {
     /// The dynamic apply requires that its generation, its change registrations and
     /// `MobileVersions.dat` were compared with the native `--dynamic=force` on this build.
     /// 8.5.1.1150 admission is additionally restricted by the dynamic planner to
-    /// its measured initial five-row, existing CommonModule body cohort.
+    /// its measured initial five-row CommonModule or module-only CommonForm cohort.
     pub fn require_config_apply_dynamic_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_CONFIG_APPLY_DYNAMIC)
     }

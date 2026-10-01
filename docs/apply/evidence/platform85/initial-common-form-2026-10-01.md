@@ -111,5 +111,15 @@ saved process identity union/listener checks confirm private stop. All five
 owned SQL clones are unregistered; worker/native leases are released.
 No standing cluster, foreign session or reference database was modified.
 
-This candidate awaits independent immutable source/raw evidence review before
-public form admission. Broader 8.5 capabilities remain unchanged and closed.
+Independent coordinator review verified all seven raw snapshot packs, full
+headers/ranges and multipart totals, all 12336 actual source-file hashes, the
+379/182 session journals and overlap, exact native body/committed fixture bytes,
+the actual binary and nine source-file hashes. The eight relocated recovery
+files were independently hashed on F; post-move reparse-check timing remains
+explicit. Review records and checker scripts are retained under
+`F:/ibcmd/lab/05/wave3/coordinator/review-p85-form-*`.
+
+The measured initial module-only CommonForm seam is accepted for publication.
+Broader 8.5 capabilities remain unchanged and closed. The actual experimental
+binary above remains the runtime provenance; later combined checks or binaries
+do not imply another native run.

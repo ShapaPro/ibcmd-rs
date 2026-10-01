@@ -242,9 +242,9 @@ fn judge_rows(
     Ok(reasons)
 }
 
-/// Experimental initial CommonForm control extends the same five-row cohort.
-/// No previous generation or SI collection is admitted. Independent native/OWN
-/// form evidence is required before this experimental seam can be published.
+/// Independently measured initial CommonModule/CommonForm five-row cohorts.
+/// No previous generation or SI collection is admitted. CommonForm is limited
+/// to its measured module-only container/layout, with opaque bytes bound below.
 fn judge_initial_85_cohort(
     staged: &[RowMeta],
     active: &HashMap<(String, i32), RowMeta>,
@@ -254,7 +254,7 @@ fn judge_initial_85_cohort(
     has_marker: bool,
 ) -> Vec<String> {
     let refusal = || {
-        vec!["platform-8.5.1.1150: only an initial five-row delta of one existing CommonModule or CommonForm .0 with its unchanged descriptor and root/version/versions is admitted by this experimental control; history, overlays, removals and other owners/bodies require native apply".to_owned()]
+        vec!["platform-8.5.1.1150: only an initial five-row delta of one existing CommonModule or module-only CommonForm .0 with its unchanged descriptor and root/version/versions is measured; history, overlays, removals and other owners/bodies require native apply".to_owned()]
     };
     if has_marker || !history.is_empty() || !overlay.is_empty() || staged.len() != 5 {
         return refusal();
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_85_experimental_cohort_accepts_only_one_existing_top_level_body() {
+    fn initial_85_cohort_accepts_only_one_existing_top_level_body() {
         let stage = delta();
         let active = all_active();
         let check = |rows: &[RowMeta], kinds: &HashMap<String, &'static str>| {
