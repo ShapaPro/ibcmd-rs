@@ -17,7 +17,8 @@ function Get-Item{param($LiteralPath,[switch]$Force);[pscustomobject]@{Attribute
 function Get-Content{param($LiteralPath,[switch]$Raw);if($LiteralPath -eq $script:StateFile){return $global:Private83FakeJson};if($LiteralPath -like 'F:\ibcmd\lab\04\locks\worker\*'){return $global:Private83FakeLease};throw 'unexpected mock read'}
 function Set-Content{param($LiteralPath,$Encoding,[Parameter(ValueFromPipeline)]$Value);begin{$values=@()}process{$values+=$Value}end{if($LiteralPath -eq $script:StateFile){$global:Private83FakeJson=$values -join "`n"}}}
 function Add-Content{param($LiteralPath,$Encoding,[Parameter(ValueFromPipeline)]$Value)}
-function Import-Csv{param($LiteralPath,$Delimiter);@([pscustomobject]@{track='load';database='ibcmd_rs_05_load_w3_mock';notes='from F:\ibcmd\lab\05\wave3\load\own.bak'},[pscustomobject]@{track='meta';database='ibcmd_rs_05_meta_w3_mock';notes='from F:\ibcmd\lab\dbbak\bsp.bak'})}
+$global:Private83FakeOrigin='from F:\ibcmd\lab\05\wave3\load\own.bak'
+function Import-Csv{param($LiteralPath,$Delimiter);@([pscustomobject]@{track='load';database='ibcmd_rs_05_load_w3_mock';notes=$global:Private83FakeOrigin},[pscustomobject]@{track='meta';database='ibcmd_rs_05_meta_w3_mock';notes='from F:\ibcmd\lab\dbbak\bsp.bak'})}
 function Stop-Process{param($Id,[switch]$Force);$global:Private83SignalCount++;throw 'mock signal reached'}
 function Start-Process{param($FilePath,$ArgumentList,$WindowStyle,[switch]$PassThru);$global:Private83StartCount++;throw 'mock start reached'}
 function Remove-Item{param($LiteralPath,[switch]$Force,[switch]$Recurse);$global:Private83DeleteCount++;throw 'mock delete reached'}
@@ -39,6 +40,7 @@ $invalid=$retained|ConvertTo-Json -Depth 9|ConvertFrom-Json;$invalid.known=@(Pri
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5540;OwningProcess=700004});Refuse {Private-RequireListeners $retained} 'foreign/unproved';$global:Private83FakeListeners=@()
 $foreign.CommandLine='foreign -regport 5541';Refuse {Private-RequireListeners $retained} 'unknown private-looking';$foreign.CommandLine='private rphost.exe'
 Private-RequireNames @('ibcmd_rs_05_load_w3_mock')
+foreach($origin in @('from F:..\..\lab\05\wave3\load\own.bak','from \ibcmd\lab\05\wave3\load\own.bak')){$global:Private83FakeOrigin=$origin;Refuse {Private-RequireNames @('ibcmd_rs_05_load_w3_mock')} 'foreign/unmanifested'};$global:Private83FakeOrigin='from F:\ibcmd\lab\05\wave3\load\own.bak'
 foreach($name in @('bsp','ibcmd_rs_05_load_w3_absent','ibcmd_rs_05_meta_w3_mock')){Refuse {Private-RequireNames @($name)} 'foreign/unmanifested'}
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5545;OwningProcess=700002})
 $global:Private83Registration="infobase : 22222222-2222-2222-2222-222222222222`nname : ibcmd_rs_05_load_w3_absent";Refuse {Private-Snapshot $retained 'disconnected'} 'foreign/unmanifested'

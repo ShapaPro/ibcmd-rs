@@ -130,7 +130,7 @@ function Private-RequireNames([string[]]$Names){
  $ownBackups=([IO.Path]::GetDirectoryName($script:Root))+'\'
  $manifest=@(Import-Csv -LiteralPath 'F:\ibcmd\lab\04\databases.tsv' -Delimiter "`t"|Where-Object{
   if($_.track -cne $script:PrivateContext.track -or $_.notes -notmatch '^from (.+)$'){return $false}
-  $origin=$Matches[1];if(![IO.Path]::IsPathRooted($origin)){return $false}
+  $origin=$Matches[1];if(![IO.Path]::IsPathFullyQualified($origin)){return $false}
   $origin=[IO.Path]::GetFullPath($origin)
   $origin.StartsWith('F:\ibcmd\lab\dbbak\',[StringComparison]::OrdinalIgnoreCase) -or $origin.StartsWith($ownBackups,[StringComparison]::OrdinalIgnoreCase)
  })

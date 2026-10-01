@@ -23,7 +23,7 @@ function Resolve-LoadLabRoot([string]$Path) {
 function Test-LoadRestoreOrigin([string]$Notes, [string]$LabRoot) {
     if ($Notes -notmatch '^from (.+)$') { return $false }
     $origin = $Matches[1]
-    if (-not [IO.Path]::IsPathRooted($origin)) { return $false }
+    if (-not [IO.Path]::IsPathFullyQualified($origin)) { return $false }
     $origin = [IO.Path]::GetFullPath($origin)
     $lab = [IO.Path]::GetFullPath($LabRoot).TrimEnd('\') + '\'
     return $origin.StartsWith('F:\ibcmd\lab\dbbak\', [StringComparison]::OrdinalIgnoreCase) -or
