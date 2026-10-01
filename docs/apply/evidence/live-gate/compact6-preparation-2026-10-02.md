@@ -1,6 +1,9 @@
 # Compact LIVE format2: fresh compact6 preparation
 
-Compact6 has not run. This checkpoint prepares one separately reviewed fresh
+At preparation checkpoint639bd007 compact6 had not run. The later controller
+attempt stopped at its bounded resource wait before restore; see
+[the measured resource outcome](compact6-resource-outcome-2026-10-02.md).
+This preparation checkpoint prepares one separately reviewed fresh
 lifetime after compact5 retained phase1 and stopped cleanly. Root scheduling
 and independent PREEXEC acceptance are required before any worker acquisition.
 It does not complete F5, connected-session readiness, generic undo or zero-error
