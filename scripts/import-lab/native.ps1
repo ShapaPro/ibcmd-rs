@@ -52,11 +52,14 @@ $script:NativeLockHeld = $false
 # that follows it on the same clone wraps both in one call and holds the lock once.
 function Invoke-WithNativeLock([scriptblock]$Body, [int]$TimeoutMin = 180) {
     if ($script:NativeLockHeld) { & $Body; return }
+    # PowerShell resolves variables dynamically. The heavy wrapper also has a $Body parameter:
+    # capture under another name or its inner invocation calls the lock wrapper recursively.
+    $nativeBody = $Body
     Invoke-WithHeavyLock {
         $out = & pwsh -NoProfile -File $script:Lock acquire import -Name native -TimeoutMin $TimeoutMin
         if ($LASTEXITCODE -ne 0) { throw "native lock: $out" }
         $script:NativeLockHeld = $true
-        try { & $Body } finally {
+        try { & $nativeBody } finally {
             $script:NativeLockHeld = $false
             & pwsh -NoProfile -File $script:Lock release import -Name native | Out-Null
         }
