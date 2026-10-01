@@ -12,14 +12,18 @@ authoritative: `direct-mssql-online-activation`, `add-mssql-live-generation-swit
    contract. Preserve the refusal for a nonempty overlay deletion list until
    the native service-info protocol has been implemented and measured.
    `auto`, `disable`, and `prompt` must retain exclusive behavior.
-2. Replace the live SQL-connection-count readiness assumption (#409 F-5)
-   with bounded, session-aware readiness and a recoverable continuation.
-   Separate committed promotion/cycle 1 from cycle 2. A repeated continuation
+2. Add an explicit `--live-checkpoint` alternative to the live SQL-connection-
+   count readiness assumption (#409 F-5), with bounded session-aware checks
+   and a recoverable continuation for already-staged activation. Preserve
+   the default renderer; source apply/watch refuse the checkpoint option
+   before staging. Separate committed promotion/cycle 1 from cycle 2. A repeated continuation
    must never blindly run a third cycle. Recovery evidence and unfinished
    session work must remain visible. Existing F-9/F-10 safety gates remain.
    The first checkpoint completes automatically only on a verified infobase
    without user sessions; active sessions leave continuation explicitly
-   required. Adaptive warm-session readiness/load proof remains open.
+   required. Shared guards protect source-stage writes and default live
+   activation from an unfinished checkpoint. Adaptive warm-session readiness,
+   high-level source orchestration and fresh session/load proof remain open.
 3. Correct extension form interceptor read/write handling (#348): decode
    both primary and additional handler codes when an adopted form has no
    BaseForm. The measured After event uses an additional handler; Override
