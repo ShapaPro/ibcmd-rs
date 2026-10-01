@@ -1095,7 +1095,9 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
             )?
             .ok_or_else(|| anyhow!("8.5 active body vanished"))?;
             let kind = match classify_name(&body.name) {
-                RowName::Body { owner, .. } => kinds.get(&owner.to_ascii_lowercase()).copied(),
+                RowName::Body { owner, .. } => {
+                    kinds.kinds.get(&owner.to_ascii_lowercase()).copied()
+                }
                 _ => None,
             };
             match kind {
