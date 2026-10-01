@@ -389,3 +389,61 @@ fn a_database_without_a_registry_is_an_error() {
         "{error:#}"
     );
 }
+
+#[test]
+fn a_stage_equal_to_the_physical_base_reverts_the_effective_alias_synonym() {
+    // Physical Config says A, the published alias and registry say B, ConfigSave reverts to A.
+    // The reader deliberately needs no physical Config answer: it reads the authoritative staged headers.
+    let staged = deflate_row(descriptor(&ru("Обработка"), &ru("Реквизит")).as_bytes()).unwrap();
+    let split = staged.len() / 2;
+    let mut client = registry_database();
+    client.rules[0].1[0][3] =
+        SqlValue::Binary(deflate_row(main_row("Обработка (новая)").as_bytes()).unwrap());
+    client.rules.push((
+        "FROM [testdb].dbo.ConfigSave s WHERE".to_owned(),
+        vec![
+            vec![
+                text(OWNER),
+                SqlValue::Int(0),
+                SqlValue::Binary(staged[..split].to_vec()),
+            ],
+            vec![
+                text(OWNER),
+                SqlValue::Int(1),
+                SqlValue::Binary(staged[split..].to_vec()),
+            ],
+        ],
+    ));
+    let changes = read_changes(&client, "testdb", &[OWNER.to_owned()]).unwrap();
+    assert_eq!(
+        changes.len(),
+        2,
+        "both object's and nested attribute's headers are authoritative"
+    );
+    let (rewrites, count) = plan_search_info(&client, "testdb", &changes, Vec::new()).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(plain(&rewrites[0]), main_row("Обработка"));
+    assert_ne!(
+        String::from_utf8(rewrites[1].new_bytes.clone()).unwrap(),
+        VERSIONS
+    );
+}
+
+#[test]
+fn an_unchanged_stage_keeps_the_registry_and_its_version_untouched() {
+    let mut client = registry_database();
+    client.rules.push((
+        "FROM [testdb].dbo.ConfigSave s WHERE".to_owned(),
+        vec![vec![
+            text(OWNER),
+            SqlValue::Int(0),
+            SqlValue::Binary(
+                deflate_row(descriptor(&ru("Обработка"), &ru("Реквизит")).as_bytes()).unwrap(),
+            ),
+        ]],
+    ));
+    let changes = read_changes(&client, "testdb", &[OWNER.to_owned()]).unwrap();
+    let (rewrites, count) = plan_search_info(&client, "testdb", &changes, Vec::new()).unwrap();
+    assert_eq!(count, 0);
+    assert!(rewrites.is_empty(), "no registry or siVersions churn");
+}

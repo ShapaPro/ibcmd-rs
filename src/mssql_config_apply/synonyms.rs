@@ -7,9 +7,10 @@
 //! record is the only thing that changes). This apply used to leave the old text: it wrote the registry for new
 //! forms and templates and for a restructuring only.
 //!
-//! Every object and child object of a descriptor row starts with the same md header,
+//! Every staged object and child object of a descriptor row starts with the same md header,
 //! `{3,{1,0,<uuid>},"Name",{<n>,"ru","text",...},"Comment",...}`. A synonym changed is a header of the staged
-//! row whose uuid the active row has too, with other pairs. The record of that uuid takes the new pairs; a uuid
+//! row whose registry record has other pairs. Reading all staged headers also covers a reversion of a dynamic
+//! alias to the physical base descriptor. The record of that uuid takes the staged pairs; a uuid
 //! the registry does not list (not every header has a record) is left out. The edit is made on the text the
 //! stage's other edits of the same row produced (new forms and templates, a restructuring, removals), as the
 //! removals do, by [`crate::restructure::caches::registry::set_synonyms`].
@@ -87,22 +88,27 @@ pub fn changes_between(active: &[u8], staged: &[u8]) -> Result<Vec<SynonymChange
         .collect())
 }
 
-/// The synonym changes of the staged descriptors `names` (rows of `ConfigSave` whose bytes differ from the
-/// active row's) against the active `Config`.
+/// The authoritative synonyms of every header in the staged descriptors `names`.
+///
+/// Compare these with the registry, not with physical Config rows: a dynamic update may publish another
+/// descriptor under an alias, and a stage can revert it to bytes equal to the physical base. Joining to that
+/// base (or filtering equal digests before this read) would miss the reversion. New headers absent from the
+/// registry are ignored by the writer; headers inserted by an earlier cache edit already have the right text.
+/// Descriptor parts are joined before inflation, like other configuration row readers.
 pub fn read_changes(
     client: &dyn SqlClient,
     database: &str,
     names: &[String],
 ) -> Result<Vec<SynonymChange>> {
     let db = quote_ident(database)?;
-    let mut out = Vec::new();
+    let mut stored = BTreeMap::<String, Vec<u8>>::new();
     for chunk in names.chunks(400) {
         let placeholders = (1..=chunk.len())
             .map(|index| format!("@P{index}"))
             .collect::<Vec<_>>()
             .join(", ");
         let query = format!(
-            "SELECT s.FileName, s.BinaryData, c.BinaryData FROM {db}.dbo.ConfigSave s JOIN {db}.dbo.Config c ON c.FileName = s.FileName AND c.PartNo = s.PartNo WHERE s.PartNo = 0 AND s.FileName IN ({placeholders})"
+            "SELECT s.FileName, s.PartNo, s.BinaryData FROM {db}.dbo.ConfigSave s WHERE s.FileName IN ({placeholders}) ORDER BY s.FileName, s.PartNo"
         );
         let params = chunk
             .iter()
@@ -110,15 +116,30 @@ pub fn read_changes(
             .collect::<Vec<_>>();
         client.read_rows(&query, &params, &mut |mut row| {
             let name = row.take_text(0)?;
-            let staged = inflate_row(&row.take_binary(1)?)
-                .with_context(|| format!("the staged descriptor {name} does not inflate"))?;
-            let active = inflate_row(&row.take_binary(2)?)
-                .with_context(|| format!("the active descriptor {name} does not inflate"))?;
-            out.extend(changes_between(&active, &staged).with_context(|| name.clone())?);
+            let bytes = row.take_binary(2)?;
+            stored.entry(name).or_default().extend_from_slice(&bytes);
             Ok(())
         })?;
     }
-    Ok(out)
+    let mut headers = BTreeMap::new();
+    for (name, bytes) in stored {
+        let staged = inflate_row(&bytes)
+            .with_context(|| format!("the staged descriptor {name} does not inflate"))?;
+        let parsed = parse_row(&staged)
+            .with_context(|| format!("the staged descriptor {name} does not parse"))?;
+        for (uuid, synonyms) in header_synonyms(&parsed) {
+            if let Some(previous) = headers.insert(uuid.clone(), synonyms.clone()) {
+                ensure!(
+                    previous == synonyms,
+                    "staged descriptors disagree on the synonyms of {uuid}"
+                );
+            }
+        }
+    }
+    Ok(headers
+        .into_iter()
+        .map(|(uuid, synonyms)| SynonymChange { uuid, synonyms })
+        .collect())
 }
 
 /// The rewrites of the registry for the synonym changes, on top of `existing` (what the new forms and
