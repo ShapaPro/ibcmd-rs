@@ -8,15 +8,22 @@ param(
     [switch]$All,
     [ValidateSet('F:\ibcmd\lab\05\wave3\platform85')][string]$LabRoot = 'F:\ibcmd\lab\05\wave3\platform85',
     [ValidateSet('localhost:6541')][string]$Srvr = 'localhost:6541',
-    [int]$TimeoutSec = 120,
-    [int]$PrimeAfterSec = 30
+    [ValidateRange(5,300)][int]$TimeoutSec = 120,
+    [ValidateRange(0,300)][int]$PrimeAfterSec = 30
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+. "$PSScriptRoot\lib.ps1"
 $obsDir = Join-Path $LabRoot 'obs'
 $epf = Join-Path $LabRoot 'observer\IbcmdRsObserver.epf'
 $client = 'C:\Program Files\1cv8\8.5.1.1150\bin\1cv8c.exe'
-New-Item -ItemType Directory -Force $obsDir | Out-Null
+RequireLabPaths85 @($obsDir,$epf)
+if ($Label) { RequireLabel85 $Label }
+if ($Action -eq 'start') {
+    RequireOwnedNames85 @($Database)
+    RequireFreshObserver85 $obsDir $Label
+    New-Item -ItemType Directory -Force $obsDir | Out-Null
+}
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
@@ -53,16 +60,18 @@ function Test-LabClient([int]$processId, [string]$label) {
     $identityPath = Join-Path $obsDir "$label.identity.json"
     if (-not (Test-Path -LiteralPath $identityPath)) { return $false }
     $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
-    $p -and $p.ExecutablePath -eq $client -and
+    $bound = $p -and $p.ExecutablePath -eq $client -and
         $p.CreationDate.ToUniversalTime().Ticks -eq ([datetime]$identity.born).ToUniversalTime().Ticks -and
-        $p.CommandLine -eq $identity.command -and
-        $p.CommandLine -match 'localhost:6541\\ibcmd_rs_05_p85_w3_[a-z0-9_]+' -and
-        $p.CommandLine -match [regex]::Escape($epf) -and $p.CommandLine -match [regex]::Escape($label)
+        $p.CommandLine -eq $identity.command
+    if (-not $bound) { return $false }
+    try { RequireObserverCommand85 $p.CommandLine $label; return $true } catch { return $false }
 }
 
 switch ($Action) {
     'list' {
         Get-ChildItem $obsDir -Filter '*.pid' -ErrorAction SilentlyContinue | ForEach-Object {
+            RequireLabel85 $_.BaseName
+            RequireLabPaths85 @($_.FullName)
             $id = [int](Get-Content -LiteralPath $_.FullName -Raw).Trim()
             '{0}: pid {1} {2}' -f $_.BaseName, $id, $(if (Get-Process -Id $id -ErrorAction SilentlyContinue) { 'running' } else { 'gone' })
         }
@@ -70,6 +79,8 @@ switch ($Action) {
     'stop' {
         $files = if ($All) { @(Get-ChildItem $obsDir -Filter '*.pid') } elseif ($Label) { @(Get-ChildItem $obsDir -Filter "$Label.pid") } else { throw 'give -Label or -All' }
         foreach ($f in $files) {
+            RequireLabel85 $f.BaseName
+            RequireLabPaths85 @($f.FullName,(Join-Path $obsDir "$($f.BaseName).identity.json"))
             $id = [int](Get-Content -LiteralPath $f.FullName -Raw).Trim()
             if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) { "$($f.BaseName): pid $id already gone"; continue }
             if (-not (Test-LabClient $id $f.BaseName)) { "$($f.BaseName): pid $id is not our client any more; left alone"; continue }

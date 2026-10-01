@@ -28,3 +28,9 @@ separate and fail-closed.
 `test_ownership.ps1` exercises descendant/orphan identity retention, foreign
 exclusion, UTC serialization, PID/command/executable drift, manifest names and
 root/reparse refusal with mocks; it never starts or signals a process.
+
+Observer launch and direct dialog priming validate their lab paths before any
+read/write or UI action. A fresh label must have no journal, PID, identity or
+client-output artifact, including a failed launch that produced no journal.
+The command binds the exact private endpoint, manifest-owned database, EPF and
+label. Observer timeouts are bounded; stop labels cannot contain wildcards.

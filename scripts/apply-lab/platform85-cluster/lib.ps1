@@ -4,6 +4,36 @@ $script:Bin = 'C:\Program Files\1cv8\8.5.1.1150\bin'
 $script:StatePath = Join-Path $script:Root 'state.json'
 $script:Data = Join-Path $script:Root 'srvinfo'
 $script:Ports = @(6540,6541,6545) + @(6560..6591)
+function RequireLabPaths85([string[]]$Paths) {
+    $base = 'F:\ibcmd\lab\05\wave3\platform85\'
+    foreach ($inputPath in $Paths) {
+        $path = [IO.Path]::GetFullPath($inputPath)
+        if (-not $path.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)) { throw 'path is outside the owned platform85 lab' }
+        for ($probe = $path; $probe; $probe = [IO.Path]::GetDirectoryName($probe)) {
+            if ((Test-Path -LiteralPath $probe) -and ((Get-Item -LiteralPath $probe -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'owned platform85 lab path has reparse ancestry'
+            }
+        }
+    }
+}
+function RequireLabel85([string]$Label) {
+    if ($Label -notmatch '^[a-z0-9-]+$') { throw 'label: [a-z0-9-]+' }
+}
+function RequireFreshObserver85([string]$ObsDir,[string]$Label) {
+    RequireLabel85 $Label
+    $paths = @('log','pid','identity.json','client-out.txt') | ForEach-Object { Join-Path $ObsDir "$Label.$_" }
+    RequireLabPaths85 $paths
+    if (@($paths | Where-Object { Test-Path -LiteralPath $_ }).Count) { throw 'observer label has existing artifacts; preserve failed-launch ownership and choose a fresh label' }
+}
+function RequireObserverCommand85([string]$Command,[string]$Label) {
+    RequireLabel85 $Label
+    if ($Command -notmatch 'localhost:6541\\(?<database>ibcmd_rs_05_p85_w3_[a-z0-9_]+)') { throw 'observer command does not bind the private database' }
+    $database = $Matches.database
+    if ($Command -notmatch [regex]::Escape('F:\ibcmd\lab\05\wave3\platform85\observer\IbcmdRsObserver.epf') -or $Command -notmatch [regex]::Escape("/C`"$Label;")) {
+        throw 'observer command does not bind the owned EPF/label'
+    }
+    RequireOwnedNames85 @($database)
+}
 function RequireRoot85 {
     $path = [IO.Path]::GetFullPath($script:Root)
     if ($path -ne 'F:\ibcmd\lab\05\wave3\platform85\cluster') { throw 'unexpected private cluster root' }

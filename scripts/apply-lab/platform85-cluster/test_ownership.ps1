@@ -45,6 +45,30 @@ foreach($invalid in @('bsp','ibcmd_rs_05_p85_w3_unmanifested_20261001')) {
  if(-not $refused){throw "unmanifested registration accepted: $invalid"}
 }
 'PASS exact manifest registry superset refusal including disconnected names (no signals)'
+RequireLabPaths85 @('F:\ibcmd\lab\05\wave3\platform85\obs')
+foreach($invalid in @('D:\foreign','F:\ibcmd\lab\05\wave3\platform85\..\foreign')) {
+ $refused=$false
+ try { RequireLabPaths85 @($invalid) } catch { $refused=$_.Exception.Message -like '*outside*' }
+ if(-not $refused){throw "foreign observer path accepted: $invalid"}
+}
+foreach($invalid in @('../native-old','native*','')) {
+ $refused=$false
+ try { RequireLabel85 $invalid } catch { $refused=$true }
+ if(-not $refused){throw "unsafe observer label accepted: $invalid"}
+}
+$command='1cv8c.exe ENTERPRISE /S"localhost:6541\ibcmd_rs_05_p85_w3_mock_20261001" /Execute"F:\ibcmd\lab\05\wave3\platform85\observer\IbcmdRsObserver.epf" /C"mock;poll;owned"'
+RequireObserverCommand85 $command 'mock'
+foreach($invalid in @($command.Replace('6541','3541'),$command.Replace('mock_20261001','unmanifested_20261001'),$command.Replace('IbcmdRsObserver.epf','foreign.epf'),$command.Replace('/C"mock;','/C"other;'))) {
+ $refused=$false
+ try { RequireObserverCommand85 $invalid 'mock' } catch { $refused=$true }
+ if(-not $refused){throw 'foreign observer command accepted'}
+}
+function Test-Path { param($LiteralPath); $LiteralPath.EndsWith('.pid') }
+function Get-Item { param($LiteralPath,[switch]$Force); [pscustomobject]@{Attributes=[IO.FileAttributes]::Normal} }
+$refused=$false
+try { RequireFreshObserver85 'F:\ibcmd\lab\05\wave3\platform85\obs' 'failed-launch' } catch { $refused=$_.Exception.Message -like '*existing artifacts*' }
+if(-not $refused){throw 'PID-only failed launch can be overwritten'}
+'PASS observer path/label/command/manifest and PID-only artifact reuse refusal (mocked, no writes/launches)'
 $oldRoot=$script:Root
 $script:Root='D:\foreign-cluster'
 $refused=$false

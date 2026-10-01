@@ -1,5 +1,9 @@
 param([Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]+$')][string]$Label)
 $ErrorActionPreference='Stop'
+. "$PSScriptRoot\lib.ps1"
+$root='F:\ibcmd\lab\05\wave3\platform85'
+RequireLabel85 $Label
+RequireLabPaths85 @("$root\obs\$Label.pid","$root\obs\$Label.identity.json","$root\obs\$Label.log","$root\observer\IbcmdRsObserver.epf")
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -15,12 +19,12 @@ public static class OwnedPrime85 {
  }
 }
 '@
-$root='F:\ibcmd\lab\05\wave3\platform85'
 $id=[int](Get-Content "$root\obs\$Label.pid")
 $saved=Get-Content "$root\obs\$Label.identity.json" -Raw | ConvertFrom-Json
 for($attempt=0;$attempt -lt 5;$attempt++) {
  $p=Get-CimInstance Win32_Process -Filter "ProcessId=$id"
  if(-not $p -or $p.ExecutablePath -ne 'C:\Program Files\1cv8\8.5.1.1150\bin\1cv8c.exe' -or $p.CreationDate.ToUniversalTime().Ticks -ne ([datetime]$saved.born).ToUniversalTime().Ticks -or $p.CommandLine -ne $saved.command){throw 'owned observer identity mismatch'}
+ RequireObserverCommand85 $p.CommandLine $Label
  $cond=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$id)
  $windows=[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children,$cond)
  $clicked=$false
