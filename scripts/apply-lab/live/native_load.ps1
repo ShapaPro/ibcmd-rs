@@ -17,7 +17,7 @@ foreach ($artifact in $artifacts) {
     if (Test-Path -LiteralPath $artifact) { throw 'native label artifacts already exist; use a fresh label' }
 }
 $owned = Import-Csv -LiteralPath 'F:\ibcmd\lab\04\databases.tsv' -Delimiter "`t" |
-    Where-Object { $_.database -eq $Database -and $_.track -eq 'load' -and $_.notes -like 'from F:\ibcmd\lab\dbbak\*' }
+    Where-Object { $_.database -ceq $Database -and $_.track -ceq 'load' -and (Test-LoadRestoreOrigin $_.notes $lab) }
 if (-not $owned) { throw 'database is not a restored Track load clone in the ownership manifest' }
 $argv = @('infobase','config', $(if ($Action -eq 'import') {'import'} else {'apply'}))
 if ($Action -eq 'import') { $argv += 'files' }

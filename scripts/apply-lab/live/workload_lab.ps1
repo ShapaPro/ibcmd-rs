@@ -18,3 +18,14 @@ function Resolve-LoadLabRoot([string]$Path) {
     if ($ownership.track -cne 'load') { throw 'lab is not owned by Track load' }
     return $resolved
 }
+
+# Restore-manifest origin, not a matching name alone, authorizes native writes.
+function Test-LoadRestoreOrigin([string]$Notes, [string]$LabRoot) {
+    if ($Notes -notmatch '^from (.+)$') { return $false }
+    $origin = $Matches[1]
+    if (-not [IO.Path]::IsPathRooted($origin)) { return $false }
+    $origin = [IO.Path]::GetFullPath($origin)
+    $lab = [IO.Path]::GetFullPath($LabRoot).TrimEnd('\') + '\'
+    return $origin.StartsWith('F:\ibcmd\lab\dbbak\', [StringComparison]::OrdinalIgnoreCase) -or
+        $origin.StartsWith($lab, [StringComparison]::OrdinalIgnoreCase)
+}
