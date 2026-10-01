@@ -280,7 +280,7 @@ pub fn render_continue(artifact: &LiveArtifact, interrupt: bool, execute: bool) 
         // Refuse an intervening log backup: merely matching two set counts is not chain evidence.
         sql.push_str(&format!("IF NOT EXISTS (SELECT 1 FROM sys.database_recovery_status r JOIN #LiveHeader h ON h.Position=1 WHERE r.database_id=DB_ID(N'{name}') AND r.last_log_backup_lsn=h.LastLSN) THROW 57268,'live log chain advanced after cycle 1',1;\nALTER DATABASE {db} SET SINGLE_USER WITH ROLLBACK IMMEDIATE;\nSET @LiveAccessChanged=1;\nBACKUP LOG {db} TO DISK=N'{tail}' WITH NORECOVERY, NOINIT, COMPRESSION, CHECKSUM, NAME=N'{}';\nRESTORE DATABASE {db} WITH RECOVERY;\nALTER DATABASE {db} SET MULTI_USER;\nSET @LiveAccessChanged=0; SET @LiveExecuted=1;\nEND\n", artifact.backup_name(2)));
     }
-    sql.push_str(&format!("SELECT CONVERT(int,(SELECT COUNT(*) FROM #LiveHeader)),CONVERT(int,@LiveExecuted);\nEXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session';\nEND TRY BEGIN CATCH\nIF @LiveAccessChanged=1 AND DB_ID(N'{name}') IS NOT NULL AND DATABASEPROPERTYEX(N'{name}','Status')<>N'RESTORING' ALTER DATABASE {db} SET MULTI_USER;\nEXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session';\nTHROW; END CATCH;\n"));
+    sql.push_str(&format!("SELECT CONVERT(int,(SELECT COUNT(*) FROM #LiveHeader)),CONVERT(int,@LiveExecuted);\nEXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session';\nEND TRY BEGIN CATCH\nIF @LiveAccessChanged=1 AND DB_ID(N'{name}') IS NOT NULL AND DATABASEPROPERTYEX(N'{name}','Status')<>N'RESTORING' ALTER DATABASE {db} SET MULTI_USER;\nUSE [master];\nEXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session';\nTHROW; END CATCH;\n"));
     Ok(sql)
 }
 
@@ -995,6 +995,25 @@ mod tests {
         assert!(!sql.contains("promotion is rolled back"));
         assert!(sql.contains("open_transaction_count>0"));
         assert!(render_continuation_sessions_check("lab", true).is_empty());
+    }
+
+    #[test]
+    fn target_generation_refusal_releases_the_lock_in_its_owning_database() {
+        for execute in [false, true] {
+            let sql = render_continue(&fixture(), false, execute).unwrap();
+            // A stale row throws while USE still names the target; app locks are
+            // database-scoped, so target-context release would hide 57266 with 1223.
+            let target = sql.find("USE [lab]]db];").unwrap();
+            let refusal = sql.find("THROW 57266").unwrap();
+            assert!(target < refusal);
+            assert!(!sql[target..refusal].contains("USE [master]"));
+            let catch = sql.split("END TRY BEGIN CATCH").nth(1).unwrap();
+            let release = catch.find("EXEC sys.sp_releaseapplock").unwrap();
+            let master = catch.find("USE [master];").unwrap();
+            assert!(master < release);
+            assert!(!catch[master..release].contains("ALTER DATABASE"));
+            assert!(catch[release..].contains("THROW;"));
+        }
     }
 
     #[test]
