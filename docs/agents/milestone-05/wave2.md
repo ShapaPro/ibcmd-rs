@@ -47,17 +47,17 @@ Lab F:/ibcmd/lab/05/wave2/live; clone owner Track live.
 Worktree F:/ibcmd/src/ibcmd-rs-05-ext-wave2, feat/0.5-extension-version.
 Lab F:/ibcmd/lab/05/wave2/extensions; clone owner Track ext.
 
-- [ ] E1 Trace `src/mssql_extension_tree_load.rs` and
+- [x] E1 Trace `src/mssql_extension_tree_load.rs` and
   `src/mssql_extension_load.rs` root-property refusal; measure a native
   Version-only twin and an updated interceptor at the new version.
-- [ ] E2 Compile a Version-only root-property change using the existing format
+- [x] E2 Compile a Version-only root-property change using the existing format
   without inventing metadata or widening unrelated structural acceptance.
   Native validation/export must match source version and retain adopted roots.
-- [ ] E3 Prove own load/native activation/source export and four-extension
+- [x] E3 Prove own load/native activation/source export and four-extension
   baseline parity; targeted negative/root-drift tests and appropriate gates.
   For any delivered CFE, build it only after Version increment and independently
   verify built Version. No CFE-delivery claim without an actual verified CFE.
-- [ ] E4 Independent peer code/evidence review before integration.
+- [x] E4 Independent peer code/evidence review before integration.
 
 ## Coordinator
 
@@ -85,3 +85,9 @@ interruption tests PASS, no-default all-targets check PASS, required debug quick
 gates PASS (3652 passed, 0 failed, 10 ignored). Publication is complete and
 no-clobber; whole F-8 row headers/online undo and power-loss durability are not
 claimed. Raw evidence: F:/ibcmd/lab/05/wave2/coordinator.
+Extension checkpoint accepted after root code/evidence review and integrated
+as30a4b361 (source b51df0fc): measured Version-only and Version+After, all464
+source files each, native activation exact proposed CAS, four-extension reader
+baseline preserved. Native CDI normalized only configVersion. No CFE/8.5 write
+or full348 closure claim. Two owned EXT clones remain unregistered and pending
+the shared60min idle cleanup guard. #348 is In review with coordinator owner.
