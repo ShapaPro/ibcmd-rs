@@ -257,6 +257,9 @@ pub struct ScriptInputs {
     /// Owners of the rows a `deleted` list names (`_MDObjID` hex): their rows are reset as well.
     pub extra_changed_objects: Vec<String>,
     pub appended_files: Vec<AppendedFile>,
+    /// Dynamic-only exact eligible existing registrations. None preserves the exclusive path;
+    /// Some(empty) appends nothing, even if registrations appear later.
+    pub appended_registration_ids: Option<Vec<String>>,
     /// Staged rows that are consumed, not moved (an empty or dynamic-only
     /// `deleted` list): their names, and how many `ConfigSave` rows they are.
     pub consumed_names: Vec<String>,
@@ -1060,6 +1063,17 @@ fn render_new_registrations(sql: &mut String, input: &ScriptInputs) {
         }
     }
     if !input.appended_files.is_empty() {
+        let append_scope = match &input.appended_registration_ids {
+            None => String::new(),
+            Some(ids) if ids.is_empty() => " AND 1 = 0".to_owned(),
+            Some(ids) => format!(
+                " AND r._IDRRef IN ({})",
+                ids.iter()
+                    .map(|id| format!("0x{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         let values = input
             .appended_files
             .iter()
@@ -1074,14 +1088,25 @@ fn render_new_registrations(sql: &mut String, input: &ScriptInputs) {
             .join(", ");
         writeln!(
             sql,
-            "INSERT dbo._ConfigChngR_ExtProps (_ConfigChngR_IDRRef, _KeyField, _FileName) SELECT r._IDRRef, CAST(ISNULL((SELECT MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef), -1) + 1 AS binary(4)), v.f FROM (VALUES {values}) AS v(o, f) JOIN dbo._ConfigChngR r ON r._MDObjID = CAST(v.o AS binary(16)) WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps x WHERE x._ConfigChngR_IDRRef = r._IDRRef AND x._FileName = v.f);"
+            "IF EXISTS (SELECT 1 FROM (VALUES {values}) AS v(o, f) GROUP BY v.o, v.f HAVING COUNT_BIG(*) > 1) THROW {}, 'Duplicate appended file input', 1;\n\
+             IF EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps e WITH (UPDLOCK, HOLDLOCK) JOIN dbo._ConfigChngR r WITH (UPDLOCK, HOLDLOCK) ON r._IDRRef = e._ConfigChngR_IDRRef JOIN (VALUES {values}) AS v(o, f) ON r._MDObjID = CAST(v.o AS binary(16)) WHERE CAST(e._KeyField AS int) < 0{append_scope}) THROW {}, 'Unmeasured appended file key range', 1;\n\
+             DECLARE @PendingAppendedFiles TABLE (r binary(16) NOT NULL, f nvarchar(128) NOT NULL, k bigint NOT NULL);\n\
+             INSERT @PendingAppendedFiles (r, f, k) SELECT pending.r, pending.f, pending.m + ROW_NUMBER() OVER (PARTITION BY pending.r ORDER BY pending.f) FROM (\n\
+               SELECT r._IDRRef AS r, v.f, CONVERT(bigint, ISNULL((SELECT MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WITH (UPDLOCK, HOLDLOCK) WHERE e._ConfigChngR_IDRRef = r._IDRRef), -1)) AS m\n\
+               FROM (VALUES {values}) AS v(o, f) JOIN dbo._ConfigChngR r WITH (UPDLOCK, HOLDLOCK) ON r._MDObjID = CAST(v.o AS binary(16))\n\
+               WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps x WITH (UPDLOCK, HOLDLOCK) WHERE x._ConfigChngR_IDRRef = r._IDRRef AND x._FileName = v.f){append_scope}\n\
+             ) AS pending;\n\
+             IF EXISTS (SELECT 1 FROM @PendingAppendedFiles WHERE k > 2147483647) THROW {}, 'Appended file key overflow', 1;\n\
+             INSERT dbo._ConfigChngR_ExtProps (_ConfigChngR_IDRRef, _KeyField, _FileName) SELECT r, CAST(CAST(k AS int) AS binary(4)), f FROM @PendingAppendedFiles;\n\
+             IF @@ROWCOUNT <> (SELECT COUNT_BIG(*) FROM @PendingAppendedFiles) THROW {}, 'Appended file count drifted', 1;",
+            code::NEW_REGISTRATION, code::NEW_REGISTRATION, code::NEW_REGISTRATION, code::NEW_REGISTRATION,
         )
         .unwrap();
         for file in &input.appended_files {
             throw(
                 sql,
                 &format!(
-                    "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MDObjID = 0x{} AND NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef AND e._FileName = N'{}'))",
+                    "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MDObjID = 0x{}{append_scope} AND NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef AND e._FileName = N'{}'))",
                     file.object_hex,
                     quote_string(&file.file_name)
                 ),
@@ -1169,6 +1194,7 @@ mod tests {
             plan_node_counts: Vec::new(),
             extra_changed_objects: Vec::new(),
             appended_files: Vec::new(),
+            appended_registration_ids: None,
             consumed_names: Vec::new(),
             consumed_row_count: 0,
             dropped_rows: Vec::new(),
@@ -1645,17 +1671,41 @@ SELECT 1;"
     fn a_file_an_object_gains_is_appended_after_its_last_key() {
         let mut input = inputs();
         input.nodes_seen = 3;
-        input.appended_files = vec![AppendedFile {
-            object_hex: "33".repeat(16),
-            file_name: "three.1".to_owned(),
-        }];
+        input.appended_files = ["three.0", "three.1"]
+            .iter()
+            .map(|name| AppendedFile {
+                object_hex: "33".repeat(16),
+                file_name: (*name).to_owned(),
+            })
+            .collect();
         let sql = render_apply_script(&input).unwrap();
-        assert!(sql.contains("MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WHERE e._ConfigChngR_IDRRef = r._IDRRef), -1) + 1 AS binary(4))"));
+        assert!(sql.contains("ROW_NUMBER() OVER (PARTITION BY pending.r ORDER BY pending.f)"));
+        assert!(sql.find("WHERE NOT EXISTS (SELECT 1 FROM dbo._ConfigChngR_ExtProps x WITH (UPDLOCK, HOLDLOCK)").unwrap()
+            < sql.find(") AS pending;").unwrap());
+        assert!(sql.contains("MAX(CAST(e._KeyField AS int)) FROM dbo._ConfigChngR_ExtProps e WITH (UPDLOCK, HOLDLOCK)"));
+        assert!(sql.contains("Duplicate appended file input"));
+        assert!(sql.contains("Unmeasured appended file key range"));
+        assert!(sql.contains("k > 2147483647"));
         assert!(sql.contains(&format!("(0x{}, N'three.1')", "33".repeat(16))));
         assert!(
             !sql.contains("INSERT dbo._ConfigChngR ("),
             "no new object, no new registration row"
         );
+
+        // The exclusive/default path keeps its old all-registration scope. Dynamic callers
+        // constrain every existing-row read and assertion to the same measured eligible IDs.
+        assert!(!sql.contains("AND r._IDRRef IN ("));
+        input.appended_registration_ids = Some(vec!["AA".repeat(16)]);
+        let filtered = render_apply_script(&input).unwrap();
+        assert_eq!(
+            filtered
+                .matches(&format!("AND r._IDRRef IN (0x{})", "AA".repeat(16)))
+                .count(),
+            4
+        );
+        input.appended_registration_ids = Some(Vec::new());
+        let empty = render_apply_script(&input).unwrap();
+        assert_eq!(empty.matches("AND 1 = 0").count(), 4);
     }
 
     #[test]

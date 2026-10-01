@@ -23,6 +23,7 @@
 
 pub mod check_gate;
 pub mod dynamic;
+mod dynamic_overlay;
 pub mod errors;
 pub mod gate;
 pub mod model;
@@ -560,6 +561,11 @@ pub(crate) fn require_settled_storage(client: &dyn SqlClient, db: &str) -> Resul
         ))
         .into());
     }
+    require_schema_settled(client, db)
+}
+
+/// The schema must be settled even when the bounded dynamic path accepts measured Params aliases.
+pub(crate) fn require_schema_settled(client: &dyn SqlClient, db: &str) -> Result<()> {
     // The schema storage of a settled infobase is at Status 100; the native apply
     // walks it through 200, 400 and 500 and back, so any other value is an
     // interrupted operation.
@@ -1671,6 +1677,7 @@ pub fn plan_with_gate(
         plan_node_counts: registration.node_counts.clone(),
         extra_changed_objects: registration.extra_objects.clone(),
         appended_files,
+        appended_registration_ids: None,
         consumed_names,
         consumed_row_count,
         dropped_rows,
@@ -1829,6 +1836,7 @@ pub fn apply_with_gate(
                 .map_or(&[][..], |inputs| inputs.params_rewrites.as_slice()),
             backup: plan.report.backup.as_ref(),
             dynamic_generation: None,
+            appended_existing_rows: &[],
         },
     )?;
     plan.report.recovery_dir = Some(dir);

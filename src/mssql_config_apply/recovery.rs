@@ -72,6 +72,15 @@ pub struct RecoveryRequest<'a> {
     /// `DynamicallyUpdated` markers only (the alias rows of the earlier generations stay where they
     /// are; the apply writes new ones and folds none) and says how to take the generation back.
     pub dynamic_generation: Option<&'a str>,
+    /// Exact planned additions to existing file lists, from a preimage CAS-bound by dynamic SQL.
+    pub appended_existing_rows: &'a [AppendedExistingRow],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedExistingRow {
+    pub registration_id: String,
+    pub key_hex: String,
+    pub file_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,6 +453,25 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
     // What the apply registers for new objects and appends to existing ones.
     let mut new_object_count = 0usize;
     let mut appended_count = 0usize;
+    // Explicit directories may be reused: always truncate the recipe, including a zero-addition
+    // plan, so an older manifest's triples cannot be mistaken for this plan's additions.
+    {
+        let mut file = BufWriter::new(fs::File::create(
+            request.dir.join("appended_existing_rows.tsv"),
+        )?);
+        writeln!(file, "registration_id\tkey_hex\tfile_name")?;
+        for row in request.appended_existing_rows {
+            writeln!(
+                file,
+                "{}\t{}\t{}",
+                row.registration_id,
+                row.key_hex,
+                tsv(&row.file_name)
+            )?;
+            appended_count += 1;
+        }
+        file.flush()?;
+    }
     if !request.new_objects.is_empty() {
         let mut file = BufWriter::new(
             fs::File::create(request.dir.join("new_registrations.tsv"))
@@ -540,9 +568,13 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
     )?;
     let dynamic_note = request.dynamic_generation.map_or_else(String::new, |generation| {
         format!(
-            "\nThis was a DYNAMIC apply: it published the generation {generation} beside the active rows\n\
-             (`<name>_dynupdate_{generation}` in Config, `versions_dynupdate_{generation}`), replaced `root` and\n\
-             `version` in place and rewrote the DynamicallyUpdated markers. To take it back: delete those alias rows,\n\
+            "\nThis artifact describes a PLANNED DYNAMIC apply, saved before execution. Only after confirming\n\
+             COMMIT, the generation {generation} was published beside the active rows\n\
+             (`<name>_dynupdate_{generation}` in Config, `versions_dynupdate_{generation}`), `root` and\n\
+             `version` were replaced in place and the DynamicallyUpdated markers rewritten. A pending-generation apply also\n\
+             writes deleted_dynupdate_{generation} in Config and <uuid>_dynupdate_{generation}.si in Params.\n\
+             After confirmed COMMIT, to take it back while stopped: delete ONLY this generation's aliases in BOTH\n\
+             Config and Params, and restore siVersions from params_replaced.tsv when it was saved,\n\
              put back `root` and `version` from config_replaced.tsv and the markers from special_rows.tsv,\n\
              then MobileVersions.dat, the message numbers and the added registrations as below.\n"
         )
@@ -552,7 +584,9 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         format!(
             "ibcmd-rs config apply recovery artifact for database {db}\n\
              token {token}\n\n\
-             The apply ran as one transaction: a failed run changes nothing. This directory\n\
+             The apply uses one transaction. A confirmed SQL rollback changes nothing; a connection\n\
+             failure can leave the COMMIT outcome uncertain. Inspect storage and markers before retry.\n\
+             This directory\n\
              lets a successful run be taken back.\n\n\
              rows.pack             the saved bytes of every row below, one after the other; a `file` value `rows.pack@<offset>+<length>` names a byte range\n\
              config_replaced.tsv   every Config row (all parts) the staged rows replaced; `file` is where its saved bytes are\n\
@@ -563,6 +597,11 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              params_replaced.tsv   the search-information rows of Params (and siVersions) rewritten for new forms/templates, with their old bytes\n\
              new_registrations.tsv the new objects registered in _ConfigChngR (per node) and the files listed for them\n\
              added_registrations.tsv the change registrations inserted for nodes that had no row for a changed object (a node with an initial image has none): node, object, files\n\
+             appended_existing_rows.tsv exact PLANNED missing entries appended to existing file lists;\n\
+             the transaction's script/token checks their exact preimage before publication.\n\
+                                       After confirming this generation committed, while stopped, delete\n\
+                                       ONLY matching registration_id/key_hex/file_name triples. They may\n\
+                                       name OLD generation aliases; keep every preexisting file-list entry.\n\
              manifest.json `backup`  the backup taken before a restructuring (file, seconds) or the operator's word that one exists;\n\
                                    the rebuilt tables come back only from it\n\n\
              To take the apply back: stage the saved rows in ConfigSave (name, part, sizes, attributes,\n\
@@ -582,6 +621,98 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::{Dbms, ScriptVariables, SqlParam, SqlRow};
+
+    struct EmptyRecoveryStorage;
+    impl SqlClient for EmptyRecoveryStorage {
+        fn dbms(&self) -> Dbms {
+            Dbms::SqlServer
+        }
+        fn max_connections(&self) -> usize {
+            1
+        }
+        fn run_script(&self, _: &str, _: ScriptVariables) -> Result<()> {
+            panic!("artifact only")
+        }
+        fn execute(&self, _: &str, _: &[SqlParam<'_>]) -> Result<u64> {
+            panic!("artifact only")
+        }
+        fn query_json(&self, _: &str) -> Result<Option<String>> {
+            panic!("artifact only")
+        }
+        fn write_rows(&self, _: &str, _: &[&str], _: &[Vec<SqlParam<'_>>]) -> Result<u64> {
+            panic!("artifact only")
+        }
+        fn read_rows(
+            &self,
+            _: &str,
+            _: &[SqlParam<'_>],
+            _: &mut dyn FnMut(SqlRow) -> Result<()>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reused_recovery_directory_replaces_old_append_triples_with_empty_recipe() {
+        let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = workspace.join("target").join(format!(
+            "recovery-appends-reuse-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let new_objects = NewObjects::default();
+        let removals = super::super::removals::Removals::default();
+        let registration = super::super::registrations::RegistrationPlan::default();
+        let rows = [AppendedExistingRow {
+            registration_id: "11".repeat(16),
+            key_hex: "00000002".to_owned(),
+            file_name: "old_generation_alias.0".to_owned(),
+        }];
+        let mut request = RecoveryRequest {
+            database: "labdb",
+            dir: &dir,
+            token: "first",
+            blobs: RecoveryBlobs::None,
+            staged: &[],
+            replaced: &[],
+            mobile_versions_before: None,
+            reset_change_registrations: false,
+            new_objects: &new_objects,
+            removals: &removals,
+            registration: &registration,
+            params_rewrites: &[],
+            backup: None,
+            dynamic_generation: Some("11111111-1111-4111-8111-111111111111"),
+            appended_existing_rows: &rows,
+        };
+        write_recovery(&EmptyRecoveryStorage, &request).unwrap();
+        assert!(
+            fs::read_to_string(dir.join("appended_existing_rows.tsv"))
+                .unwrap()
+                .contains("old_generation_alias.0")
+        );
+        let first: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(first["appended_files"], 1);
+        request.token = "second";
+        request.appended_existing_rows = &[];
+        write_recovery(&EmptyRecoveryStorage, &request).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("appended_existing_rows.tsv")).unwrap(),
+            "registration_id\tkey_hex\tfile_name\n"
+        );
+        let second: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(second["appended_files"], 0);
+        assert_eq!(second["token"], "second");
+        assert!(dir.canonicalize().unwrap().starts_with(&workspace));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

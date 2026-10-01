@@ -24,7 +24,8 @@
 //!   already exists, and a descriptor is unchanged in text: the kinds a session was measured with
 //!   (other kinds are #345's), no new object, no removal, no change of an object's properties;
 //! - the restructure check ([`ApplyCheckGate`]) finds no restructuring;
-//! - the database is settled (no unfinished operation, no overlay in `Params`) and its platform
+//! - the schema is settled; a pending overlay has the exact measured removal/service inventory
+//!   (`dynamic_overlay`), otherwise no overlay in `Params`; the platform
 //!   declares `mssql.config.apply.dynamic`.
 //!
 //! A stage that does not qualify is refused with the reasons ([`NeedsNativeApply`]); nothing is
@@ -43,9 +44,10 @@ use crate::mssql_main_activation::{
     MAX_PLAN_BYTES, MAX_ROW_BYTES, MAX_ROWS, MainActivationError, MainActivationMode,
     MainActivationSnapshot, MainStorageRow, prepare_main_activation, render_main_activation_sql,
 };
-use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam};
+use crate::sql::{ScriptVariables, SqlClient, SqlExec};
 
 use super::check_gate::ApplyCheckGate;
+use super::dynamic_overlay;
 use super::errors::{self, DynamicUnsupported, NeedsNativeApply};
 use super::gate::{GateInput, GateVerdict, StructuralGate};
 use super::model::{RowMeta, RowName, classify_name, hex_lower, quote_ident};
@@ -54,8 +56,8 @@ use super::{
     ApplyMode, ApplyTimings, ConfigApplyOptions, ConfigApplyReport, DynamicPublication,
     ROW_COLUMNS, RegistrationSummary, StageSummary, blank_report, ms, node_literals,
     other_sessions, plan_mobile_versions, read_blob, read_row_metas, recovery, registrations,
-    require_client, require_no_unfinished_operation, require_settled_storage, scalar_i64, versions,
-    write_artifact, xml_version_of,
+    require_client, require_no_unfinished_operation, require_schema_settled,
+    require_settled_storage, scalar_i64, versions, write_artifact, xml_version_of,
 };
 
 /// The number of generations past which the report warns that the overlay grows.
@@ -78,6 +80,8 @@ pub struct DynamicPlan {
     mobile_versions_before: Option<Vec<u8>>,
     registration: registrations::RegistrationPlan,
     reset_change_registrations: bool,
+    params_rewrites: Vec<sqlgen::ParamsRewrite>,
+    appended_existing_rows: Vec<recovery::AppendedExistingRow>,
 }
 
 /// What the size of `ConfigSave` alone says: rows, bytes, the largest row.
@@ -136,6 +140,15 @@ fn judge_rows(
     let mut refused_owners: HashSet<String> = HashSet::new();
     for row in staged {
         let name = row.name.as_str();
+        // Native stages in the measured profile have no row flags. In particular, the
+        // deleted alias must not inherit unmeasured flags from ConfigSave.
+        if row.attributes != 0 {
+            reasons.push(format!(
+                "{name}: unmeasured staged Attributes {}; only Attributes=0 is supported",
+                row.attributes
+            ));
+            continue;
+        }
         if row.part != 0 {
             reasons.push(format!(
                 "{name}: a row of several parts (part {})",
@@ -193,6 +206,10 @@ fn judge_rows(
                 }
                 match body_suffix {
                     Some("0") => {}
+                    // Native repeated imports re-encode the existing common form help companion.
+                    // Its inflated text must stay identical; changing help is not measured.
+                    Some("1") if kinds.get(&owner.to_ascii_lowercase()) == Some(&"CommonForm")
+                        && same_text(name)? => {}
                     Some(suffix) => reasons.push(format!(
                         "{name}: a body with the suffix .{suffix}; only the .0 body of a common module or common form is published dynamically"
                     )),
@@ -229,12 +246,16 @@ fn judge_rows(
 /// It may when the list is empty (the platform's own import writes one to every stage; what the
 /// platform's `force` writes for an empty list is NOT measured, this consumes it and writes nothing).
 ///
-/// It may not when it names rows of the online update the database carries (`overlay_rows`,
+/// This legacy empty-list route does not admit nonempty lists. The measured pending-generation
+/// route is separately judged by `dynamic_overlay::judge_deleted` and reproduces the extra writes.
+/// Nonempty shapes reaching this fallback remain refused. `overlay_rows` is the current inventory.
+///
+/// Historically it refused lists naming rows of the online update the database carries (`overlay_rows`,
 /// lower-cased), which is what the import stage of a target with a pending update lists, because the
 /// exclusive apply that stage is made for promotes the update. Measured (evidence/dropin-dynamic/
 /// acceptance.md, section 7): the platform's `force` on such a stage also writes a `deleted_dynupdate_<g>`
 /// row, appends the alias bodies to the file lists of the change register and collects the service
-/// information into `Params` (16 alias rows, 4 MB). This apply does none of it, so it refuses the stage:
+/// information into `Params` (16 alias rows, 4 MB). The fallback does none of it, so it refuses the stage:
 /// apply it exclusively. Any other name is a removal of an object, a form, an attribute: not published
 /// dynamically either.
 fn judge_deleted_list(
@@ -267,28 +288,22 @@ fn judge_deleted_list(
     ))
 }
 
-/// The rows of the online update `Config` carries, lower-cased: the aliases and the marker.
-fn overlay_rows(client: &dyn SqlClient, db: &str) -> Result<HashSet<String>> {
-    let mut rows = HashSet::new();
-    client.read_rows(
-        &format!(
-            "SELECT FileName FROM {db}.dbo.Config WHERE FileName = N'DynamicallyUpdated' OR FileName LIKE {}",
-            sqlgen::ALIAS_PATTERN
-        ),
-        &[],
-        &mut |row| {
-            rows.insert(row.text(0)?.to_ascii_lowercase());
-            Ok(())
-        },
-    )?;
-    Ok(rows)
-}
-
 /// The kind of every top-level object of the active configuration, by lower-cased uuid: the `root`
 /// row names the configuration's row, which lists them.
-fn object_kinds(client: &dyn SqlClient, database: &str) -> Result<HashMap<String, &'static str>> {
-    let root = read_blob(client, database, "Config", "root")?
-        .ok_or_else(|| anyhow!("Config holds no root row"))?;
+fn object_kinds(
+    client: &dyn SqlClient,
+    database: &str,
+) -> Result<(HashMap<String, &'static str>, Vec<RowMeta>)> {
+    let db = quote_ident(database)?;
+    let mut metas = read_row_metas(
+        client,
+        &format!("SELECT {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'root'"),
+    )?;
+    let root_meta = metas
+        .first()
+        .filter(|row| metas.len() == 1 && row.part == 0 && row.byte_len <= MAX_ROW_BYTES as i64)
+        .ok_or_else(|| anyhow!("Config.root has unmeasured metadata"))?;
+    let root = dynamic_overlay::read_bound_blob(client, &db, "Config", root_meta)?;
     let plain = versions::inflate_row(&root).context("the root row does not inflate")?;
     let text = String::from_utf8_lossy(versions::strip_bom(&plain)).into_owned();
     let configuration = text
@@ -297,11 +312,22 @@ fn object_kinds(client: &dyn SqlClient, database: &str) -> Result<HashMap<String
         .and_then(|rest| rest.split(',').next())
         .map(|value| value.trim().to_ascii_lowercase())
         .ok_or_else(|| anyhow!("the root row does not name the configuration"))?;
-    let row = read_blob(client, database, "Config", &configuration)?
-        .ok_or_else(|| anyhow!("Config holds no row {configuration}"))?;
+    uuid::Uuid::parse_str(&configuration)?;
+    let descriptor = read_row_metas(
+        client,
+        &format!("SELECT {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{configuration}'"),
+    )?;
+    let descriptor_meta = descriptor
+        .first()
+        .filter(|row| {
+            descriptor.len() == 1 && row.part == 0 && row.byte_len <= MAX_ROW_BYTES as i64
+        })
+        .ok_or_else(|| anyhow!("Config configuration descriptor has unmeasured metadata"))?;
+    let row = dynamic_overlay::read_bound_blob(client, &db, "Config", descriptor_meta)?;
     let tree = parse_row(&versions::inflate_row(&row)?)
         .with_context(|| format!("the configuration row {configuration} does not parse"))?;
-    Ok(root_kinds(&tree))
+    metas.extend(descriptor);
+    Ok((root_kinds(&tree), metas))
 }
 
 /// The bytes of the row `name` the configuration is read from: its newest alias of a generation the
@@ -311,30 +337,66 @@ fn effective_blob(
     database: &str,
     name: &str,
     history: &[String],
+    judged: &[RowMeta],
 ) -> Result<Option<Vec<u8>>> {
-    let db = quote_ident(database)?;
-    let pattern = format!("{name}!_dynupdate!_%");
-    let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
-    client.read_rows(
-        &format!(
-            "SELECT FileName, BinaryData FROM {db}.dbo.Config WHERE PartNo = 0 AND (FileName = @P1 OR FileName LIKE @P2 ESCAPE N'!')"
-        ),
-        &[SqlParam::Text(name), SqlParam::Text(&pattern)],
-        &mut |mut row| {
-            let file = row.take_text(0)?;
-            rows.push((file, row.take_binary(1)?));
-            Ok(())
-        },
-    )?;
     let stored = crate::mssql_dump::stored_row_name(
         history,
         name,
-        rows.iter().map(|(file, _)| file.as_str()),
+        judged.iter().map(|row| row.name.as_str()),
     );
-    Ok(rows
-        .into_iter()
-        .find(|(file, _)| file.eq_ignore_ascii_case(&stored))
-        .map(|(_, bytes)| bytes))
+    let meta = judged
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(&stored) && row.part == 0)
+        .ok_or_else(|| anyhow!("Config.{stored} was not in the judged inventory"))?;
+    let bytes = dynamic_overlay::read_bound_blob(client, &quote_ident(database)?, "Config", meta)?;
+    Ok(Some(bytes))
+}
+
+fn read_stage_semantic(
+    client: &dyn SqlClient,
+    db: &str,
+    staged: &[RowMeta],
+    name: &str,
+) -> Result<Vec<u8>> {
+    let meta = staged
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(name) && row.part == 0)
+        .ok_or_else(|| anyhow!("ConfigSave.{name} has no judged row"))?;
+    dynamic_overlay::read_bound_blob(client, db, "ConfigSave", meta)
+}
+
+/// A no-op is safe only against the effective image, even when a manually staged request omits
+/// `deleted`. The online engine's ordinary-row equality must not discard a pending-body revert.
+fn judge_effective_noop(
+    staged: &[RowMeta],
+    history: &[String],
+    overlay: &[RowMeta],
+    read_effective: &mut dyn FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<()> {
+    if history.is_empty() && overlay.is_empty() {
+        return Ok(());
+    }
+    for row in staged {
+        if matches!(
+            classify_name(&row.name),
+            RowName::Descriptor(_) | RowName::Body { .. }
+        ) && !judged_stage_digest(staged, &row.name, &read_effective(&row.name)?)
+        {
+            return Err(NeedsNativeApply::apply("an ordinary-byte no-op would discard a pending-generation revert; this shape is not measured".to_owned()).into());
+        }
+    }
+    Ok(())
+}
+
+fn unfinished_guard() -> String {
+    let names = sqlgen::UNFINISHED_NAMES
+        .iter()
+        .map(|name| format!("N'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "IF EXISTS (SELECT 1 FROM dbo.Config WITH (UPDLOCK, HOLDLOCK) WHERE FileName IN ({names}) OR FileName LIKE N'%.new') THROW 57307, 'Unfinished operation appeared', 1;\n"
+    )
 }
 
 fn stage_size(client: &dyn SqlClient, db: &str) -> Result<StageSize> {
@@ -478,6 +540,8 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
             mobile_versions_before: None,
             registration: registrations::RegistrationPlan::default(),
             reset_change_registrations: false,
+            params_rewrites: Vec::new(),
+            appended_existing_rows: Vec::new(),
         });
     }
     let too_big = size_reasons(size);
@@ -485,7 +549,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         return Err(NeedsNativeApply::apply(refusal_reason(&too_big)).into());
     }
     require_no_unfinished_operation(client, &db)?;
-    require_settled_storage(client, &db)?;
+    require_schema_settled(client, &db)?;
 
     let staged = read_row_metas(
         client,
@@ -514,6 +578,9 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         .iter()
         .map(|generation| generation.hyphenated().to_string())
         .collect();
+    let overlay = dynamic_overlay::inventory(client, &db)
+        .map_err(|error| NeedsNativeApply::apply(format!("pending Config inventory: {error:#}")))?;
+    let judged_effective: Vec<_> = replaced.iter().chain(&overlay).cloned().collect();
     timings.inventory_ms = ms(started);
 
     // The rows: kinds, and the text of what must not change.
@@ -524,23 +591,28 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
             RowName::Descriptor(_) | RowName::Body { .. }
         )
     });
-    let kinds = if needs_kinds {
+    let (kinds, kind_metas) = if needs_kinds {
         object_kinds(client, database)?
     } else {
-        HashMap::new()
+        (HashMap::new(), Vec::new())
     };
     let mut same_text = |name: &str| -> Result<bool> {
-        let staged_bytes = read_blob(client, database, "ConfigSave", name)?
-            .ok_or_else(|| anyhow!("ConfigSave.{name} vanished"))?;
+        let staged_bytes = read_stage_semantic(client, &db, &staged, name)?;
         if !judged_stage_digest(&staged, name, &staged_bytes) {
             bail!(
                 "ConfigSave.{name} changed while its descriptor was judged; no publication was attempted"
             );
         }
         let active_bytes = if matches!(classify_name(name), RowName::Service(_)) {
-            read_blob(client, database, "Config", name)?
+            let meta = replaced
+                .iter()
+                .find(|row| row.name.eq_ignore_ascii_case(name) && row.part == 0)
+                .ok_or_else(|| anyhow!("Config.{name} has no judged row"))?;
+            Some(dynamic_overlay::read_bound_blob(
+                client, &db, "Config", meta,
+            )?)
         } else {
-            effective_blob(client, database, name, &history_names)?
+            effective_blob(client, database, name, &history_names, &judged_effective)?
         }
         .ok_or_else(|| anyhow!("Config.{name} vanished"))?;
         if matches!(classify_name(name), RowName::Service(_))
@@ -556,13 +628,51 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         Ok(versions::inflate_row(&staged_bytes)? == versions::inflate_row(&active_bytes)?)
     };
     let mut reasons = judge_rows(&staged, &active, &kinds, &mut same_text)?;
+    // Bind the semantic inventory to the exact bytes the transaction will assert. The structural
+    // checker reads independently, so its safe verdict must not permit an ABA replacement of
+    // `versions` with an inventory that removes or silently changes unstaged metadata.
+    let staged_versions = read_stage_semantic(client, &db, &staged, "versions")?;
+    if !judged_stage_digest(&staged, "versions", &staged_versions) {
+        bail!("ConfigSave.versions changed while its inventory was judged");
+    }
+    let effective_versions = effective_blob(
+        client,
+        database,
+        "versions",
+        &history_names,
+        &judged_effective,
+    )?
+    .ok_or_else(|| anyhow!("effective Config lacks versions"))?;
+    let old_versions = versions::parse_versions(&effective_versions)?;
+    let new_versions = versions::parse_versions(&staged_versions)?;
+    let old: HashMap<_, _> = old_versions
+        .entries
+        .iter()
+        .map(|(name, version)| (name.to_ascii_lowercase(), version))
+        .collect();
+    let new: HashMap<_, _> = new_versions
+        .entries
+        .iter()
+        .map(|(name, version)| (name.to_ascii_lowercase(), version))
+        .collect();
+    if old.len() != old_versions.entries.len()
+        || new.len() != new_versions.entries.len()
+        || old.keys().collect::<HashSet<_>>() != new.keys().collect::<HashSet<_>>()
+        || new.iter().any(|(name, version)| {
+            old.get(name) != Some(version)
+                && !staged.iter().any(|row| row.name.eq_ignore_ascii_case(name))
+        })
+    {
+        reasons.push("versions: removal, duplicate, new name or changed unstaged metadata is not published dynamically".to_owned());
+    }
     // The list of removals, when the stage has one: consumed if it says nothing a dynamic apply acts on.
     let mut deleted_note = None;
+    let mut pending_deleted = Vec::new();
     if staged
         .iter()
         .any(|row| row.name.eq_ignore_ascii_case("deleted"))
     {
-        let bytes = read_blob(client, database, "ConfigSave", "deleted")?;
+        let bytes = Some(read_stage_semantic(client, &db, &staged, "deleted")?);
         if bytes
             .as_deref()
             .is_some_and(|bytes| !judged_stage_digest(&staged, "deleted", bytes))
@@ -574,12 +684,41 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         let plain = bytes.and_then(|bytes| versions::inflate_row(&bytes).ok());
         match plain {
             None => reasons.push("deleted: a list of removals this apply cannot read".to_owned()),
-            Some(plain) => match judge_deleted_list(&plain, &overlay_rows(client, &db)?) {
-                Ok(note) => deleted_note = Some(note),
-                Err(reason) => reasons.push(reason),
-            },
+            Some(plain) => {
+                if super::parse_removals(&plain).is_some_and(|entries| !entries.is_empty()) {
+                    match dynamic_overlay::judge_deleted(&plain, &overlay, &history_names, &kinds) {
+                        Ok(names) => {
+                            deleted_note = Some("the exact pending overlay inventory is retained beside the new generation".to_owned());
+                            pending_deleted = names;
+                        }
+                        Err(reason) => reasons.push(format!("deleted: {reason:#}")),
+                    }
+                } else {
+                    match judge_deleted_list(
+                        &plain,
+                        &overlay
+                            .iter()
+                            .map(|row| row.name.to_ascii_lowercase())
+                            .collect(),
+                    ) {
+                        Ok(note) => deleted_note = Some(note),
+                        Err(reason) => reasons.push(reason),
+                    }
+                }
+            }
         }
     }
+    // A service overlay is accepted only together with the exact nonempty removal inventory.
+    let collection = if pending_deleted.is_empty() {
+        require_settled_storage(client, &db)?;
+        None
+    } else {
+        Some(
+            dynamic_overlay::collect(client, &db, &history_names).map_err(|error| {
+                NeedsNativeApply::apply(format!("pending service collection: {error:#}"))
+            })?,
+        )
+    };
 
     // The restructure check, only when nothing else rules the stage out.
     if reasons.is_empty() {
@@ -653,6 +792,15 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     )
     .map_err(engine_error)?
     .with_consumed_stage_rows(consumed);
+    // The engine judges byte equality against ordinary rows. A request to revert a pending body
+    // to those bytes must be a new generation, not silent no-op consumption; this unmeasured
+    // rollback shape remains refused until the engine has a bound effective no-op image.
+    if activation.is_no_op() {
+        judge_effective_noop(&staged, &history_names, &overlay, &mut |name| {
+            effective_blob(client, database, name, &history_names, &judged_effective)?
+                .ok_or_else(|| anyhow!("effective Config.{name} vanished"))
+        })?;
+    }
 
     // The writes the platform's `force` makes besides the rows, planned by the exclusive apply's own
     // code: the mobile versions ring and the change registrations.
@@ -664,27 +812,92 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         ),
     )? == 1;
     let registration = if has_change_registrations {
-        registrations::plan(client, database, &staged, &[])?
+        registrations::plan(client, database, &staged, &pending_deleted)?
     } else {
         registrations::RegistrationPlan::default()
     };
     let unchanged = activation.is_no_op();
+    let appends = dynamic_overlay::plan_appends(
+        client,
+        &db,
+        &registration.dropped_files,
+        &registration.nodes,
+    )
+    .map_err(|error| {
+        NeedsNativeApply::apply(format!("pending registration file lists: {error:#}"))
+    })?;
+    // The reused parity helper also asserts all distinct registered node pairs before appending.
+    // This count includes stale/own-node registrations; it is not the eligible-node count.
+    let nodes_seen = if registration.dropped_files.is_empty() {
+        0
+    } else {
+        usize::try_from(scalar_i64(client, &format!(
+            "SELECT COUNT_BIG(*) FROM (SELECT DISTINCT _NodeTRef, _NodeRRef FROM {db}.dbo._ConfigChngR) d"
+        ))?).map_err(|_| anyhow!("invalid registered-node count"))?
+    };
     let parity = ScriptInputs {
         database: database.to_owned(),
         reset_change_registrations: has_change_registrations,
         files_rewrites,
         nodes: node_literals(&registration.nodes),
+        nodes_seen,
         registration_additions: registration.additions.clone(),
         registration_rows_expected: registration.added_rows,
         registration_file_rows_expected: registration.added_file_rows,
         plan_node_counts: registration.node_counts.clone(),
+        extra_changed_objects: registration.extra_objects.clone(),
+        appended_files: registration.dropped_files.clone(),
+        appended_registration_ids: Some(appends.registration_ids.clone()),
         ..ScriptInputs::default()
     };
     // The markers are stamped as the platform stamps them (local time, the year offset), like the rows
     // the parity writes touch.
+    // Core activation binds stage names and bytes; dynamic publication also copies row
+    // headers, so bind the entire judged stage before either publication or no-op cleanup.
+    let mut precondition = dynamic_overlay::guard("ConfigSave", "1=1", &staged);
+    precondition.push_str(&dynamic_overlay::guard(
+        "Config",
+        dynamic_overlay::CONFIG_FILTER,
+        &overlay,
+    ));
+    precondition.push_str(&appends.guard_sql);
+    if !registration.dropped_files.is_empty() {
+        precondition.push_str(
+            &dynamic_overlay::node_guard(client, &db, &registration.nodes).map_err(|error| {
+                NeedsNativeApply::apply(format!("pending registration node eligibility: {error:#}"))
+            })?,
+        );
+    }
+    if !kind_metas.is_empty() {
+        let names = kind_metas
+            .iter()
+            .map(|row| format!("N'{}'", super::model::quote_string(&row.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        precondition.push_str(&dynamic_overlay::guard(
+            "Config",
+            &format!("FileName IN ({names})"),
+            &kind_metas,
+        ));
+    }
+    precondition.push_str("IF EXISTS (SELECT 1 FROM dbo.SchemaStorage WITH (UPDLOCK, HOLDLOCK) WHERE Status <> 100) THROW 57316, 'SchemaStorage no longer settled', 1;\n");
+    precondition.push_str(&unfinished_guard());
+    let mut parity_sql = sqlgen::render_parity_writes(&parity);
+    let mut params_rewrites = Vec::new();
+    if let Some(collection) = &collection {
+        precondition.push_str(&collection.guard_sql);
+        parity_sql.push_str(&collection.render(activation.new_generation()));
+        parity_sql.push_str(&dynamic_overlay::publish_deleted(
+            activation.new_generation(),
+        ));
+        if !unchanged {
+            params_rewrites = collection.rewrites.clone();
+        }
+    }
     let activation = activation
+        .with_precondition_sql(precondition)
         .with_platform_timestamps(sqlgen::timestamp_declarations())
-        .with_parity_sql(sqlgen::render_parity_writes(&parity));
+        .with_parity_sql(parity_sql);
     let rendered = render_main_activation_sql(database, &activation, None).map_err(engine_error)?;
     // Row locks may wait for a session that holds one; not for ever.
     let script = format!("SET LOCK_TIMEOUT 30000;\n{}", rendered.sql);
@@ -726,9 +939,14 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     }
     report.stage = Some(stage);
     if let Some(note) = &deleted_note {
-        report.warnings.push(format!(
-            "the stage's `deleted` list is consumed, not published: {note}"
-        ));
+        report.warnings.push(if !pending_deleted.is_empty() && !unchanged {
+            format!("the stage's `deleted` list is copied into deleted_dynupdate_{new_generation}: {note}")
+        } else {
+            "the stage's `deleted` list is consumed without publishing a removal alias".to_owned()
+        });
+    }
+    if collection.is_some() && !unchanged {
+        report.warnings.push(format!("native measured service collection: 16 unchanged raw SI aliases and siVersions tokens; {} exact additions to existing register file lists are saved for stopped-database recovery", appends.rows.len()));
     }
     report.active_generation = Some(old_generation.hyphenated().to_string());
     if unchanged {
@@ -738,11 +956,15 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     } else {
         history_after.push(new_generation.hyphenated().to_string());
         report.new_generation = Some(new_generation.hyphenated().to_string());
+        let mut aliases = activation.alias_rows();
+        if !pending_deleted.is_empty() {
+            aliases.push(format!("deleted_dynupdate_{new_generation}"));
+        }
         report.published = Some(DynamicPublication {
             generation: new_generation.hyphenated().to_string(),
             previous_generation: old_generation.hyphenated().to_string(),
             history: history_after.clone(),
-            alias_rows: activation.alias_rows(),
+            alias_rows: aliases,
             replaced_in_place: vec!["root".to_owned(), "version".to_owned()],
             warn_after_generations: WARN_GENERATIONS,
         });
@@ -758,7 +980,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     };
     if has_change_registrations && !unchanged {
         touched.push("_ConfigChngR");
-        if registration.added_file_rows > 0 {
+        if registration.added_file_rows > 0 || !registration.dropped_files.is_empty() {
             touched.push("_ConfigChngR_ExtProps");
         }
     }
@@ -772,7 +994,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
             changed_objects: registration.changed_objects,
             rows_added: registration.added_rows,
             file_rows_added: registration.added_file_rows,
-            objects_of_dropped_rows: 0,
+            objects_of_dropped_rows: registration.extra_objects.len(),
         });
     if options.backup != super::BackupPolicy::None {
         report.warnings.push(
@@ -781,6 +1003,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     }
     report.not_written = vec![
         "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written".to_owned(),
+        "the help/search index in Files (userDocs_ru*, userPostings_ru*, userVocabulary_ru*): not rebuilt; native-derived payloads can differ and help-search equivalence is not claimed".to_owned(),
         "the ordinary rows the aliases stand beside: they keep the previous text until an exclusive apply folds the generation".to_owned(),
     ];
     report.script_sha256 = Some(script_sha.clone());
@@ -795,6 +1018,8 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         mobile_versions_before: if unchanged { None } else { mobile_before },
         registration,
         reset_change_registrations: has_change_registrations && !unchanged,
+        params_rewrites,
+        appended_existing_rows: if unchanged { Vec::new() } else { appends.rows },
     })
 }
 
@@ -856,9 +1081,10 @@ pub fn apply_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Conf
             new_objects: &super::objects::NewObjects::default(),
             removals: &super::removals::Removals::default(),
             registration: &plan.registration,
-            params_rewrites: &[],
+            params_rewrites: &plan.params_rewrites,
             backup: None,
             dynamic_generation: generation.as_deref(),
+            appended_existing_rows: &plan.appended_existing_rows,
         },
     )?;
     plan.report.recovery_dir = Some(dir.clone());
@@ -939,6 +1165,48 @@ fn owners_of(staged: &[RowMeta]) -> std::collections::BTreeMap<String, Vec<Strin
 mod tests {
     use super::*;
 
+    #[test]
+    fn manually_staged_ordinary_noop_cannot_discard_pending_alias_revert_without_deleted() {
+        let name = "313d9858-3995-4a4c-b2b0-15d2350417b4.0";
+        let ordinary = b"ordinary A";
+        let mut body = meta(name, &hex_lower(&Sha256::digest(ordinary)));
+        body.byte_len = ordinary.len() as i64;
+        body.data_size = body.byte_len;
+        let history = vec![uuid::Uuid::new_v4().to_string()];
+        // The engine ordinary image is a byte no-op, while the effective generation is B.
+        // No deleted row is staged first; the second manually stages the empty list.
+        for deleted in [false, true] {
+            let mut staged = vec![body.clone()];
+            if deleted {
+                staged.push(meta("deleted", "unused"));
+            }
+            let refused =
+                judge_effective_noop(&staged, &history, &[], &mut |_| Ok(b"pending B".to_vec()))
+                    .unwrap_err();
+            assert!(refused.downcast_ref::<NeedsNativeApply>().is_some());
+            assert!(
+                judge_effective_noop(&staged, &history, &[], &mut |_| Ok(ordinary.to_vec()))
+                    .is_ok()
+            );
+        }
+        assert!(
+            judge_effective_noop(&[body], &[], &[], &mut |_| panic!(
+                "clean noop must not read aliases"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unfinished_phantom_guard_locks_new_suffix_as_well_as_named_markers() {
+        let sql = unfinished_guard();
+        assert!(sql.contains("WITH (UPDLOCK, HOLDLOCK)"));
+        assert!(sql.contains("OR FileName LIKE N'%.new'"));
+        for name in sqlgen::UNFINISHED_NAMES {
+            assert!(sql.contains(&format!("N'{name}'")));
+        }
+    }
+
     const MODULE: &str = "313d9858-3995-4a4c-b2b0-15d2350417b4";
     const FORM: &str = "07d3ab2c-5a1c-4d50-9d7e-0c9f3a1c2b44";
     const CATALOG: &str = "5eab8a1b-1111-4222-8333-444455556666";
@@ -1016,6 +1284,99 @@ mod tests {
         ];
         assert_eq!(judged(&form, true), Vec::<String>::new());
         assert_eq!(owners_of(&form).len(), 1);
+    }
+
+    #[test]
+    fn unmeasured_stage_flags_are_refused_before_semantic_reads() {
+        for name in [MODULE.to_owned(), "root".to_owned(), "deleted".to_owned()] {
+            let mut staged = delta();
+            if name == "deleted" {
+                staged.push(meta("deleted", "aa"));
+            }
+            let row = staged.iter_mut().find(|row| row.name == name).unwrap();
+            row.attributes = 1;
+            // Otherwise this descriptor/root would need a semantic byte read.
+            row.sha256 = "different".to_owned();
+            let reasons = judge_rows(&staged, &all_active(), &kinds(), &mut |read| {
+                assert_ne!(read, name, "flagged payload must not be interpreted");
+                Ok(true)
+            })
+            .unwrap();
+            assert!(
+                reasons.iter().any(|reason| {
+                    reason.starts_with(&name) && reason.contains("only Attributes=0")
+                }),
+                "{reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_stage_header_guard_precedes_even_noop_consumption() {
+        let generation = "719baa18-69ed-439a-8962-1de53d98e05e";
+        let rows: Vec<_> = [MODULE, "root", "version", "versions"]
+            .into_iter()
+            .map(|name| {
+                let bytes = if name == "versions" {
+                    super::super::versions::deflate_row(
+                        format!("{{1,4,\"\",{generation},\"root\",x}}").as_bytes(),
+                    )
+                    .unwrap()
+                } else {
+                    b"unchanged".to_vec()
+                };
+                MainStorageRow {
+                    file_name: name.to_owned(),
+                    part_no: 0,
+                    creation: "2026-01-01 00:00:00.000".to_owned(),
+                    modified: "2026-01-01 00:00:00.000".to_owned(),
+                    attributes: 0,
+                    data_size: bytes.len() as u64,
+                    binary_data: bytes,
+                }
+            })
+            .collect();
+        let consumed = MainStorageRow {
+            file_name: "deleted".to_owned(),
+            ..rows[0].clone()
+        };
+        let stage: Vec<_> = rows
+            .iter()
+            .chain(std::iter::once(&consumed))
+            .map(|row| RowMeta {
+                name: row.file_name.clone(),
+                part: row.part_no,
+                data_size: row.data_size as i64,
+                byte_len: row.binary_data.len() as i64,
+                attributes: row.attributes as i16,
+                creation: row.creation.clone(),
+                modified: row.modified.clone(),
+                sha256: hex_lower(&Sha256::digest(&row.binary_data)),
+            })
+            .collect();
+        let plan = prepare_main_activation(
+            MainActivationMode::Online,
+            rows.clone(),
+            MainActivationSnapshot {
+                config_rows: rows,
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[MODULE.to_owned()],
+            true,
+        )
+        .unwrap()
+        .with_consumed_stage_rows(vec![consumed])
+        .with_precondition_sql(dynamic_overlay::guard("ConfigSave", "1=1", &stage));
+        assert!(plan.is_no_op());
+        let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+        let guard = sql.find("Pending ConfigSave row drifted").unwrap();
+        assert!(sql.find("BEGIN TRANSACTION").unwrap() < guard);
+        assert!(sql.find("THROW 57204").unwrap() < guard);
+        assert!(guard < sql.find("DELETE FROM dbo.ConfigSave;").unwrap());
+        assert_eq!(sql.matches("Pending ConfigSave row drifted").count(), 5);
+        assert!(sql.contains("FileName = N'deleted' AND PartNo = 0"));
+        assert!(!sql.contains("INSERT dbo.Config"));
     }
 
     #[test]

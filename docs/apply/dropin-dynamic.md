@@ -5,8 +5,8 @@ generation** while sessions stay connected: the changed rows go beside the activ
 `<name>_dynupdate_<generation>`, the two `DynamicallyUpdated` markers name the generation, `root` and `version` are
 replaced in place, and the writes the platform's own `force` makes besides -- the change registrations of the exchange
 plans and `Files.MobileVersions.dat` -- are made in the same transaction. Sessions that are open keep the generation they
-loaded; sessions that open afterwards read the new one; the next exclusive apply folds every generation into the ordinary
-rows.
+loaded; sessions that open afterwards read the new one. Settling collected pending generations requires the
+**native exclusive apply**: this binary's direct exclusive path still refuses pending Params SI aliases.
 
 The design and the platform measurements that decided it are in [`dropin-dynamic-design.md`](dropin-dynamic-design.md)
 (checkpoint 1); this file is what was built and how it was proven (evidence:
@@ -23,9 +23,10 @@ only the common report initializer required conflict reconciliation.
 The native twins below are historical September measurements, not fresh native
 acceptance of this port. The current checkpoint validates bounded Rust gates and
 regressions. Fresh native/session acceptance on the integrated 0.5 candidate is
-still required before expanding or closing #347. No pending-overlay
-import -> force -> repeat support is claimed, and Params `.si` collection remains
-unimplemented. The profile change adds only `mssql.config.apply.dynamic`:
+still required before expanding or closing #347. That first-wave checkpoint did not
+implement pending-overlay import -> force -> repeat or Params `.si` collection.
+The measured bounded extension is described below; active-session acceptance remains open.
+The profile change adds only `mssql.config.apply.dynamic`:
 8.3.27.2214 supported, 8.5.1.1150 unsupported; existing 0.4 capabilities stay as released.
 
 The semantic stage inventory is now bound to the exact image the transaction
@@ -36,6 +37,41 @@ of ConfigSave and generation markers before retry, and leaves the outcome
 uncertain. A final verification failure after successful execution explicitly
 states that the transaction committed. The recovery artifact is manual recovery
 evidence, not an automatic resume command.
+
+## Pending generations — second-wave bounded extension
+
+The BSP 8.3.27.2214 storage survey and fresh own/native proof are recorded in
+[`wave2-pending-generations.md`](evidence/dropin-dynamic/wave2-pending-generations.md).
+An imported pending overlay is accepted only when `deleted` exactly inventories
+the existing Config aliases and marker, both ordered generation histories agree,
+and the Params service collection has the measured sixteen-class shape. The
+initial legacy generation has neither collected SI aliases nor a deleted alias;
+every later generation must have a complete collection. Missing whole later
+collections, partial collections, reordered history, unknown classes and actual
+object removal are refused before publication.
+
+An unchanged CommonForm `.1` HELP companion may be carried with `.0`; its inflated
+text must equal the effective active row. This does not enable changed help or
+other extra parts. Publication preserves every previous alias, adds the new
+deleted alias and sixteen raw SI copies, and refreshes raw BOM `siVersions` tokens.
+It writes no licensing `.ui` rows. The service inventory, node eligibility and
+registration/file-list preimages are checked under transaction locks before even
+no-op consumption. An ordinary-row no-op that would discard an effective pending
+body revert is refused, including manually prepared stages with absent/empty `deleted`.
+Staged rows require measured `Attributes=0`; the dynamic transaction also binds
+their Creation/Modified headers, sizes and digests before publication or cleanup.
+
+Stopped-database recovery saves the replaced `siVersions` and exact previously
+absent registration-ID/key/filename triples. Those additions may name an **old**
+generation's files; deleting only new-generation aliases is insufficient recovery.
+Inspect an uncertain COMMIT outcome before using the manual recipe or retrying.
+The native comparison covers the measured eligible-node append shape with NULL
+message numbers; it does not add an active-session, licensing or arbitrary-node acceptance claim.
+The native rebuilds three help/search indexes in Files; this path preserves their
+preimage and now reports that known difference in `not_written`. Full storage and
+help-search equivalence are not claimed. After these generations, use the platform's
+exclusive apply to settle the overlay. Our exclusive guard remains strict; this
+checkpoint does not enable its fold of the newly collected Params SI shape.
 
 ## 1. What each value of `--dynamic` does
 
@@ -78,18 +114,21 @@ with the reasons named:
    (`mssql-stage-source-objects --per-row`) or by the platform's partial import. A whole-tree stage (9 521 rows) is refused
    by its size.
    The `deleted` row of a stage: an empty list is consumed; a list that names the rows of the online update the database
-   carries -- every import stage of such a database -- is refused (`evidence/dropin-dynamic/acceptance.md`, section 7).
+   carries is accepted only for the exact measured pending inventory above. Unknown or structural
+   removals remain refused; the September refusal in `acceptance.md`, section 7 is historical.
 2. **A generation is made of** `root`, `version` and `versions`; `root` and `version` must have the text of the active rows.
 3. **Every other row** is the descriptor or the `.0` body of a **common module or common form** that already exists (the
    kinds a session was measured with, `online-activation.md` section 4; the kind is read from the configuration row the
-   `root` row names). A row of another kind, a new object, a `.1` body, a `deleted` list, a name that is not an object's:
+   `root` row names). Only unchanged-text CommonForm `.1` HELP may accompany the body. A row of another kind,
+   a new object, a changed `.1` body, a structural `deleted` list, a name that is not an object's:
    refused. More kinds are #345's, after they are measured with sessions.
 4. **A descriptor is published only unchanged in text** (compared with the row the configuration is read from now: an
    alias of an earlier generation counts). A change of an object's properties is not dynamic here.
 5. **The restructure check** (`ApplyCheckGate`) finds no restructuring. It is asked last, only for a stage nothing else
    refused; with 1-4 it cannot say yes to a stage that changes a table.
 6. **The database is settled:** no unfinished operation (`commit`, `dynamicCommit`, ...), the schema storage at rest, no
-   overlay in `Params` (a native dynamic update's `.si` rows: `config repair` / the native apply first).
+   unmeasured overlay in `Params`. The bounded measured sixteen-class collection above is accepted;
+   other service shapes require `config repair` / native apply first.
 7. **The platform** declares `mssql.config.apply.dynamic`: `platform-8.3.27.2214` only (the build the online transition and
    the twin were measured on). The storage profile is verified against the database as for the exclusive apply (SQL only,
    no RAS; the drop-in has no cluster options).
@@ -117,7 +156,8 @@ Nothing of this needs exclusive access, and none of it is asked for.
   consumed; the planning is `plan_mobile_versions`, `registrations::plan`, `node_literals` of `mssql_config_apply`.
   `sqlgen::timestamp_declarations` gives both the same `@now` (local time shifted by the year offset), which the plan also
   stamps the markers with (`with_platform_timestamps`; the source-driven online apply keeps UTC).
-* **The words of the checks** are shared: `require_no_unfinished_operation`, `require_settled_storage`, `blank_report`.
+* **The checks** share `require_no_unfinished_operation`, the schema-settled helper and `blank_report`.
+  The exclusive path retains `require_settled_storage`'s strict Params refusal; dynamic adds its measured inventory checks.
 * **The recovery artifact** is the exclusive apply's (`recovery::write_recovery`): the rows of `Config` that carry the staged
   names, the markers, `MobileVersions.dat` before, the `_MessageNo` values it resets, the registrations it adds; for a
   dynamic apply the alias rows of earlier generations are not copied (a dynamic apply folds nothing), and the README says how
@@ -129,19 +169,19 @@ Nothing of this needs exclusive access, and none of it is asked for.
 
 ## 4. What is not done
 
-* **An import stage of a database that carries a pending online update** (section 2, the `deleted` list): the platform's
-  `force` writes a `deleted_dynupdate_<g>` row, register file lists and service information for it; this apply refuses it.
-  The import-then-`force` loop therefore works from a clean base to the first generation, and the next import stage is the
-  exclusive apply's until the update is folded. To finish: publish the list as `deleted_dynupdate_<g>`, take the register
-  part from `registrations::plan(.., dropped)`, decide the `Params` `.si` part.
+* **Unmeasured pending inventories** are refused. The second-wave exact deleted/history/SI shape above now supports
+  consecutive import -> force operations; arbitrary service collection, structural removal and licensing remain open.
+* **Help/search index rebuilding** (`Files.userDocs_ru*`, `userPostings_ru*`, `userVocabulary_ru*`) is not implemented.
+  The native-derived caches differ from the preserved own preimage; full storage/help-search equivalence is not claimed.
 * **More kinds** (object modules, forms of top-level objects, templates, pictures, help, rights, command interfaces): #345.
 * **A prompt** (`--dynamic=prompt` asking the terminal) and **ending sessions** (`--session-terminate`): not built.
 * **The cluster is not told.** Like the platform run against a database, this apply writes to SQL Server only; a session that
   is open keeps its generation (measured for both), a new one reads the new generation.
 * **8.5** (`mssql.config.apply.dynamic` is unsupported there) and **8.3.27.1989**.
 * **A stage of the platform's own import** (removals, structure): `требуется штатный config apply`.
-* **The overlay grows** with every generation: no cap, a warning past 50. An exclusive apply folds all of it
-  (`own-apply.md`, "Dynamic-update rows go even when the stage omits them").
+* **The overlay grows** with every generation. Stage and service inventories retain strict 128-row/32-MiB bounds;
+  this checkpoint does not promise an unlimited number of pending generations. The historical growth warning remains.
+  Native exclusive apply is the settlement route; this binary's exclusive guard still refuses collected Params aliases.
 
 ## 5. Findings for the apply track
 

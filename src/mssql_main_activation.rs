@@ -146,6 +146,8 @@ pub struct MainActivationPlan {
     own_ras_processes: Vec<OwnRasProcess>,
     /// Writes the caller's apply makes in the same transaction (see [`Self::with_parity_sql`]).
     parity_sql: Option<String>,
+    /// Internal caller's exact semantic inventory assertions, also required before no-op cleanup.
+    precondition_sql: Option<String>,
     /// T-SQL that declares `@now`, the timestamp as the platform writes it (see
     /// [`Self::with_platform_timestamps`]).
     platform_timestamps: Option<String>,
@@ -264,6 +266,14 @@ impl MainActivationPlan {
         self
     }
 
+    /// Internal, validated assertions executed under the same serializable transaction and row
+    /// locks as publication, after the exact stage/markers and before even no-op consumption.
+    /// This hook is for CAS assertions, not writes or user-supplied SQL.
+    pub(crate) fn with_precondition_sql(mut self, sql: String) -> Self {
+        self.precondition_sql = Some(sql).filter(|sql| !sql.trim().is_empty());
+        self
+    }
+
     /// The plan whose `online` publication stamps the `DynamicallyUpdated` markers the way the
     /// platform does -- local time shifted by the infobase's year offset, the `@now` the
     /// `declarations` declare -- instead of UTC (the default, which the source-driven online apply
@@ -275,8 +285,9 @@ impl MainActivationPlan {
     }
 
     /// The plan for a stage that holds rows besides the ones published: the caller has judged them (the
-    /// empty `deleted` list of an import stage; nonempty lists are refused by the dynamic caller)
-    /// and this publication neither publishes nor acts on them. They are part of the exact stage
+    /// empty `deleted` list of an import stage, or a measured pending list the caller explicitly
+    /// copies through its parity hook). The core transition neither publishes nor acts on them.
+    /// They are part of the exact stage
     /// the transaction asserts and go with `ConfigSave` when it is emptied; the plan validated and
     /// published only the rows it was prepared with.
     pub fn with_consumed_stage_rows(mut self, rows: Vec<MainStorageRow>) -> Self {
@@ -489,6 +500,7 @@ pub fn prepare_main_activation_for(
         recovery,
         own_ras_processes: Vec::new(),
         parity_sql: None,
+        precondition_sql: None,
         platform_timestamps: None,
         consumed_stage_rows: Vec::new(),
         executor,
@@ -728,6 +740,12 @@ fn render_main_activation_sql_internal(
     render_selected_assertion(&mut sql, "Config", "ExpectedActive", 57202);
     render_marker_assertion(&mut sql, "Config", plan.config_marker.as_ref(), 57203);
     render_marker_assertion(&mut sql, "Params", plan.params_marker.as_ref(), 57204);
+    if let Some(precondition) = &plan.precondition_sql {
+        sql.push_str(precondition);
+        if !precondition.ends_with('\n') {
+            sql.push('\n');
+        }
+    }
     if !plan.no_op && plan.mode != MainActivationMode::Online {
         render_online_history_assertion(&mut sql, plan.mode, 57208);
     }
@@ -1692,6 +1710,7 @@ mod tests {
         )
         .unwrap()
         .with_consumed_stage_rows(vec![row("deleted", b"0".to_vec())])
+        .with_precondition_sql("IF EXISTS (SELECT 1 FROM dbo.Params WITH (UPDLOCK, HOLDLOCK) WHERE FileName=N'stale-si') THROW 57305, 'pending service drifted', 1;".to_owned())
         .with_parity_sql("UPDATE dbo.Files SET BinaryData=0x01; -- must not run".to_owned())
         .with_platform_timestamps("DECLARE @now datetime2(6) = SYSDATETIME();".to_owned());
         assert!(plan.is_no_op());
@@ -1699,6 +1718,10 @@ mod tests {
         assert!(sql.contains("INSERT @ExpectedStage VALUES (N'deleted'"));
         assert!(sql.contains("DELETE FROM dbo.ConfigSave;"));
         assert!(sql.contains("IF @@ROWCOUNT <> 6 THROW 57205"));
+        let guard = sql.find("pending service drifted").unwrap();
+        assert!(sql.find("BEGIN TRANSACTION").unwrap() < guard);
+        assert!(sql.find("THROW 57204").unwrap() < guard);
+        assert!(guard < sql.find("DELETE FROM dbo.ConfigSave;").unwrap());
         assert!(!sql.contains("must not run"));
         assert!(!sql.contains("DECLARE @now"));
         assert!(!sql.contains("INSERT dbo.Config"));
