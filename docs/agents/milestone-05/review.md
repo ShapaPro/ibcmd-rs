@@ -92,3 +92,12 @@ accepted dynamic changes. Extension adapters, dynamic owned files and v0.4
 synonym/state behavior are preserved. Preflight precedes the recovered input
 reader; both full test groups remain and no production functions duplicate.
 Integrated compilation/tests and current CI are separate from this review.
+
+## Release audit alignment: PASS
+
+Reviewer `release_review` independently checked the CI-discovered stale
+dynamic-force refusal. Replacing that case with unsupported extension apply
+matches the Rust boundary suite and refuses during parsing before SQL/profile
+or executor dispatch. Exit 1/message and empty-PATH checks remain; binary,
+archive, oracle-command, SBOM and checksum guards are unchanged. Local saved
+CLI audit PASS; combined release binaries remain subject to current CI.

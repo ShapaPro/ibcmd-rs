@@ -28,6 +28,15 @@ Published as draft [PR #420](https://github.com/Untru/ibcmd-rs/pull/420).
 Use its current checks for live Windows/Linux CI status; local results above
 refer to the reviewed implementation source, not a claim that CI completed.
 
+The initial Linux Offline E2E run passed compilation, integration tests,
+release-shaped build and native micro-corpus parity, then found a stale audit
+expectation: `--dynamic=force` was still classified as unsupported. The audit
+now checks the still-unsupported `--extension=E` route, as the Rust boundary
+test already does. Exit/message, empty-PATH, oracle-command, binary-marker and
+SBOM guards are retained. Local clean-PATH infobase audit passes on the saved
+LIVE checkpoint CLI binary; current combined release binaries are checked by
+the updated Windows/Linux CI runs.
+
 The branch stays a first-wave milestone checkpoint. No milestone issue is
 closed wholesale; no v0.5 tag or release is created. The remaining acceptance
 is listed in [roadmap.md](roadmap.md), especially warm/native RAS sessions,
