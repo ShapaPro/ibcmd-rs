@@ -1,5 +1,5 @@
-//! `infobase config save` from rows (Untru/ibcmd-rs#352), proven without a
-//! server: a platform
+//! `infobase config save` from rows (Untru/ibcmd-rs#352) and the offline half
+//! of `infobase config load` (#353), proven without a server: a platform
 //! `.cf` is turned into the folder of stored rows a `Config` table would hold
 //! (`<FileName>__part<N>.bin`, the element's packed bytes), saved back with
 //! `mssql-save-config --rows-dir`, and the result is compared with the
@@ -344,4 +344,125 @@ fn what_is_no_configuration_is_refused_and_nothing_is_left_behind() {
     let run = save(&rows, &output, &["--overwrite"]);
     assert!(run.status.success(), "{}", text(&run.stderr));
     assert_eq!(fs::read(&output).unwrap(), expected_container(&entries));
+}
+
+/// The bcp native rows of the bulk stage's table:
+/// `(FileName, Kind, DataSize, PartNo, BinaryData)` per part.
+fn read_bcp(bytes: &[u8]) -> Vec<(String, u8, i64, i32, Vec<u8>)> {
+    let mut rows = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let mut take = |len: usize| {
+            let slice = bytes[at..at + len].to_vec();
+            at += len;
+            slice
+        };
+        let name_len = u16::from_le_bytes(take(2).try_into().unwrap()) as usize;
+        let units = take(name_len)
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        let kind = take(1)[0];
+        let data_size = i64::from_le_bytes(take(8).try_into().unwrap());
+        let part = i32::from_le_bytes(take(4).try_into().unwrap());
+        let len = i64::from_le_bytes(take(8).try_into().unwrap()) as usize;
+        let blob = take(len);
+        rows.push((
+            String::from_utf16(&units).unwrap(),
+            kind,
+            data_size,
+            part,
+            blob,
+        ));
+    }
+    rows
+}
+
+#[test]
+fn a_loaded_file_stages_its_records_and_saves_back_to_the_same_configuration() {
+    for fixture in FIXTURES {
+        let original = common::fixture(fixture);
+        let scratch = Scratch::new(&format!("load-{}", fixture.replace('/', "-")));
+        // The file as a platform's `config save` of an unapplied import
+        // writes it: with the stage's empty removal list, `deleted`.
+        let mut entries = packed_entries(&original);
+        entries.push(("deleted".to_string(), deflate("\u{feff}0".as_bytes())));
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let input = scratch.join("input.cf");
+        fs::write(&input, expected_container(&entries)).unwrap();
+
+        let script = scratch.join("scripts").join("load.sql");
+        let run = ibcmd_rs(&[
+            "mssql-load-config".as_ref(),
+            "--database".as_ref(),
+            "Db".as_ref(),
+            "--script-only".as_ref(),
+            "--script-output".as_ref(),
+            script.as_os_str(),
+            input.as_os_str(),
+        ]);
+        assert!(run.status.success(), "{fixture}: {}", text(&run.stderr));
+        let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+        assert_eq!(report["rows"], entries.len(), "{fixture}");
+        assert_eq!(report["parts"], entries.len(), "{fixture}");
+        assert_eq!(report["carries_deleted_row"], true, "{fixture}");
+        assert_eq!(report["written_to_database"], false, "{fixture}");
+
+        // the rows written are the container's records, in its order
+        let rows_file = PathBuf::from(report["rows_file"].as_str().unwrap());
+        let staged = read_bcp(&fs::read(&rows_file).unwrap());
+        assert_eq!(staged.len(), entries.len(), "{fixture}");
+        for ((name, kind, data_size, part, blob), (expected_name, bytes)) in
+            staged.iter().zip(&entries)
+        {
+            assert_eq!(name, expected_name, "{fixture}");
+            assert_eq!((*kind, *part), (0, 0), "{fixture}: {name}");
+            assert_eq!(*data_size, bytes.len() as i64, "{fixture}: {name}");
+            assert_eq!(blob, bytes, "{fixture}: {name}");
+        }
+        let scripts = report["scripts"].as_array().unwrap();
+        let prepare = fs::read_to_string(scripts[0].as_str().unwrap()).unwrap();
+        assert!(prepare.contains("CREATE TABLE"), "{prepare}");
+        let apply = fs::read_to_string(scripts[1].as_str().unwrap()).unwrap();
+        assert!(apply.contains("USE [Db];"), "{apply}");
+        assert!(apply.contains("DELETE FROM dbo.ConfigSave;"), "{apply}");
+        assert!(
+            apply.contains(&format!(") <> {}\n", entries.len())),
+            "{apply}"
+        );
+
+        // the staged rows, read back as the table would hold them, save to the
+        // same configuration; `deleted` is a stage's own row, not Config's
+        let rows = scratch.join("rows");
+        let without_deleted = staged
+            .iter()
+            .filter(|row| row.0 != "deleted")
+            .map(|row| (row.0.clone(), row.4.clone()))
+            .collect::<Vec<_>>();
+        write_rows_dir(&rows, &without_deleted, None);
+        let output = scratch.join("saved.cf");
+        saved(&rows, &output);
+        let (ours, theirs) = (scratch.join("ours"), scratch.join("theirs"));
+        common::export(&output, &ours);
+        common::export(&original, &theirs);
+        common::assert_tree_eq(&theirs, &ours);
+    }
+
+    // without --script-only nothing is done
+    let scratch = Scratch::new("load-refused");
+    let run = ibcmd_rs(&[
+        "mssql-load-config".as_ref(),
+        "--database".as_ref(),
+        "Db".as_ref(),
+        "--script-output".as_ref(),
+        scratch.join("load.sql").as_os_str(),
+        common::fixture(FIXTURES[0]).as_os_str(),
+    ]);
+    assert!(!run.status.success());
+    assert!(
+        text(&run.stderr).contains("--script-only"),
+        "{}",
+        text(&run.stderr)
+    );
+    assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
 }

@@ -1849,7 +1849,11 @@ pub(super) fn stage_source_objects_base_free(
 /// copied from or checked against Config. Attributes are 0 (what every
 /// staged body row the target lacks already gets on the default path); a row
 /// over the platform's part size is stored in parts, as its own import does.
-fn build_base_free_bulk_stage_apply_sql(database: &str, table: &str, staged_rows: usize) -> String {
+pub(super) fn build_base_free_bulk_stage_apply_sql(
+    database: &str,
+    table: &str,
+    staged_rows: usize,
+) -> String {
     let stage = format!("tempdb.dbo.{}", quote_ident(table));
     format!(
         "SET NOCOUNT ON;\n\

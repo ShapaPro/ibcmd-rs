@@ -570,6 +570,7 @@ ibcmd-rs cf load C:\src\MyConf C:\cf\MyConf-new.cf --base C:\cf\MyConf.cf
 | `cf load` | Собрать новый файл с правками дерева XML — см. [раздел 3](#cf-export-и-cf-load--файлы-cf-cfe-epf-erf--xml-без-базы). |
 | `cf bootstrap` | Собрать новый CF из полного дерева XML без базы и платформы. |
 | `mssql-save-config` | То же, что `ibcmd infobase config save`: конфигурация в файл `.cf` прямо из строк, без XML. Подключение — как у `mssql-dump-config` (`--server`, `--database`, `--sql-user`, `--sql-pwd`, `--sqlcmd`), или без сервера: `--rows-dir <каталог>` читает строки Config из файлов `<FileName>__part<N>.bin` (части одной строки склеиваются). `--db` — только Config; `--overwrite` — заменить существующий файл. Печатает отчёт JSON: число элементов, строк из ConfigSave, строк онлайн-обновления и строк из нескольких частей. |
+| `mssql-load-config` | Офлайновая половина `config load`: разбирает `.cf` в строки, которые загрузка записывает в ConfigSave (по строке на элемент, с теми же сжатыми байтами; строка больше 10 000 000 байт — частями), и пишет файл строк bcp и два скрипта пакетной загрузки, как `mssql-stage-source-objects --script-only`. Нужны `--database` и `--script-only`; `--script-output` — куда писать. В базу ничего не пишет; файл без `root`, `version`, `versions` или с повреждённым элементом отклоняется. |
 | `convert` | Конвертация целиком: XML ↔ CF между указанными профилями версий (`--source-format`, `--target-format`, `--source-profile`, `--target-profile`). |
 
 ### Расширения конфигурации

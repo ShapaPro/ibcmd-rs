@@ -92,6 +92,7 @@ use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 pub mod base_free_cf;
+pub mod cf_load_stage;
 mod delta_stage;
 mod empty_stage;
 mod offline_compile;

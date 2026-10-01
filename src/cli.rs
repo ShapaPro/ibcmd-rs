@@ -143,6 +143,10 @@ pub enum Commands {
     /// Write the configuration of a database (or of a folder of its Config
     /// rows) as a .cf straight from the rows, as `infobase config save`.
     MssqlSaveConfig(MssqlSaveConfigArgs),
+    /// Turn a .cf into the rows a `config load` stages in ConfigSave and
+    /// write the bulk stage scripts for them (--script-only; nothing is
+    /// written to a database).
+    MssqlLoadConfig(MssqlLoadConfigArgs),
     /// List configuration extensions directly from the SQL Server registry.
     MssqlExtensionList(MssqlExtensionListArgs),
     /// Export one or all configuration extensions directly from SQL Server CAS.
@@ -1654,6 +1658,24 @@ pub struct MssqlSaveConfigArgs {
     pub overwrite: bool,
     /// The .cf to write.
     pub output: PathBuf,
+}
+
+/// `mssql-load-config`: the offline half of `infobase config load`.
+#[derive(Debug, Args)]
+pub struct MssqlLoadConfigArgs {
+    /// SQL Server database name the scripts are written for.
+    #[arg(long)]
+    pub database: String,
+    /// Only write the bulk rows file and the SQL scripts. Required: this
+    /// version does not run them.
+    #[arg(long)]
+    pub script_only: bool,
+    /// Where to write the scripts (a file name: the rows file and the two
+    /// scripts are written beside it, as `mssql-stage-source-objects` does).
+    #[arg(long)]
+    pub script_output: Option<PathBuf>,
+    /// The .cf to load.
+    pub input: PathBuf,
 }
 
 #[derive(Debug, Args)]

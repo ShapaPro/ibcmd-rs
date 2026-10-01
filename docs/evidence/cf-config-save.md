@@ -1,8 +1,12 @@
-# `infobase config save`: a `.cf` straight from the rows (#352)
+# `infobase config save`: a `.cf` straight from the rows (#352, #353)
 
 `ibcmd infobase config save [--db] <file.cf>` and the research command
 `ibcmd-rs mssql-save-config` write the configuration a database publishes as a
-`.cf` without XML in between (`src/mssql_dump/config_save.rs`).
+`.cf` without XML in between (`src/mssql_dump/config_save.rs`). The offline
+half of `config load` (`ibcmd-rs mssql-load-config --script-only`,
+`src/mssql/cf_load_stage.rs`) is the inverse: the elements of a `.cf` become
+the rows a load stages in `ConfigSave`, written as the bulk stage's rows file
+and scripts.
 
 ## What the container holds
 
@@ -53,6 +57,19 @@ goal. A file this writer saved does reproduce byte for byte: its rows saved
 again give the same bytes, and the bytes equal an independent build with
 the V8 writer from the same rules (`tests/cf_config_save.rs`).
 
+## The offline half of `config load`
+
+`mssql-load-config --script-only` refuses a file without `root`, `version` and
+`versions` (an extension's `.cfe`) and one whose element is not one complete
+raw-deflate stream, then writes one row per element in the container's order:
+`Kind` 0, `PartNo` 0, `DataSize` the element's length, or several parts of
+10 000 000 bytes each carrying the whole size. The apply script is the
+base-free stage's (`ConfigSave` emptied, every row inserted with the
+platform's dates and `Attributes` 0). A `.cf` that carries `deleted` stages it
+as it is. `tests/cf_config_save.rs` reads the rows file back and finds the
+container's records; saving those rows back gives the original configuration
+(`cf export` file for file).
+
 ## Open, needs the platform or SQL Server
 
 - `config load` of a saved file by 8.3.27.2214 / 8.5, and its export equal to
@@ -63,3 +80,6 @@ the V8 writer from the same rules (`tests/cf_config_save.rs`).
   nothing is staged (here it does not).
 - The platform's lines and behaviour for `config save` (an existing file is
   replaced here; the title is the command's name in `ibcmd help infobase`).
+- `config load` against a server: running the scripts, the `deleted` list for
+  what the target's `Config` holds and the file does not, and the platform's
+  `config apply` of such a stage (#353).
