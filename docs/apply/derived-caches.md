@@ -144,8 +144,11 @@ An object that lists forms, templates, commands or any collection beyond its att
 more records than the descriptor's attributes explain: such a new object is refused.
 
 A changed synonym of an existing metadata header is also written into this registry, for both the
-nonstructural gate and S1. `mssql_config_apply::synonyms` compares active and staged descriptor headers by
-UUID; `registry::set_synonyms` changes just the matching record's localized block, on top of any edits from
+nonstructural gate and S1. `mssql_config_apply::synonyms` reads every staged descriptor's headers by UUID
+and reconciles their localized text with the registry. It deliberately does not filter by physical Config
+digests or join physical Config descriptors: a stage can revert a newer dynamic alias to the exact bytes
+of its physical base. Descriptor parts are joined before inflation. `registry::set_synonyms` changes just
+the matching record's localized block, on top of any edits from
 new objects, members, forms, templates or removals. The guarded rewrite preserves the stored-row digest
 and bumps the registry's `siVersions` entry. Empty synonyms, multiple languages and doubled quotes are
 covered by unit tests. Headers absent from the registry require no record edit.
