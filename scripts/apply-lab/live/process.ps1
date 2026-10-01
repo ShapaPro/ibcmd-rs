@@ -39,12 +39,12 @@ function Invoke-LiveBounded {
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     foreach ($arg in $Arguments) { $psi.ArgumentList.Add($arg) }
-    $p=New-LiveBoundedProcess $psi;$started=$false;$exitProved=$false;$spawn=$null;$timedOut=$false;$reapAttempted=$false
+    $p=New-LiveBoundedProcess $psi;$started=$false;$exitProved=$false;$spawn=$null;$timedOut=$false;$reapAttempted=$false;$pipesUnproved=$false
     $state=[ordered]@{execution_state='not_started';requested_executable=$Executable;arguments_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($Arguments|ConvertTo-Json -Compress))))}
     try {
         if (-not $p.Start()) { throw 'child process failed to start' }
         $started=$true;$state.pid=$p.Id;$state.handle_start_utc=$p.StartTime.ToUniversalTime().ToString('o')
-        $stdout=$p.StandardOutput.ReadToEndAsync();$stderr=$p.StandardError.ReadToEndAsync()
+        $pipesUnproved=$true;$stdout=$p.StandardOutput.ReadToEndAsync();$stderr=$p.StandardError.ReadToEndAsync()
         # The original live process handle prevents PID reuse during initial
         # capture. Rapid exits need no signalling authority and still return.
         if (!$p.HasExited) {
@@ -67,16 +67,17 @@ function Invoke-LiveBounded {
         }
         $exitProved=$true
         if (!$stdout.Wait(5000) -or !$stderr.Wait(5000)) { throw 'direct child output pipes exceeded5000ms' }
+        $pipesUnproved=$false
         [pscustomobject]@{ExitCode=$p.ExitCode;Stdout=$stdout.GetAwaiter().GetResult();Stderr=$stderr.GetAwaiter().GetResult()}
     } catch {
         $state.failure=$_.Exception.Message
         throw
     } finally {
         if ($started -and !$exitProved -and !$reapAttempted -and $p.HasExited) { $exitProved=$p.WaitForExit(5000) }
-        if ($started -and (!$exitProved -or $timedOut)) {
+        if ($started -and (!$exitProved -or $timedOut -or $pipesUnproved)) {
             # A direct handle exit does not prove that a timed-out wrapper left
             # no running descendants. Retain the lifecycle; never signal a tree.
-            $script:LiveBoundedUncertainChild=$true;$state.execution_state=$(if($exitProved){'timeout_descendants_unproved'}else{'unknown_running'});$state.direct_child_exit_proved=$exitProved;$state.captured_utc=[DateTime]::UtcNow.ToString('o')
+            $script:LiveBoundedUncertainChild=$true;$state.execution_state=$(if(!$exitProved){'unknown_running'}elseif($timedOut){'timeout_descendants_unproved'}else{'pipe_timeout_descendants_unproved'});$state.direct_child_exit_proved=$exitProved;$state.captured_utc=[DateTime]::UtcNow.ToString('o')
             try {Save-LiveUncertainChild $state} catch {$state.receipt_error='publication refused; retain leases and original failure'}
             $p.Dispose()
             throw ('LIVE_CHILD_EXECUTION_UNCERTAIN '+($state|ConvertTo-Json -Depth 4 -Compress))

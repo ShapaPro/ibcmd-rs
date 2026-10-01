@@ -49,8 +49,8 @@ foreach($fault in @('birthday','exe','cmd','parent','missing')){
 Reset reap-fails;$caught=$false;try{Invoke-LiveBounded child @('arg') 1|Out-Null}catch{$caught=$_.Exception.Message -match '^LIVE_CHILD_EXECUTION_UNCERTAIN '}
 if(!$caught -or $script:kills -ne 1 -or ($script:waits -join ',') -cne '1000,5000' -or !(Test-LiveUncertainChild)){throw 'unreaped child silently complete'}
 'PASS unreaped child unresolved, original direct identity retained, no descendants signalled'
-Reset pipe-timeout;$caught=$false;try{Invoke-LiveBounded child @('arg') 1|Out-Null}catch{$caught=$_.Exception.Message -match 'output pipes exceeded5000ms'}
-if(!$caught -or $script:kills -or (Test-LiveUncertainChild)){throw 'pipe timeout incorrectly signalled/released live child'}
-'PASS completed child output pipe deadline5000, no unbounded GetResult or signal'
+Reset pipe-timeout;$caught=$false;try{Invoke-LiveBounded child @('arg') 1|Out-Null}catch{$caught=$_.Exception.Message -match '^LIVE_CHILD_EXECUTION_UNCERTAIN '}
+if(!$caught -or $script:kills -or !(Test-LiveUncertainChild) -or $script:receipt.execution_state -cne 'pipe_timeout_descendants_unproved' -or !$script:receipt.direct_child_exit_proved){throw 'inherited pipe completion unproved but lifetime released'}
+'PASS inherited output pipe deadline5000 retains unresolved descendants/lifetime; no unbounded GetResult or signal'
 'PASS pure child mocks; realStarts=realSignals=SQLcalls=registryWrites=0'
 }finally{$env:IBCMD_RS_LIVE_CHILD_RECEIPT_ROOT=$savedReceipts}

@@ -8,7 +8,7 @@ A missing or changed identity refuses any signal. An admitted timeout signals
 only the original process handle; descendants are never signalled. Reap and
 output-pipe waits are bounded to5000ms each.
 
-Timeouts retain an unresolved lifetime state even after the direct handle exits:
+Process or output-pipe timeouts retain an unresolved lifetime state even after the direct handle exits:
 that exit does not establish whether a wrapper left running descendants.
 `LIVE_CHILD_EXECUTION_UNCERTAIN` includes sanitized identity and a command/argument
 hash, without command text. An unresolved direct child also sets the sticky
