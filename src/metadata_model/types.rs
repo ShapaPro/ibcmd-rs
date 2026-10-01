@@ -292,7 +292,7 @@ const BUILTIN_LOCAL_TYPES: &[(&str, &str)] = &[
     ),
 ];
 
-fn builtin_type_id(name: &str) -> Option<&'static str> {
+pub(crate) fn builtin_type_id(name: &str) -> Option<&'static str> {
     if let Some((_, id)) = BUILTIN_TYPES
         .iter()
         .find(|(candidate, _)| *candidate == name)

@@ -103,7 +103,7 @@ pub fn base_free_patch(
         }
         entries = theirs;
     }
-    let total = entries.values().map(Vec::len).sum();
+    let total: usize = entries.values().map(Vec::len).sum();
     let mut patch = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
         patch.push(StoragePatchEntry::new(
@@ -115,5 +115,9 @@ pub fn base_free_patch(
             StoragePatchOutcome::compiled(bytes)?,
         ));
     }
-    Ok((StoragePatch::new(patch)?, total))
+    // The patch retains every compiled payload plus keys and provenance, so
+    // its budget follows the tree's own size (an ERP-sized tree retains more
+    // than the 512 MiB floor) rather than the floor alone.
+    let budget = total.saturating_mul(2);
+    Ok((StoragePatch::with_retained_byte_limit(patch, budget)?, total))
 }

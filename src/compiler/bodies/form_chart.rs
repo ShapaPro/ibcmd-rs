@@ -112,6 +112,66 @@ pub(crate) fn format_form_embedded_gantt_chart(settings_xml: &str) -> Result<Str
     Ok(value)
 }
 
+/// `<Settings xsi:type="d4p1:FlowchartContextType">` to
+/// `{0,1,"Flowchart",{"#",<type>,{5,{{1,…}},0,0}}}`: the design record the
+/// exporter reads (`parse_form_flowchart_settings_xml`), member for member, and
+/// checked against that reader. `bpUUID` and `useOutput` are not stored, so
+/// only the values the platform writes back for them are accepted.
+pub(crate) fn format_form_embedded_flowchart(settings_xml: &str) -> Result<String> {
+    let root = parse_xml(settings_xml)?;
+    ensure!(
+        root.name == "Settings"
+            && attributes_are(
+                &root,
+                &[
+                    ("xmlns:d4p1", "http://v8.1c.ru/8.2/data/graphscheme"),
+                    ("xsi:type", "d4p1:FlowchartContextType")
+                ]
+            ),
+        "the attribute's <Settings> is not a graphical scheme the writer reads"
+    );
+    let mut c = Children::chart(&root)?;
+    let back_color = color(c.required("backColor")?)?;
+    let enable_grid = boolean(c.required("enableGrid")?)?;
+    let draw_grid_mode = code(
+        c.required("drawGridMode")?,
+        &[("None", "0"), ("Dots", "1"), ("Lines", "3")],
+    )?;
+    let horizontal_step = integer(c.required("gridHorizontalStep")?)?;
+    let vertical_step = integer(c.required("gridVerticalStep")?)?;
+    exact(
+        c.required("bpUUID")?,
+        "00000000-0000-0000-0000-000000000000",
+    )?;
+    exact(c.required("useOutput")?, "Auto")?;
+    let mut pairs = Vec::new();
+    while let Some(item) = c.optional("printPropItem") {
+        let mut p = Children::chart(item)?;
+        let key = integer(p.required("key")?)?;
+        let value = integer(p.required("val")?)?;
+        p.finish()?;
+        pairs.push(format!("{key},{{\"N\",{value}}}"));
+    }
+    c.finish()?;
+    let mut record = format!(
+        "1,{back_color},{enable_grid},{horizontal_step},{vertical_step},{draw_grid_mode},{}",
+        pairs.len()
+    );
+    for pair in &pairs {
+        record.push(',');
+        record.push_str(pair);
+    }
+    let value = format!(
+        "{{0,1,\"Flowchart\",{{\"#\",4af83795-fc2a-48cd-9bea-ce665789a62c,{{5,{{{{{record}}}}},0,0}}}}}}"
+    );
+    verify_round_trip(
+        settings_xml,
+        &value,
+        crate::mssql_dump::render_form_flowchart_settings_value,
+    )?;
+    Ok(value)
+}
+
 /// The chart value `format_form_embedded_chart` returns, before the form
 /// exporter's check: a spreadsheet template carries the same serialization
 /// and checks it against its own exporter instead.
@@ -203,6 +263,7 @@ const MARKERS: &[(&str, &str)] = &[
 
 const CHART_TYPES: &[(&str, &str)] = &[
     ("Line", "0"),
+    ("Area", "2"),
     ("StackedColumn", "5"),
     ("Column3D", "6"),
     ("StackedBar", "9"),
@@ -1086,6 +1147,7 @@ fn rectangle(node: &XmlNode) -> Result<[String; 4]> {
 // ---------------------------------------------------------------------------
 
 const TIME_MEASURES: &[(&str, &str)] = &[
+    ("Second", "5"),
     ("Minute", "10"),
     ("Hour", "20"),
     ("Day", "30"),
@@ -1581,6 +1643,7 @@ fn line(node: &XmlNode) -> Result<String> {
     );
     let width = width_of(node)?;
     let style = match style_of(node, "v8ui:ChartLineType")? {
+        "None" => "0",
         "Solid" => "1",
         "Dotted" => "2",
         other => bail!(
@@ -2362,7 +2425,7 @@ mod tests {
         // A chart type the decoder has no code for.
         let area = settings.replace(
             "<d4p1:chartType>Column3D</d4p1:chartType>",
-            "<d4p1:chartType>Area</d4p1:chartType>",
+            "<d4p1:chartType>Radar</d4p1:chartType>",
         );
         assert_ne!(area, settings);
         assert!(format_form_embedded_chart(&area).is_err());

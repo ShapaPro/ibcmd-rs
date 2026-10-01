@@ -273,6 +273,7 @@ pub(crate) const WEB_COLOR_CODES: &[(&str, &str)] = &[
     ("LightSteelBlue", "78"),
     ("LightYellow", "79"),
     ("Lime", "80"),
+    ("LimeGreen", "81"),
     ("Maroon", "84"),
     ("MediumBlue", "86"),
     ("MediumGray", "87"),
@@ -2140,12 +2141,14 @@ pub(crate) fn format_gantt_chart_payload(
     height: &str,
     horizontal_stretch: bool,
     vertical_stretch: bool,
+    auto_max_width: bool,
     events: &str,
 ) -> String {
     format!(
-        "{{3,{width},{height},{horizontal},{vertical},{events},1,0,0,1,0,0,0,0,2,2}}",
+        "{{3,{width},{height},{horizontal},{vertical},{events},{auto_max_width},0,0,1,0,0,0,0,2,2}}",
         horizontal = u8::from(horizontal_stretch),
         vertical = u8::from(vertical_stretch),
+        auto_max_width = u8::from(auto_max_width),
     )
 }
 
@@ -2925,7 +2928,7 @@ pub(crate) fn format_spreadsheet_payload(payload: &NativeSpreadsheetPayload<'_>)
         "1",
     )?;
     let output = root_code(payload.output, &[("Enable", "1"), ("Disable", "2")], "0")?;
-    let scaling = root_code(payload.view_scaling_mode, &[("Normal", "1")], "0")?;
+    let scaling = root_code(payload.view_scaling_mode, &[("Normal", "1"), ("Large", "2")], "0")?;
     let drawing_selection = root_code(payload.drawing_selection_show_mode, &[("Show", "0")], "2")?;
     Some(format!(
         "{{13,{width},{height},{horizontal_stretch},{vertical_stretch},{show_grid},{show_headers},{vertical},{horizontal},0,{protection},{selection},{output},{edit},{show_groups},{border_color},{enable_start_drag},{enable_drag},{events},{scaling},{auto_max_width},{max_width},0,{auto_max_height},{max_height},{show_cell_names},{show_row_and_column_names},0,{vertical_tail},{horizontal_tail},{selection_tail},{drawing_selection}}}",
@@ -4424,6 +4427,25 @@ const FORM_STANDARD_COMMAND_UUIDS: &[(&str, &str, &str)] = &[
         "Copy",
         "68baa1bc-edd1-4d9b-ad80-1d53fb8a7988",
     ),
+    // Документооборот 3.0 `Reports/ДокументыВДелах/Forms/ФормаОтчета`: a
+    // button on `Form.StandardCommand.StandardSettings` stores this uuid.
+    (
+        "cfg:ReportObject",
+        "StandardSettings",
+        "c8f1bd8c-b4d1-46d5-97b3-929b5606b6c3",
+    ),
+    // Документооборот 3.0 `BusinessProcesses/Исполнение` and `Подписание`
+    // forms exclude these two; the stored set names these uuids.
+    (
+        "cfg:BusinessProcessObject",
+        "SetDeletionMark",
+        "827b541d-30c1-4f06-aecf-92aa496a0835",
+    ),
+    (
+        "cfg:BusinessProcessObject",
+        "ChangeHistory",
+        "174e58ce-82ad-4787-b956-9367937f7971",
+    ),
     (
         "cfg:BusinessProcessObject",
         "CustomizeForm",
@@ -5810,7 +5832,7 @@ pub(crate) fn format_table_tail(tail: &NativeTableTail<'_>) -> Option<String> {
         &[("None", "1"), ("CommandBar", "2")],
         "0",
     )?;
-    let refresh = root_code(tail.refresh_request, &[("PullFromTop", "1")], "0")?;
+    let refresh = root_code(tail.refresh_request, &[("PullFromTop", "1"), ("PullFromTopOrBottom", "3")], "0")?;
     let height_variant = root_code(
         tail.height_control_variant,
         &[
@@ -5929,7 +5951,13 @@ pub(crate) fn format_table_addition(addition: &NativeTableAddition<'_>) -> Optio
     )?;
     let importance = root_code(
         addition.display_importance,
-        &[("VeryHigh", "1"), ("VeryLow", "5")],
+        &[
+            ("VeryHigh", "1"),
+            ("High", "2"),
+            ("Usual", "3"),
+            ("Low", "4"),
+            ("VeryLow", "5"),
+        ],
         "0",
     )?;
     Some(format!(
@@ -8675,6 +8703,10 @@ const DATA_PATH_STANDARD_ATTRIBUTES: &[(&str, &str, &str)] = &[
         "CalculationType",
         "-101",
     ),
+    // The exporter's own table: ERP WE 2.5 `ChartsOfCharacteristicTypes/
+    // СтатьиРасходов/Forms/ФормаЭлемента` names `Объект.Ref`.
+    ("ChartOfCharacteristicTypes", "Ref", "-2"),
+    ("ChartOfCharacteristicTypes", "Predefined", "-5"),
     ("ChartOfCharacteristicTypes", "Parent", "-6"),
     ("ChartOfCharacteristicTypes", "Code", "-8"),
     ("ChartOfCharacteristicTypes", "Description", "-9"),
@@ -9091,6 +9123,25 @@ pub(crate) fn resolve_form_data_path(
         },
         None => (data_path.trim(), None),
     };
+    // The export's physical spelling of a chain it cannot name --
+    // `<attribute id>/<member>/…`, each member `<code>` or `<code>:<uuid>` --
+    // is the stored chain itself, segment for segment.
+    if marked.is_none()
+        && data_path.contains('/')
+        && let Some(segments) = data_path
+            .split('/')
+            .map(|segment| match segment.split_once(':') {
+                Some((code, uuid)) => (code.parse::<i64>().is_ok()
+                    && uuid.len() == 36
+                    && uuid.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+                .then(|| format!("{{{code},{uuid}}}")),
+                None => segment.parse::<i64>().is_ok().then(|| format!("{{{segment}}}")),
+            })
+            .collect::<Option<Vec<_>>>()
+        && segments.len() >= 2
+    {
+        return Some(format!("{{{},{}}}", segments.len(), segments.join(",")));
+    }
     let tokens = parse_data_path_tokens(data_path);
     if tokens.is_empty() || tokens[0].0.is_empty() {
         return None;
@@ -9240,6 +9291,17 @@ fn resolve_data_path_tokens<'a>(
                             if let Some(subscript) = subscript {
                                 emitted.push(format!("{{{subscript},{DATA_PATH_INDEX_UUID}}}"));
                             }
+                            index += 1;
+                            continue;
+                        }
+                        // `Group` is the list's grouping pseudo field, stored
+                        // `-3` the way the exporter reads it back.
+                        if name == "Group"
+                            && index == dynamic_list_start
+                            && index + 1 == tokens.len()
+                            && marked.is_none()
+                        {
+                            emitted.push("{-3}".to_string());
                             index += 1;
                             continue;
                         }

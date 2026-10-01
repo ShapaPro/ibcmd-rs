@@ -10,7 +10,7 @@ dump of it to <work>/native-8.3.27.2214/load-<label>. Prints per label:
 `build-failed <message>`, `dump-failed`, or `identical N/M differ D missing
 X extra Y` with the first differing files.
 """
-import os, re, subprocess, sys
+import os, re, shutil, subprocess, sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +45,7 @@ def main():
             print(label, 'build-failed', ' | '.join(msg[-3:])[:600])
             continue
         dump_label = 'load-' + label
+        shutil.rmtree(os.path.join(NATIVE, dump_label), ignore_errors=True)
         r = subprocess.run([sys.executable, os.path.join(HERE, 'oracle_dump.py'), '8.3.27.2214',
                             WORK, cf + '=' + dump_label], capture_output=True)
         dumped = os.path.join(NATIVE, dump_label)

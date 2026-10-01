@@ -442,6 +442,10 @@ fn picture_source(reference: &str, context: &DescriptorContext) -> Result<Pictur
     if let Some(uuid) = reference.strip_prefix("0:") {
         return Ok(PictureSource::Uuid(uuid.to_ascii_lowercase()));
     }
+    // `0`: a reference naming nothing, stored `{0}` behind the present flag.
+    if reference == "0" {
+        return Ok(PictureSource::Code(0));
+    }
     bail!("unsupported picture reference {reference}")
 }
 
