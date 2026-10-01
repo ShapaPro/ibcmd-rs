@@ -135,13 +135,75 @@ Raw evidence is preserved under `F:/ibcmd/lab/05/wave3/metadata`:
   `logs/semantic-identical-GREEN.log` passes all 46 focused dynamic tests.
   `gates-semantic-identical/summary.txt` passes all four mandatory quick gates:
   3,711 tests passed, zero failed and ten ignored. Both earlier clean binaries
-  remain historical pre-repair candidates; fresh activation proof is pending.
+  remain historical pre-repair candidates. The clean final candidate used below
+  is source `bb86ee58ca228db583712157eb82956beae88d29`, binary SHA256
+  `B402DC94A55ED6AB316C446D2DD344BFD3EBC75DAA4E5072646EA0D419C5CEC0`.
 
-The fresh native/own activation twins and their real old/new session controls
-are required before claiming the expanded cohort accepted. Source comparisons
-must cover every exported file and normalize only ConfigDumpInfo `configVersion`
-attribute values. Help/search caches and physical dates are reported separately;
-source equality does not establish complete physical storage parity.
+## Fresh module activation twins
+
+The native and OWN D1 controls each restore the native-established A backup into
+a new owned database. Four samples per control cover all 26 module roles: the
+retained old COM session reads A before and after publication; the new session
+reads B before and after its second sample. Each sample also reads the three
+unchanged templates as A, with zero module or template errors. Full session UUID,
+infobase, application, start time and helper process bindings are retained; this
+is functional proof for the measured existing module cohort.
+
+The OWN lifetime uses the clean final candidate, with all 551 tracked source
+files, clean HEAD and binary digest checked before launch and after completion.
+Native import/apply/export and OWN import/apply/native export return success;
+acceptance additionally uses the actual samples and full source comparisons.
+
+Both exported inventories contain 12,198 files. Against the expected
+modules-B/templates-A tree, 12,197 files match byte for byte. ConfigDumpInfo
+matches after changing only `configVersion` attribute values, with all 9,835
+attributes and remaining bytes preserved. Native changes exactly 42 values
+(26 modules and 16 owners); OWN changes exactly 26 module values and no owners.
+The native and OWN module `info` and `text` element payloads match in all 26 rows.
+Neither raw compressed bytes nor complete inflated containers match: native
+container headers differ, and those differences remain in the report.
+
+The storage evidence preserves full headers, SHA256 and 493 selected native raw
+blobs / 445 selected OWN raw blobs. Native stages 45 rows, including 16 unchanged
+descriptor companions; OWN stages 29 rows, without those companions. Native
+creates descriptor aliases and changes 16 Params SI rows plus siVersions; OWN
+preserves these rows. Both publish their actual generation histories and change
+MobileVersions.dat. Distinct generation values and dates are retained.
+
+Native replaces all 20,685 registration IDs and 21,357 linked physical rows while
+preserving every owner/node file list. It resets 60 touched messages from zero
+to NULL and changes 65 other NULL messages to zero. OWN preserves IDs, linked
+rows and file lists, and resets only the same 60 touched messages. Native also
+changes three opaque `.ui` Params rows and `extd_props_cached/gc.mrk`; OWN
+preserves them. The native after-payloads for these four opaque rows were not
+selected: only their complete headers and SHA256 are captured. All 15 help/search
+index rows remain byte/header exact in both controls. These are explicit storage
+differences and capture limits, not a complete physical parity claim.
+
+Both controls finish unregistered with their owned clients closed, the private
+cluster stopped without purge and worker/native leases released. Native cleanup
+first refused a register/unregister result-label collision; its raw refusal is
+preserved and a separately reviewed cleanup-only controller completed cleanup.
+V7 uses distinct action labels, with actual production-helper RED/GREEN evidence,
+and OWN cleanup succeeds directly. Databases remain for the standard 60-minute
+idle cleanup guard; no old shared registration is modified by these controls.
+
+The compact retained evidence map is
+`metadata-modules-D1-summary.json` beside this document. Full originals and
+reproducible offline comparisons remain on F:
+
+- `evidence/body2-native-modules-D1-checkpoint.json`: 557 pinned native proof files.
+- `evidence/body2-own-modules-D1-checkpoint.json`: 511 pinned OWN proof files.
+- `evidence/body2-modules-D1-twins.json`: exact 26 element comparisons and gaps.
+- `evidence/body2-{native,own}-modules-D1-{source,storage,registration}.json`:
+  complete source, full-header/selected-raw and registration comparisons.
+- `evidence/body2_own_modules_D1-source-freeze.json`: actual-write provenance.
+
+OWN template activation remains pending. Its next control must start from a
+captured modules-B/templates-A baseline and change only the three templates;
+the earlier combined A-to-B fixture is not fresh template-only activation proof.
+Nested managed-form admission remains empty. No broad all-object or high-load
+acceptance follows from these module controls.
 
 The prepared >128-row control remains a native-fallback case. No larger dynamic
 budget is enabled by this checkpoint, and no all-object or high-load acceptance
