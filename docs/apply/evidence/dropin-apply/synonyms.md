@@ -63,7 +63,9 @@ root library tests **3581 passed, 0 failed, 9 ignored**. Unit tests cover nested
 multiple languages, removed/empty synonym text, embedded quotes, missing registry records,
 row/version rewrites, and composing an edit on top of another cache edit.
 
-Committed raw reports and comparator output are in [synonyms/](synonyms/). Full lab runs
+Committed apply reports and comparator output are in [synonyms/](synonyms/). Export reports retain the
+summary and changed-object/ConfigDumpInfo entries; unchanged unrelated entries are omitted, with the
+complete-report path recorded in each JSON. Full lab runs
 and reusable scripts remain under `F:\ibcmd\lab\04\restructure-check\dn`:
 `make_syn2.py`, `make_mix2.py`, `prepare_resume.ps1`, `own_case_resume.ps1`,
 `logs/*20261001*`, `bak/{syn2,mix2}_staged.bak`, `ddl_{syn2,mix2}/snap`.
