@@ -998,13 +998,14 @@ pub fn activate_staged_main(
         &args.sql_pwd_env,
     );
     let user = args.sql_user.as_deref();
-    let sql = stage_sql(
+    let sql = stage_sql_with_certificate_policy(
         args.sqlcmd.as_deref(),
         args.bcp_executable.as_deref(),
         &args.server,
         user,
         password.as_deref(),
         &args.sql_pwd_env,
+        args.sqlcmd_trust_cert,
     )?;
     if args.live_checkpoint {
         crate::mssql_live_continue::preflight_backend(&sql, &args.database)?;
@@ -8304,6 +8305,18 @@ fn stage_sql(
     password: Option<&str>,
     password_env: &str,
 ) -> Result<SqlExec> {
+    stage_sql_with_certificate_policy(sqlcmd, bcp, server, user, password, password_env, true)
+}
+
+fn stage_sql_with_certificate_policy(
+    sqlcmd: Option<&Path>,
+    bcp: Option<&Path>,
+    server: &str,
+    user: Option<&str>,
+    password: Option<&str>,
+    password_env: &str,
+    trust_server_certificate: bool,
+) -> Result<SqlExec> {
     SqlExec::from_options(SqlOptions {
         sqlcmd,
         bcp,
@@ -8311,7 +8324,7 @@ fn stage_sql(
         user,
         password,
         password_env,
-        trust_server_certificate: true,
+        trust_server_certificate,
     })
 }
 
@@ -8525,8 +8538,10 @@ fn sqlcmd_command(sql: &SqlExec, tools: &SqlTools, statement: &str) -> Command {
             command.arg("-E");
         }
     }
+    if sql.trust_server_certificate() {
+        command.arg("-C");
+    }
     command
-        .arg("-C")
         .arg("-f")
         .arg("65001")
         .arg("-b")
@@ -8560,8 +8575,10 @@ fn sqlcmd_file_command(sql: &SqlExec, tools: &SqlTools, script: &Path) -> Comman
     // so the ceiling rises from 256 MiB to about 1 GiB on the wire -- room for
     // a staged batch holding one 61 MB add-in template alone (~250 MB as
     // UTF-16 hex text).
+    if sql.trust_server_certificate() {
+        command.arg("-C");
+    }
     command
-        .arg("-C")
         .arg("-a")
         .arg("32767")
         .arg("-f")
@@ -17167,6 +17184,39 @@ mod tests {
         assert!(args.contains(&"-E".to_string()));
         assert!(!args.contains(&"-U".to_string()));
         assert!(!args.contains(&"-P".to_string()));
+    }
+
+    #[test]
+    fn activation_certificate_policy_reaches_clients_and_both_sqlcmd_builders() {
+        for trust in [false, true] {
+            for executable in [None, Some(Path::new("must-not-run-sqlcmd.exe"))] {
+                let sql = super::stage_sql_with_certificate_policy(
+                    executable,
+                    None,
+                    "must-not-connect",
+                    None,
+                    None,
+                    "MUST_NOT_READ",
+                    trust,
+                )
+                .unwrap();
+                assert_eq!(sql.trust_server_certificate(), trust);
+                if let Some(tools) = sql.tools() {
+                    for command in [
+                        super::sqlcmd_command(&sql, tools, "SELECT 1"),
+                        super::sqlcmd_file_command(&sql, tools, Path::new("must-not-read.sql")),
+                    ] {
+                        assert_eq!(command.get_args().any(|arg| arg == "-C"), trust);
+                    }
+                }
+            }
+        }
+        // Other staging commands retain their explicit legacy trust policy.
+        assert!(
+            super::stage_sql(None, None, "must-not-connect", None, None, "MUST_NOT_READ")
+                .unwrap()
+                .trust_server_certificate()
+        );
     }
 
     #[test]

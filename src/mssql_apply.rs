@@ -1228,8 +1228,8 @@ fn main_read_sql(args: &MssqlApplySourceChangeArgs) -> Result<SqlExec> {
     } else {
         None
     };
-    // The main activation's reads trusted the certificate (bcp -u) on the
-    // --sqlcmd path as well.
+    // Propagate the caller's existing certificate policy. Source apply still
+    // requires explicit trust because its legacy dump/stage paths do.
     SqlExec::from_options(SqlOptions {
         sqlcmd: args.sqlcmd.as_deref(),
         bcp: args.bcp_executable.as_deref(),
@@ -1237,7 +1237,7 @@ fn main_read_sql(args: &MssqlApplySourceChangeArgs) -> Result<SqlExec> {
         user: args.sql_user.as_deref(),
         password: password.as_deref(),
         password_env: &args.sql_pwd_env,
-        trust_server_certificate: true,
+        trust_server_certificate: args.sqlcmd_trust_cert,
     })
 }
 
