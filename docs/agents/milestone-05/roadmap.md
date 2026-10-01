@@ -6,8 +6,8 @@ This page records the resumed work boundary, not a release-completion claim.
 | Issue | Implemented checkpoints | Remaining acceptance |
 |---|---|---|
 | [#344](https://github.com/Untru/ibcmd-rs/issues/344) | Independent review of resumed dynamic/live code | Complete four oracle groups, current session measurements, security/correctness review and operational/recovery documentation |
-| [#345](https://github.com/Untru/ibcmd-rs/issues/345) | Preserve the existing common-module/common-form boundary | Evidence and fail-closed classification for modules, forms and templates of other object kinds; address bounded-stage limits explicitly |
-| [#346](https://github.com/Untru/ibcmd-rs/issues/346) | Exact 8.5.1.1150 initial five-row CommonModule and module-only CommonForm dynamic admission; separate actual native/own twins, old A/A and new B/B cohorts, 12336 exact source files and classified full storage evidence. CommonForm binds the complete inflated V4/layout59 tuple outside the edited module; seven raw snapshots were independently checked | Nested/visible forms, extensions and repeated overlays; general worker ownership, same-session refresh and warm LIVE remain unproved. Standalone main/extension/LIVE/worker capabilities stay closed |
+| [#345](https://github.com/Untru/ibcmd-rs/issues/345) | Bounded existing ManagerModule/ObjectModule classification measured for 26 roles across 16 object kinds. Separate native/OWN controls retain old A and expose new B; all 12198 exported files compared, with only measured CDI version-value differences. Selected raw/full-header and registration evidence independently checked | OWN template activation, nested forms and the larger-stage control remain open. The 128-row stage limit remains; native descriptor/cache/registration effects differ from OWN, so full physical parity is unproved. See [module twins](../../apply/evidence/dropin-dynamic/metadata-coverage-wave3.md) |
+| [#346](https://github.com/Untru/ibcmd-rs/issues/346) | Exact 8.5.1.1150 initial five-row CommonModule and module-only CommonForm dynamic admission; separate actual native/own twins, old A/A and new B/B cohorts, 12336 exact source files and classified full storage evidence. CommonForm binds the complete inflated V4/layout59 tuple outside the edited module; seven raw snapshots were independently checked. A separate Version-only native extension control refused import; complete six/eight storage comparison stayed unchanged and exact owned cleanup completed | Nested/visible forms, extensions and repeated overlays; general worker ownership, same-session refresh and warm LIVE remain unproved. The [failed extension control](../../apply/evidence/platform85/extension-version-failed-2026-10-02.md) did not apply or install its intended fixture version. Standalone main/extension/LIVE/worker capabilities stay closed |
 | [#347](https://github.com/Untru/ibcmd-rs/issues/347) | Explicit force and two consecutive pending-generation publications, independently reviewed with immutable recovery preimage and exact registration appends | Derived Files help/search index, active-session contract and wider native profile/layout acceptance; whole-storage parity remains unproved |
 | [#348](https://github.com/Untru/ibcmd-rs/issues/348) | Fix adopted-form After/Override interceptors; guarded Version-only root edits measured with native activation/export | Drop-in extension import/apply; extension writes and activation on 8.5; remaining whole-tree/profile evidence |
 | [#349](https://github.com/Untru/ibcmd-rs/issues/349) | Three bounded concurrent clients, 1434 confirmed posted UUID/report pairs, five own publications and five full-header/byte identical repeats; independent raw review | Restored native/own load twins, the remaining load matrix and throughput ceiling; bounded observations do not establish zero-error LIVE switching |
@@ -25,3 +25,15 @@ those changes without resetting their original worktrees.
 to implement. See [the measured investigation](../../apply/params-ui.md).
 That result removes an old hypothesis; it does not by itself prove online or
 live activation on 8.5.
+
+Compact LIVE format2 has a separately measured first-phase package: ten exact
+captured row headers, one owned log set, 118 posted/report pairs and three
+unreturned calls absent at final readback. A lab reader rejected uppercase SQL
+GUIDs before continuation; its separate case-insensitive syntax repair preserves
+the original package and exact identity binding. The fresh compact6 preparation
+adds every-set HEADERONLY GUID lineage checks and passes independent pure
+regressions. Its bounded resource wait ended before restore/start/registration;
+no compact6 activation or continuation occurred; the [resource outcome](../../apply/evidence/live-gate/compact6-resource-outcome-2026-10-02.md)
+records exact owned resource release and unchanged original evidence. A fresh execution scope after
+queue availability is still required; this does not establish warm readiness,
+zero-error switching or completed compact LIVE recovery.
