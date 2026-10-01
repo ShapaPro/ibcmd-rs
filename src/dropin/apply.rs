@@ -305,6 +305,9 @@ pub fn profile_of(spec: PlatformSpec) -> Result<MssqlNativePlatformProfile> {
     if let Some(profile) = spec.native_profile() {
         return Ok(profile);
     }
+    if spec.is_exact_build() {
+        bail!("для точной платформы {spec} не описана раскладка хранилища конфигурации");
+    }
     match spec.release() {
         [8, 3, 27] => Ok(MssqlNativePlatformProfile::Platform8_3_27_2214),
         [8, 5, 1] => Ok(MssqlNativePlatformProfile::Platform8_5_1_1150),
@@ -993,6 +996,18 @@ mod tests {
             profile("8.5.1.1150"),
             MssqlNativePlatformProfile::Platform8_5_1_1150
         );
+        // Known XML builds are not evidence for another build's native write
+        // protocol. Only a declared release alias may choose its measured build.
+        let unmeasured = crate::platform::parse("8.5.1.1529").unwrap();
+        assert!(unmeasured.is_exact_build());
+        assert!(unmeasured.native_profile().is_none());
+        assert!(
+            profile_of(unmeasured)
+                .unwrap_err()
+                .to_string()
+                .contains("8.5.1.1529")
+        );
+        assert!(crate::platform::parse("8.5.1.1151").is_err());
     }
 
     #[test]

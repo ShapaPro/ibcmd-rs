@@ -484,7 +484,8 @@ mod tests {
                 ),
                 _ => assert!(!profile.capabilities.contains_key(&config_apply)),
             }
-            // the dynamic apply of the drop-in: measured on one build, refused by name on 8.5
+            // Drop-in dynamic: 8.3 is measured; exact 8.5 additionally requires
+            // the initial CommonModule cohort guard in its planner.
             let dynamic = CapabilityId::parse("mssql.config.apply.dynamic").unwrap();
             match version {
                 "8.3.27.2214" => assert_eq!(
@@ -493,7 +494,7 @@ mod tests {
                 ),
                 "8.5.1.1150" => assert_eq!(
                     profile.capabilities[&dynamic].value,
-                    CapabilityState::Unsupported
+                    CapabilityState::Supported
                 ),
                 _ => assert!(!profile.capabilities.contains_key(&dynamic)),
             }

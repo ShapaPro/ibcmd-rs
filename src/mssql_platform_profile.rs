@@ -102,6 +102,8 @@ impl MssqlNativePlatformProfile {
 
     /// The dynamic apply requires that its generation, its change registrations and
     /// `MobileVersions.dat` were compared with the native `--dynamic=force` on this build.
+    /// 8.5.1.1150 admission is additionally restricted by the dynamic planner to
+    /// its measured initial five-row, existing CommonModule body cohort.
     pub fn require_config_apply_dynamic_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_CONFIG_APPLY_DYNAMIC)
     }
@@ -1235,6 +1237,33 @@ mod tests {
             .require_config_apply_supported()
             .expect_err("an undeclared capability must fail closed");
         assert!(undeclared.to_string().contains("is not declared"));
+    }
+
+    #[test]
+    fn initial_85_dynamic_capability_does_not_enable_other_builds_or_activation_modes() {
+        let exact = MssqlNativePlatformProfile::Platform8_5_1_1150;
+        exact.require_config_apply_dynamic_supported().unwrap();
+        // Main activation owns ONLINE/LIVE/WORKER; they remain closed even
+        // though the separately guarded drop-in dynamic publication is admitted.
+        assert!(exact.require_main_write_supported().is_err());
+        assert!(exact.require_extension_write_supported().is_err());
+        exact.require_config_apply_supported().unwrap(); // released 0.4 policy
+
+        MssqlNativePlatformProfile::Platform8_3_27_2214
+            .require_config_apply_dynamic_supported()
+            .unwrap();
+        assert!(
+            MssqlNativePlatformProfile::Platform8_3_27_1989
+                .require_config_apply_dynamic_supported()
+                .is_err()
+        );
+        for unknown in ["platform-8.5.1.1529", "platform-8.5.1.1151", "platform-8.5"] {
+            assert!(<MssqlNativePlatformProfile as ValueEnum>::from_str(unknown, false).is_err());
+        }
+        // The same schema never proves a different server executable build.
+        assert!(verify_probe(exact, "8.5.1.1529", evidenced_probe(), test_binding()).is_err());
+        assert!(verify_probe(exact, "8.3.27.2214", evidenced_probe(), test_binding()).is_err());
+        assert!(verify_probe(exact, "8.5.1.1150", evidenced_probe(), test_binding()).is_ok());
     }
 
     #[test]

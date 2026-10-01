@@ -27,7 +27,29 @@ still required before expanding or closing #347. That first-wave checkpoint did 
 implement pending-overlay import -> force -> repeat or Params `.si` collection.
 The measured bounded extension is described below; active-session acceptance remains open.
 The profile change adds only `mssql.config.apply.dynamic`:
-8.3.27.2214 supported, 8.5.1.1150 unsupported; existing 0.4 capabilities stay as released.
+8.3.27.2214 supported; exact 8.5.1.1150 now admits only the initial existing
+CommonModule cohort described below. Existing 0.4 capabilities stay as released.
+
+## Exact 8.5.1.1150 — initial CommonModule generation
+
+The [fresh native/own evidence](evidence/platform85/initial-common-module-2026-10-01.md)
+admits exactly five staged rows: one existing CommonModule descriptor and `.0`
+body, plus `root`, `version`, and `versions`. Descriptor and version must be
+semantically unchanged; the bounded body must contain the measured `text`/`info`
+container with unchanged info and genuinely changed UTF-8 text. The opaque root
+may re-stamp only its measured final sixteen bytes. The configuration has no
+pending history, markers, deletion list or aliases, and its three touched
+registrations must retain the measured NULL-message/existing-file-list shape.
+All row, history, registration and stage guards run before publication.
+
+Other 8.5 builds, repeated generations, forms, extensions, structural changes,
+SI collection and standalone ONLINE/LIVE/WORKER activation remain unsupported.
+`--dynamic=force` remains explicit; `auto`, `prompt` and `disable` keep their
+exclusive semantics. SQL-only commands verify storage against the declared
+profile; the exact executable build remains the caller's claim. Native/session
+acceptance used independently verified 8.5.1.1150 binaries in a fresh private
+cluster. Old sessions retaining A and new sessions reading B do not prove
+same-session refresh, generic worker ownership or warm LIVE readiness.
 
 The semantic stage inventory is now bound to the exact image the transaction
 asserts. A changed `deleted` list or descriptor between judgment and publication
@@ -94,7 +116,7 @@ Words and exit codes:
 | done | `Обновление конфигурации базы данных...`, `Создано поколение конфигурации: <hex>`, `... успешно завершено` (the same lines as the platform's `force`, the same generation) | 0 |
 | nothing staged | `Обновление конфигурации базы данных не требуется` | 0 |
 | the stage does not qualify | `требуется штатный config apply: <row>: <reason>; ...` (the first 8, then `и ещё N`) | 1 |
-| the platform has no dynamic apply (8.5.1.1150 declares it unsupported, 8.3.27.1989 not at all) | ``Параметр `--dynamic=force` команды `infobase config apply` не поддерживается для платформы ...`` | 1 |
+| the profile has no admitted dynamic apply (8.3.27.1989 declares none) | ``Параметр `--dynamic=force` команды `infobase config apply` не поддерживается для платформы ...`` | 1 |
 | `auto`/`prompt`/`disable` with sessions | `Ошибка исключительной блокировки информационной базы.`, the sessions, `Закройте их ... и повторите` and, for `auto`/`prompt` when the stage would qualify, `можно применить динамически: --dynamic=force` | -1 (1 with `--session-terminate=force|prompt`, as before) |
 | more than 50 generations after the apply | `[WARN] В информационной базе накоплено динамических поколений конфигурации: N; ...` on stderr, and `warnings` in the report | 0 |
 | failure | the error and its context | -1 |
@@ -177,7 +199,7 @@ Nothing of this needs exclusive access, and none of it is asked for.
 * **A prompt** (`--dynamic=prompt` asking the terminal) and **ending sessions** (`--session-terminate`): not built.
 * **The cluster is not told.** Like the platform run against a database, this apply writes to SQL Server only; a session that
   is open keeps its generation (measured for both), a new one reads the new generation.
-* **8.5** (`mssql.config.apply.dynamic` is unsupported there) and **8.3.27.1989**.
+* **8.5 outside the exact initial CommonModule cohort above**, and **8.3.27.1989**.
 * **A stage of the platform's own import** (removals, structure): `требуется штатный config apply`.
 * **The overlay grows** with every generation. Stage and service inventories retain strict 128-row/32-MiB bounds;
   this checkpoint does not promise an unlimited number of pending generations. The historical growth warning remains.
