@@ -16,6 +16,9 @@
 //! - A failed write fails the export: every later call reports it, and
 //!   [`OutputWriter::finish`] returns it.
 //! - `IBCMD_RS_OUTPUT_WRITERS=0` writes on the calling thread, as before.
+//! - A writer built with [`OutputWriter::from_env_to_sink`] writes nothing:
+//!   each file goes to a [`FileSink`] instead, on the same threads under the
+//!   same budget. A verification of what an export would write uses it.
 
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
@@ -38,6 +41,15 @@ const DEFAULT_WRITERS: usize = 8;
 const DEFAULT_BUDGET_BYTES: usize = 256 << 20;
 /// Files queued and not yet written, at most.
 const MAX_QUEUED_JOBS: usize = 8192;
+
+/// Where the files of an export go when they are not written to the disk.
+///
+/// The sink is handed every file with the path the export would have written
+/// it to, on the writer threads (or the calling one), so it must be cheap to
+/// share. An error fails the export like a failed write does.
+pub(crate) trait FileSink: Send + Sync {
+    fn accept(&self, path: &Path, bytes: &[u8]) -> Result<()>;
+}
 
 /// Bytes a file gets, taken without a copy when the caller owns them.
 pub(crate) trait OutputBytes {
@@ -123,6 +135,8 @@ struct Queue {
 }
 
 struct Shared {
+    /// Set: the files go here and folders are not created.
+    sink: Option<Arc<dyn FileSink>>,
     queue: Mutex<Queue>,
     room: Condvar,
     max_bytes: usize,
@@ -235,15 +249,21 @@ impl Shared {
     fn run(&self, job: &Job) -> Result<()> {
         match job {
             Job::Write { path, bytes } => {
-                if let Some(parent) = path.parent() {
-                    self.ensure_folder(parent)?;
+                if let Some(sink) = &self.sink {
+                    sink.accept(path, bytes)?;
+                } else {
+                    if let Some(parent) = path.parent() {
+                        self.ensure_folder(parent)?;
+                    }
+                    fs::write(path, bytes)
+                        .with_context(|| format!("failed to write {}", path.display()))?;
                 }
-                fs::write(path, bytes)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
                 self.files.fetch_add(1, Ordering::Relaxed);
                 self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 Ok(())
             }
+            // A sink has no folders.
+            Job::CreateDir { .. } if self.sink.is_some() => Ok(()),
             Job::CreateDir { path } => self.ensure_folder(path),
         }
     }
@@ -311,6 +331,16 @@ impl OutputWriter {
         Self::new(threads, budget)
     }
 
+    /// A writer sized as [`OutputWriter::from_env`] whose files go to `sink`
+    /// instead of the disk.
+    pub(crate) fn from_env_to_sink(sink: Arc<dyn FileSink>) -> Self {
+        let threads = std::env::var("IBCMD_RS_OUTPUT_WRITERS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_WRITERS);
+        Self::build(threads, DEFAULT_BUDGET_BYTES, Some(sink))
+    }
+
     /// `folder` exists already (the export's output folder): folders below it
     /// are created level by level from it.
     pub(crate) fn with_existing_folder(self, folder: &Path) -> Self {
@@ -331,7 +361,12 @@ impl OutputWriter {
     }
 
     pub(crate) fn new(threads: usize, budget_bytes: usize) -> Self {
+        Self::build(threads, budget_bytes, None)
+    }
+
+    fn build(threads: usize, budget_bytes: usize, sink: Option<Arc<dyn FileSink>>) -> Self {
         let shared = Arc::new(Shared {
+            sink,
             queue: Mutex::new(Queue { bytes: 0, jobs: 0 }),
             room: Condvar::new(),
             max_bytes: budget_bytes.max(1),
@@ -611,6 +646,84 @@ mod tests {
             let _ = refused;
         }
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// Collects what a writer hands it.
+    #[derive(Default)]
+    struct Collect {
+        files: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+        refuse: Option<&'static str>,
+    }
+
+    impl FileSink for Collect {
+        fn accept(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            if self.refuse.is_some_and(|name| path.ends_with(name)) {
+                return Err(anyhow!("the sink refuses {}", path.display()));
+            }
+            self.files
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), bytes.to_vec()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_sink_takes_the_files_and_nothing_reaches_the_disk() {
+        let root = scratch("sink");
+        let out = root.join("never-created");
+        for threads in [0, 3] {
+            let sink = Arc::new(Collect::default());
+            let writer = OutputWriter::build(threads, 10, Some(sink.clone()));
+            for index in 0..50 {
+                writer
+                    .write(
+                        out.join(format!("d{}", index % 4)).join("f.txt"),
+                        format!("file {index}"),
+                    )
+                    .unwrap();
+            }
+            writer.create_dir_all(out.join("empty")).unwrap();
+            writer
+                .write_xml(
+                    out.join("x.xml"),
+                    "<a/>",
+                    InfobaseConfigSourceVersion::V2_20,
+                )
+                .unwrap();
+            let stats = writer.finish().unwrap();
+            assert_eq!(stats.files, 51);
+            assert_eq!(sink.files.lock().unwrap().len(), 51);
+            assert!(
+                sink.files
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(path, _)| path.starts_with(&out))
+            );
+        }
+        assert!(!out.exists(), "no folder is created for a sink");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_refusing_sink_fails_the_finish() {
+        for threads in [0, 2] {
+            let sink = Arc::new(Collect {
+                refuse: Some("bad.txt"),
+                ..Collect::default()
+            });
+            let writer = OutputWriter::build(threads, DEFAULT_BUDGET_BYTES, Some(sink));
+            let first = writer.write(PathBuf::from("v").join("bad.txt"), b"x".as_slice());
+            if threads == 0 {
+                assert!(first.is_err());
+                continue;
+            }
+            first.unwrap();
+            let finished = writer.finish();
+            let message = format!("{:#}", finished.unwrap_err());
+            assert!(message.contains("bad.txt"), "{message}");
+        }
     }
 }
 

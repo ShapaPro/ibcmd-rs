@@ -55,6 +55,10 @@ pub struct SettingsReport {
     /// Where the password comes from; the password itself is never shown.
     pub db_password: Option<SettingSource>,
     pub dbms: Option<Sourced<String>>,
+    /// The most rows of tables a restructuring may rebuild (S1-J); `None`: the measured default.
+    pub restructure_limit_rows: Option<Sourced<u64>>,
+    /// The most bytes of those tables and their indexes; `None`: the measured default.
+    pub restructure_limit_bytes: Option<Sourced<u64>>,
     pub databases: Vec<BindingReport>,
 }
 
@@ -153,6 +157,8 @@ pub fn settings_report(
         db_user: settings.db_user(),
         db_password: settings.db_password().map(|password| password.source),
         dbms: settings.dbms(),
+        restructure_limit_rows: settings.restructure_limit_rows()?,
+        restructure_limit_bytes: settings.restructure_limit_bytes()?,
         databases,
     })
 }
@@ -219,6 +225,15 @@ pub fn render(report: &SettingsReport) -> String {
         None => line(&mut out, "db-password", "(not set)", None),
     }
     sourced(&mut out, "dbms", &report.dbms);
+    for (key, value) in [
+        ("limit-rows", &report.restructure_limit_rows),
+        ("limit-bytes", &report.restructure_limit_bytes),
+    ] {
+        match value {
+            Some(value) => line(&mut out, key, &value.value.to_string(), Some(&value.source)),
+            None => line(&mut out, key, "(the default)", None),
+        }
+    }
     if !report.databases.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "[[database]] entries, in the order they are searched:");

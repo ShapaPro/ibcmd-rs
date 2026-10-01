@@ -428,6 +428,16 @@ pub(super) enum DetailedFormBodyExtraction {
 pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     body: &ParsedFormBodyBlob,
     context: &FormParseContext<'_>,
+    timings: Option<&mut MssqlDumpTimingReport>,
+) -> Option<DetailedFormBodyExtraction> {
+    // The base form an adopted form carries is written after its own tree by
+    // `form_extension::with_adopted_form_parts`, for every source of forms.
+    extract_form_body_xml_from_body_detailed_single(body, context, timings)
+}
+
+fn extract_form_body_xml_from_body_detailed_single(
+    body: &ParsedFormBodyBlob,
+    context: &FormParseContext<'_>,
     mut timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
     // Every reader below splits the values it meets, each once per value that
@@ -669,8 +679,10 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         form_attribute_ids_without_declared_owner(&attributes, context.metadata_field_declarations);
     child_item_indexes
         .owner_scoped_bindings
-        .undeclared_root_standard_attributes =
-        form_attribute_undeclared_standard_attributes(&attributes, context.metadata_field_declarations);
+        .undeclared_root_standard_attributes = form_attribute_undeclared_standard_attributes(
+        &attributes,
+        context.metadata_field_declarations,
+    );
     apply_form_attribute_save_field_bindings(
         &mut attributes,
         &attribute_save_field_bindings,
@@ -852,7 +864,10 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         return Some(DetailedFormBodyExtraction::Rejected { diagnostics, error });
     }
 
-    if !context.form_compatibility.usual_group_behavior {
+    if !writes_usual_group_behavior(
+        context.form_compatibility.usual_group_behavior,
+        super::extension::active().as_deref(),
+    ) {
         without_usual_group_behavior(&mut child_items);
     }
     let started = Instant::now();
@@ -1004,6 +1019,26 @@ pub(super) fn with_unidentified_form_items_numbered(layout: &str) -> Option<Stri
 /// The items with every explicit `Usual` behavior dropped, as the platform
 /// writes them under a compatibility mode before 8.3.20 (see
 /// `forms_write_usual_group_behavior`).
+/// Whether a group's explicit `Usual` behavior is written. The forms of an
+/// extension follow the compatibility mode of the configuration it EXTENDS,
+/// not the extension's own: the native 8.3.27.2214 export of `VAExtension`
+/// (extension mode 8.3.14, extended configuration 8.3.27) writes it, and so do
+/// the extensions of upstream PR 387's fixture `group_behavior_extension`. A
+/// configuration follows its own mode (`own_mode_writes`, from its rows). When
+/// the extended configuration cannot be read the platform's own edition
+/// applies: written.
+pub(super) fn writes_usual_group_behavior(
+    own_mode_writes: bool,
+    extension: Option<&super::extension::ExtensionContext>,
+) -> bool {
+    match extension {
+        Some(extension) => {
+            super::refs::forms_write_usual_group_behavior(extension.extended_compatibility_mode())
+        }
+        None => own_mode_writes,
+    }
+}
+
 pub(super) fn without_usual_group_behavior(items: &mut [FormChildItem]) {
     for item in items {
         if item.behavior == Some("Usual") {
@@ -7186,7 +7221,9 @@ fn form_dynamic_list_use_always_field_name(
 ) -> Option<String> {
     let has_main_table = main_table.is_some();
     match item_id {
-        "10000000" if form_dynamic_list_default_picture_is_out_of_table(main_table, manual_query) => {
+        "10000000"
+            if form_dynamic_list_default_picture_is_out_of_table(main_table, manual_query) =>
+        {
             Some(format!("~{}.DefaultPicture", attribute_name))
         }
         "10000000" => Some(format!("{}.DefaultPicture", attribute_name)),
@@ -13984,7 +14021,9 @@ fn parse_form_child_item_with_metadata_owners(
             .or_else(|| {
                 parse_form_document_field_on_flag(tag, fields, |layout| layout.enable_start_drag)
             }),
-        enable_drag: table_schema.and_then(|schema| schema.enable_drag(&fields)),
+        enable_drag: table_schema
+            .and_then(|schema| schema.enable_drag(&fields))
+            .or_else(|| parse_planner_field_enable_drag(tag, fields)),
         file_drag_mode: if tag == "Table" {
             if let Some(schema) = table_schema {
                 schema.file_drag_mode(&fields)
@@ -16898,7 +16937,7 @@ pub(super) fn form_control_system_color_name(code: i32) -> Option<&'static str> 
 /// Window-palette entries of colour space `1`, from the native form dumps.
 fn form_control_window_color_name(code: i32) -> Option<&'static str> {
     match code {
-        4 => Some("win:MenuBar"),       // 12
+        4 => Some("win:MenuBar"), // 12
         // 1C:Документооборот `CommonForms/РедактированиеТабличногоДокумента`
         // `ИмяОбласти` holds `{3,1,{5}}` and writes `win:WindowBackground`.
         5 => Some("win:WindowBackground"),
@@ -16973,13 +17012,13 @@ fn form_control_web_color_name(code: i32) -> Option<&'static str> {
         // 1C:Документооборот `Documents/Отсутствие/Forms/ФормаДокумента`
         // `ЗаместителиТекст` holds `{3,2,{125}}` and writes `web:Seagreen`.
         125 => Some("web:Seagreen"),
-        100 => Some("web:NavajoWhite"),   // 2
-        106 => Some("web:OrangeRed"),     // 2
-        109 => Some("web:PaleGreen"),     // 5
-        115 => Some("web:Pink"),          // 4
-        122 => Some("web:SaddleBrown"),   // 20
-        132 => Some("web:Snow"),          // 2
-        143 => Some("web:White"),         // 12
+        100 => Some("web:NavajoWhite"), // 2
+        106 => Some("web:OrangeRed"),   // 2
+        109 => Some("web:PaleGreen"),   // 5
+        115 => Some("web:Pink"),        // 4
+        122 => Some("web:SaddleBrown"), // 20
+        132 => Some("web:Snow"),        // 2
+        143 => Some("web:White"),       // 12
         // Three codes the same join names that neither this table nor the
         // shared style palette behind it answers. Re-run over the dumped item
         // layouts of all seven stand corpora that carry forms, item by item
@@ -17756,6 +17795,22 @@ const FORM_GRAPHICAL_SCHEME_COMMANDS: &[(&str, &'static str)] = &[
 
 /// The mirror of `parse_form_document_field_flag` for a flag whose unwritten
 /// default is `0`: only the `1` state reaches the XML.
+/// A `PlannerField` keeps `EnableDrag` in the option slot behind
+/// `EnableStartDrag` (slot 6, behind slot 5). Evidence: the one planner of the
+/// ServiceDesk extension (`сд_Канбан2`), written `<EnableStartDrag>true` and
+/// `<EnableDrag>true` with both slots `1`; the planners of the ordinary
+/// corpora write neither. Read in an extension export only.
+fn parse_planner_field_enable_drag(tag: &str, fields: &[&str]) -> Option<bool> {
+    if tag != "PlannerField" || super::extension::active().is_none() {
+        return None;
+    }
+    let (_, options) = form_document_field_geometry_options(tag, fields)?;
+    match options.get(6).map(|field| field.trim()) {
+        Some("1") => Some(true),
+        _ => None,
+    }
+}
+
 fn parse_form_document_field_on_flag(
     tag: &str,
     fields: &[&str],
@@ -19206,7 +19261,9 @@ fn form_item_unnamed_binding_physical_path(
             unnamed = true;
         }
     }
-    unnamed.then(|| form_physical_chain_spelling(segments)).flatten()
+    unnamed
+        .then(|| form_physical_chain_spelling(segments))
+        .flatten()
 }
 
 fn form_physical_chain_spelling(segments: &[&str]) -> Option<String> {
@@ -22196,7 +22253,13 @@ pub(super) fn parse_form_special_field_layout<'a>(
         fields
             .get(FormSpecialFieldSchema::NESTED_ITEM_COUNT_SLOT + top_level_offset)
             .map(|field| field.trim())
-            .map(|field| if field == FORM_ITEM_ABSENT_MEMBER { "0" } else { field }),
+            .map(|field| {
+                if field == FORM_ITEM_ABSENT_MEMBER {
+                    "0"
+                } else {
+                    field
+                }
+            }),
     )?;
     Some((schema, options))
 }
@@ -24908,9 +24971,34 @@ fn form_register_record_set_standard_attribute_name(
         "InformationRegister" => INFORMATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES
             .iter()
             .find_map(|(candidate, name)| (*candidate == marker).then_some(*name)),
+        "CalculationRegister" => CALCULATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES
+            .iter()
+            .find_map(|(candidate, name)| (*candidate == marker).then_some(*name)),
         _ => None,
     }
 }
+
+/// The standard attributes a calculation register's record set spells for the
+/// markers a form binding names them by. The markers are the register's own
+/// standard-attribute markers, identical on the three calculation registers of
+/// the ordinary corpora (the БСП demo register and the two ERP УХ ones); a form
+/// binding uses them the way the other families' bindings do (`-3` is
+/// `LineNumber` in the document form of the `_ДемоРасширение` extension, `-4`
+/// `CalculationType` and `-11` `ReversingEntry` in the same register's
+/// columns).
+const CALCULATION_REGISTER_RECORD_SET_STANDARD_ATTRIBUTES: [(&str, &str); 11] = [
+    ("-13", "RegistrationPeriod"),
+    ("-11", "ReversingEntry"),
+    ("-10", "Active"),
+    ("-9", "EndOfBasePeriod"),
+    ("-8", "BegOfBasePeriod"),
+    ("-7", "EndOfActionPeriod"),
+    ("-6", "BegOfActionPeriod"),
+    ("-5", "ActionPeriod"),
+    ("-4", "CalculationType"),
+    ("-3", "LineNumber"),
+    ("-2", "Recorder"),
+];
 
 /// The standard attributes an information register's *record set* spells for
 /// the markers a form binding names them by.
@@ -25657,8 +25745,10 @@ fn walk_form_bound_chain_members(
             [marker] if marker.trim().starts_with('-') => {
                 let name = match (previous_type, previous_metadata_reference) {
                     (Some(reference), _) => {
-                        let name =
-                            form_standard_attribute_name_for_type_reference(reference, marker.trim())?;
+                        let name = form_standard_attribute_name_for_type_reference(
+                            reference,
+                            marker.trim(),
+                        )?;
                         // A catalogue's `Owner` reaches its one owner's own
                         // reference, so a further standard member of the
                         // owner can still be named (`….Owner.Owner`).
@@ -27622,9 +27712,9 @@ pub(super) fn form_dynamic_list_default_picture_is_out_of_table(
     // which `with_no_main_table_default_picture_unmarked` restores.
     match main_table {
         None => true,
-        Some(main_table) => main_table.split_once('.').is_some_and(|(family, _)| {
-            family == "FilterCriterion" || family == "Enum"
-        }),
+        Some(main_table) => main_table
+            .split_once('.')
+            .is_some_and(|(family, _)| family == "FilterCriterion" || family == "Enum"),
     }
 }
 
@@ -33570,6 +33660,9 @@ pub(super) fn format_form_child_item_xml(
             "{tab}\t<EnableStartDrag>true</EnableStartDrag>\r\n"
         ));
     }
+    if item.tag == "PlannerField" && item.enable_drag == Some(true) {
+        xml.push_str(&format!("{tab}\t<EnableDrag>true</EnableDrag>\r\n"));
+    }
     if item.tag == "LabelDecoration"
         && let Some(skip_on_input) = item.skip_on_input
     {
@@ -38560,7 +38653,6 @@ pub(super) fn parse_and_render_form_flowchart_settings_for_test(text: &str) -> O
     let object_refs = BTreeMap::new();
     parse_form_flowchart_settings_xml(text, &value_types, &object_refs, 3)
 }
-
 
 /// The graphical-scheme counterpart of `render_form_chart_settings_value`.
 pub(crate) fn render_form_flowchart_settings_value(field: &str) -> Option<String> {

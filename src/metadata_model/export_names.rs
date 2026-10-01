@@ -370,6 +370,100 @@ fn collect_owned(
     }
 }
 
+/// One `{<class id>,<count>,<uuid>...}` list of owned objects in a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedGroup {
+    /// The class id the list is filed under.
+    pub class: String,
+    pub kind: &'static str,
+    /// The listed uuids, lower-cased, in document order.
+    pub members: Vec<String>,
+}
+
+/// The groups of owned objects a row lists, in document order.
+pub fn owned_groups(row: &Brace) -> Vec<OwnedGroup> {
+    let classes = OWNED_CLASSES.iter().copied().collect::<HashMap<_, _>>();
+    let mut out = Vec::new();
+    collect_groups(row, &classes, &mut out);
+    out
+}
+
+/// The members of an owned-object group: `(class, kind)` and the uuid atoms.
+fn group_shape<'a>(
+    members: &'a [Brace],
+    classes: &HashMap<&str, &'static str>,
+) -> Option<(&'a str, &'static str, &'a [Brace])> {
+    let class = members.first().and_then(Brace::as_atom)?;
+    let count = members
+        .get(1)
+        .and_then(Brace::as_atom)?
+        .parse::<usize>()
+        .ok()?;
+    let kind = classes.get(class)?;
+    (members.len() == count + 2 && members[2..].iter().all(|member| member.as_atom().is_some()))
+        .then_some((class, *kind, &members[2..]))
+}
+
+fn collect_groups(node: &Brace, classes: &HashMap<&str, &'static str>, out: &mut Vec<OwnedGroup>) {
+    let Some(members) = node.as_list() else {
+        return;
+    };
+    if let Some((class, kind, listed)) = group_shape(members, classes) {
+        out.push(OwnedGroup {
+            class: class.to_owned(),
+            kind,
+            members: listed
+                .iter()
+                .filter_map(Brace::as_atom)
+                .map(str::to_ascii_lowercase)
+                .collect(),
+        });
+        return;
+    }
+    for member in members {
+        collect_groups(member, classes, out);
+    }
+}
+
+/// Takes the given owned objects (lower-case uuids) out of every group of a
+/// row and keeps each group's count in step; returns how many were removed.
+pub fn remove_owned(row: &mut Brace, remove: &std::collections::HashSet<String>) -> usize {
+    let classes = OWNED_CLASSES.iter().copied().collect::<HashMap<_, _>>();
+    strip_owned(row, &classes, remove)
+}
+
+fn strip_owned(
+    node: &mut Brace,
+    classes: &HashMap<&str, &'static str>,
+    remove: &std::collections::HashSet<String>,
+) -> usize {
+    let is_group = node
+        .as_list()
+        .is_some_and(|members| group_shape(members, classes).is_some());
+    let Some(members) = node.as_list_mut() else {
+        return 0;
+    };
+    if is_group {
+        let before = members.len() - 2;
+        let mut index = 0;
+        members.retain(|member| {
+            let keep = index < 2
+                || member
+                    .as_atom()
+                    .is_none_or(|uuid| !remove.contains(&uuid.to_ascii_lowercase()));
+            index += 1;
+            keep
+        });
+        let after = members.len() - 2;
+        members[1] = Brace::Atom(after.to_string());
+        return before - after;
+    }
+    members
+        .iter_mut()
+        .map(|member| strip_owned(member, classes, remove))
+        .sum()
+}
+
 // ---------------------------------------------------------------------------
 // Predefined items.
 

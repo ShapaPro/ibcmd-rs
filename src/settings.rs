@@ -77,6 +77,7 @@ use crate::platform::PlatformSpec;
 
 pub mod commands;
 mod files;
+mod restructure;
 pub mod show;
 
 /// The platform of the databases nothing else names.
@@ -89,6 +90,10 @@ pub const ENV_DB_USER: &str = "IBCMD_RS_DB_USER";
 pub const ENV_DB_PASSWORD: &str = "IBCMD_DB_PSW";
 /// The one settings file to read instead of the layers.
 pub const ENV_CONFIG: &str = "IBCMD_RS_CONFIG";
+/// The most rows of rebuilt tables a restructuring may hold (S1-J, settings/restructure.rs).
+pub const ENV_RESTRUCTURE_LIMIT_ROWS: &str = "IBCMD_RS_RESTRUCTURE_LIMIT_ROWS";
+/// The most bytes a restructuring may write (the data of the rebuilt tables twice, their other indexes once).
+pub const ENV_RESTRUCTURE_LIMIT_BYTES: &str = "IBCMD_RS_RESTRUCTURE_LIMIT_BYTES";
 /// The settings file name of every layer.
 pub const SETTINGS_FILE_NAME: &str = "ibcmd-rs.toml";
 /// The platform assumed, with a warning, when nothing names one.
@@ -311,6 +316,8 @@ pub struct SettingsFile {
     platform: Option<Located<PlatformSpec>>,
     db_server: Option<Located<String>>,
     db_user: Option<Located<String>>,
+    restructure_limit_rows: Option<Located<u64>>,
+    restructure_limit_bytes: Option<Located<u64>>,
     databases: Vec<DatabaseBinding>,
 }
 
@@ -382,6 +389,8 @@ impl Settings {
             ENV_DB_USER,
             ENV_DB_PASSWORD,
             ENV_CONFIG,
+            ENV_RESTRUCTURE_LIMIT_ROWS,
+            ENV_RESTRUCTURE_LIMIT_BYTES,
         ] {
             if let Some(value) = (sources.env)(variable).filter(|value| !value.trim().is_empty()) {
                 env.insert(variable, value);

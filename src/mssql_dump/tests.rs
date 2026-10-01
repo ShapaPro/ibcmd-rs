@@ -6495,6 +6495,45 @@ fn metadata_command_reference_index_reads_catalog_use_standard_commands_from_rea
     assert!(index[true_uuid].use_standard_commands);
 }
 
+/// A constant's `<UseStandardCommands>` is slot 7 of its record, the slot its
+/// own `Constants/<name>.xml` is written from; the platform keeps the raw
+/// `100:<uuid>` sentinel in a command interface when it is `false`. The row is
+/// the constant `ИспользоватьКонтрольТарификации` of the БСП demo, whose
+/// staged copy on the lab database `ibcmd_rs_04_rcheck_bsp_a` says `false`.
+#[test]
+fn metadata_command_reference_index_reads_constant_use_standard_commands() {
+    let uuid = "eaaa6d15-f212-4a47-ae92-c5398ed6296d";
+    let text = |use_standard_commands: &str| {
+        format!(
+            "{{1,\n{{16,\n{{27,\n{{2,\n{{3,\n{{1,0,{uuid}}},\"ИспользоватьКонтрольТарификации\",\n\
+             {{1,\"ru\",\"Использовать контроль тарификации\"}},\"\",0,0,00000000-0000-0000-0000-000000000000,0}},\n\
+             {{\"Pattern\",\n{{\"B\"}}\n}}\n}},0,\n{{0}},\n{{0}},0,\"\",0,\n{{\"U\"}},\n{{\"U\"}},0,\
+             00000000-0000-0000-0000-000000000000,2,0,\n{{5006,0}},\n{{3,0,0}},\n{{0,0}},0,\n{{0}},\n\
+             {{\"S\",\"\"}},0,0,0}},133fd53a-4064-41f3-af43-148ba8f74aa2,5e880ab4-4e7b-4f55-9597-80a12e35fa3b,\
+             a46eb7e4-579a-46bb-9583-5b652c9746f3,ce80f907-bc5b-4bee-8c9c-d648cc329b8f,1,{use_standard_commands},\n\
+             {{0}},\n{{0}},00000000-0000-0000-0000-000000000000,0,0,1459ee59-7ebb-51a0-ac9d-4ca22e26f193,\
+             b028c710-d6c8-5f4f-b103-4c9dafeac716,0,0}},0}}"
+        )
+        .replace('\n', "\r\n")
+    };
+    for (value, uses_them) in [("1", true), ("0", false)] {
+        let packed = deflate_for_test(text(value).as_bytes());
+        let row = metadata_text_row_from_blob(uuid, &packed).expect("the constant row decodes");
+        assert_eq!(row.kind.as_deref(), Some("Constant"));
+        let index = build_metadata_command_reference_index_from_texts(&[row]);
+        assert_eq!(index[uuid].use_standard_commands, uses_them);
+        let name = command_interface_command_name("100", uuid, &BTreeMap::new(), &index);
+        assert_eq!(
+            name,
+            if uses_them {
+                "Constant.ИспользоватьКонтрольТарификации.StandardCommand.Open".to_string()
+            } else {
+                format!("100:{uuid}")
+            }
+        );
+    }
+}
+
 #[test]
 fn extracts_standalone_content_used_items() {
     let first_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
@@ -39066,6 +39105,7 @@ fn format_role_rights_top_level_object_hides_plain_false_rights_matching_set_for
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Document.Invoice".to_string(),
             rights: vec![
@@ -39118,6 +39158,7 @@ fn format_role_rights_top_level_object_inverts_when_set_for_new_objects_true() {
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Catalog.Products".to_string(),
             rights: vec![
@@ -39150,6 +39191,7 @@ fn format_role_rights_omits_plain_false_rights_for_restriction_only_top_level_ob
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Catalog.Products".to_string(),
             rights: vec![
@@ -39188,6 +39230,7 @@ fn format_role_rights_omits_plain_false_rights_when_only_view_input_by_string_ar
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Document.Invoice".to_string(),
             rights: vec![
@@ -39231,6 +39274,7 @@ fn format_role_rights_omits_non_native_top_level_accumulation_register_false_rig
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "AccumulationRegister.Stock".to_string(),
             rights: vec![
@@ -39281,6 +39325,7 @@ fn format_role_rights_configuration_root_shows_rights_that_differ_from_set_for_n
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Configuration.DemoApp".to_string(),
             rights: vec![
@@ -39320,6 +39365,7 @@ fn format_role_rights_configuration_root_inverts_when_set_for_new_objects_true()
         set_for_attributes_by_default: true,
         independent_rights_of_child_objects: false,
         objects: vec![RoleObjectRights {
+            adopted: false,
             has_conditionless_restrictions: false,
             name: "Configuration.DemoApp".to_string(),
             rights: vec![
@@ -66395,13 +66441,14 @@ fn calculation_period_alternative_scalars_remain_accepted_omissions() {
         .replace("\t\t\t<ActionPeriod>true</ActionPeriod>\r\n", "")
         .replace("\t\t\t<BasePeriod>true</BasePeriod>\r\n", "");
     // Slot 17 is `<ActionPeriod>` and separates both values on the corpus, so
-    // `0` is a reading and no longer an omission; every other scalar there,
-    // and every alternative on the two slots that stay checked constants,
-    // still refuses the block whole.
+    // `0` is a reading and no longer an omission; slot 18 is `<BasePeriod>`,
+    // whose `0` the calculation register of an extension separates (`false`).
+    // Every other scalar there, and every alternative on the slot that stays a
+    // checked constant, still refuses the block whole.
     let alternatives = [
         (16, vec!["0", "1", "3", "-1", "value", "{0}"]),
         (17, vec!["2", "-1", "value", "{0}"]),
-        (18, vec!["0", "2", "-1", "value", "{0}"]),
+        (18, vec!["2", "-1", "value", "{0}"]),
     ];
 
     for (slot, values) in alternatives {
@@ -66479,6 +66526,19 @@ fn calculation_period_alternative_scalars_remain_accepted_omissions() {
         fixed.replace(
             "\t\t\t<ActionPeriod>true</ActionPeriod>\r\n",
             "\t\t\t<ActionPeriod>false</ActionPeriod>\r\n",
+        )
+    );
+
+    // `0` in slot 18 is `<BasePeriod>false</BasePeriod>`: the calculation
+    // register of the `_ДемоРасширение` extension writes `0` in both slots.
+    let mut false_base = CalculationRegisterPresentationsFixture::exact();
+    false_base.fields[18] = "0".to_string();
+    let false_base_xml = false_base.xml().unwrap();
+    assert_eq!(
+        false_base_xml,
+        fixed.replace(
+            "\t\t\t<BasePeriod>true</BasePeriod>\r\n",
+            "\t\t\t<BasePeriod>false</BasePeriod>\r\n",
         )
     );
 }
@@ -71436,18 +71496,15 @@ fn marks_a_default_picture_the_declared_main_table_cannot_hold() {
         }
         form_attribute_metadata_owner(&attribute)
     };
-    let owner_for = |main_table: Option<&str>, dynamic_list: bool| {
-        owner_with(main_table, dynamic_list, true)
-    };
+    let owner_for =
+        |main_table: Option<&str>, dynamic_list: bool| owner_with(main_table, dynamic_list, true);
     // An Enum list under the platform's own query is marked like any other
     // (1C:Документооборот's `Enums/СтатусыПриглашений` list forms under
     // compatibility 8.3.21 and 8.3.24); under 8.3.17 the platform writes them
     // unmarked, which `with_no_main_table_default_picture_unmarked` restores.
-    assert!(form_dynamic_list_default_picture_is_out_of_main_table(&owner_with(
-        Some("Enum.СтатусыПриглашений"),
-        true,
-        false
-    )));
+    assert!(form_dynamic_list_default_picture_is_out_of_main_table(
+        &owner_with(Some("Enum.СтатусыПриглашений"), true, false)
+    ));
 
     for (main_table, expected) in [
         (None, true),
@@ -74822,6 +74879,83 @@ fn task_direct_attribute_wrapper_is_the_code_three_form_the_platform_writes() {
         &["3", "{27}", "1", "1", "1", "0"],
         true
     ));
+}
+
+/// The accounting register of the `_ДемоРасширение` extension writes
+/// `...,1,1,0,1,{0},...` after its chart and list form and exports
+/// `Managed`, `EnableTotalsSplitting` true and `FullTextSearch` `DontUse`:
+/// header+6 is the lock mode, header+7 the full-text search, header+8 the
+/// totals splitting.
+#[test]
+fn an_accounting_registers_lock_mode_and_full_text_search_have_their_own_slots() {
+    let uuid = "bab02573-c189-4387-9496-059ee0f5d55f";
+    let nil = "00000000-0000-0000-0000-000000000000";
+    let mut fields = vec!["21".to_string()];
+    fields.extend((1..=14).map(|_| "11111111-1111-1111-1111-111111111111".to_string()));
+    fields.push(format!(
+        "{{0,{{3,{{1,0,{uuid}}},\"R\",{{0}},\"\",0,0,{nil},0}}}}"
+    ));
+    fields.extend(
+        [
+            "1",
+            "0",
+            "b4bcb6f1-afc2-464e-af01-038624d119d6",
+            nil,
+            "1",
+            "1",
+            "0",
+            "1",
+            "{0}",
+            nil,
+            "{0}",
+            "{0}",
+            "{0}",
+            "0",
+        ]
+        .map(String::from),
+    );
+    let view = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        parse_register_data_lock_control_mode("AccountingRegister", &view, uuid),
+        Some("Managed")
+    );
+    assert_eq!(
+        parse_register_full_text_search("AccountingRegister", &view, uuid),
+        Some("DontUse")
+    );
+}
+
+#[test]
+fn a_bound_of_another_value_type_keeps_its_xml_type() {
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"N",0}"#)).as_deref(),
+        Some("\u{1}xs:decimal\u{1}0")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"B",1}"#)).as_deref(),
+        Some("\u{1}xs:boolean\u{1}true")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"D",20240102030405}"#)).as_deref(),
+        Some("\u{1}xs:dateTime\u{1}2024-01-02T03:04:05")
+    );
+    assert_eq!(
+        parse_metadata_bound_value(Some(r#"{"S","abc"}"#)).as_deref(),
+        Some("abc")
+    );
+    assert_eq!(parse_metadata_bound_value(Some(r#"{"U"}"#)), None);
+    assert_eq!(
+        format_constant_bound_xml("MinValue", Some("\u{1}xs:decimal\u{1}0")),
+        "<MinValue xsi:type=\"xs:decimal\">0</MinValue>"
+    );
+    assert_eq!(
+        format_constant_bound_xml("MinValue", Some("abc")),
+        "<MinValue xsi:type=\"xs:string\">abc</MinValue>"
+    );
+    assert_eq!(
+        parse_information_register_bound(r#"{"N",5}"#),
+        Some(Some("\u{1}xs:decimal\u{1}5".to_string()))
+    );
 }
 
 #[test]
@@ -79344,6 +79478,137 @@ fn ws_definition_publishes_schema_local_qnames_with_the_later_prefix() {
     assert!(normalize_ws_definition_own_namespace_prefixes(text.as_bytes()).is_none());
 }
 
+/// Platform 8.5 writes a style body one revision up (`{2,...}`, colours `{4,...}`,
+/// fonts `{8,...}`) and closes it with the brand colour, which the export
+/// prints as the last item `FirstBrand`. The body is the one the БСП 8.5
+/// extension `_ДемоРасширение` stores (`Styles/_ДемоСтильРасширения`).
+#[test]
+fn reads_the_8_5_style_body_with_its_brand_colour() {
+    let item_uuid = "7d3c7d6b-5286-4ece-b7d4-aebcef3465c7";
+    let body = "{2,5,{{0,7d3c7d6b-5286-4ece-b7d4-aebcef3465c7},1,{8,2,0,{-31},1,100}},{{-47},0,{4,0,{16755278},0}},{{-43},0,{4,0,{16772321},0}},{{-42},0,{4,0,{16768433},0}},{{-44},0,{4,0,{16759160},0}},{1,{0,{4,0,{16755278},0}}}}";
+    let refs = BTreeMap::from([(
+        item_uuid.to_owned(),
+        "StyleItem._ДемоРабочийСегментПартнеровШрифтРасширение".to_owned(),
+    )]);
+    let xml = extract_style_body_xml(
+        &deflate_for_test(body.as_bytes()),
+        &refs,
+        &BTreeMap::new(),
+        InfobaseConfigSourceVersion::V2_21,
+    )
+    .expect("an 8.5 style body reads");
+    // The items of the native `Style.xml`, in its order: the four standard
+    // colours by their platform order, the configuration's font, the brand.
+    let expected = [
+        ("ActivityColor", "<Color>#78B9FF</Color>"),
+        ("NavigationColor", "<Color>#B1DDFF</Color>"),
+        ("AuxiliaryNavigationColor", "<Color>#E1ECFF</Color>"),
+        ("ImportantColor", "<Color>#4EAAFF</Color>"),
+        (
+            "StyleItem._ДемоРабочийСегментПартнеровШрифтРасширение",
+            "<Font ref=\"style:NormalTextFont\" kind=\"StyleItem\"/>",
+        ),
+        ("FirstBrand", "<Color>#4EAAFF</Color>"),
+    ]
+    .iter()
+    .map(|(name, value)| format!("\t<Item name=\"{name}\">\r\n\t\t{value}\r\n\t</Item>\r\n"))
+    .collect::<String>();
+    assert!(xml.ends_with(&format!("{expected}</Style>")), "{xml}");
+
+    // The 8.3.27 body keeps its revision `1`, colour `3` and font `7` tags and
+    // has no brand colour; a body of an unknown revision is refused.
+    let old = "{1,1,{{-47},0,{3,0,{16755278}}}}";
+    let old_xml = extract_style_body_xml(
+        &deflate_for_test(old.as_bytes()),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        InfobaseConfigSourceVersion::V2_20,
+    )
+    .expect("an 8.3.27 style body reads");
+    assert!(
+        old_xml.contains("<Item name=\"ImportantColor\">"),
+        "{old_xml}"
+    );
+    assert!(!old_xml.contains("FirstBrand"));
+    let unknown = "{3,1,{{-47},0,{3,0,{16755278}}}}";
+    assert!(
+        extract_style_body_xml(
+            &deflate_for_test(unknown.as_bytes()),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            InfobaseConfigSourceVersion::V2_21,
+        )
+        .is_err()
+    );
+}
+
+/// `{"R"}` is the 8.5 binary data type (`xs:base64Binary`, length 0,
+/// variable); `{"R",<length>,<flag>}` carries its qualifiers.
+#[test]
+fn reads_and_writes_the_8_5_binary_data_type() {
+    let indent = "\t\t\t\t\t";
+    let types = parse_metadata_type_pattern(r#"{"Pattern",{"R"}}"#, &BTreeMap::new())
+        .expect("a binary data pattern");
+    assert_eq!(
+        format_metadata_types_xml_with_indent(&types, indent),
+        "\t\t\t\t\t<Type>\r\n\
+\t\t\t\t\t\t<v8:Type>xs:base64Binary</v8:Type>\r\n\
+\t\t\t\t\t\t<v8:BinaryDataQualifiers>\r\n\
+\t\t\t\t\t\t\t<v8:Length>0</v8:Length>\r\n\
+\t\t\t\t\t\t\t<v8:AllowedLength>Variable</v8:AllowedLength>\r\n\
+\t\t\t\t\t\t</v8:BinaryDataQualifiers>\r\n\
+\t\t\t\t\t</Type>\r\n"
+    );
+    let fixed = parse_metadata_type_pattern(r#"{"Pattern",{"R",16,0}}"#, &BTreeMap::new())
+        .expect("a fixed-length binary data pattern");
+    let xml = format_metadata_types_xml_with_indent(&fixed, indent);
+    assert!(xml.contains("<v8:Length>16</v8:Length>"), "{xml}");
+    assert!(
+        xml.contains("<v8:AllowedLength>Fixed</v8:AllowedLength>"),
+        "{xml}"
+    );
+    // A flag no measured platform writes is refused, not guessed.
+    assert!(parse_metadata_type_pattern(r#"{"Pattern",{"R",16,5}}"#, &BTreeMap::new()).is_none());
+}
+
+/// `HTTPMethod` `PATCH` is stored as `10` (measured on the БСП 8.5 extension
+/// ServiceDesk); a method the reader could not name used to vanish from the
+/// service without a word.
+#[test]
+fn names_the_http_patch_method() {
+    assert_eq!(http_service_method_from_code("10"), Some("PATCH"));
+    assert_eq!(http_service_method_from_code("2"), Some("DELETE"));
+    assert_eq!(http_service_method_from_code("99"), None);
+}
+
+/// A characteristic can name no source: both sources are the nil uuid and the
+/// fields are the `0`/`-1` sentinels. The platform prints `from=""` and the
+/// sentinel numbers (the БСП 8.5 extension catalog
+/// `_ДемоСегментыПартнеровРасширение`).
+#[test]
+fn a_characteristic_without_a_source_reads_and_prints_empty() {
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+    let real = collection(&item("4", DOCUMENT_CHARACTERISTIC_TYPE_UUID, r#"{"U"}"#));
+    let raw = real.replace(TYPES_UUID, NIL).replace(VALUES_UUID, NIL);
+    let model = decode(&raw).expect("an empty characteristic reads");
+    assert_eq!(model.items().len(), 1);
+    assert_eq!(model.items()[0].types().source().path(), "");
+    assert_eq!(model.items()[0].values().source().path(), "");
+    let xml = render_metadata_characteristics_xml(&model).unwrap();
+    // The same item with real sources prints the same fields.
+    let with_sources = render_metadata_characteristics_xml(&decode(&real).unwrap()).unwrap();
+    assert_eq!(
+        xml,
+        with_sources
+            .replace("from=\"Catalog.Types\"", "from=\"\"")
+            .replace("from=\"Catalog.Values\"", "from=\"\"")
+    );
+    assert_eq!(xml.matches("from=\"\"").count(), 2, "{xml}");
+    // A source that is neither a known object nor nil is still refused.
+    let dangling = real.replacen(TYPES_UUID, "20000000-0000-4000-8000-000000000009", 1);
+    assert!(decode(&dangling).is_err());
+}
+
 // Tests of the onecdec fork, kept apart from the upstream file.
 mod onecdec;
 
@@ -79392,7 +79657,10 @@ fn a_form_that_excludes_help_writes_its_help_button_as_the_raw_id() {
         with_excluded_help_command_unresolved(xml.clone(), &["Help"]),
         "<CommandName>0:39bb0fe9-771d-4dd5-8a6e-2d16984523af</CommandName>"
     );
-    assert_eq!(with_excluded_help_command_unresolved(xml.clone(), &["Refresh"]), xml);
+    assert_eq!(
+        with_excluded_help_command_unresolved(xml.clone(), &["Refresh"]),
+        xml
+    );
 }
 
 /// Evidence: `ТекущийДокументPDFСостояниеПросмотра` of 1C:Документооборот
@@ -79412,14 +79680,21 @@ fn a_view_status_addition_reads_center_and_a_lowered_stretch() {
         parse_form_view_status_addition_horizontal_stretch(&fields),
         Some(false)
     );
-    let left = tuple.replacen("{1,0,0,", "{1,0,2,", 1).replacen("48312c09-257f-4b29-b280-284dd89efc1e},1,", "48312c09-257f-4b29-b280-284dd89efc1e},0,", 1);
+    let left = tuple.replacen("{1,0,0,", "{1,0,2,", 1).replacen(
+        "48312c09-257f-4b29-b280-284dd89efc1e},1,",
+        "48312c09-257f-4b29-b280-284dd89efc1e},0,",
+        1,
+    );
     let mut fields = vec!["0"; 13];
     fields.push(&left);
     assert_eq!(
         parse_form_view_status_addition_horizontal_location(&fields),
         Some("Left")
     );
-    assert_eq!(parse_form_view_status_addition_horizontal_stretch(&fields), None);
+    assert_eq!(
+        parse_form_view_status_addition_horizontal_stretch(&fields),
+        None
+    );
 }
 
 /// Evidence: 1C:Интеграция ISL 2.8.1.13 (root `{63,...}`, compatibility 8.3.21)
@@ -79437,8 +79712,7 @@ fn a_version_0_mobile_table_reads_like_version_1() {
     let raw = format!("{{0,30,{pairs},0}}");
     let (uuid, text) = flat_configuration_mobile_text(67, 60, &raw);
     let (functionalities, messages) =
-        parse_configuration_used_mobile_application_functionalities(&text, &uuid, "2.20")
-            .unwrap();
+        parse_configuration_used_mobile_application_functionalities(&text, &uuid, "2.20").unwrap();
     assert!(messages.is_empty());
     assert_eq!(functionalities.len(), 38);
     let used = functionalities
@@ -79467,5 +79741,8 @@ fn a_chart_writes_its_reference_bands_palette() {
     assert!(compact.contains(&pair));
     let edited = compact.replacen(&pair, &format!("{palette_32},{palette_32}"), 1);
     let xml = parse_and_render_form_chart_settings_for_test(&edited).unwrap();
-    assert!(xml.contains("<d4p1:referenceBandsColorPaletteDescription>"), "{xml}");
+    assert!(
+        xml.contains("<d4p1:referenceBandsColorPaletteDescription>"),
+        "{xml}"
+    );
 }

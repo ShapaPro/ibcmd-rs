@@ -56,7 +56,7 @@ use crate::compiler::{
     AdditionalIndexesMapping, CompileAxes, CompileRequest, SourcePayload, compile_source,
 };
 use crate::module_blob::{
-    CommonModuleXmlProperties, InterfaceAssetSource, MetadataSourceContext,
+    CommonModuleXmlProperties, InterfaceAssetSource, MetadataSourceContext, PredefinedPatch,
     SimpleMetadataXmlProperties, VersionReplacement, business_process_flowchart_base_free_blockers,
     command_interface_base_free_blockers, command_interface_xml_can_pack_without_base,
     common_module_metadata_base_free_blockers, form_body_base_free_blockers,
@@ -67,21 +67,21 @@ use crate::module_blob::{
     pack_ext_picture_blob_from_xml_and_bytes, pack_form_body_blob_from_form_xml_base_free,
     pack_form_body_blob_from_form_xml_with_source_and_assets, pack_help_blob_from_parts,
     pack_interface_asset_blob, pack_module_blob_container_bytes, pack_native_form_body_blob,
-    pack_predefined_data_blob_from_xml, pack_role_rights_blob_base_free,
-    pack_role_rights_blob_from_xml_with_source, pack_schedule_blob_from_xml,
-    pack_simple_metadata_blob_from_xml_with_source, pack_style_body_blob_from_xml,
-    parse_common_module_xml_properties, parse_ext_picture_file_name_from_xml,
-    parse_help_pages_from_xml, parse_simple_metadata_xml_properties, parse_template_type_from_xml,
-    patch_versions_blob_bytes, patch_versions_blob_bytes_allowing_additions,
-    predefined_data_base_free_blockers, raw_deflated_first_base64_payload_sha256,
-    raw_deflated_help_content_sha256, raw_deflated_plain_sha256, role_rights_base_free_blockers,
-    versions_base_free_blockers,
+    pack_role_rights_blob_base_free, pack_role_rights_blob_from_xml_with_source,
+    pack_schedule_blob_from_xml, pack_simple_metadata_blob_from_xml_with_source,
+    pack_style_body_blob_from_xml, parse_common_module_xml_properties,
+    parse_ext_picture_file_name_from_xml, parse_help_pages_from_xml,
+    parse_simple_metadata_xml_properties, parse_template_type_from_xml,
+    patch_predefined_data_blob_from_xml, patch_versions_blob_bytes,
+    patch_versions_blob_bytes_allowing_additions, predefined_data_base_free_blockers,
+    raw_deflated_first_base64_payload_sha256, raw_deflated_help_content_sha256,
+    raw_deflated_plain_sha256, role_rights_base_free_blockers, versions_base_free_blockers,
 };
 use crate::module_blob::{HtmlPageOwner, html_page_storage_bytes};
 use crate::mssql_main_activation::{
-    MainActivationDryRunReport, MainActivationMode,
-    MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation,
-    render_main_activation_sql,
+    MainActivationDryRunReport, MainActivationExecutor, MainActivationMode, MainActivationPlan,
+    MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation_for,
+    render_main_activation_sql_with,
 };
 use crate::parallel;
 use crate::source::{scan_sources, scan_sources_with_prefixes};
@@ -92,9 +92,16 @@ use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
 pub mod base_free_cf;
+mod delta_stage;
 mod empty_stage;
 mod offline_compile;
+mod override_stage;
+mod patch_refusal;
+mod stage_guard;
 mod stage_timing;
+
+pub use override_stage::StageOverrides;
+pub use stage_guard::{StageRefused, StageVerification};
 
 pub use empty_stage::{
     EmptyStageAuditOptions, EmptyStageAuditReport, audit_empty_stage, empty_stage_summary,
@@ -349,6 +356,14 @@ pub struct MssqlActivateStagedMainReport {
     pub tail_log_output: Option<PathBuf>,
     pub live_recovery_command: Option<String>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
+    /// What the live gate found before the promotion (#409 F-9, F-10): the log backup chain, the tail directory, the sessions whose
+    /// work the switch interrupts. Only for the `live` mode on the built-in SQL client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<crate::mssql_live_gate::LiveGateReport>,
+    /// The report of the own apply (`mssql_config_apply`) that carried the promotion out: the `exclusive` mode of
+    /// the built-in SQL client (#408 step 2). Absent when the transaction of this module did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_apply: Option<crate::mssql_config_apply::ConfigApplyReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -492,6 +507,25 @@ pub struct StageSourceObjectsReport {
     pub after: StorageTableManifest,
     pub versions_blob: GeneratedBlobReport,
     pub version_replacements: Vec<VersionReplacement>,
+    /// What the guard compared with the tree, when it ran.
+    pub verification: Option<StageVerification>,
+    /// What a patch stage built from the tree because the target's rows could
+    /// not carry it, when it looked.
+    pub overrides: Option<StageOverrides>,
+}
+
+/// What a bulk stage writes besides the rows of the objects it prepared:
+/// the ids of objects the target holds no Config row of, and the platform's
+/// `deleted` row.
+#[derive(Debug, Default)]
+struct StageAdditions {
+    /// Objects new to the target: their descriptor rows take no Attributes
+    /// from a Config row.
+    new_ids: std::collections::HashSet<String>,
+    /// The names the `deleted` row lists.
+    deleted_names: Vec<String>,
+    /// The `deleted` row itself, when there is a name to list.
+    deleted_row: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -601,11 +635,19 @@ impl PreparedCommonModuleObjectStage {
     /// The Config rows this module stages: its metadata row, and its body row
     /// when it has one.
     fn row_count(&self) -> usize {
-        1 + usize::from(self.has_module_body)
+        usize::from(self.stages_metadata_row()) + usize::from(self.has_module_body)
+    }
+
+    /// False when the target's own metadata row stays (#395): the blob is empty.
+    fn stages_metadata_row(&self) -> bool {
+        !self.metadata_blob.is_empty()
     }
 
     fn row_ids(&self) -> Vec<String> {
-        let mut ids = vec![self.module_id.clone()];
+        let mut ids = Vec::new();
+        if self.stages_metadata_row() {
+            ids.push(self.module_id.clone());
+        }
         if self.has_module_body {
             ids.push(self.module_body_id.clone());
         }
@@ -913,6 +955,9 @@ pub fn activate_staged_main(
     // The declared policy is checked before any external process starts, so an
     // unsupported build never reaches rac, sqlcmd, or the source tree.
     args.platform_profile.require_main_write_supported()?;
+    if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
+        bail!("--interrupt-sessions is only valid for live activation");
+    }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
@@ -990,7 +1035,14 @@ pub fn activate_staged_main(
         MssqlMainActivationModeArg::Live => MainActivationMode::Live,
         MssqlMainActivationModeArg::Worker => MainActivationMode::Worker,
     };
-    let plan = prepare_main_activation(
+    // The exclusive mode is carried out by the own apply (`mssql_config_apply`), which folds the rows of the
+    // online generations the way the native apply does (#408 step 2). It needs the built-in SQL client; with
+    // `--sqlcmd` the script of this module carries the promotion out and refuses such a database (step 1), as
+    // do the live and worker modes.
+    let executor =
+        MainActivationExecutor::for_mode(mode, matches!(sql.backend(), SqlBackend::Client(_)));
+    let plan = prepare_main_activation_for(
+        executor,
         mode,
         staged,
         MainPublicationSnapshot {
@@ -1002,6 +1054,25 @@ pub fn activate_staged_main(
         args.allow_non_lab,
     )
     .map_err(anyhow::Error::new)?;
+    // The tool's own RAS verification made the cluster open idle SQL sessions on
+    // this database; the session gate of an exclusive activation must not count
+    // them (#409 F-3), and an infobase that has clients is refused before any
+    // write, on the cluster's word.
+    let plan = if mode == MainActivationMode::Exclusive && !plan.is_no_op() {
+        plan.with_own_ras_processes(
+            crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+                &args.rac,
+                &args.ras_endpoint,
+                profile_verification.verified_cluster_id,
+                profile_verification.verified_infobase_id,
+            )?,
+        )
+    } else {
+        plan
+    };
+    if plan.is_carried_out_by_config_apply() {
+        return activate_by_config_apply(args, &sql, &plan, profile_verification);
+    }
     if matches!(args.mode, MssqlMainActivationModeArg::Live)
         && args
             .tail_log_output
@@ -1018,8 +1089,30 @@ pub fn activate_staged_main(
                 .ok_or_else(|| anyhow!("--tail-log-output is not valid Unicode"))
         })
         .transpose()?;
-    let rendered = render_main_activation_sql(&args.database, &plan, tail_log_output)
-        .map_err(anyhow::Error::new)?;
+    // The gate of the live switch (#409 F-9, F-10) asked here as well, so that a refusal names the sessions and the reason; the
+    // script has the same gate at its head, and that one is the last word (also on the `--sqlcmd` route, which cannot ask). The
+    // probe backup is left to the script's own gate.
+    let live_gate = match (
+        matches!(args.mode, MssqlMainActivationModeArg::Live),
+        plan.is_no_op(),
+        tail_log_output,
+    ) {
+        (true, false, Some(tail)) => crate::mssql_live_gate::preflight_live(
+            &sql,
+            &args.database,
+            tail,
+            args.interrupt_sessions,
+            false,
+        )?,
+        _ => None,
+    };
+    let rendered = render_main_activation_sql_with(
+        &args.database,
+        &plan,
+        tail_log_output,
+        args.interrupt_sessions,
+    )
+    .map_err(anyhow::Error::new)?;
     let worker_options =
         if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !plan.is_no_op() {
             Some(crate::mssql_worker_switch::WorkerSwitchOptions {
@@ -1098,10 +1191,144 @@ pub fn activate_staged_main(
             None
         },
         worker_switch,
+        config_apply: None,
+        live_gate,
     })
 }
 
-fn exactly_one_optional_marker(
+/// The exclusive promotion of the staged ConfigSave, carried out by the own apply (#408 step 2, F-4 of #344).
+///
+/// The transaction of [`render_main_activation_sql`] replaces the staged rows and deletes the two markers, which
+/// leaves the `_dynupdate_` rows of earlier online generations behind; the own apply folds them into the ordinary
+/// rows as the native one does, and does what the native apply does besides (`_MessageNo`, the registration for
+/// the exchange-plan nodes, `MobileVersions.dat`, its own recovery artifact). What this module keeps: the
+/// verification of the platform profile and of the cluster, the plan (the refusal of a stage of another shape, the
+/// generations, the recovery snapshot of the rows of the staged objects) and the report's shape.
+fn activate_by_config_apply(
+    args: &MssqlActivateStagedMainArgs,
+    sql: &SqlExec,
+    plan: &MainActivationPlan,
+    profile_verification: crate::mssql_platform_profile::MssqlNativeProfileVerification,
+) -> Result<MssqlActivateStagedMainReport> {
+    let report = plan.dry_run_report();
+    let artifact_root = std::env::temp_dir().join("ibcmd-rs");
+    fs::create_dir_all(&artifact_root)
+        .with_context(|| format!("failed to create {}", artifact_root.display()))?;
+    let token = &report.recovery_token[..16];
+    let script = args.script_output.clone().unwrap_or_else(|| {
+        artifact_root.join(format!(
+            "activate_{}_{}.sql",
+            safe_file_stem(&args.database),
+            token
+        ))
+    });
+    let recovery = args.recovery_output.clone().unwrap_or_else(|| {
+        artifact_root.join(format!(
+            "recovery_{}_{}.json",
+            safe_file_stem(&args.database),
+            token
+        ))
+    });
+    // The snapshot of the rows the stage replaces, as before: written ahead of the run, so it is there when the
+    // run stops half way (the apply's own artifact, under `config_apply.recovery_dir`, is written by the apply).
+    let recovery_json = serde_json::to_vec_pretty(plan.recovery())?;
+    write_new_or_identical(&recovery, &recovery_json)?;
+
+    let options = config_apply_options(
+        &args.database,
+        args.platform_profile,
+        args.dry_run,
+        &script,
+        plan.own_ras_processes(),
+    );
+    let applied = crate::mssql_config_apply::apply_staged_configuration(sql, &options)?;
+    Ok(MssqlActivateStagedMainReport {
+        database: args.database.clone(),
+        claimed_platform_profile: profile_verification.claimed_platform_profile,
+        verified_platform_profile: profile_verification.verified_platform_profile,
+        storage_schema_sha256: profile_verification.storage_schema_sha256,
+        dry_run: args.dry_run,
+        executed: applied.executed,
+        activation: report,
+        script,
+        recovery,
+        tail_log_output: None,
+        live_recovery_command: None,
+        worker_switch: None,
+        config_apply: Some(applied),
+        live_gate: None,
+    })
+}
+
+/// The options of the own apply for an exclusive promotion of the old commands: the default gate (the apply check,
+/// which reads an aliased object's descriptor the way the platform does), no restructuring, the exclusivity proved by
+/// the sessions SQL Server shows -- less the idle sessions of the tool's own RAS verification (#409 F-3) -- and the
+/// script written where the command's `--script-output` names it.
+fn config_apply_options(
+    database: &str,
+    profile: crate::mssql_platform_profile::MssqlNativePlatformProfile,
+    dry_run: bool,
+    script: &Path,
+    own_ras_processes: &[crate::mssql_platform_profile::OwnRasProcess],
+) -> crate::mssql_config_apply::ConfigApplyOptions {
+    let mut options = crate::mssql_config_apply::ConfigApplyOptions::new(database, profile);
+    options.dry_run = dry_run;
+    options.exclusivity = crate::mssql_config_apply::Exclusivity::SqlSessions;
+    options.script_output = Some(script.to_path_buf());
+    options.own_ras_processes = own_ras_processes.to_vec();
+    options
+}
+
+#[cfg(test)]
+mod config_apply_options_tests {
+    use super::config_apply_options;
+    use crate::mssql_config_apply::{BackupPolicy, Exclusivity, GateChoice};
+    use crate::mssql_platform_profile::{MssqlNativePlatformProfile, OwnRasProcess};
+    use std::path::Path;
+
+    #[test]
+    fn the_old_exclusive_commands_hand_the_own_apply_its_default_gate_and_their_own_ras_sessions() {
+        let own = [OwnRasProcess {
+            host: "wks".to_owned(),
+            pid: 4711,
+        }];
+        let options = config_apply_options(
+            "ibcmd_rs_04_apply_x",
+            MssqlNativePlatformProfile::Platform8_3_27_2214,
+            false,
+            Path::new("activate.sql"),
+            &own,
+        );
+        assert_eq!(options.database, "ibcmd_rs_04_apply_x");
+        assert_eq!(
+            options.platform_profile,
+            MssqlNativePlatformProfile::Platform8_3_27_2214
+        );
+        assert!(!options.dry_run && !options.rehearse);
+        assert_eq!(options.exclusivity, Exclusivity::SqlSessions);
+        assert_eq!(
+            options.script_output.as_deref(),
+            Some(Path::new("activate.sql"))
+        );
+        assert_eq!(options.own_ras_processes, own);
+        // the default gate, no restructuring, no backup asked for
+        assert_eq!(options.gate, GateChoice::ApplyCheck);
+        assert!(options.allow_restructure.is_none());
+        assert!(matches!(options.backup, BackupPolicy::None));
+        // a dry run is a dry run of the apply
+        let dry = config_apply_options(
+            "db",
+            MssqlNativePlatformProfile::Platform8_5_1_1150,
+            true,
+            Path::new("a.sql"),
+            &[],
+        );
+        assert!(dry.dry_run);
+        assert!(dry.own_ras_processes.is_empty());
+    }
+}
+
+pub(crate) fn exactly_one_optional_marker(
     table: &str,
     mut rows: Vec<MainStorageRow>,
 ) -> Result<Option<MainStorageRow>> {
@@ -3357,7 +3584,9 @@ pub fn stage_source_objects(
     }
     stage_timing::reset_from_env();
 
-    let manifest = scan_sources_with_prefixes(&args.source_root, &args.path_prefix)?;
+    let manifest = timed_stage_step("scan the tree", || {
+        scan_sources_with_prefixes(&args.source_root, &args.path_prefix)
+    })?;
     let metadata_xmls = filter_source_paths_by_prefix(
         source_metadata_xmls(&manifest, &args.source_root),
         &args.source_root,
@@ -3398,6 +3627,27 @@ pub fn stage_source_objects(
         )?
     };
     install_always_used_constants_source(&sql, &args.database, Some(&args.source_root));
+    // What the target's rows cannot carry is built from the tree: the
+    // objects it lacks, the descriptors that differ, the removals
+    // (`override_stage`). Only a bulk stage against a database can.
+    let overriding = !args.per_row && !offline;
+    let plan = if overriding {
+        timed_stage_step("compare the tree with the target", || {
+            override_stage::plan(args, &sql)
+        })?
+    } else {
+        override_stage::Plan::default()
+    };
+    let leave_to_the_build =
+        |xml: &PathBuf| plan.is_added(&source_relative_path(&args.source_root, xml));
+    let metadata_xmls = metadata_xmls
+        .into_iter()
+        .filter(|xml| !leave_to_the_build(xml))
+        .collect::<Vec<_>>();
+    let common_module_xmls = common_module_xmls
+        .into_iter()
+        .filter(|xml| !leave_to_the_build(xml))
+        .collect::<Vec<_>>();
     // A bulk stage reads the base rows it patches in one pass (in slices on
     // several connections; one bcp query with --sqlcmd) instead of one query
     // per object (ERP УХ: over an hour without it).
@@ -3406,35 +3656,313 @@ pub fn stage_source_objects(
             crate::mssql_dump::fetch_config_part0_rows(&sql, &args.database)
                 .context("failed to read the target's Config rows in bulk")
         })?;
-        let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), rows));
+        // The rows an online update of the target left pending are what the
+        // storage now publishes (`versions` first among them): the rows a
+        // stage patches start from those.
+        let aliases = crate::mssql_dump::dynamic_generation_aliases(
+            rows.get("DynamicallyUpdated").map(Vec::as_slice),
+            rows.keys().map(String::as_str),
+        )?;
+        let _ = BASE_ROW_ALIASES.set((args.database.clone(), aliases));
+        let shared = rows
+            .into_iter()
+            .map(|(file_name, bytes)| (file_name, std::sync::Arc::new(bytes)))
+            .collect();
+        let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), shared));
     }
-    let metadata_objects = parallel::install(|| {
-        metadata_xmls
-            .par_iter()
-            .map(|xml| {
-                prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
-            })
-            .collect::<Result<Vec<_>>>()
-    })??;
-    let metadata_object_count = metadata_objects.len();
-    let common_modules = parallel::install(|| {
-        common_module_xmls
-            .par_iter()
-            .map(|xml| prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None))
-            .collect::<Result<Vec<_>>>()
-    })??;
-    let common_module_count = common_modules.len();
-    ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
+    // Only the rows that change are staged (#395): the target's own export says
+    // which files of the tree it already reproduces, and the objects and rows
+    // they come from stay the target's (`delta_stage`).
+    let mut delta = None;
+    let mut all_rows_because = None;
+    if overriding {
+        let aliases = BASE_ROW_ALIASES
+            .get()
+            .filter(|(aliased_database, _)| aliased_database == &args.database)
+            .map(|(_, aliases)| aliases.clone())
+            .unwrap_or_default();
+        let prepared = metadata_xmls
+            .iter()
+            .chain(&common_module_xmls)
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        match timed_stage_step("compare the tree with the target's export", || {
+            delta_stage::plan(args, &sql, &manifest, &prepared, &plan, &aliases)
+        })? {
+            delta_stage::Outcome::Active(found) => delta = Some(found),
+            delta_stage::Outcome::Off(reason) => all_rows_because = Some(reason),
+        }
+    }
+    let all_metadata_xmls = metadata_xmls;
+    let all_common_module_xmls = common_module_xmls;
+    let (
+        metadata_objects,
+        common_modules,
+        metadata_object_count,
+        common_module_count,
+        patched_versions,
+        additions,
+        overrides,
+        verification,
+    ) = loop {
+        let (metadata_xmls, common_module_xmls) = match delta.as_mut() {
+            Some(delta) => {
+                delta.reset_left_out();
+                let prepares = |xml: &PathBuf| delta.prepares(&args.source_root, xml);
+                let before = all_metadata_xmls.len() + all_common_module_xmls.len();
+                let metadata_xmls = all_metadata_xmls
+                    .iter()
+                    .filter(|xml| prepares(xml))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let common_module_xmls = all_common_module_xmls
+                    .iter()
+                    .filter(|xml| prepares(xml))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                delta.count_left_out(before - metadata_xmls.len() - common_module_xmls.len());
+                (metadata_xmls, common_module_xmls)
+            }
+            None => (all_metadata_xmls.clone(), all_common_module_xmls.clone()),
+        };
+        // Every object that cannot be built is collected, so that one refusal
+        // names them all (see `patch_refusal`).
+        let mut failures = Vec::new();
+        let prepare_started = std::time::Instant::now();
+        let mut metadata_objects = parallel::install(|| {
+            metadata_xmls
+                .par_iter()
+                .map(|xml| {
+                    prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
+                        .map_err(|error| patch_refusal::ObjectFailure {
+                            xml: xml.clone(),
+                            error,
+                        })
+                })
+                .collect::<Vec<_>>()
+        })?
+        .into_iter()
+        .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+        .collect::<Vec<_>>();
+        let mut common_modules = parallel::install(|| {
+            common_module_xmls
+                .par_iter()
+                .map(|xml| {
+                    prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None)
+                        .map_err(|error| patch_refusal::ObjectFailure {
+                            xml: xml.clone(),
+                            error,
+                        })
+                })
+                .collect::<Vec<_>>()
+        })?
+        .into_iter()
+        .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+        .collect::<Vec<_>>();
+        if stage_timing::enabled() {
+            eprintln!(
+                "stage timing: prepare {} objects in {:.1} s",
+                metadata_xmls.len() + common_module_xmls.len(),
+                prepare_started.elapsed().as_secs_f64()
+            );
+        }
+        // A failure a build from the tree fixes (predefined items the target's row
+        // does not hold) is not a refusal: the object is built whole instead.
+        let (fixable, mut failures): (Vec<_>, Vec<_>) = failures
+            .into_iter()
+            .partition(|failure| overriding && override_stage::is_buildable(&failure.error));
+        let rebuild = fixable
+            .into_iter()
+            .map(|failure| failure.xml)
+            .collect::<Vec<_>>();
+        let built = if overriding && !(plan.is_empty() && rebuild.is_empty()) {
+            let patched = |id: &str| {
+                metadata_objects
+                    .iter()
+                    .find(|object| object.object_id == id)
+                    .map(|object| object.metadata_blob.clone())
+                    .or_else(|| {
+                        common_modules
+                            .iter()
+                            .find(|module| module.module_id == id)
+                            .map(|module| module.metadata_blob.clone())
+                    })
+            };
+            timed_stage_step("build what the target's rows cannot carry", || {
+                override_stage::build(
+                    &override_stage::Tree {
+                        root: &args.source_root,
+                        version: args.source_version.map(|version| version.as_str()),
+                        database: &args.database,
+                    },
+                    &sql,
+                    &plan,
+                    &rebuild,
+                    &patched,
+                )
+            })?
+        } else {
+            override_stage::Built::default()
+        };
+        failures.extend(built.failures);
+        if !failures.is_empty() {
+            return Err(patch_refusal::refusal(&args.source_root, failures));
+        }
+        for object in &mut metadata_objects {
+            if let Some(row) = built.descriptors.get(&object.object_id) {
+                object.metadata_blob = row.blob.clone();
+                object.metadata_blob_sha256 = row.sha256.clone();
+                object.metadata_plain_bytes = row.plain_bytes;
+            }
+        }
+        for module in &mut common_modules {
+            if let Some(row) = built.descriptors.get(&module.module_id) {
+                module.metadata_blob = row.blob.clone();
+                module.metadata_blob_sha256 = row.sha256.clone();
+                module.metadata_plain_bytes = row.plain_bytes;
+            }
+        }
+        if let Some(delta) = delta.as_mut() {
+            // What the target's own rows already hold as the tree has it is not staged;
+            // the descriptors the build compiled are.
+            let compiled = built
+                .descriptors
+                .keys()
+                .map(|id| id.to_lowercase())
+                .collect::<std::collections::HashSet<_>>();
+            let pending = |name: &str| pending_update_row(&args.database, name);
+            metadata_objects.retain_mut(|object| {
+                delta.trim_object(&args.source_root, object, &compiled, &pending)
+            });
+            common_modules.retain_mut(|module| {
+                delta.trim_module(&args.source_root, module, &compiled, &pending)
+            });
+        }
+        let compiled_descriptors = built.descriptors.len();
+        let built_objects = built.objects.len();
+        let new_objects = built.new_ids.len();
+        let mut built_files = built.built_files;
+        built_files.truncate(60);
+        let mut compiled_files = built.compiled_files;
+        compiled_files.truncate(60);
+        metadata_objects.extend(built.objects);
+        let metadata_object_count = metadata_objects.len();
+        let common_module_count = common_modules.len();
+        ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
 
-    let changes = source_stage_change_ids(&metadata_objects, &common_modules);
-    let versions_blob = fetch_classified_versions_blob(
-        &sql,
-        &args.database,
-        &legacy_non_xml_compile_axes(),
-        changes.len(),
-    )?;
-    let patched_versions =
-        patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
+        let changes = source_stage_change_ids(&metadata_objects, &common_modules);
+        let versions_blob = fetch_classified_versions_blob(
+            &sql,
+            &args.database,
+            &legacy_non_xml_compile_axes(),
+            changes.len(),
+        )?;
+        let mut patched_versions =
+            patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
+
+        // What leaves the configuration: the rows of the removed objects, and the
+        // rows an online update of the target left pending, are listed in the
+        // `deleted` row as the platform's own import lists them; the removed
+        // names go from `versions`.
+        let removal = if overriding {
+            let names = override_stage::versions_names(&versions_blob)?;
+            // A partial import (`--path-prefix`) is not a whole configuration: it
+            // does not clear the pending online update.
+            let dynamic = if args.path_prefix.is_empty() {
+                override_stage::dynamic_update_rows(&sql, &args.database)?
+            } else {
+                Vec::new()
+            };
+            override_stage::removal(&names, &plan, dynamic)
+        } else {
+            override_stage::removal(&[], &plan, Vec::new())
+        };
+        if !removal.object_rows.is_empty() {
+            patched_versions.blob = override_stage::drop_versions_entries(
+                &patched_versions.blob,
+                &removal.object_rows,
+            )?;
+            patched_versions.output_sha256 = hex_sha256(&patched_versions.blob);
+        }
+        let additions = StageAdditions {
+            new_ids: built.new_ids,
+            deleted_row: if removal.deleted.is_empty() {
+                None
+            } else {
+                Some(override_stage::deleted_row(&removal.deleted)?)
+            },
+            deleted_names: removal.deleted,
+        };
+        let overrides = overriding.then(|| StageOverrides {
+            built_objects,
+            new_objects,
+            compiled_descriptors,
+            removed_rows: removal.object_rows.len(),
+            deleted_names: additions.deleted_names.len(),
+            built_files,
+            compiled_files,
+            differing_files: delta.as_ref().map_or(0, |delta| delta.stats.differing),
+            objects_left_out: delta
+                .as_ref()
+                .map_or(0, |delta| delta.stats.objects_left_out),
+            rows_left_out: delta.as_ref().map_or(0, |delta| delta.stats.rows_left_out),
+            compare_seconds: delta.as_ref().map_or(0.0, |delta| delta.stats.seconds),
+            all_rows_because: all_rows_because.clone(),
+        });
+
+        // The guard: the state this stage would leave, exported with the model and
+        // compared with the tree, before anything is written.
+        let verification = if stage_guard::wanted(args.verify) {
+            let staged = bulk_stage_rows(
+                &metadata_objects,
+                &common_modules,
+                &patched_versions.blob,
+                &additions,
+                false,
+            );
+            let verified = timed_stage_step("verify the staged state", || {
+                stage_guard::verify_patch_stage(
+                    args,
+                    &sql,
+                    &manifest,
+                    &staged,
+                    &additions.deleted_names,
+                )
+            });
+            match verified {
+                Ok(verification) => Some(verification),
+                Err(error) => {
+                    // A row the target keeps that the tree says otherwise about (a link
+                    // in a help page to an object the tree removed, say): the tree wins,
+                    // and the rows of the objects that own the differing files are
+                    // staged from it, once.
+                    let widened = match (
+                        delta.as_mut(),
+                        error.downcast_ref::<stage_guard::StageRefused>(),
+                    ) {
+                        (Some(delta), Some(refused)) => delta.widen(refused.differences()),
+                        _ => false,
+                    };
+                    if widened {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        break (
+            metadata_objects,
+            common_modules,
+            metadata_object_count,
+            common_module_count,
+            patched_versions,
+            additions,
+            overrides,
+            verification,
+        );
+    };
 
     let batch_size = args.batch_size.unwrap_or(500).max(1);
     let batches = if !args.per_row {
@@ -3459,6 +3987,7 @@ pub fn stage_source_objects(
             &metadata_objects,
             &common_modules,
             &patched_versions.blob,
+            &additions,
         )?;
         if !args.script_only {
             after = storage_table_stats(&sql, &args.database, "ConfigSave")?;
@@ -3550,6 +4079,8 @@ pub fn stage_source_objects(
             sha256: patched_versions.output_sha256,
         },
         version_replacements: patched_versions.replacements,
+        verification,
+        overrides,
     })
 }
 
@@ -3603,55 +4134,12 @@ fn is_root_metadata_xml(path: &str) -> bool {
     parts.len() == 2 && is_stage_root_metadata_collection(parts[0])
 }
 
+/// The root folders whose objects a patch stage prepares: the model's table of root families and the
+/// 8.5 palette colors (`source::is_metadata_collection`), less the common modules, which have a path of
+/// their own (`prepare_common_module_object_stage`). It was a hand-written list that lacked the 8.5
+/// `PaletteColors` and `ExternalDataSources` (#419).
 fn is_stage_root_metadata_collection(value: &str) -> bool {
-    matches!(
-        value,
-        "catalogs"
-            | "documents"
-            | "informationregisters"
-            | "accumulationregisters"
-            | "accountingregisters"
-            | "calculationregisters"
-            | "chartsofcharacteristictypes"
-            | "chartsofaccounts"
-            | "chartsofcalculationtypes"
-            | "chartsofcalculationregisters"
-            | "commonforms"
-            | "commonpictures"
-            | "commontemplates"
-            | "commonattributes"
-            | "commandgroups"
-            | "documentjournals"
-            | "reports"
-            | "dataprocessors"
-            | "enums"
-            | "exchangeplans"
-            | "eventsubscriptions"
-            | "filtercriteria"
-            | "functionaloptions"
-            | "functionaloptionsparameters"
-            | "httpservices"
-            | "languages"
-            | "scheduledjobs"
-            | "sessionparameters"
-            | "settingsstorages"
-            | "styleitems"
-            | "styles"
-            | "subsystems"
-            | "roles"
-            | "commoncommands"
-            | "businessprocesses"
-            | "bots"
-            | "definedtypes"
-            | "tasks"
-            | "constants"
-            | "documentnumerators"
-            | "integrationservices"
-            | "sequences"
-            | "webservices"
-            | "wsreferences"
-            | "xdtopackages"
-    )
+    value != "commonmodules" && crate::source::is_metadata_collection(value)
 }
 
 fn is_template_metadata_xml(path: &str) -> bool {
@@ -5202,6 +5690,8 @@ fn prepare_configuration_asset_body_rows(
         axes,
     )?);
     rows.extend(prepare_parent_configuration_rows(
+        sql,
+        database,
         &configuration_uuid,
         xml_path,
     )?);
@@ -5218,7 +5708,16 @@ fn prepare_configuration_asset_body_rows(
 /// level 9, memLevel 9 inside and again outside). A list naming more than
 /// one parent is refused, as the exporter leaves it: where the next entry
 /// starts is not on record.
+///
+/// The stream this deflates is another stream than the platform's (the
+/// library cannot set memLevel 9: on that row 99 663 207 bytes inside against
+/// the stored 99 664 295), so a stage against a database keeps the stored row
+/// itself while it holds this very file
+/// ([`stored_parent_configuration_row`]): a check of the stage against the
+/// target compares the bytes, and reads a re-deflated row as a change.
 fn prepare_parent_configuration_rows(
+    sql: &SqlExec,
+    database: &str,
     configuration_uuid: &str,
     xml_path: &Path,
 ) -> Result<Vec<PreparedMetadataBodyStage>> {
@@ -5268,16 +5767,54 @@ fn prepare_parent_configuration_rows(
                 )
             })?;
         let cf = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let inner = crate::module_blob::deflate_raw(&cf)?;
-        let blob = crate::module_blob::deflate_raw(&inner)?;
+        let body_id = format!("{configuration_uuid}.{uuid}");
+        let blob = match stored_parent_configuration_row(sql, database, &body_id, &cf) {
+            Some(stored) => stored,
+            None => {
+                let inner = crate::module_blob::deflate_raw(&cf)?;
+                crate::module_blob::deflate_raw(&inner)?
+            }
+        };
         rows.push(PreparedMetadataBodyStage {
-            body_id: format!("{configuration_uuid}.{uuid}"),
+            body_id,
             path,
             blob_sha256: hex_sha256(&blob),
             blob,
         });
     }
     Ok(rows)
+}
+
+/// The row a target stores for the parent configuration `body_id` (all its
+/// parts, under the name the storage publishes it by), when the two streams
+/// inflate to `cf`. `None` in a base-free or offline stage, when the target
+/// has no such row, cannot be read, or holds another file: the caller
+/// deflates `cf` itself then.
+fn stored_parent_configuration_row(
+    sql: &SqlExec,
+    database: &str,
+    body_id: &str,
+    cf: &[u8],
+) -> Option<Vec<u8>> {
+    if base_free(sql) || OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let stored_name = BASE_ROW_ALIASES
+        .get()
+        .filter(|(aliased_database, _)| aliased_database == database)
+        .and_then(|(_, aliases)| aliases.get(body_id))
+        .map_or(body_id, String::as_str);
+    let stored = crate::mssql_dump::fetch_config_row_whole(sql, database, stored_name)
+        .ok()
+        .flatten()?;
+    stored_row_holds_parent_configuration(&stored, cf).then_some(stored)
+}
+
+/// Whether a stored parent configuration row (deflated twice) holds `cf`.
+fn stored_row_holds_parent_configuration(stored: &[u8], cf: &[u8]) -> bool {
+    crate::module_blob::inflate_raw(stored)
+        .and_then(|inner| crate::module_blob::inflate_raw(&inner))
+        .is_ok_and(|plain| plain == cf)
 }
 
 /// `(parent uuid, name)` of every parent `Ext/ParentConfigurations.bin`
@@ -5340,11 +5877,12 @@ fn base_free_command_interface_body(
 /// In a base-free stage there is no row to patch once the base-free writer
 /// refuses a command interface: fail with the writer's own reason.
 fn base_free_command_interface_refusal(
+    sql: &SqlExec,
     body_id: &str,
     xml: &[u8],
     source: Option<&MetadataSourceContext>,
 ) -> Result<()> {
-    if !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+    if !base_free(sql) {
         return Ok(());
     }
     let refusal =
@@ -5477,7 +6015,7 @@ fn prepare_configuration_command_interface_body_row(
             "Configuration CommandInterface",
         )?]);
     }
-    base_free_command_interface_refusal(&body_id, &xml, source)?;
+    base_free_command_interface_refusal(sql, &body_id, &xml, source)?;
     let required = required_base_key(&classification, "Configuration CommandInterface")?;
     let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let packed = pack_command_interface_blob_from_xml(&base_body, &xml).with_context(|| {
@@ -5585,14 +6123,24 @@ fn prepare_predefined_data_body_row(
     let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let xml = fs::read(&body_path)
         .with_context(|| format!("failed to read PredefinedData {}", body_path.display()))?;
-    let packed = pack_predefined_data_blob_from_xml(&base_body, &xml)
+    let patch = patch_predefined_data_blob_from_xml(&base_body, &xml)
         .with_context(|| format!("failed to pack PredefinedData {}", body_path.display()))?;
-    Ok(vec![PreparedMetadataBodyStage {
-        body_id,
-        path: body_path,
-        blob: packed.blob,
-        blob_sha256: packed.output_sha256,
-    }])
+    match patch {
+        PredefinedPatch::Patched(packed) => Ok(vec![PreparedMetadataBodyStage {
+            body_id,
+            path: body_path,
+            blob: packed.blob,
+            blob_sha256: packed.output_sha256,
+        }]),
+        // A row is patched item by item; a set of items that is not the
+        // row's has to be compiled from the tree (`override_stage`).
+        PredefinedPatch::ItemsDiffer { added, removed } => bail!(
+            "{}added: {}; removed: {}",
+            override_stage::PREDEFINED_ITEMS_DIFFER,
+            added.join(", "),
+            removed.join(", ")
+        ),
+    }
 }
 
 fn prepare_business_process_flowchart_body_row(
@@ -5784,7 +6332,7 @@ fn prepare_form_body_row(
     // An empty infobase has no row to patch: the native writer is the only
     // way left (a form with item assets reaches here without having tried
     // it), and its refusal is the reason the row fails.
-    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+    if base_free(sql) {
         if let Some(packed) = native() {
             return Ok(vec![PreparedMetadataBodyStage {
                 body_id,
@@ -5858,7 +6406,24 @@ fn prepare_form_body_row(
         source,
         Some(&form_item_assets_root),
     )
-    .with_context(|| format!("failed to pack Form body {}", form_path.display()))?;
+    .with_context(|| {
+        // The patch of the target's layout is the last resort after the native
+        // writer; its own refusal (a binding to a removed attribute, ...) is
+        // the reason worth naming.
+        let refusal = match pack_native_form_body_blob(
+            &form_xml,
+            module_text.as_deref(),
+            source,
+            Some(native_items_root.as_path()),
+        ) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => "it accepts the form on a second run".to_string(),
+        };
+        format!(
+            "failed to pack Form body {}: the native form writer refuses the form ({refusal}) and the target's layout cannot be patched",
+            form_path.display()
+        )
+    })?;
     Ok(vec![PreparedMetadataBodyStage {
         body_id,
         path: if source_listing::exists(&form_path) {
@@ -5898,7 +6463,7 @@ fn prepare_role_rights_body_row(
             blob_sha256: packed.output_sha256,
         }]);
     }
-    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+    if base_free(sql) {
         let refusal = match source {
             Some(source) => match pack_role_rights_blob_base_free(&xml, source) {
                 Ok(_) => "the writer accepted it on a second run".to_string(),
@@ -5968,7 +6533,7 @@ fn prepare_command_interface_body_row(
             "CommandInterface",
         )?]);
     }
-    base_free_command_interface_refusal(&body_id, &xml, source)?;
+    base_free_command_interface_refusal(sql, &body_id, &xml, source)?;
     let required = required_base_key(&classification, "CommandInterface")?;
     let base_body = fetch_config_blob(sql, database, required.as_str())?;
     let packed = pack_command_interface_blob_from_xml(&base_body, &xml)
@@ -7187,7 +7752,115 @@ fn target_always_used_constants(
     flagged
 }
 
-/// Part 0 of the named Config rows, a hundred names a query.
+/// The online generations active in `database`, oldest first (empty when there
+/// is none), asked once per process: the history a stage reads its base rows
+/// through ([`fetch_effective_blob`]).
+fn active_generation_history(sql: &SqlExec, database: &str) -> Result<std::sync::Arc<Vec<String>>> {
+    static HISTORIES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Vec<String>>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(found) = HISTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(database)
+    {
+        return Ok(found.clone());
+    }
+    ensure_online("run a query")?;
+    let history = std::sync::Arc::new(crate::mssql_dump::active_generation_history(sql, database)?);
+    HISTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(database.to_owned(), history.clone());
+    Ok(history)
+}
+
+/// Part 0 of the plain row `published` names and of every alias of it, in any
+/// generation: `(stored name, DataSize, bytes)`.
+fn fetch_effective_candidates(
+    sql: &SqlExec,
+    database: &str,
+    published: &str,
+) -> Result<Vec<(String, i64, Vec<u8>)>> {
+    ensure_online("run a query")?;
+    let pattern = crate::mssql_effective_row::alias_pattern(published);
+    if let SqlBackend::Client(client) = sql.backend() {
+        let query = format!(
+            "SELECT FileName, DataSize, BinaryData FROM {db}.dbo.Config \
+             WHERE PartNo = 0 AND (FileName = @P1 OR FileName LIKE @P2 ESCAPE N'\\')",
+            db = quote_ident(database),
+        );
+        let mut found = Vec::new();
+        client.read_rows(
+            &query,
+            &[SqlParam::Text(published), SqlParam::Text(&pattern)],
+            &mut |mut row| {
+                found.push((row.take_text(0)?, row.i64(1)?, row.take_binary(2)?));
+                Ok(())
+            },
+        )?;
+        return Ok(found);
+    }
+    let query = format!(
+        "SET NOCOUNT ON; USE {db};\n\
+         SELECT COALESCE((\n\
+             SELECT FileName AS file_name,\n\
+                    DataSize AS data_size,\n\
+                    CONVERT(varchar(max), BinaryData, 2) AS binary_hex\n\
+             FROM Config\n\
+             WHERE PartNo = 0 AND (FileName = N'{name}' OR FileName LIKE N'{pattern}' ESCAPE N'\\')\n\
+             FOR JSON PATH\n\
+         ), '[]');",
+        db = quote_ident(database),
+        name = quote_string(published),
+        pattern = quote_string(&pattern),
+    );
+    let json = query_json_required(
+        sql,
+        &query,
+        &format!("fetch_effective_candidates({published})"),
+    )?;
+    let rows: Vec<BinaryBlobRow> = serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse Config blob JSON for {published}"))?;
+    rows.into_iter()
+        .map(|row| Ok((row.file_name, row.data_size, decode_hex(&row.binary_hex)?)))
+        .collect()
+}
+
+/// Part 0 of the row the platform reads for `published` when online generations
+/// are active: the alias of the newest generation that carries it, else the
+/// plain row. `None` when neither exists.
+///
+/// A stage patches base rows, and builds the next generation's `versions` from
+/// one; reading the plain rows there sent the version of every object an earlier
+/// generation had changed back to what it was before that generation (#416).
+fn fetch_effective_row(
+    sql: &SqlExec,
+    database: &str,
+    published: &str,
+    history: &[String],
+) -> Result<Option<Vec<u8>>> {
+    let candidates = fetch_effective_candidates(sql, database, published)?;
+    let Some((stored, (data_size, bytes))) = crate::mssql_effective_row::pick(
+        published,
+        history,
+        candidates
+            .into_iter()
+            .map(|(name, size, bytes)| (name, (size, bytes))),
+    ) else {
+        return Ok(None);
+    };
+    if bytes.len() as i64 != data_size {
+        bail!(
+            "Config row {stored} DataSize {data_size} does not match BinaryData length {}",
+            bytes.len()
+        );
+    }
+    Ok(Some(bytes))
+}
+
+/// Part 0 of the named Config rows, a hundred names a query; the rows the
+/// platform reads when online generations are active ([`fetch_effective_row`]).
 fn fetch_config_blobs_for_files(
     sql: &SqlExec,
     database: &str,
@@ -7200,6 +7873,19 @@ fn fetch_config_blobs_for_files(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let history = active_generation_history(sql, database)?;
+    if !history.is_empty() {
+        for name in &unique {
+            if let Some(bytes) = fetch_effective_row(sql, database, name, &history)? {
+                rows.push(BinaryBlobRow {
+                    file_name: name.clone(),
+                    data_size: bytes.len() as i64,
+                    binary_hex: encode_hex(&bytes),
+                });
+            }
+        }
+        return Ok(rows);
+    }
     for chunk in unique.chunks(100) {
         let selected = chunk
             .iter()
@@ -7252,8 +7938,56 @@ fn fetch_config_blobs_for_files(
 /// `--bulk` stage; `fetch_config_blob` answers from it first.
 static PREFETCHED_BASE_ROWS: std::sync::OnceLock<(
     String,
-    std::collections::HashMap<String, Vec<u8>>,
+    std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>,
 )> = std::sync::OnceLock::new();
+
+/// The rows a bulk stage has read of `database`, when it has.
+fn prefetched_base_rows(
+    database: &str,
+) -> Option<&'static std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>> {
+    PREFETCHED_BASE_ROWS
+        .get()
+        .filter(|(prefetched, _)| prefetched == database)
+        .map(|(_, rows)| rows)
+}
+
+/// What the online update a target has pending publishes for a row, against the
+/// plain row that stays in the table (`delta_stage`): the bytes of the alias row,
+/// or that the two are the same. A row kept in parts is not judged (only its
+/// first part is read).
+fn pending_update_row(database: &str, name: &str) -> delta_stage::Pending {
+    let (Some((aliased, aliases)), Some((prefetched, rows))) =
+        (BASE_ROW_ALIASES.get(), PREFETCHED_BASE_ROWS.get())
+    else {
+        return delta_stage::Pending::No;
+    };
+    if aliased != database || prefetched != database {
+        return delta_stage::Pending::No;
+    }
+    let Some((plain_name, alias)) = aliases
+        .iter()
+        .find(|(published, _)| published.eq_ignore_ascii_case(name))
+    else {
+        return delta_stage::Pending::No;
+    };
+    let (Some(plain), Some(published)) = (rows.get(plain_name.as_str()), rows.get(alias.as_str()))
+    else {
+        return delta_stage::Pending::No;
+    };
+    if plain.len() >= CONFIG_ROW_PART_BYTES || published.len() >= CONFIG_ROW_PART_BYTES {
+        return delta_stage::Pending::No;
+    }
+    if plain == published {
+        delta_stage::Pending::Same
+    } else {
+        delta_stage::Pending::Replaces(published.as_ref().clone())
+    }
+}
+
+/// Published name -> alias row, for the rows of `PREFETCHED_BASE_ROWS`' database
+/// that an active dynamic generation publishes under another name.
+static BASE_ROW_ALIASES: std::sync::OnceLock<(String, std::collections::BTreeMap<String, String>)> =
+    std::sync::OnceLock::new();
 
 /// Set by a stage that must not reach SQL Server: `--script-only` with its
 /// base rows read from `IBCMD_RS_BASE_ROWS_DIR`, or `--base-free
@@ -7296,18 +8030,33 @@ static BASE_FREE_STAGE: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// the row name back out of it.
 const BASE_FREE_MISSING_ROW: &str = "base-free stage has no base Config row";
 
+/// Whether a writer working through `sql` has no base row to fall back on: a
+/// whole base-free stage (the process-wide flag), or one object compiled base-free
+/// inside a patch stage, which is handed `SqlExec::detached(BASE_FREE_MISSING_ROW)`.
+fn base_free(sql: &SqlExec) -> bool {
+    BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed)
+        || sql.detached_reason() == Some(BASE_FREE_MISSING_ROW)
+}
+
 /// Part 0 of one Config row: from the bulk prefetch, the lab row folder, or
 /// a query.
 fn fetch_config_blob(sql: &SqlExec, database: &str, file_name: &str) -> Result<Vec<u8>> {
-    if BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
+    if base_free(sql) {
         bail!("{BASE_FREE_MISSING_ROW} {file_name}");
     }
     if let Some((prefetched_database, rows)) = PREFETCHED_BASE_ROWS.get()
         && prefetched_database == database
     {
+        // What the storage publishes under this name: an active dynamic
+        // generation's alias when it has one.
+        let stored = BASE_ROW_ALIASES
+            .get()
+            .filter(|(aliased_database, _)| aliased_database == database)
+            .and_then(|(_, aliases)| aliases.get(file_name))
+            .map_or(file_name, String::as_str);
         return rows
-            .get(file_name)
-            .cloned()
+            .get(stored)
+            .map(|bytes| bytes.as_ref().clone())
             .ok_or_else(|| anyhow!("Config row not found: {file_name}"));
     }
     // A dry run over a large tree fetches thousands of base rows one query
@@ -7325,6 +8074,11 @@ fn fetch_config_blob(sql: &SqlExec, database: &str, file_name: &str) -> Result<V
         if OFFLINE_STAGE.load(std::sync::atomic::Ordering::Relaxed) {
             bail!("Config row not found: {file_name}");
         }
+    }
+    let history = active_generation_history(sql, database)?;
+    if !history.is_empty() {
+        return fetch_effective_row(sql, database, file_name, &history)?
+            .ok_or_else(|| anyhow!("Config row not found: {file_name}"));
     }
     if let SqlBackend::Client(client) = sql.backend() {
         ensure_online("run a query")?;
@@ -7906,7 +8660,7 @@ fn build_stage_common_modules_sql(
          BEGIN TRAN;\n\
          DELETE FROM ConfigSave;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM Config\n\
          WHERE FileName IN (N'root', N'version'{module_filter}) AND PartNo = 0;\n\
          IF @@ROWCOUNT <> {expected_stable_rows} THROW 51000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n",
@@ -7924,7 +8678,7 @@ fn build_stage_common_modules_sql(
         let error_number = 51001 + index;
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'{module_body_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
+             SELECT N'{module_body_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'{module_body_id}' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW {error_number}, 'Expected to insert module body row into ConfigSave', 1;\n",
@@ -7937,7 +8691,7 @@ fn build_stage_common_modules_sql(
 
     sql.push_str(&format!(
         "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'versions', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
+         SELECT N'versions', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'versions' AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 1 THROW 51998, 'Expected to insert versions row into ConfigSave', 1;\n\
@@ -7966,17 +8720,17 @@ fn build_stage_common_module_metadata_sql(
          BEGIN TRAN;\n\
          DELETE FROM ConfigSave;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM Config\n\
          WHERE FileName IN (N'root', N'version') AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 2 THROW 52000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'{module_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
+         SELECT N'{module_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'{module_id}' AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 1 THROW 52001, 'Expected to insert common module metadata row into ConfigSave', 1;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'versions', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
+         SELECT N'versions', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'versions' AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 1 THROW 52002, 'Expected to insert versions row into ConfigSave', 1;\n\
@@ -8009,7 +8763,7 @@ fn build_stage_common_module_objects_sql(
          BEGIN TRAN;\n\
          DELETE FROM ConfigSave;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM Config\n\
          WHERE FileName IN (N'root', N'version') AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 2 THROW 53000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n",
@@ -8023,7 +8777,7 @@ fn build_stage_common_module_objects_sql(
         let body_error = metadata_error + 1;
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'{module_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
+             SELECT N'{module_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'{module_id}' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW {metadata_error}, 'Expected to insert common module metadata row into ConfigSave', 1;\n",
@@ -8035,7 +8789,7 @@ fn build_stage_common_module_objects_sql(
         if module.has_module_body {
             sql.push_str(&format!(
                 "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-                 SELECT N'{module_body_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
+                 SELECT N'{module_body_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
                  FROM Config\n\
                  WHERE FileName = N'{module_body_id}' AND PartNo = 0;\n\
                  IF @@ROWCOUNT <> 1 THROW {body_error}, 'Expected to insert common module body row into ConfigSave', 1;\n",
@@ -8049,7 +8803,7 @@ fn build_stage_common_module_objects_sql(
 
     sql.push_str(&format!(
         "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'versions', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
+         SELECT N'versions', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'versions' AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 1 THROW 53998, 'Expected to insert versions row into ConfigSave', 1;\n\
@@ -8081,7 +8835,7 @@ fn build_stage_metadata_objects_sql(
          BEGIN TRAN;\n\
          DELETE FROM ConfigSave;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM Config\n\
          WHERE FileName IN (N'root', N'version') AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 2 THROW 54000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n",
@@ -8093,7 +8847,7 @@ fn build_stage_metadata_objects_sql(
         let error_number = 54001 + index;
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'{object_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
+             SELECT N'{object_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'{object_id}' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW {error_number}, 'Expected to insert metadata object row into ConfigSave', 1;\n",
@@ -8110,7 +8864,7 @@ fn build_stage_metadata_objects_sql(
 
     sql.push_str(&format!(
         "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'versions', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
+         SELECT N'versions', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'versions' AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 1 THROW 54998, 'Expected to insert versions row into ConfigSave', 1;\n\
@@ -8157,14 +8911,14 @@ fn push_insert_metadata_body_row_sql(
     sql.push_str(&format!(
         "DECLARE @metadata_body_blob_{tag} varbinary(max) = 0x{body_blob_hex};\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT N'{body_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {body_blob_len}, @metadata_body_blob_{tag}, PartNo\n\
+         SELECT N'{body_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {body_blob_len}, @metadata_body_blob_{tag}, PartNo\n\
          FROM Config\n\
          WHERE FileName = N'{body_id}' AND PartNo = 0;\n\
          DECLARE @metadata_body_rows_{tag} int = @@ROWCOUNT;\n\
          IF @metadata_body_rows_{tag} = 0\n\
          BEGIN\n\
              INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             VALUES (N'{body_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), 0, {body_blob_len}, @metadata_body_blob_{tag}, 0);\n\
+             VALUES (N'{body_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), 0, {body_blob_len}, @metadata_body_blob_{tag}, 0);\n\
              SET @metadata_body_rows_{tag} = @@ROWCOUNT;\n\
          END;\n\
          IF @metadata_body_rows_{tag} <> 1 THROW {body_error_number}, 'Expected to insert metadata body row into ConfigSave', 1;\n",
@@ -8192,7 +8946,7 @@ fn build_stage_source_objects_sql(
          BEGIN TRAN;\n\
          DELETE FROM ConfigSave;\n\
          INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM Config\n\
          WHERE FileName IN (N'root', N'version') AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 2 THROW 55000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n",
@@ -8214,7 +8968,7 @@ fn build_stage_source_objects_sql(
         let error_number = 55001 + index;
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'{object_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
+             SELECT N'{object_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'{object_id}' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW {error_number}, 'Expected to insert metadata object row into ConfigSave', 1;\n",
@@ -8236,7 +8990,7 @@ fn build_stage_source_objects_sql(
         let body_error = metadata_error + 1;
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'{module_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
+             SELECT N'{module_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {metadata_blob_len}, 0x{metadata_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'{module_id}' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW {metadata_error}, 'Expected to insert common module metadata row into ConfigSave', 1;\n",
@@ -8248,7 +9002,7 @@ fn build_stage_source_objects_sql(
         if module.has_module_body {
             sql.push_str(&format!(
                 "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-                 SELECT N'{module_body_id}', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
+                 SELECT N'{module_body_id}', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {module_blob_len}, 0x{module_blob_hex}, PartNo\n\
                  FROM Config\n\
                  WHERE FileName = N'{module_body_id}' AND PartNo = 0;\n\
                  IF @@ROWCOUNT <> 1 THROW {body_error}, 'Expected to insert common module body row into ConfigSave', 1;\n",
@@ -8263,7 +9017,7 @@ fn build_stage_source_objects_sql(
     if include_versions_row {
         sql.push_str(&format!(
             "INSERT INTO ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-             SELECT N'versions', SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
+             SELECT N'versions', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, {versions_blob_len}, 0x{versions_blob_hex}, PartNo\n\
              FROM Config\n\
              WHERE FileName = N'versions' AND PartNo = 0;\n\
              IF @@ROWCOUNT <> 1 THROW 56998, 'Expected to insert versions row into ConfigSave', 1;\n",
@@ -8291,18 +9045,25 @@ struct BulkStageRow<'a> {
 }
 
 /// Every row the per-row batches insert, in the same order, versions last.
+/// `with_deleted`: the platform's `deleted` row too, before `versions` -- the
+/// guard leaves it out and takes its names from `additions`.
 fn bulk_stage_rows<'a>(
     metadata_objects: &'a [PreparedMetadataObjectStage],
     common_modules: &'a [PreparedCommonModuleObjectStage],
     versions_blob: &'a [u8],
+    additions: &'a StageAdditions,
+    with_deleted: bool,
 ) -> Vec<BulkStageRow<'a>> {
     let mut rows = Vec::new();
     for object in metadata_objects {
-        rows.push(BulkStageRow {
-            file_name: &object.object_id,
-            requires_config_row: true,
-            blob: &object.metadata_blob,
-        });
+        // An empty descriptor blob: the target's own row stays (#395).
+        if !object.metadata_blob.is_empty() {
+            rows.push(BulkStageRow {
+                file_name: &object.object_id,
+                requires_config_row: !additions.new_ids.contains(&object.object_id),
+                blob: &object.metadata_blob,
+            });
+        }
         for body in &object.body_rows {
             rows.push(BulkStageRow {
                 file_name: &body.body_id,
@@ -8312,11 +9073,13 @@ fn bulk_stage_rows<'a>(
         }
     }
     for module in common_modules {
-        rows.push(BulkStageRow {
-            file_name: &module.module_id,
-            requires_config_row: true,
-            blob: &module.metadata_blob,
-        });
+        if module.stages_metadata_row() {
+            rows.push(BulkStageRow {
+                file_name: &module.module_id,
+                requires_config_row: true,
+                blob: &module.metadata_blob,
+            });
+        }
         if module.has_module_body {
             rows.push(BulkStageRow {
                 file_name: &module.module_body_id,
@@ -8324,6 +9087,13 @@ fn bulk_stage_rows<'a>(
                 blob: &module.module_blob,
             });
         }
+    }
+    if with_deleted && let Some(deleted) = &additions.deleted_row {
+        rows.push(BulkStageRow {
+            file_name: override_stage::DELETED_ROW,
+            requires_config_row: false,
+            blob: deleted,
+        });
     }
     rows.push(BulkStageRow {
         file_name: "versions",
@@ -8334,12 +9104,43 @@ fn bulk_stage_rows<'a>(
 }
 
 /// Writes the rows in bcp's native format for a table of
-/// `FileName nvarchar(128), Kind tinyint, DataSize bigint,
+/// `FileName nvarchar(128), Kind tinyint, DataSize bigint, PartNo int,
 /// BinaryData varbinary(max)`, all NOT NULL: a 2-byte byte count and the
-/// UTF-16LE name, one byte, eight bytes, then an 8-byte byte count and the
-/// bytes -- the layout `bcp queryout -n` gives and
-/// `parse_bcp_native_config_rows` reads.
+/// UTF-16LE name, one byte, eight bytes, four bytes, then an 8-byte byte count
+/// and the bytes -- the layout `bcp queryout -n` gives. A row larger than
+/// `CONFIG_ROW_PART_BYTES` is written as several lines, one per part.
 fn write_bulk_stage_rows(path: &Path, rows: &[BulkStageRow<'_>]) -> Result<()> {
+    write_bulk_stage_rows_in_parts(path, rows, CONFIG_ROW_PART_BYTES)
+}
+
+/// The bytes of a stored row that one Config row holds: the platform's own
+/// import writes a row larger than this in parts of this size, each part row
+/// carrying the whole row's `DataSize` (`docs/import/patch-mode.md` section 7).
+const CONFIG_ROW_PART_BYTES: usize = 10_000_000;
+
+/// A stored row cut into the parts a Config table keeps: `(PartNo, bytes)`;
+/// an empty row is one empty part.
+fn bulk_stage_parts(blob: &[u8], part_bytes: usize) -> impl Iterator<Item = (i32, &[u8])> {
+    let count = blob.len().div_ceil(part_bytes).max(1);
+    (0..count).map(move |part| {
+        let start = part * part_bytes;
+        let end = (start + part_bytes).min(blob.len());
+        (part as i32, &blob[start..end])
+    })
+}
+
+/// How many Config rows (parts) the staged rows make.
+fn bulk_stage_part_count(rows: &[BulkStageRow<'_>]) -> usize {
+    rows.iter()
+        .map(|row| row.blob.len().div_ceil(CONFIG_ROW_PART_BYTES).max(1))
+        .sum()
+}
+
+fn write_bulk_stage_rows_in_parts(
+    path: &Path,
+    rows: &[BulkStageRow<'_>],
+    part_bytes: usize,
+) -> Result<()> {
     use std::io::Write;
     let file =
         fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
@@ -8352,15 +9153,17 @@ fn write_bulk_stage_rows(path: &Path, rows: &[BulkStageRow<'_>]) -> Result<()> {
                 row.file_name
             );
         }
-        out.write_all(&((name.len() * 2) as u16).to_le_bytes())?;
-        for unit in name {
-            out.write_all(&unit.to_le_bytes())?;
+        for (part, bytes) in bulk_stage_parts(row.blob, part_bytes) {
+            out.write_all(&((name.len() * 2) as u16).to_le_bytes())?;
+            for unit in &name {
+                out.write_all(&unit.to_le_bytes())?;
+            }
+            out.write_all(&[u8::from(row.requires_config_row)])?;
+            out.write_all(&(row.blob.len() as i64).to_le_bytes())?;
+            out.write_all(&part.to_le_bytes())?;
+            out.write_all(&(bytes.len() as i64).to_le_bytes())?;
+            out.write_all(bytes)?;
         }
-        out.write_all(&[u8::from(row.requires_config_row)])?;
-        let len = row.blob.len() as i64;
-        out.write_all(&len.to_le_bytes())?;
-        out.write_all(&len.to_le_bytes())?;
-        out.write_all(row.blob)?;
     }
     out.flush()
         .with_context(|| format!("failed to write {}", path.display()))
@@ -8379,7 +9182,7 @@ fn build_bulk_stage_prepare_sql(table: &str) -> String {
         "SET NOCOUNT ON;\n\
          USE tempdb;\n\
          IF OBJECT_ID(N'tempdb.dbo.{name}', N'U') IS NOT NULL DROP TABLE dbo.{table};\n\
-         CREATE TABLE dbo.{table} (FileName nvarchar(128) NOT NULL, Kind tinyint NOT NULL, DataSize bigint NOT NULL, BinaryData varbinary(max) NOT NULL);\n",
+         CREATE TABLE dbo.{table} (FileName nvarchar(128) NOT NULL, Kind tinyint NOT NULL, DataSize bigint NOT NULL, PartNo int NOT NULL, BinaryData varbinary(max) NOT NULL);\n",
         name = quote_string(&quote_ident(table)),
         table = quote_ident(table),
     )
@@ -8402,7 +9205,7 @@ fn build_bulk_stage_apply_sql(
          USE {db};\n\
          IF (SELECT COUNT_BIG(*) FROM {stage}) <> {staged_rows}\n\
              THROW 55002, 'bcp loaded an unexpected number of staged rows', 1;\n\
-         IF EXISTS (SELECT 1 FROM {stage} WHERE DATALENGTH(BinaryData) <> DataSize)\n\
+         IF EXISTS (SELECT 1 FROM {stage} GROUP BY FileName, DataSize HAVING SUM(DATALENGTH(BinaryData)) <> DataSize)\n\
              THROW 55003, 'A staged row lost bytes on its way in', 1;\n\
          IF EXISTS (SELECT 1 FROM {stage} s WHERE s.Kind = 1 AND NOT EXISTS\n\
                     (SELECT 1 FROM dbo.Config c WHERE c.FileName = s.FileName AND c.PartNo = 0))\n\
@@ -8410,12 +9213,12 @@ fn build_bulk_stage_apply_sql(
          BEGIN TRAN;\n\
          DELETE FROM dbo.ConfigSave;\n\
          INSERT INTO dbo.ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), Attributes, DataSize, BinaryData, PartNo\n\
+         SELECT FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), Attributes, DataSize, BinaryData, PartNo\n\
          FROM dbo.Config\n\
          WHERE FileName IN (N'root', N'version') AND PartNo = 0;\n\
          IF @@ROWCOUNT <> 2 THROW 55000, 'Unexpected number of stable Config rows copied into ConfigSave', 1;\n\
          INSERT INTO dbo.ConfigSave (FileName, Creation, Modified, Attributes, DataSize, BinaryData, PartNo)\n\
-         SELECT s.FileName, SYSUTCDATETIME(), SYSUTCDATETIME(), ISNULL(c.Attributes, 0), s.DataSize, s.BinaryData, 0\n\
+         SELECT s.FileName, DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), ISNULL(c.Attributes, 0), s.DataSize, s.BinaryData, s.PartNo\n\
          FROM {stage} s\n\
          LEFT JOIN dbo.Config c ON c.FileName = s.FileName AND c.PartNo = 0;\n\
          IF (SELECT COUNT_BIG(*) FROM dbo.ConfigSave) <> {expected_total_rows}\n\
@@ -8549,27 +9352,27 @@ fn load_bulk_stage_rows(
                 .with_context(|| format!("staged row {} is too large", row.file_name))
         })
         .collect::<Result<Vec<_>>>()?;
-    let values = rows
-        .iter()
-        .zip(&lengths)
-        .map(|(row, length)| {
-            vec![
+    let mut values = Vec::with_capacity(rows.len());
+    for (row, length) in rows.iter().zip(&lengths) {
+        for (part, bytes) in bulk_stage_parts(row.blob, CONFIG_ROW_PART_BYTES) {
+            values.push(vec![
                 SqlParam::Text(row.file_name),
                 SqlParam::U8(u8::from(row.requires_config_row)),
                 SqlParam::I64(*length),
-                SqlParam::Binary(row.blob),
-            ]
-        })
-        .collect::<Vec<_>>();
+                SqlParam::I32(part),
+                SqlParam::Binary(bytes),
+            ]);
+        }
+    }
     let written = client
         .write_rows(
             &qualified,
-            &["FileName", "Kind", "DataSize", "BinaryData"],
+            &["FileName", "Kind", "DataSize", "PartNo", "BinaryData"],
             &values,
         )
         .with_context(|| format!("failed to write the staged rows into {qualified}"))?;
-    if written != rows.len() as u64 {
-        bail!("{qualified} took {written} of {} staged rows", rows.len());
+    if written != values.len() as u64 {
+        bail!("{qualified} took {written} of {} staged rows", values.len());
     }
     Ok(())
 }
@@ -8584,8 +9387,15 @@ fn stage_source_rows_bulk(
     metadata_objects: &[PreparedMetadataObjectStage],
     common_modules: &[PreparedCommonModuleObjectStage],
     versions_blob: &[u8],
+    additions: &StageAdditions,
 ) -> Result<Vec<PathBuf>> {
-    let rows = bulk_stage_rows(metadata_objects, common_modules, versions_blob);
+    let rows = bulk_stage_rows(
+        metadata_objects,
+        common_modules,
+        versions_blob,
+        additions,
+        true,
+    );
     let (rows_path, prepare_path, apply_path) =
         bulk_stage_paths(args.script_output.as_ref(), &args.database);
     if let Some(parent) = rows_path.parent() {
@@ -8599,10 +9409,11 @@ fn stage_source_rows_bulk(
     fs::write(&prepare_path, build_bulk_stage_prepare_sql(&table))
         .with_context(|| format!("failed to write {}", prepare_path.display()))?;
     // `root` and `version` join the staged rows in ConfigSave.
-    let expected_total_rows = rows.len() + 2;
+    let staged_parts = bulk_stage_part_count(&rows);
+    let expected_total_rows = staged_parts + 2;
     fs::write(
         &apply_path,
-        build_bulk_stage_apply_sql(&args.database, &table, rows.len(), expected_total_rows),
+        build_bulk_stage_apply_sql(&args.database, &table, staged_parts, expected_total_rows),
     )
     .with_context(|| format!("failed to write {}", apply_path.display()))?;
     if !args.script_only {
@@ -8712,7 +9523,9 @@ fn source_stage_change_ids(
     metadata_objects
         .iter()
         .flat_map(|object| {
-            std::iter::once(object.object_id.clone())
+            (!object.metadata_blob.is_empty())
+                .then(|| object.object_id.clone())
+                .into_iter()
                 .chain(object.body_rows.iter().map(|body| body.body_id.clone()))
         })
         .chain(common_modules.iter().flat_map(|module| module.row_ids()))
@@ -9271,14 +10084,14 @@ mod tests {
         DeltaBundleManifest, PreparedCommonModuleObjectStage, PreparedCommonModuleStage,
         PreparedMetadataBodyStage, PreparedMetadataObjectStage, StorageBundleManifest,
         StorageTableManifest, TableShape, activate_staged_main, build_bulk_stage_apply_sql,
-        build_source_stage_batches, build_source_stage_batches_within, compare_shapes,
-        compare_storage_table_manifests, diff_activation_rows, encode_hex,
-        filter_source_paths_by_prefix, infer_common_module_text_path, is_root_common_module_xml,
-        is_root_metadata_xml, is_stage_metadata_xml, quote_ident, quote_string,
-        require_non_lab_confirmation, source_common_module_xmls, source_metadata_xmls,
-        source_stage_batch_reports, source_xml_version_from_bytes, sqlcmd_file_command,
-        validate_delta_manifest, validate_selected_source_versions, validate_storage_manifest,
-        write_bulk_stage_rows,
+        build_source_stage_batches, build_source_stage_batches_within, bulk_stage_part_count,
+        bulk_stage_parts, compare_shapes, compare_storage_table_manifests, diff_activation_rows,
+        encode_hex, filter_source_paths_by_prefix, infer_common_module_text_path,
+        is_root_common_module_xml, is_root_metadata_xml, is_stage_metadata_xml, quote_ident,
+        quote_string, require_non_lab_confirmation, source_common_module_xmls,
+        source_metadata_xmls, source_stage_batch_reports, source_xml_version_from_bytes,
+        sqlcmd_file_command, validate_delta_manifest, validate_selected_source_versions,
+        validate_storage_manifest, write_bulk_stage_rows, write_bulk_stage_rows_in_parts,
     };
     use crate::cli::{
         InfobaseConfigSourceVersion, MssqlActivateStagedMainArgs, MssqlMainActivationModeArg,
@@ -9313,6 +10126,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,
@@ -9337,6 +10151,49 @@ mod tests {
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// #416 (F-18), on a lab database that holds online generations
+    /// (`IBCMD_RS_DYNGEN_DB`): the `versions` row a stage builds the next
+    /// generation from is the active generation's, not the plain one.
+    ///
+    /// ```text
+    /// IBCMD_RS_DYNGEN_DB=ibcmd_rs_05_ui_v3 cargo test --locked -p ibcmd-rs --lib --no-default-features \
+    ///     --features mssql-live-tests the_stage_reads_the_versions_row -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "mssql-live-tests")]
+    #[test]
+    #[ignore = "reads a lab database: set IBCMD_RS_DYNGEN_DB"]
+    fn the_stage_reads_the_versions_row_the_platform_reads() -> anyhow::Result<()> {
+        let Some(database) = std::env::var_os("IBCMD_RS_DYNGEN_DB") else {
+            return Ok(());
+        };
+        let database = database.to_string_lossy().into_owned();
+        let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions::integrated(
+            "localhost",
+            None,
+        ))?;
+        // `{1,<count>,<generation>...}` (with a byte order mark): the last one is the active one.
+        let marker = super::fetch_config_blob(&sql, &database, "DynamicallyUpdated")?;
+        let marker = String::from_utf8_lossy(&marker).into_owned();
+        let active = marker
+            .trim_matches(|c: char| {
+                !(c.is_ascii_hexdigit() || c == '-' || c == ',' || c == '{' || c == '}')
+            })
+            .trim_matches(['{', '}'])
+            .split(',')
+            .next_back()
+            .map(str::to_owned)
+            .filter(|generation| generation.len() == 36)
+            .expect("a generation history");
+        let active_versions =
+            super::fetch_config_blob(&sql, &database, &format!("versions_dynupdate_{active}"))?;
+        let read = super::fetch_config_blob(&sql, &database, "versions")?;
+        assert!(
+            read == active_versions,
+            "the stage reads the plain `versions` row, not versions_dynupdate_{active}"
+        );
+        Ok(())
+    }
 
     /// A SQL handle for unit tests: any request it gets fails.
     fn test_sql() -> crate::sql::SqlExec {
@@ -9765,6 +10622,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_patch_stage_prepares_the_objects_of_every_root_folder_but_the_common_modules() {
+        for (folder, _) in crate::metadata_model::index::ROOT_COLLECTIONS {
+            let path = format!("{folder}/Object.xml");
+            assert_eq!(
+                super::is_root_metadata_xml(&path),
+                *folder != "CommonModules",
+                "{folder}"
+            );
+        }
+        // The 8.5 folder of the palette colors, at any case; nested and stray folders are not roots.
+        assert!(super::is_root_metadata_xml("PaletteColors/Color.xml"));
+        assert!(super::is_root_metadata_xml("palettecolors/Color.xml"));
+        assert!(!super::is_root_metadata_xml("Forms/Form.xml"));
+        assert!(!super::is_root_metadata_xml("Catalogs/X/Ext/Y.xml"));
+    }
+
+    #[test]
+    fn a_delta_stage_stages_only_the_rows_whose_source_differs() {
+        use super::{StageAdditions, bulk_stage_rows, delta_stage, source_stage_change_ids};
+        use std::collections::HashSet;
+        let root = Path::new("R");
+        let object = || {
+            test_metadata_stage_object(
+                "Catalog",
+                "u1",
+                "X",
+                "R/Catalogs/X.xml",
+                &[
+                    "R/Catalogs/X/Ext/ObjectModule.bsl",
+                    "R/Catalogs/Y/Ext/Other.bsl",
+                    "R/Catalogs/X/Ext/Predefined.xml",
+                ],
+            )
+        };
+        let none = |_: &str| delta_stage::Pending::No;
+        let no_ids = HashSet::new();
+
+        // Only the descriptor file differs: its row is staged and no body is.
+        let mut delta = delta_stage::Delta::for_test(&["catalogs/x.xml"], &[], &[]);
+        let mut only_descriptor = object();
+        assert!(delta.trim_object(root, &mut only_descriptor, &no_ids, &none));
+        assert!(!only_descriptor.metadata_blob.is_empty());
+        assert!(only_descriptor.body_rows.is_empty());
+
+        // Only a module differs: the bodies of that Ext folder are staged, the descriptor is not.
+        let mut delta =
+            delta_stage::Delta::for_test(&["catalogs/x/ext/objectmodule.bsl"], &[], &[]);
+        let mut only_module = object();
+        assert!(delta.trim_object(root, &mut only_module, &no_ids, &none));
+        assert!(only_module.metadata_blob.is_empty());
+        assert_eq!(
+            only_module
+                .body_rows
+                .iter()
+                .map(|body| body.body_id.as_str())
+                .collect::<Vec<_>>(),
+            ["u1.0", "u1.2"]
+        );
+        // The rows a stage writes leave the emptied descriptor out.
+        let additions = StageAdditions::default();
+        let staged = only_module.clone();
+        let rows = bulk_stage_rows(
+            std::slice::from_ref(&staged),
+            &[],
+            b"versions",
+            &additions,
+            false,
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.file_name).collect::<Vec<_>>(),
+            ["u1.0", "u1.2", "versions"]
+        );
+        assert_eq!(
+            source_stage_change_ids(std::slice::from_ref(&staged), &[]),
+            ["u1.0", "u1.2"]
+        );
+
+        // Nothing differs: nothing is left.
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]);
+        let mut unchanged = object();
+        assert!(!delta.trim_object(root, &mut unchanged, &no_ids, &none));
+        assert_eq!(delta.stats.rows_left_out, 4);
+
+        // The guard said a file of the object differs from the tree: every row is staged.
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]).with_units(&["catalogs/x.xml"]);
+        assert!(delta.widen(&[super::stage_guard::FileDifference {
+            path: "Catalogs/X/Ext/Help/ru.html".to_string(),
+            difference: super::stage_guard::Difference::OnlyInTree,
+        }]));
+        let mut widened = object();
+        assert!(delta.trim_object(root, &mut widened, &no_ids, &none));
+        assert!(!widened.metadata_blob.is_empty());
+        assert_eq!(widened.body_rows.len(), 3);
+    }
+
+    #[test]
+    fn a_delta_stage_takes_a_common_module_row_by_row() {
+        use super::delta_stage;
+        use std::collections::HashSet;
+        let root = Path::new("R");
+        let module = || {
+            test_common_module_stage_object(
+                "m1",
+                "M",
+                "R/CommonModules/M.xml",
+                "R/CommonModules/M/Ext/Module.bsl",
+            )
+        };
+        let none = |_: &str| delta_stage::Pending::No;
+        let mut delta = delta_stage::Delta::for_test(&["commonmodules/m/ext/module.bsl"], &[], &[]);
+        let mut edited = module();
+        assert!(delta.trim_module(root, &mut edited, &HashSet::new(), &none));
+        assert_eq!(edited.row_ids(), ["m1.0"]);
+        assert_eq!(edited.row_count(), 1);
+
+        let mut delta = delta_stage::Delta::for_test(&["commonmodules/m.xml"], &[], &[]);
+        let mut renamed = module();
+        assert!(delta.trim_module(root, &mut renamed, &HashSet::new(), &none));
+        assert_eq!(renamed.row_ids(), ["m1"]);
+
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]);
+        let mut unchanged = module();
+        assert!(!delta.trim_module(root, &mut unchanged, &HashSet::new(), &none));
+    }
+
     fn test_common_module_stage_object(
         uuid: &str,
         name: &str,
@@ -10179,12 +11162,42 @@ mod tests {
         let _ = fs::remove_file(&path);
         let mut expected = vec![4, 0, b'a', 0, b'b', 0, 1];
         expected.extend_from_slice(&3i64.to_le_bytes());
+        expected.extend_from_slice(&0i32.to_le_bytes());
         expected.extend_from_slice(&3i64.to_le_bytes());
         expected.extend_from_slice(&[1, 2, 3]);
         expected.extend_from_slice(&[2, 0, 0x2f, 0x04, 0]);
         expected.extend_from_slice(&0i64.to_le_bytes());
+        expected.extend_from_slice(&0i32.to_le_bytes());
         expected.extend_from_slice(&0i64.to_le_bytes());
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_large_row_is_written_in_parts_that_each_carry_the_whole_size() {
+        let path =
+            std::env::temp_dir().join(format!("ibcmd-rs-bulk-parts-{}.bcp", std::process::id()));
+        let blob = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let rows = [BulkStageRow {
+            file_name: "a",
+            requires_config_row: false,
+            blob: &blob,
+        }];
+        write_bulk_stage_rows_in_parts(&path, &rows, 4).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let mut expected = Vec::new();
+        for (part, chunk) in blob.chunks(4).enumerate() {
+            expected.extend_from_slice(&[2, 0, b'a', 0, 0]);
+            expected.extend_from_slice(&10i64.to_le_bytes());
+            expected.extend_from_slice(&(part as i32).to_le_bytes());
+            expected.extend_from_slice(&(chunk.len() as i64).to_le_bytes());
+            expected.extend_from_slice(chunk);
+        }
+        assert_eq!(bytes, expected);
+        // 4 + 4 + 2 bytes: three parts, and the platform's size makes one.
+        assert_eq!(bulk_stage_parts(&blob, 4).count(), 3);
+        assert_eq!(bulk_stage_part_count(&rows), 1);
+        assert_eq!(bulk_stage_parts(&[], 4).count(), 1);
     }
 
     #[test]
@@ -15530,7 +16543,7 @@ mod tests {
         assert!(sql.contains("0xAABBCC"));
         assert!(sql.contains("DECLARE @metadata_body_blob_0_0 varbinary(max) = 0xAABBCC;"));
         assert!(sql.contains("DECLARE @metadata_body_rows_0_0 int = @@ROWCOUNT"));
-        assert!(sql.contains("VALUES (N'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.0', SYSUTCDATETIME(), SYSUTCDATETIME(), 0, 3, @metadata_body_blob_0_0, 0);"));
+        assert!(sql.contains("VALUES (N'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.0', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), 0, 3, @metadata_body_blob_0_0, 0);"));
         assert!(sql.contains("IF @metadata_body_rows_0_0 <> 1 THROW 54501"));
         assert_eq!(sql.matches("0xAABBCC").count(), 1);
         assert!(sql.contains("IF (SELECT COUNT_BIG(*) FROM ConfigSave) <> 5"));
@@ -15573,7 +16586,7 @@ mod tests {
         assert!(sql.contains("N'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.0'"));
         assert!(sql.contains("0xAABBCC"));
         assert!(sql.contains("DECLARE @metadata_body_rows_0_0 int = @@ROWCOUNT"));
-        assert!(sql.contains("VALUES (N'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.0', SYSUTCDATETIME(), SYSUTCDATETIME(), 0, 3, @metadata_body_blob_0_0, 0);"));
+        assert!(sql.contains("VALUES (N'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.0', DATEADD(year, 2000, SYSUTCDATETIME()), DATEADD(year, 2000, SYSUTCDATETIME()), 0, 3, @metadata_body_blob_0_0, 0);"));
         assert!(sql.contains("IF @metadata_body_rows_0_0 <> 1 THROW 55501"));
         assert!(sql.contains("IF (SELECT COUNT_BIG(*) FROM ConfigSave) <> 5"));
     }
@@ -16064,6 +17077,44 @@ mod tests {
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(diff.changed[0].before.sha256, "bbb");
         assert_eq!(diff.changed[0].after.sha256, "ccc");
+    }
+
+    #[test]
+    fn a_stored_parent_configuration_row_holds_the_file_however_it_was_deflated() {
+        use flate2::Compression;
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+
+        let deflate = |bytes: &[u8], level: u32| {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
+            encoder.write_all(bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        let cf: Vec<u8> = (0..20_000u32)
+            .flat_map(|n| (n % 251).to_le_bytes())
+            .collect();
+        // The platform's stream and this program's differ in bytes (levels
+        // stand for the two libraries), and hold the same file.
+        let stored = deflate(&deflate(&cf, 9), 9);
+        let ours = deflate(&deflate(&cf, 1), 1);
+        assert_ne!(stored, ours);
+        assert!(super::stored_row_holds_parent_configuration(&stored, &cf));
+        assert!(super::stored_row_holds_parent_configuration(&ours, &cf));
+
+        let mut other = cf.clone();
+        other[100] ^= 1;
+        assert!(!super::stored_row_holds_parent_configuration(
+            &stored, &other
+        ));
+        assert!(!super::stored_row_holds_parent_configuration(
+            b"not deflate",
+            &cf
+        ));
+        // One deflate only is not the shape of the row.
+        assert!(!super::stored_row_holds_parent_configuration(
+            &deflate(&cf, 9),
+            &cf
+        ));
     }
 
     #[test]

@@ -205,7 +205,9 @@ pub fn assemble_bootstrap_artifact(
     // floor) instead of refusing a tree the patch already accepted.
     let retained: usize = entries
         .iter()
-        .map(|entry| entry.payloads().packed().bytes().len() + entry.payloads().unpacked().bytes().len())
+        .map(|entry| {
+            entry.payloads().packed().bytes().len() + entry.payloads().unpacked().bytes().len()
+        })
         .sum();
     let image = StorageImage::with_retained_byte_limit(entries, retained.saturating_mul(2))
         .map_err(BootstrapError::Storage)?;

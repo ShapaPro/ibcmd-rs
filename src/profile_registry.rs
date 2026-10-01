@@ -65,6 +65,10 @@ pub const BUNDLED_PROFILES: &[BundledProfile<'static>] = &[
         json: include_str!("../profiles/platform/8.5.1.1150.json"),
     },
     BundledProfile {
+        name: "profiles/platform/8.5.1.1529.json",
+        json: include_str!("../profiles/platform/8.5.1.1529.json"),
+    },
+    BundledProfile {
         name: "profiles/xml/2.17.json",
         json: include_str!("../profiles/xml/2.17.json"),
     },
@@ -250,8 +254,8 @@ mod tests {
     #[test]
     fn bundled_seed_profiles_keep_version_axes_independent() {
         let registry = load_bundled_profile_registry().unwrap();
-        assert_eq!(BUNDLED_PROFILES.len(), 7);
-        assert_eq!(registry.profiles().len(), 7);
+        assert_eq!(BUNDLED_PROFILES.len(), 8);
+        assert_eq!(registry.profiles().len(), 8);
 
         for version in ["2.17", "2.20", "2.21"] {
             let id = ProfileId::parse(&format!("xml-{version}")).unwrap();
@@ -471,6 +475,15 @@ mod tests {
                 );
             }
             let main_write = CapabilityId::parse("mssql.main.write").unwrap();
+            let config_apply = CapabilityId::parse("mssql.config.apply").unwrap();
+            // the own exclusive apply: declared for the two builds it was compared on
+            match version {
+                "8.3.27.2214" | "8.5.1.1150" => assert_eq!(
+                    profile.capabilities[&config_apply].value,
+                    CapabilityState::Supported
+                ),
+                _ => assert!(!profile.capabilities.contains_key(&config_apply)),
+            }
             match version {
                 "8.3.24.1819" => assert!(profile.capabilities.is_empty()),
                 "8.3.27.1989" => {

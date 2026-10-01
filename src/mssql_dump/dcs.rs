@@ -766,7 +766,10 @@ fn without_empty_local_string_items(source: Vec<u8>) -> Vec<u8> {
     while let Some(at) = rest.find(OPEN_END) {
         let after = &rest[at + OPEN_END.len()..];
         let tag_start = rest[..at].rfind('<').unwrap_or(at);
-        let name = rest[tag_start + 1..at].split(' ').next().unwrap_or_default();
+        let name = rest[tag_start + 1..at]
+            .split(' ')
+            .next()
+            .unwrap_or_default();
         let close = format!("</{name}>");
         let trimmed = after.trim_start_matches('\t');
         if !name.is_empty() && trimmed.starts_with(&close) {

@@ -199,12 +199,17 @@ fn upgrade_events(node: Node) -> Node {
     let Node::List(mut items) = node else {
         return node;
     };
-    let count = items[0].as_leaf().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    let count = items[0]
+        .as_leaf()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     if items.len() == 2 * count + 1 {
         items.extend([Node::leaf("0"), Node::leaf("0")]);
     }
     let count = (items.len() - 3) / 2;
-    let handlers = (0..count).map(|j| items[1 + 2 * j].clone()).collect::<Vec<_>>();
+    let handlers = (0..count)
+        .map(|j| items[1 + 2 * j].clone())
+        .collect::<Vec<_>>();
     let len = items.len();
     items[len - 2] = Node::leaf("1");
     items[len - 1] = Node::leaf("0");
@@ -284,13 +289,18 @@ fn upgrade_root(items: Vec<Node>) -> Vec<Node> {
     let old_root = items[0].as_leaf().unwrap_or_default().to_owned();
     let tail_at = anchor + 2;
     let mut rest = items[tail_at..].to_vec();
-    let skip = if rest.first().is_some_and(|flag| flag.is("1")) && rest.get(1).and_then(Node::as_list).is_some() {
+    let skip = if rest.first().is_some_and(|flag| flag.is("1"))
+        && rest.get(1).and_then(Node::as_list).is_some()
+    {
         2
     } else {
         1
     };
     rest.drain(..skip.min(rest.len()));
-    let trailer = ROOT_50_TRAILER.iter().map(|value| parse_str_or_leaf(value)).collect::<Vec<_>>();
+    let trailer = ROOT_50_TRAILER
+        .iter()
+        .map(|value| parse_str_or_leaf(value))
+        .collect::<Vec<_>>();
     let new_rest = if matches!(old_root.as_str(), "37" | "38") && rest.len() >= 4 {
         let mut new_rest = rest[..4].to_vec();
         new_rest.extend_from_slice(&trailer[4..12]);
@@ -383,7 +393,10 @@ fn upgrade_table(items: Vec<Node>) -> Vec<Node> {
     upgraded[54] = Node::Leaf((count + 1).to_string());
     upgraded.insert(at, parse_str(r#"{"S",""}"#));
     upgraded.insert(at, Node::leaf("19"));
-    if let Some(events) = upgraded.get_mut(at + 2).filter(|events| is_event_list(events)) {
+    if let Some(events) = upgraded
+        .get_mut(at + 2)
+        .filter(|events| is_event_list(events))
+    {
         let old = std::mem::replace(events, Node::leaf(""));
         *events = upgrade_events(old);
     }
@@ -479,7 +492,11 @@ fn learned_rule(
 ) -> Option<&'static Learned> {
     let parent = parent?;
     let matches = |rule: &&Learned, root: &str, slot: Option<usize>| {
-        rule.root == root && rule.parent == parent && rule.slot == slot && rule.tag == tag && rule.len == len
+        rule.root == root
+            && rule.parent == parent
+            && rule.slot == slot
+            && rule.tag == tag
+            && rule.len == len
     };
     [root, "42"].into_iter().find_map(|root| {
         LEARNED
@@ -512,7 +529,13 @@ fn parse_str_or_leaf(value: &str) -> Node {
     }
 }
 
-fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Option<usize>) -> Node {
+fn upgrade(
+    node: Node,
+    root: &str,
+    depth: usize,
+    parent: Option<&str>,
+    slot: Option<usize>,
+) -> Node {
     let Node::List(items) = node else {
         return node;
     };
@@ -521,7 +544,10 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
         .and_then(Node::as_leaf)
         .map(str::to_owned)
         .unwrap_or_default();
-    let is_item = items.len() > 5 && items[1].as_list().is_some_and(|identity| identity.len() == 2);
+    let is_item = items.len() > 5
+        && items[1]
+            .as_list()
+            .is_some_and(|identity| identity.len() == 2);
     let parent_kind = parent.map(|parent| parent.split(':').next().unwrap_or(parent));
     let items = if depth == 0 && own == "3" {
         let mut items = items;
@@ -545,7 +571,10 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
         upgrade_button(items)
     } else if parent_kind == Some("22") && own == "23" && items.len() == 23 {
         upgrade_group(items)
-    } else if parent_kind == Some("22") && slot == Some(20) && matches!((own.as_str(), items.len()), ("1", 3) | ("4", 6)) {
+    } else if parent_kind == Some("22")
+        && slot == Some(20)
+        && matches!((own.as_str(), items.len()), ("1", 3) | ("4", 6))
+    {
         upgrade_item_slot_20(items)
     } else if let Some(rule) = learned_rule(root, parent, slot, &own, items.len()) {
         apply_learned(rule, items)
@@ -566,7 +595,8 @@ fn upgrade(node: Node, root: &str, depth: usize, parent: Option<&str>, slot: Opt
             .enumerate()
             .map(|(index, child)| {
                 let slot_is = |slots: &[(&str, usize)]| {
-                    kind.as_deref().is_some_and(|kind| slots.contains(&(kind, index)))
+                    kind.as_deref()
+                        .is_some_and(|kind| slots.contains(&(kind, index)))
                 };
                 let len = child.as_list().map_or(0, <[Node]>::len);
                 let empty = child.as_list().is_some_and(|list| list[0].is("0"));
@@ -616,7 +646,8 @@ mod tests {
 
     #[test]
     fn an_old_event_list_gains_its_handler_calls() {
-        let events = parse_str("{1,9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b,\"ПриСозданииНаСервере\",0,0}");
+        let events =
+            parse_str("{1,9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b,\"ПриСозданииНаСервере\",0,0}");
         assert_eq!(
             upgrade_events(events).rendered(),
             "{1,9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b,\"ПриСозданииНаСервере\",1,0,9f2e5ddb-3492-4f5d-8f0d-416b8d1d5c5b,0,1}"

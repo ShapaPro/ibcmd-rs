@@ -2928,7 +2928,11 @@ pub(crate) fn format_spreadsheet_payload(payload: &NativeSpreadsheetPayload<'_>)
         "1",
     )?;
     let output = root_code(payload.output, &[("Enable", "1"), ("Disable", "2")], "0")?;
-    let scaling = root_code(payload.view_scaling_mode, &[("Normal", "1"), ("Large", "2")], "0")?;
+    let scaling = root_code(
+        payload.view_scaling_mode,
+        &[("Normal", "1"), ("Large", "2")],
+        "0",
+    )?;
     let drawing_selection = root_code(payload.drawing_selection_show_mode, &[("Show", "0")], "2")?;
     Some(format!(
         "{{13,{width},{height},{horizontal_stretch},{vertical_stretch},{show_grid},{show_headers},{vertical},{horizontal},0,{protection},{selection},{output},{edit},{show_groups},{border_color},{enable_start_drag},{enable_drag},{events},{scaling},{auto_max_width},{max_width},0,{auto_max_height},{max_height},{show_cell_names},{show_row_and_column_names},0,{vertical_tail},{horizontal_tail},{selection_tail},{drawing_selection}}}",
@@ -5832,7 +5836,11 @@ pub(crate) fn format_table_tail(tail: &NativeTableTail<'_>) -> Option<String> {
         &[("None", "1"), ("CommandBar", "2")],
         "0",
     )?;
-    let refresh = root_code(tail.refresh_request, &[("PullFromTop", "1"), ("PullFromTopOrBottom", "3")], "0")?;
+    let refresh = root_code(
+        tail.refresh_request,
+        &[("PullFromTop", "1"), ("PullFromTopOrBottom", "3")],
+        "0",
+    )?;
     let height_variant = root_code(
         tail.height_control_variant,
         &[
@@ -9136,9 +9144,14 @@ pub(crate) fn resolve_form_data_path(
             .map(|segment| match segment.split_once(':') {
                 Some((code, uuid)) => (code.parse::<i64>().is_ok()
                     && uuid.len() == 36
-                    && uuid.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+                    && uuid
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
                 .then(|| format!("{{{code},{uuid}}}")),
-                None => segment.parse::<i64>().is_ok().then(|| format!("{{{segment}}}")),
+                None => segment
+                    .parse::<i64>()
+                    .is_ok()
+                    .then(|| format!("{{{segment}}}")),
             })
             .collect::<Option<Vec<_>>>()
         && segments.len() >= 2

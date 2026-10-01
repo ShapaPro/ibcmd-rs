@@ -678,6 +678,15 @@ fn run() -> Result<()> {
             let report = ibcmd_rs::mssql::activate_staged_main(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Commands::MssqlApplyCheck(args) => {
+            std::process::exit(ibcmd_rs::apply_check::cli::run_mssql_apply_check(&args)?)
+        }
+        Commands::ApplyCheckTrees(args) => {
+            std::process::exit(ibcmd_rs::apply_check::cli::run_apply_check_trees(&args)?)
+        }
+        Commands::MssqlConfigApply(args) => {
+            ibcmd_rs::mssql_config_apply::run_command(&args)?;
+        }
         Commands::MssqlApplySourceChange(mut args) => {
             ibcmd_rs::settings::commands::prepare_apply_source_change(&mut args, subcommand)?;
             if args.watch {
@@ -686,6 +695,10 @@ fn run() -> Result<()> {
                 let report = ibcmd_rs::mssql_apply::apply_source_change(&args)?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
+        }
+        Commands::MssqlRestructure(args) => {
+            let report = ibcmd_rs::restructure::command::run(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::MssqlAuditSourceParity(mut args) => {
             ibcmd_rs::settings::commands::prepare_audit_source_parity(&mut args, subcommand)?;

@@ -46,7 +46,10 @@ pub fn base_free_entries(
     for row in stage.rows() {
         match entries.get(&row.file_name) {
             Some(existing) if existing != &row.blob => {
-                bail!("row {} is compiled twice with different bytes", row.file_name)
+                bail!(
+                    "row {} is compiled twice with different bytes",
+                    row.file_name
+                )
             }
             Some(_) => {}
             None => {
@@ -76,7 +79,10 @@ pub fn base_free_patch(
     // what a platform refuses.
     if let Some(from) = std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_FROM") {
         let keep = std::env::var("IBCMD_RS_BASE_FREE_KEEP_OURS").unwrap_or_default();
-        let keep = keep.split(',').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+        let keep = keep
+            .split(',')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
         let source = std::fs::File::open(&from)?;
         let limits = ibcmd_core::limits::ResourceLimits::for_input_bytes(source.metadata()?.len());
         let profile = ibcmd_core::artifact::StorageProfileId::parse("storage:cf-cli")?;
@@ -87,7 +93,12 @@ pub fn base_free_patch(
         let only = std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_ONLY")
             .map(std::fs::read_to_string)
             .transpose()?
-            .map(|text| text.lines().map(str::trim).map(str::to_owned).collect::<std::collections::BTreeSet<_>>());
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>()
+            });
         let mut theirs = BTreeMap::new();
         for (name, payload) in crate::external::export::entries_of(&archive) {
             if only.as_ref().is_some_and(|only| !only.contains(&name)) {
@@ -119,5 +130,8 @@ pub fn base_free_patch(
     // its budget follows the tree's own size (an ERP-sized tree retains more
     // than the 512 MiB floor) rather than the floor alone.
     let budget = total.saturating_mul(2);
-    Ok((StoragePatch::with_retained_byte_limit(patch, budget)?, total))
+    Ok((
+        StoragePatch::with_retained_byte_limit(patch, budget)?,
+        total,
+    ))
 }

@@ -1937,7 +1937,11 @@ impl<'a> FormCommandSchema<'a> {
                 // A reference naming nothing, `{0}`, is published as
                 // `<xr:Ref>0</xr:Ref>` (ERP WE 2.5 `CommonForms/
                 // ФормаНастроекОтчета`, commands `ВыбратьПериод1`/`2`).
-                [code] => code.trim().parse::<i32>().ok().is_some_and(|code| code <= 0),
+                [code] => code
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .is_some_and(|code| code <= 0),
                 _ => false,
             },
             _ => false,
@@ -3057,6 +3061,7 @@ impl FormChildItemDisplayImportanceSchema {
                 | "GraphicalSchemaField"
                 | "HTMLDocumentField"
                 | "FormattedDocumentField"
+                | "PlannerField"
                 | "ProgressBarField"
                 | "TrackBarField"
                 | "ChartField",
@@ -9869,18 +9874,28 @@ mod track_bar_extent_tests {
     #[test]
     fn a_track_bar_reads_its_max_width_from_member_14() {
         let options = [
-            "2", "1", "1", "1", "0", "30", "100", "1", "0", "10", "5", "1", "{3,4,{0}}", "0",
-            "20", "0", "1", "0",
+            "2",
+            "1",
+            "1",
+            "1",
+            "0",
+            "30",
+            "100",
+            "1",
+            "0",
+            "10",
+            "5",
+            "1",
+            "{3,4,{0}}",
+            "0",
+            "20",
+            "0",
+            "1",
+            "0",
         ];
-        let schema = FormSpecialFieldSchema::from_raw_layout(
-            "37",
-            59,
-            Some("10"),
-            0,
-            &options,
-            Some("2"),
-        )
-        .unwrap();
+        let schema =
+            FormSpecialFieldSchema::from_raw_layout("37", 59, Some("10"), 0, &options, Some("2"))
+                .unwrap();
         assert_eq!(schema.max_width(&options).as_deref(), Some("20"));
     }
 }

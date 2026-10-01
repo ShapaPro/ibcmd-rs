@@ -547,6 +547,11 @@ mod characteristics {
                 CharacteristicsReferenceKind::SourceUuid,
             ));
         }
+        // A characteristic that names no source stores a nil uuid and prints
+        // `from=""` (the БСП 8.5 extension catalog `_ДемоСегментыПартнеровРасширение`).
+        if information_register_uuid_matches(fields[1], "00000000-0000-0000-0000-000000000000") {
+            return Ok(CharacteristicReference::empty_source());
+        }
         let uuid = parse_information_register_non_zero_uuid(fields[1]).ok_or_else(|| {
             unresolved(
                 family,
@@ -967,6 +972,7 @@ mod config_rows;
 mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;
+pub(crate) mod extension;
 pub(crate) mod extension_types;
 mod fetch;
 mod form;
@@ -1015,6 +1021,10 @@ pub(crate) fn fetch_main_activation_rows(
     table: &str,
     selected_file_names: &BTreeSet<String>,
 ) -> Result<Vec<crate::mssql_main_activation::MainStorageRow>> {
+    // The activation compares these rows with the table inside its transaction
+    // (`dbo.Config`, no view), so they are the rows as stored: never the
+    // generation an export of this process resolved (#409 F-2).
+    let _stored = dynamic_generation::StorageViewScope::begin(database);
     fetch::fetch_binary_rows(sql, database, table, selected_file_names, false)?
         .into_iter()
         .map(|row| {
@@ -1076,6 +1086,7 @@ use form_ref_index::FormObjectRefIndex;
 use forms::*;
 use metadata::*;
 use moxel::*;
+pub(crate) use output_writer::FileSink;
 use output_writer::OutputWriter;
 use refs::*;
 use role_rights::*;
@@ -2081,6 +2092,13 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
 }
 
 fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    // Lab aid: `IBCMD_RS_EXTENSION_MODE=1` runs this export as an extension
+    // export's converters run (rows written by `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT`),
+    // to probe one row without a database.
+    let _extension_probe = std::env::var_os("IBCMD_RS_EXTENSION_MODE")
+        .filter(|value| !value.is_empty())
+        .map(|_| extension::activate(extension::ExtensionContext::default()))
+        .transpose()?;
     // `--rows-dir`: every Config read of this run comes from the folder and
     // no query reaches a server.
     let _offline_rows = match &args.rows_dir {
@@ -2124,8 +2142,10 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         &selected_file_names,
     )?;
     prepare_output_dir(&args.output_dir, args.overwrite)?;
-    // Each run resolves the dynamic generation of the database it was given.
-    dynamic_generation::clear_storage_generation_overlays();
+    // Each run resolves the dynamic generation of the database it was given and
+    // its view ends with it: the reads that follow in this process (the
+    // activation's) see the rows as they are stored (#409 F-2).
+    let _views = dynamic_generation::StorageViewScope::begin(&args.database);
 
     let mut table_roles = vec![MssqlConfigurationTableRole::Current];
     if args.include_config_save {
@@ -2179,6 +2199,8 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             source_version,
             args.collect_all_source_asset_diagnostics,
             model_export::requested(args.model_export, args.legacy_export),
+            None,
+            args.main_configuration && !args.include_config_save,
         )?;
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
@@ -2269,6 +2291,239 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         timings: total_timings,
         tables: reports,
     })
+}
+
+/// The rows an active dynamic generation of the Config table publishes under
+/// another name, published name -> the alias row that holds its current
+/// content (`versions` -> `versions_dynupdate_<generation>`). `marker` is the
+/// payload of the `DynamicallyUpdated` row, `None` when the table has none.
+/// A stage bases the rows it patches on these, so the ids it keeps are the
+/// ones the storage now publishes.
+pub(crate) fn dynamic_generation_aliases<'a>(
+    marker: Option<&[u8]>,
+    file_names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>> {
+    let Some(marker) = marker else {
+        return Ok(BTreeMap::new());
+    };
+    let history = dynamic_generation::dynamic_generation_history(marker)
+        .ok_or_else(|| anyhow!("{} is not a generation history", DYNAMIC_UPDATE_MARKER_ROW))?;
+    let overlay = dynamic_generation::storage_generation_overlay(&history, file_names);
+    Ok(overlay
+        .renames()
+        .iter()
+        .map(|(alias, published)| (published.clone(), alias.clone()))
+        .collect())
+}
+
+/// The stored row that holds the current content of the published `name`,
+/// among `stored_names`: the alias of the newest generation of `history` that
+/// carries it, else `name` itself.
+///
+/// One rule for every reader of the current content: the export's overlay, the
+/// stage that has read the whole table ([`dynamic_generation_aliases`]) and the
+/// stage that asks row by row (`mssql_effective_row`, which only adds the seek
+/// that finds the candidates).
+pub(crate) fn stored_row_name<'a>(
+    history: &[String],
+    name: &str,
+    stored_names: impl IntoIterator<Item = &'a str>,
+) -> String {
+    dynamic_generation::storage_generation_overlay(history, stored_names)
+        .stored_name(name)
+        .to_owned()
+}
+
+/// The rows a state export starts from.
+pub(crate) enum StateBase<'a> {
+    /// Nothing is stored: the staged rows are the whole configuration (a
+    /// stage for an empty infobase, offline).
+    Nothing,
+    /// A folder of `<FileName>__part<N>.bin` files: the Config table as the
+    /// lab keeps it (`IBCMD_RS_BASE_ROWS_DIR`).
+    Folder(&'a Path),
+    /// The Config table of a database, every part of every row.
+    Database {
+        sql: &'a crate::sql::SqlExec,
+        database: &'a str,
+    },
+    /// The Config table of a database as a stage has already read it: part 0
+    /// of every row. Only the rows stored in more than one part are read
+    /// again, for their other parts -- the read of the whole table took
+    /// 195 s on ERP УХ.
+    Prefetched {
+        part0: &'a std::collections::HashMap<String, Arc<Vec<u8>>>,
+        sql: &'a crate::sql::SqlExec,
+        database: &'a str,
+    },
+}
+
+/// A row a stage writes into ConfigSave: its file name and stored bytes.
+pub(crate) struct StagedRow<'a> {
+    pub file_name: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// What exporting a staged state did.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StateExportReport {
+    /// Rows of the state: the stored ones as the storage publishes them, the
+    /// staged ones in place of theirs.
+    pub state_rows: usize,
+    /// Milliseconds spent reading the stored rows and building the state.
+    pub read_ms: u64,
+    /// Milliseconds the export took.
+    pub export_ms: u64,
+}
+
+/// Exports the configuration a stage would leave -- `staged` over the stored
+/// rows (see [`offline_rows::OfflineRows::with_staged`]) -- through the model
+/// export into `sink`, as the platform's export of that state would write it.
+/// Nothing is written to disk and no query reaches a server but the one read
+/// of the stored rows; `output_root` only names the files (the sink receives
+/// `output_root` joined with each relative path). `ConfigDumpInfo.xml` is not
+/// produced: it holds generation ids no stage keeps.
+pub(crate) fn export_staged_state(
+    base: StateBase<'_>,
+    staged: &[StagedRow<'_>],
+    removed: &[String],
+    source_version: InfobaseConfigSourceVersion,
+    output_root: &Path,
+    sink: Arc<dyn FileSink>,
+) -> Result<StateExportReport> {
+    let started = Instant::now();
+    // The state is exported from memory under no database's name; whatever that
+    // export resolves ends with it.
+    let _detached = dynamic_generation::StorageViewScope::begin("");
+    let stored = match base {
+        StateBase::Nothing => offline_rows::OfflineRows::from_memory(std::iter::empty()),
+        StateBase::Folder(dir) => offline_rows::OfflineRows::load(dir)?,
+        StateBase::Database { sql, database } => {
+            // Every stored row: `with_staged` folds the generation history itself.
+            let _stored = dynamic_generation::StorageViewScope::begin(database);
+            offline_rows::OfflineRows::from_memory(
+                fetch_all_config_rows(sql, database)?
+                    .into_iter()
+                    .map(|row| (row.file_name, Arc::new(row.binary))),
+            )
+        }
+        StateBase::Prefetched {
+            part0,
+            sql,
+            database,
+        } => {
+            let _stored = dynamic_generation::StorageViewScope::begin(database);
+            let mut rows = part0
+                .iter()
+                .map(|(file_name, bytes)| (file_name.clone(), Arc::clone(bytes)))
+                .collect::<BTreeMap<_, _>>();
+            for row in fetch_multi_part_config_rows(sql, database)? {
+                rows.insert(row.file_name, Arc::new(row.binary));
+            }
+            offline_rows::OfflineRows::from_memory(rows)
+        }
+    };
+    let state = stored.with_staged(
+        staged
+            .iter()
+            .map(|row| (row.file_name.to_owned(), Arc::new(row.bytes.to_vec()))),
+        removed,
+    )?;
+    let state_rows = state.len();
+    let read_ms = elapsed_ms(started);
+
+    let export_started = Instant::now();
+    let dumped = {
+        let _active = offline_rows::activate_rows(state)?;
+        let sql = crate::sql::SqlExec::detached("a staged state is exported from memory");
+        let plan = MssqlExportInventoryPlan::new(
+            MssqlConfigurationTableRole::Current,
+            false,
+            true,
+            true,
+            false,
+            false,
+        );
+        dump_table_rows_streamed(
+            &sql,
+            "",
+            &BTreeSet::new(),
+            plan,
+            output_root,
+            false,
+            false,
+            true,
+            true,
+            source_version,
+            false,
+            model_export::requested(false, false),
+            Some(sink),
+            // The state is the rows of the memory, not a database's tables.
+            false,
+        )
+    };
+    dumped?;
+    Ok(StateExportReport {
+        state_rows,
+        read_ms,
+        export_ms: elapsed_ms(export_started),
+    })
+}
+
+/// Every row of the Config table, assembled from its parts, read the way the
+/// export reads it: in batches of contiguous names, each on several
+/// connections when the client allows.
+fn fetch_all_config_rows(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let headers = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
+    let file_names = headers
+        .iter()
+        .map(|header| header.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::with_capacity(file_names.len());
+    for batch in build_dump_file_name_batches(&headers, &file_names) {
+        let selected = batch.into_iter().collect::<BTreeSet<_>>();
+        rows.extend(fetch_binary_rows(sql, database, table, &selected, true)?);
+    }
+    Ok(rows)
+}
+
+/// One row of the Config table whole (its parts assembled), or `None` when
+/// the table has no row of that name.
+pub(crate) fn fetch_config_row_whole(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    file_name: &str,
+) -> Result<Option<Vec<u8>>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let selected = BTreeSet::from([file_name.to_string()]);
+    let rows = fetch_binary_rows(sql, database, table, &selected, false)?;
+    Ok(rows
+        .into_iter()
+        .find(|row| row.file_name == file_name)
+        .map(|row| row.binary))
+}
+
+/// The rows of the Config table that are stored in more than one part, each
+/// assembled from all its parts.
+fn fetch_multi_part_config_rows(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<BinaryConfigRow>> {
+    let table = MssqlConfigurationTableRole::Current.sql_name();
+    let headers = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
+    let multi = headers
+        .iter()
+        .filter(|header| header.part_no > 0)
+        .map(|header| header.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    if multi.is_empty() {
+        return Ok(Vec::new());
+    }
+    fetch_binary_rows(sql, database, table, &multi, true)
 }
 
 fn ensure_collect_all_strict_gates(
@@ -3292,6 +3547,9 @@ fn dump_table_rows_with_options_mode(
     } else {
         MetadataObjectReferenceIndexes::default()
     };
+    if let Some(extension) = extension::active() {
+        extension.note_indexes(&type_index, &object_refs);
+    }
     let (
         ((configuration_root_object_refs, role_rights_object_refs), (metadata_order, field_refs)),
         (
@@ -3717,6 +3975,11 @@ fn dump_table_rows_with_options_mode(
         }
         manifests.push(dumped.manifest);
     }
+    if let Some(extension) = extension::active() {
+        for (file_name, diagnostic) in &metadata_extraction_diagnostics {
+            extension.note_diagnostic(file_name, extension::describe_diagnostic(diagnostic));
+        }
+    }
     for (source_row_id, reason) in &source_asset_discovery_misses {
         source_asset_completeness.record_affected_reason(source_asset_audit_entry(
             table,
@@ -3861,6 +4124,30 @@ fn dump_table_rows_with_options_mode(
                     written?;
                 }
             }
+        } else if let Some(extension) = extension::active()
+            && let Some(packed_sha1) = extension.packed_sha1()
+        {
+            // A configuration extension has no `versions` row: its CAS
+            // manifest holds the digest of every row instead.
+            config_dump_info::write_extension_config_dump_info(
+                &output,
+                output_dir,
+                source_version,
+                packed_sha1,
+                ConfigDumpInfoPartialInventoryPolicy::Skip,
+                ConfigDumpInfoInventory {
+                    file_names: &file_names_owned,
+                    metadata_texts: &metadata_audit.rows,
+                    object_refs: &object_refs,
+                    form_refs: &form_refs,
+                    template_refs: &template_refs,
+                    subsystem_refs: &subsystem_refs,
+                    module_text_paths: &module_text_paths,
+                    source_assets: &source_assets,
+                    emitted_source_asset_paths: &emitted_source_asset_paths,
+                    configuration_module_groups: &configuration_module_groups,
+                },
+            )?;
         }
     }
 
@@ -3910,6 +4197,8 @@ fn dump_table_rows_streamed(
     source_version: InfobaseConfigSourceVersion,
     collect_all_source_asset_diagnostics: bool,
     model_export: bool,
+    sink: Option<Arc<dyn FileSink>>,
+    main_configuration: bool,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
@@ -3938,8 +4227,14 @@ fn dump_table_rows_streamed(
     // Everything below reads the configuration an active dynamic generation
     // publishes; without one this leaves the headers and every later query
     // exactly as they were.
-    let headers =
-        install_dynamic_generation_overlay(sql, database, table, selected_file_names, headers)?;
+    let headers = install_storage_overlay(
+        sql,
+        database,
+        table,
+        selected_file_names,
+        headers,
+        main_configuration,
+    )?;
     let fetch_headers_ms = elapsed_ms(headers_started);
     let mut timings = MssqlDumpTimingReport {
         fetch_headers_ms,
@@ -5068,8 +5363,12 @@ fn dump_table_rows_streamed(
     }
 
     // The files go to writer threads of their own, so a worker converting a
-    // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`).
-    let output = OutputWriter::from_env().with_existing_folder(output_dir);
+    // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`). With a sink
+    // they go to the sink instead and nothing is written.
+    let output = match sink {
+        Some(sink) => OutputWriter::from_env_to_sink(sink),
+        None => OutputWriter::from_env().with_existing_folder(output_dir),
+    };
     let context = DumpRowContext {
         output: &output,
         model_export: model.as_ref(),
@@ -5621,55 +5920,7 @@ fn collect_root_family_kinds(text: &str, kinds: &mut BTreeMap<String, &'static s
 
 /// The folder of a root family's kind (the plural the platform lays out).
 pub(crate) fn root_family_folder(kind: &str) -> Option<&'static str> {
-    Some(match kind {
-        "Role" => "Roles",
-        "CommonTemplate" => "CommonTemplates",
-        "CommonModule" => "CommonModules",
-        "HTTPService" => "HTTPServices",
-        "ScheduledJob" => "ScheduledJobs",
-        "CommonAttribute" => "CommonAttributes",
-        "SessionParameter" => "SessionParameters",
-        "FunctionalOptionsParameter" => "FunctionalOptionsParameters",
-        "Subsystem" => "Subsystems",
-        "Style" => "Styles",
-        "FilterCriterion" => "FilterCriteria",
-        "SettingsStorage" => "SettingsStorages",
-        "EventSubscription" => "EventSubscriptions",
-        "StyleItem" => "StyleItems",
-        "Bot" => "Bots",
-        "CommonPicture" => "CommonPictures",
-        "ExchangePlan" => "ExchangePlans",
-        "WebService" => "WebServices",
-        "Language" => "Languages",
-        "FunctionalOption" => "FunctionalOptions",
-        "DefinedType" => "DefinedTypes",
-        "XDTOPackage" => "XDTOPackages",
-        "WSReference" => "WSReferences",
-        "Constant" => "Constants",
-        "Document" => "Documents",
-        "CommonForm" => "CommonForms",
-        "InformationRegister" => "InformationRegisters",
-        "CommandGroup" => "CommandGroups",
-        "CommonCommand" => "CommonCommands",
-        "DocumentNumerator" => "DocumentNumerators",
-        "DocumentJournal" => "DocumentJournals",
-        "Report" => "Reports",
-        "ChartOfCharacteristicTypes" => "ChartsOfCharacteristicTypes",
-        "AccumulationRegister" => "AccumulationRegisters",
-        "Sequence" => "Sequences",
-        "DataProcessor" => "DataProcessors",
-        "Catalog" => "Catalogs",
-        "Enum" => "Enums",
-        "ChartOfAccounts" => "ChartsOfAccounts",
-        "AccountingRegister" => "AccountingRegisters",
-        "ChartOfCalculationTypes" => "ChartsOfCalculationTypes",
-        "CalculationRegister" => "CalculationRegisters",
-        "Task" => "Tasks",
-        "BusinessProcess" => "BusinessProcesses",
-        "ExternalDataSource" => "ExternalDataSources",
-        "IntegrationService" => "IntegrationServices",
-        _ => return None,
-    })
+    crate::metadata_model::index::collection_of_kind(kind)
 }
 
 fn normalize_direct_form_metadata(metadata: &mut MetadataTextRow) -> bool {
@@ -8594,7 +8845,9 @@ fn configuration_module_body_paths(file_names: &BTreeSet<&str>) -> BTreeMap<Stri
 
     let mut paths = BTreeMap::new();
     for (metadata_id, suffixes) in suffixes_by_id {
-        if file_names.contains(metadata_id) || !is_configuration_module_group(&suffixes) {
+        if file_names.contains(metadata_id)
+            || !is_configuration_module_group(metadata_id, &suffixes)
+        {
             continue;
         }
         paths.extend(configuration_module_body_paths_of(metadata_id, file_names));
@@ -8644,8 +8897,16 @@ fn form_module_body_paths(
     paths
 }
 
-fn is_configuration_module_group(suffixes: &BTreeSet<&str>) -> bool {
+fn is_configuration_module_group(owner: &str, suffixes: &BTreeSet<&str>) -> bool {
     let registry = crate::compiler::families::assets::SourceAssetRegistry;
+    if let Some(extension) = extension::active() {
+        // An extension keeps only the blocks of its root object that it
+        // overrides (the managed application module, say), not the whole set.
+        return extension.is_root_header(owner)
+            && registry
+                .configuration_routes()
+                .any(|route| suffixes.contains(route.suffix().trim_start_matches('.')));
+    }
     // The configuration's own `Ext` bodies hang off the one id that has no
     // row of its own, and a configuration need not have every module: the
     // DMIL, ISL and mon configurations have no external connection module
@@ -10714,6 +10975,8 @@ struct StyleBodyItem {
     /// for it.
     uuid: Option<String>,
     value_xml: String,
+    /// Written after every other item (the 8.5 brand colour).
+    trailing: bool,
 }
 
 struct TypedMetadataProperties {
@@ -10949,6 +11212,13 @@ pub(super) enum ConstantValueType {
     },
     DateTime {
         date_fractions: &'static str,
+    },
+    /// `{"R"}` / `{"R",<length>,<allowed length>}`: `xs:base64Binary`, the 8.5
+    /// binary data type (БСП 8.5 extension ServiceDesk, `{"R"}` = length 0,
+    /// variable).
+    BinaryData {
+        length: u32,
+        allowed_length_flag: u8,
     },
     Reference {
         reference: String,
@@ -17135,6 +17405,14 @@ fn register_standard_attributes(
         ));
     }
     if kind == "AccountingRegister" {
+        if extension::active().is_some()
+            && metadata_header_field_index(fields, uuid)
+                .and_then(|header_index| fields.get(header_index + 9))
+                .is_some_and(|field| field.trim() == "{0}")
+        {
+            // An extension's own register can hold no standard attributes.
+            return Vec::new();
+        }
         let account_data_path =
             format!("AccountingRegister.{owner_name}.StandardAttribute.Account");
         if accounting_attributes.present.contains("PeriodAdjustment") {
@@ -17470,7 +17748,11 @@ fn parse_register_data_lock_control_mode(
 ) -> Option<&'static str> {
     let header_index = metadata_header_field_index(fields, uuid)?;
     let field_offset = match kind {
-        "AccountingRegister" => 7,
+        // Slot header+7 is `<FullTextSearch>`; an extension's own accounting
+        // register (`Managed`, `DontUse`) is the record that separates the two.
+        // The nine accounting registers of the ordinary corpora write `0` in
+        // both slots.
+        "AccountingRegister" => 6,
         "AccumulationRegister" => 5,
         _ => return None,
     };
@@ -17814,19 +18096,21 @@ fn parse_calculation_register_fixed_period(
     // demo one. Slot 18 is `1` on all three and slot 16 is `2`/`Month` on all
     // three; both stay checked constants so an unobserved code refuses rather
     // than being invented.
-    let (Some("2"), Some(action_period), Some("1")) = (
+    let (Some("2"), Some(action_period), Some(base_period)) = (
         fields.get(16).map(|field| field.trim()),
         fields
             .get(17)
             .and_then(|field| parse_1c_bool_field(Some(*field))),
-        fields.get(18).map(|field| field.trim()),
+        fields
+            .get(18)
+            .and_then(|field| parse_1c_bool_field(Some(*field))),
     ) else {
         return Some(None);
     };
     Some(Some(CalculationRegisterPeriodProperties {
         periodicity: "Month",
         action_period,
-        base_period: true,
+        base_period,
     }))
 }
 
@@ -18048,13 +18332,13 @@ fn parse_register_full_text_search(
         // `Хозрасчетный` write `1` there and export
         // `<PeriodAdjustmentLength>1</PeriodAdjustmentLength>` together with
         // `<FullTextSearch>DontUse`, and reading the one slot for both made
-        // exactly those two registers write `Use`. All seven accounting
-        // registers of the stand export `DontUse`, so this family separates no
-        // second value: header+6 -- the only slot no other property claims and
-        // `0` on all seven -- carries it as a checked constant, and an
-        // unobserved code refuses rather than being read as something it has
-        // never been.
-        "AccountingRegister" => 6,
+        // exactly those two registers write `Use`. Header+6 is
+        // `<DataLockControlMode>` (see `parse_register_data_lock_control_mode`)
+        // and header+7 carries this property: the accounting register of an
+        // extension writes `1` in the first and `0` in the second and exports
+        // `Managed` with `DontUse`. The nine accounting registers of the other
+        // corpora write `0` in both.
+        "AccountingRegister" => 7,
         "AccumulationRegister" => 6,
         _ => return None,
     };
@@ -20097,40 +20381,40 @@ fn parse_accumulation_register_attribute_payload(
                 // `.../СтруктураОстатковАктивовМСФО` (`Index`/`Use`) and
                 // `.../ЗначенияОперативныхПоказателейРасчетаЗарплатыОрганизаций`
                 // (`DontIndex`/`DontUse`).
-                let (indexing, full_text_search, body_field) =
-                    if fields.len() == 6 && fields.first().map(|field| field.trim()) == Some("4") {
-                        let indexing = metadata_attribute_indexing_xml(fields.get(2)?.trim())?;
-                        let full_text_search =
-                            register_child_full_text_search_xml(fields.get(3)?.trim())?;
-                        if fields.get(4).map(|field| field.trim()) != Some("0") {
-                            return None;
-                        }
-                        let data_history = split_1c_braced_fields(fields.get(5)?.trim(), 0)?;
-                        if data_history.len() != 2
-                            || data_history.first().map(|field| field.trim()) != Some("1")
-                            || !information_register_uuid_is_zero(&parse_uuid_field(
-                                data_history.get(1)?.trim(),
-                            )?)
-                        {
-                            return None;
-                        }
-                        (indexing, full_text_search, fields.get(1)?)
-                    } else if fields.len() == 4
-                        && fields.first().map(|field| field.trim()) == Some("3")
-                    {
-                        // The short form stores the two codes as well: a
-                        // 1C:Документооборот register keeps `{3, <body>, 1,
-                        // 1}` for an attribute the platform dumps
-                        // `Index`/`Use` (`AccumulationRegisters/
-                        // КоличествоДействийЗадач`).
-                        (
-                            metadata_attribute_indexing_xml(fields.get(2)?.trim())?,
-                            register_child_full_text_search_xml(fields.get(3)?.trim())?,
-                            fields.get(1)?,
-                        )
-                    } else {
+                let (indexing, full_text_search, body_field) = if fields.len() == 6
+                    && fields.first().map(|field| field.trim()) == Some("4")
+                {
+                    let indexing = metadata_attribute_indexing_xml(fields.get(2)?.trim())?;
+                    let full_text_search =
+                        register_child_full_text_search_xml(fields.get(3)?.trim())?;
+                    if fields.get(4).map(|field| field.trim()) != Some("0") {
                         return None;
-                    };
+                    }
+                    let data_history = split_1c_braced_fields(fields.get(5)?.trim(), 0)?;
+                    if data_history.len() != 2
+                        || data_history.first().map(|field| field.trim()) != Some("1")
+                        || !information_register_uuid_is_zero(&parse_uuid_field(
+                            data_history.get(1)?.trim(),
+                        )?)
+                    {
+                        return None;
+                    }
+                    (indexing, full_text_search, fields.get(1)?)
+                } else if fields.len() == 4 && fields.first().map(|field| field.trim()) == Some("3")
+                {
+                    // The short form stores the two codes as well: a
+                    // 1C:Документооборот register keeps `{3, <body>, 1,
+                    // 1}` for an attribute the platform dumps
+                    // `Index`/`Use` (`AccumulationRegisters/
+                    // КоличествоДействийЗадач`).
+                    (
+                        metadata_attribute_indexing_xml(fields.get(2)?.trim())?,
+                        register_child_full_text_search_xml(fields.get(3)?.trim())?,
+                        fields.get(1)?,
+                    )
+                } else {
+                    return None;
+                };
                 let common_fields = split_1c_braced_fields(body_field, 0)?;
                 let value_types = parse_register_common_child_value_types(
                     &common_fields,
@@ -20721,6 +21005,19 @@ fn parse_information_register_type_pattern_element(
                 allowed_sign_flag,
             })
         }
+        (r#""R""#, 1) => Some(ConstantValueType::BinaryData {
+            length: 0,
+            allowed_length_flag: 1,
+        }),
+        (r#""R""#, 3) => Some(ConstantValueType::BinaryData {
+            length: fields.get(1)?.trim().parse().ok()?,
+            allowed_length_flag: fields
+                .get(2)?
+                .trim()
+                .parse()
+                .ok()
+                .filter(|flag| *flag <= 1)?,
+        }),
         (r#""D""#, 1) => Some(ConstantValueType::DateTime {
             date_fractions: "DateTime",
         }),
@@ -20733,11 +21030,18 @@ fn parse_information_register_type_pattern_element(
         }),
         (r##""#""##, 2) => {
             let type_id = parse_uuid_field(fields.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
                 .or_else(|| information_register_builtin_reference(&type_id).map(str::to_string))
-                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))?;
+                .or_else(|| builtin_type_reference(&type_id).map(str::to_string))
+            else {
+                // A type of the extended configuration (see
+                // `parse_metadata_type_pattern_element_with_builtin`).
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             if metadata_reference_is_type_set(&reference) {
                 Some(ConstantValueType::ReferenceTypeSet { reference })
             } else {
@@ -20964,6 +21268,7 @@ fn parse_information_register_bound(value: &str) -> Option<Option<String>> {
     match fields.first()?.trim() {
         r#""U""# if fields.len() == 1 => Some(None),
         r#""S""# if fields.len() == 2 => Some(Some(parse_1c_quoted_string(fields.get(1)?.trim())?)),
+        r#""N""# | r#""D""# | r#""B""# => parse_typed_bound_member(&fields).map(Some),
         _ => None,
     }
 }
@@ -21005,7 +21310,10 @@ fn parse_information_register_fill_value(
 /// all, which the platform writes as an empty `xr:DesignTimeRef` (ERP 2.5
 /// `DataProcessors/РедактированиеЭтаповПроизводства`, two attributes).
 fn design_time_ref_value_is_zero(fields: &[&str]) -> bool {
-    let Some(inner) = fields.get(2).and_then(|value| split_1c_braced_fields(value.trim(), 0)) else {
+    let Some(inner) = fields
+        .get(2)
+        .and_then(|value| split_1c_braced_fields(value.trim(), 0))
+    else {
         return false;
     };
     inner.len() == 3
@@ -21303,7 +21611,19 @@ fn information_register_design_time_owner_reference(
     if let Some(reference) = object_refs.get(owner_uuid) {
         return Some(reference.clone());
     }
-    parse_generated_metadata_reference_owner(type_index.get(owner_uuid)?)
+    if let Some(type_reference) = type_index.get(owner_uuid) {
+        return parse_generated_metadata_reference_owner(type_reference)
+            .map(|owner| owner.owner_reference());
+    }
+    // A value of an extension may point at an object of the configuration the
+    // extension extends (an empty reference to its catalog, say); the platform
+    // names it through the whole configuration.
+    let extension = extension::active()?;
+    let base = extension.base_indexes()?;
+    if let Some(reference) = base.object_refs.get(owner_uuid) {
+        return Some(reference.clone());
+    }
+    parse_generated_metadata_reference_owner(base.type_index.get(owner_uuid)?)
         .map(|owner| owner.owner_reference())
 }
 
@@ -21797,7 +22117,9 @@ fn parse_catalog_attribute_wrapper_fields<'a>(
     // an attribute with no type.
     let detail = split_1c_braced_fields(payload.get(1)?.trim(), 0)?;
     let pattern = split_1c_braced_fields(detail.get(2)?.trim(), 0)?;
-    if pattern.len() < 2 {
+    // An attribute the extension adopted keeps no type of its own: the pattern
+    // is empty and the type stays that of the extended configuration.
+    if pattern.len() < 2 && extension::active().is_none() {
         return None;
     }
     metadata_attribute_indexing_xml(fields.get(2)?.trim())?;
@@ -22722,9 +23044,16 @@ fn parse_owner_link_by_type(
     if link_item > 3 {
         return None;
     }
-    let data_path =
-        resolve_owner_data_path(&fields[2..2 + path_count], owner_kind, owner_name, object_refs)?;
-    Some(MetadataChildLinkByType { data_path, link_item })
+    let data_path = resolve_owner_data_path(
+        &fields[2..2 + path_count],
+        owner_kind,
+        owner_name,
+        object_refs,
+    )?;
+    Some(MetadataChildLinkByType {
+        data_path,
+        link_item,
+    })
 }
 
 fn resolve_catalog_data_path(
@@ -22981,8 +23310,8 @@ fn parse_accounting_register_child_properties_from_fields(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(7).copied()).unwrap_or(false),
         extended_edit: parse_1c_bool_field(fields.get(17).copied()).unwrap_or(false),
-        min_value: parse_constant_bound_value(fields.get(8).copied()),
-        max_value: parse_constant_bound_value(fields.get(9).copied()),
+        min_value: parse_metadata_bound_value(fields.get(8).copied()),
+        max_value: parse_metadata_bound_value(fields.get(9).copied()),
         fill_from_filling_value: false,
         emit_fill_from_filling_value: false,
         fill_value: None,
@@ -23060,8 +23389,8 @@ fn parse_metadata_child_properties_from_fields(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(header_index + 7).copied())?,
         extended_edit: parse_1c_bool_field(fields.get(header_index + 8).copied())?,
-        min_value: parse_constant_bound_value(fields.get(header_index + 9).copied()),
-        max_value: parse_constant_bound_value(fields.get(header_index + 10).copied()),
+        min_value: parse_metadata_bound_value(fields.get(header_index + 9).copied()),
+        max_value: parse_metadata_bound_value(fields.get(header_index + 10).copied()),
         fill_from_filling_value: parse_1c_bool_field(fields.get(header_index + 11).copied())?,
         emit_fill_from_filling_value: true,
         fill_value: parse_metadata_child_fill_value(
@@ -23216,8 +23545,8 @@ fn parse_data_processor_wrapped_child_properties(
             .unwrap_or_default(),
         multi_line: parse_1c_bool_field(fields.get(8).copied()).unwrap_or(false),
         extended_edit: parse_1c_bool_field(fields.get(18).copied()).unwrap_or(false),
-        min_value: parse_constant_bound_value(fields.get(9).copied()),
-        max_value: parse_constant_bound_value(fields.get(10).copied()),
+        min_value: parse_metadata_bound_value(fields.get(9).copied()),
+        max_value: parse_metadata_bound_value(fields.get(10).copied()),
         fill_from_filling_value: parse_1c_bool_field(fields.get(21).copied()).unwrap_or(false),
         emit_fill_from_filling_value: true,
         // The wider index, the only one carrying owner-qualified predefined-item
@@ -24014,25 +24343,33 @@ fn parse_chart_of_accounts_properties(
     )?;
 
     let input_modes = parse_catalog_input_modes(fields.get(52)?)?;
-    // Field 24 is `"1"` on every chart of accounts of the stand, exactly as it
-    // is on every characteristic-type plan. It used to be read as
-    // `<CodeSeries>`, which made all four charts write
-    // `WithinSubordination`; the separating carrier is field 35 below. Field
-    // 49 is `"1"` on all four and used to be read as
-    // `<DataLockControlMode>`, whose carrier is field 36. Both are kept as
-    // validated constants so an unobserved value fails closed.
-    if fields.get(24)?.trim() != "1" || fields.get(49)?.trim() != "1" {
+    // Field 27 is `"1"` on every chart of accounts on record, the chart of an
+    // extension included. Field 49 is `"1"` on all of them and used to be read
+    // as `<DataLockControlMode>`, whose carrier is field 36. Both are kept as
+    // validated constants so an unobserved value fails closed. (Field 24, once
+    // the constant here, carries `<AutoOrderByCode>` below; it was `"1"` on the
+    // four charts of the ordinary corpora and is `"0"` on the one of an
+    // extension.)
+    if fields.get(27)?.trim() != "1" || fields.get(49)?.trim() != "1" {
         return None;
     }
     Some(ChartOfAccountsProperties {
         generated_types,
         use_standard_commands: information_register_bool(fields.get(16)?)?,
         include_help_in_contents: information_register_bool(fields.get(17)?)?,
-        ext_dimension_types: parse_chart_direct_object_reference(
-            fields.get(19)?,
-            "ChartOfCharacteristicTypes",
-            object_refs,
-        )?,
+        ext_dimension_types: if extension::active().is_some()
+            && parse_information_register_uuid(fields.get(19)?)
+                .is_some_and(|uuid| information_register_uuid_is_zero(&uuid))
+        {
+            // An extension's own chart can name no plan of extra dimensions.
+            String::new()
+        } else {
+            parse_chart_direct_object_reference(
+                fields.get(19)?,
+                "ChartOfCharacteristicTypes",
+                object_refs,
+            )?
+        },
         max_ext_dimension_count: parse_exchange_plan_u32(fields.get(20)?)?,
         code_mask: parse_information_register_quoted_string(fields.get(21)?)?,
         code_length: parse_exchange_plan_u32(fields.get(22)?)?,
@@ -24135,11 +24472,11 @@ fn parse_chart_of_accounts_properties(
             &header.name,
             form_refs,
         )?,
-        // Field 27 is `"1"` on all four charts of accounts of the stand and
-        // all four export `<AutoOrderByCode>true`; field 34, against which
-        // this used to be read, is `<CheckUnique>` and is `"0"` on two of
-        // them. The constant is validated above rather than invented.
-        auto_order_by_code: information_register_bool(fields.get(27)?)?,
+        // `<AutoOrderByCode>` rides field 24: `"1"`/`true` on the four charts
+        // of accounts of the ordinary corpora, `"0"`/`false` on the chart of an
+        // extension (whose field 27, the constant validated above, stays
+        // `"1"`). Field 34 is `<CheckUnique>` and is `"0"` on two of the four.
+        auto_order_by_code: information_register_bool(fields.get(24)?)?,
         order_length: parse_exchange_plan_u32(fields.get(25)?)?,
         // `<DataLockControlMode>` rides field 36 with the shared 0/1 encoding:
         // `uh` `МСФО` and `Хозрасчетный` write `"0"`/`Automatic`, `ssl`
@@ -24365,7 +24702,7 @@ fn parse_chart_of_calculation_types_properties(
     // and used to be read as `<CodeAllowedLength>` and `<DataLockControlMode>`,
     // whose separating carriers are fields 53 and 41. Both are kept as
     // validated constants so an unobserved value fails closed.
-    if fields.get(27)?.trim() != "1" || fields.get(55)?.trim() != "1" {
+    if fields.get(35)?.trim() != "1" || fields.get(55)?.trim() != "1" {
         return None;
     }
     Some(ChartOfCalculationTypesProperties {
@@ -24460,17 +24797,29 @@ fn parse_chart_of_calculation_types_properties(
             &header.name,
             form_refs,
         )?,
-        dependence_on_calculation_types: match fields.get(35)?.trim() {
+        // `<DependenceOnCalculationTypes>` rides field 27: the three charts of
+        // the ordinary corpora write `1` and export `OnActionPeriod`, the chart
+        // of an extension writes `0` and exports `DontUse`. Field 35, against
+        // which this used to be read, is `1` on all four and is kept as a
+        // checked constant above.
+        dependence_on_calculation_types: match fields.get(27)?.trim() {
             "0" => "DontUse",
             "1" => "OnActionPeriod",
             "2" => "OnBasePeriod",
             _ => return None,
         },
-        base_calculation_types: parse_chart_wrapped_object_reference(
-            fields.get(28)?,
-            "ChartOfCalculationTypes",
-            object_refs,
-        )?,
+        base_calculation_types: if extension::active().is_some()
+            && fields.get(28)?.trim() == "{0,0}"
+        {
+            // An extension's own chart can name no base calculation types.
+            String::new()
+        } else {
+            parse_chart_wrapped_object_reference(
+                fields.get(28)?,
+                "ChartOfCalculationTypes",
+                object_refs,
+            )?
+        },
         action_period_use: information_register_bool(fields.get(29)?)?,
         standard_attributes: parse_chart_standard_attributes(
             fields.get(43)?,
@@ -24878,6 +25227,10 @@ fn parse_chart_standard_attributes(
     type_index: &BTreeMap<String, String>,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<RegisterStandardAttribute>> {
+    // An extension's own chart can hold no standard attributes at all.
+    if extension::active().is_some() && value.trim() == "{0}" {
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     let payload = if outer.len() == 2 && outer.first()?.trim() == "1" {
         split_information_register_braced_fields(outer.get(1)?)?
@@ -25053,6 +25406,9 @@ fn parse_chart_standard_tabular_sections(
     value: &str,
     definitions: &[ChartStandardTabularSectionDefinition],
 ) -> Option<Vec<MetadataStandardTabularSection>> {
+    if extension::active().is_some() && value.trim() == "{0}" {
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     if outer.len() != 2 || outer.first()?.trim() != "1" {
         return None;
@@ -25689,6 +26045,10 @@ fn parse_cct_standard_attributes(
     type_index: &BTreeMap<String, String>,
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<RegisterStandardAttribute>> {
+    if extension::active().is_some() && value.trim() == "{0}" {
+        // An extension's own plan can hold no standard attributes at all.
+        return Some(Vec::new());
+    }
     let outer = split_information_register_braced_fields(value)?;
     // An extension's adopted chart stores no standard attributes (`{0}`,
     // fixture `adopted/kinds`); the extension writer prints none of them.
@@ -25988,9 +26348,12 @@ fn parse_cct_attribute_properties(
     // СтатьиАктивовПассивов`, `Субконто1..3`).
     let resolved_link_by_type = match (link_by_type_empty, owner_scope) {
         (true, _) => None,
-        (false, Some((owner_kind, owner_name, object_refs))) => {
-            Some(parse_owner_link_by_type(payload.get(15)?, owner_kind, owner_name, object_refs)?)
-        }
+        (false, Some((owner_kind, owner_name, object_refs))) => Some(parse_owner_link_by_type(
+            payload.get(15)?,
+            owner_kind,
+            owner_name,
+            object_refs,
+        )?),
         (false, None) => return None,
     };
     if !information_register_uuid_is_zero(&choice_form_uuid) {
@@ -28938,8 +29301,7 @@ fn parse_metadata_object_reference_collection_members(
             }
             let uuid = parse_information_register_non_zero_uuid(payload.get(1)?)?;
             let reference = resolve_exchange_plan_index_reference(&uuid, object_refs)?;
-            (accepts(&reference)
-                && (seen.insert(reference.to_ascii_lowercase()) || allow_repeats))
+            (accepts(&reference) && (seen.insert(reference.to_ascii_lowercase()) || allow_repeats))
                 .then_some((uuid, reference))
         })
         .collect()
@@ -31892,7 +32254,13 @@ fn parse_catalog_form_ref(
     form_refs: &BTreeMap<String, FormSourceReference>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    form_refs.get(&uuid).and_then(form_source_reference_name)
+    match form_refs.get(&uuid) {
+        Some(form) => form_source_reference_name(form),
+        // A form of the extended configuration: the extension does not hold
+        // it, and the platform prints the identifier the row stores.
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 /// An owner's form slot: its own form, or else a common form known only
@@ -32002,7 +32370,12 @@ fn parse_metadata_object_ref(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let uuid = parse_non_zero_uuid(field?)?;
-    object_refs.get(&uuid).cloned()
+    match object_refs.get(&uuid) {
+        Some(reference) => Some(reference.clone()),
+        // An object of the extended configuration (see `parse_catalog_form_ref`).
+        None if extension::active().is_some() => Some(uuid),
+        None => None,
+    }
 }
 
 fn parse_report_child_templates_from_text(
@@ -32415,8 +32788,8 @@ fn parse_constant_properties_from_text(
         .get(6)
         .and_then(|field| parse_1c_quoted_string(field.trim()))
         .unwrap_or_default();
-    let min_value = parse_constant_bound_value(constant_detail_fields.get(8).copied());
-    let max_value = parse_constant_bound_value(constant_detail_fields.get(9).copied());
+    let min_value = parse_metadata_bound_value(constant_detail_fields.get(8).copied());
+    let max_value = parse_metadata_bound_value(constant_detail_fields.get(9).copied());
     let fill_checking = match constant_detail_fields.get(13).map(|field| field.trim()) {
         Some("1") => "ShowError",
         _ => "DontCheck",
@@ -32935,6 +33308,48 @@ fn parse_design_time_references(text: &str, object_refs: &BTreeMap<String, Strin
         .into_iter()
         .filter_map(|uuid| object_refs.get(&uuid).cloned())
         .collect()
+}
+
+/// A bound that is not a string (`{"N",0}`) travels as the string bound does,
+/// behind this marker, the XML type and the marker again.
+const TYPED_BOUND_MARKER: char = '\u{1}';
+
+fn typed_bound(xsi_type: &str, text: &str) -> String {
+    format!("{TYPED_BOUND_MARKER}{xsi_type}{TYPED_BOUND_MARKER}{text}")
+}
+
+/// The XML type and the text of a bound built by [`typed_bound`].
+fn split_typed_bound(value: &str) -> Option<(&str, &str)> {
+    value
+        .strip_prefix(TYPED_BOUND_MARKER)?
+        .split_once(TYPED_BOUND_MARKER)
+}
+
+/// The bound a `{"N",..}`, `{"D",..}` or `{"B",..}` member states.
+fn parse_typed_bound_member(fields: &[&str]) -> Option<String> {
+    if fields.len() != 2 {
+        return None;
+    }
+    let text = fields.get(1)?.trim();
+    match fields.first()?.trim() {
+        r#""N""# => {
+            information_register_decimal_is_valid(text).then(|| typed_bound("xs:decimal", text))
+        }
+        r#""D""# => format_1c_date_time(text).map(|date| typed_bound("xs:dateTime", &date)),
+        r#""B""# => parse_1c_bool_flag(text)
+            .map(|flag| typed_bound("xs:boolean", if flag { "true" } else { "false" })),
+        _ => None,
+    }
+}
+
+/// [`parse_constant_bound_value`], and the bounds of the other value types.
+fn parse_metadata_bound_value(field: Option<&str>) -> Option<String> {
+    let text = field?;
+    let fields = split_1c_braced_fields(text, 0)?;
+    match fields.first()?.trim() {
+        r#""S""# => parse_constant_bound_value(Some(text)),
+        _ => parse_typed_bound_member(&fields),
+    }
 }
 
 fn parse_constant_bound_value(field: Option<&str>) -> Option<String> {
@@ -34234,6 +34649,8 @@ fn http_service_method_from_code(value: &str) -> Option<&'static str> {
     match value {
         "2" => Some("DELETE"),
         "3" => Some("GET"),
+        // Measured on the БСП 8.5 extension ServiceDesk (`сд_МобильноеAPI`).
+        "10" => Some("PATCH"),
         "11" => Some("POST"),
         "14" => Some("PUT"),
         _ => None,
@@ -34382,9 +34799,14 @@ fn parse_defined_type_properties_from_text(
     let defined_type_start = text[..marker_start].rfind("{0,")?;
     let fields = split_1c_braced_fields(text, defined_type_start)?;
     let value_types = parse_metadata_type_pattern(fields.get(4)?, type_index)?;
-    // An empty type is `<Type/>`: an extension adopting a defined type
-    // without widening it stores `{"Pattern"}` (a real extension's dump).
-    if value_types.is_empty() && fields.get(4)?.trim() != r#"{"Pattern"}"# {
+    // An empty type is `<Type/>`. An adopted defined type of an extension
+    // keeps no type of its own (the MSSQL extension export), and an
+    // extension adopting a defined type without widening it stores
+    // `{"Pattern"}` (a real extension's dump, the .cfe export).
+    if value_types.is_empty()
+        && extension::active().is_none()
+        && fields.get(4)?.trim() != r#"{"Pattern"}"#
+    {
         return None;
     }
     let header = parse_metadata_header_from_text(text, uuid)?;
@@ -35557,6 +35979,13 @@ const STYLE_BODY_TAG: &str = "1";
 const STYLE_BODY_COLOR_TAG: &str = "3";
 const STYLE_BODY_BORDER_TAG: &str = "3";
 const STYLE_BODY_FONT_TAG: &str = "7";
+/// Platform 8.5 writes the body one version up: tag `2`, colours `{4,<variant>,
+/// {<code>},0}`, fonts `{8,...}` (the БСП 8.5 extension `_ДемоРасширение`, the
+/// only style body on the 8.5 stand), and after the declared items one record
+/// `{1,{0,<colour>}}` that the export prints as the item `FirstBrand`.
+const STYLE_BODY_TAG_8_5_1: &str = "2";
+const STYLE_BODY_COLOR_TAG_8_5_1: &str = "4";
+const STYLE_BODY_FONT_TAG_8_5_1: &str = "8";
 /// The only font form a style body is evidenced to carry: a reference to a
 /// style item (`kind="StyleItem"`). `Absolute` and `WindowsFont` bodies would
 /// need their own member layout, and neither appears on the stand.
@@ -35599,9 +36028,13 @@ fn extract_style_body_xml(
                 .copied()
                 .unwrap_or(usize::MAX)
         };
-        left.standard_order
-            .unwrap_or(usize::MAX)
-            .cmp(&right.standard_order.unwrap_or(usize::MAX))
+        left.trailing
+            .cmp(&right.trailing)
+            .then_with(|| {
+                left.standard_order
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.standard_order.unwrap_or(usize::MAX))
+            })
             .then_with(|| configuration_order(left).cmp(&configuration_order(right)))
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
             .then_with(|| left.name.cmp(&right.name))
@@ -35614,24 +36047,36 @@ fn parse_style_body_items(
     object_refs: &BTreeMap<String, String>,
 ) -> Option<Vec<StyleBodyItem>> {
     let fields = split_1c_braced_fields(text, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_TAG {
-        return None;
-    }
+    let layout_8_5_1 = match fields.first()?.trim() {
+        STYLE_BODY_TAG => false,
+        STYLE_BODY_TAG_8_5_1 => true,
+        _ => return None,
+    };
     let declared_count = fields.get(1)?.trim().parse::<usize>().ok()?;
-    if fields.len() != declared_count + 2 {
+    // An 8.5 body may close with the brand-colour record.
+    let brand = if layout_8_5_1 && fields.len() == declared_count + 3 {
+        fields.last()
+    } else {
+        None
+    };
+    if fields.len() != declared_count + 2 + usize::from(brand.is_some()) {
         return None;
     }
     let mut items = Vec::new();
-    for field in fields.iter().skip(2) {
+    for field in fields.iter().skip(2).take(declared_count) {
         let entry = split_1c_braced_fields(field, 0)?;
         let (name, standard_order, uuid) = style_body_item_name(entry.first()?, object_refs)?;
         let value = entry.get(2)?;
         let value_xml = match entry.get(1)?.trim() {
             "0" => format!(
                 "<Color>{}</Color>",
-                escape_xml_text(&parse_style_body_color_value(value, object_refs)?)
+                escape_xml_text(&parse_style_body_color_value(
+                    value,
+                    object_refs,
+                    layout_8_5_1
+                )?)
             ),
-            "1" => parse_style_body_font_xml(value, object_refs)?,
+            "1" => parse_style_body_font_xml(value, object_refs, layout_8_5_1)?,
             "2" => parse_style_body_border_xml(value, object_refs)?,
             _ => return None,
         };
@@ -35640,10 +36085,36 @@ fn parse_style_body_items(
             standard_order,
             uuid,
             value_xml,
+            trailing: false,
         });
     }
     if items.len() != declared_count {
         return None;
+    }
+    if let Some(brand) = brand {
+        // `{1,{0,<colour>}}`: one colour, item 0.
+        let record = split_1c_braced_fields(brand, 0)?;
+        let entry = split_1c_braced_fields(record.get(1)?, 0)?;
+        if record.len() != 2 || record.first()?.trim() != "1" || entry.len() != 2 {
+            return None;
+        }
+        if entry.first()?.trim() != "0" {
+            return None;
+        }
+        items.push(StyleBodyItem {
+            name: "FirstBrand".to_string(),
+            standard_order: None,
+            uuid: None,
+            value_xml: format!(
+                "<Color>{}</Color>",
+                escape_xml_text(&parse_style_body_color_value(
+                    entry.get(1)?,
+                    object_refs,
+                    true
+                )?)
+            ),
+            trailing: true,
+        });
     }
     Some(items)
 }
@@ -35719,6 +36190,7 @@ fn standard_style_item_for_code(code: i32) -> Option<(usize, &'static str)> {
         -42 => "NavigationColor",
         -43 => "AuxiliaryNavigationColor",
         -44 => "ActivityColor",
+        -47 => "ImportantColor",
         // Platform 8.5 standard style fonts. 8.5.1.1150 BSP: every form item
         // and style item that carries exactly one style font pairs the code
         // with the native `ref` without exception (`fontcodes.py`).
@@ -35739,16 +36211,25 @@ fn standard_style_item_for_code(code: i32) -> Option<(usize, &'static str)> {
 
 const STANDARD_STYLE_ITEM_CODES: &[i32] = &[
     -1, -11, -3, -15, -7, -13, -21, -10, -14, -23, -24, -16, -17, -22, -25, -26, -27, -28, -18,
-    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -42, -43, -44, -50, -52, -53, -54, -55, -56,
-    -59,
+    -20, -30, -31, -32, -33, -34, -35, -36, -37, -38, -44, -42, -43, -47, -50, -52, -53, -54, -55,
+    -56, -59,
 ];
 
 fn parse_style_body_color_value(
     value: &str,
     object_refs: &BTreeMap<String, String>,
+    layout_8_5_1: bool,
 ) -> Option<String> {
     let fields = split_1c_braced_fields(value, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_COLOR_TAG {
+    if layout_8_5_1 {
+        // `{4,<variant>,{<code>},0}`.
+        if fields.first()?.trim() != STYLE_BODY_COLOR_TAG_8_5_1
+            || fields.len() != 4
+            || fields.get(3)?.trim() != "0"
+        {
+            return None;
+        }
+    } else if fields.first()?.trim() != STYLE_BODY_COLOR_TAG {
         return None;
     }
     let variant = fields.get(1)?.trim().parse::<i32>().ok()?;
@@ -35778,9 +36259,15 @@ fn parse_style_body_color_value(
 fn parse_style_body_font_xml(
     value: &str,
     object_refs: &BTreeMap<String, String>,
+    layout_8_5_1: bool,
 ) -> Option<String> {
     let fields = split_1c_braced_fields(value, 0)?;
-    if fields.first()?.trim() != STYLE_BODY_FONT_TAG
+    let font_tag = if layout_8_5_1 {
+        STYLE_BODY_FONT_TAG_8_5_1
+    } else {
+        STYLE_BODY_FONT_TAG
+    };
+    if fields.first()?.trim() != font_tag
         || fields.get(1)?.trim() != STYLE_BODY_FONT_STYLE_ITEM_KIND
     {
         return None;
@@ -36359,6 +36846,19 @@ fn parse_metadata_type_pattern_element_with_builtin(
             fraction_digits: element.get(2)?.trim().parse().ok()?,
             allowed_sign_flag: element.get(3)?.trim().parse().ok()?,
         }),
+        r#""R""# if element.len() == 1 => Some(ConstantValueType::BinaryData {
+            length: 0,
+            allowed_length_flag: 1,
+        }),
+        r#""R""# if element.len() == 3 => Some(ConstantValueType::BinaryData {
+            length: element.get(1)?.trim().parse().ok()?,
+            allowed_length_flag: element
+                .get(2)?
+                .trim()
+                .parse()
+                .ok()
+                .filter(|flag| *flag <= 1)?,
+        }),
         r#""D""# => Some(ConstantValueType::DateTime {
             date_fractions: match element.get(1).map(|field| field.trim()) {
                 Some(r#""D""#) => "Date",
@@ -36377,10 +36877,17 @@ fn parse_metadata_type_pattern_element_with_builtin(
         }),
         r##""#""## if element.len() >= 2 => {
             let type_id = parse_uuid_field(element.get(1)?.trim())?;
-            let reference = type_index
+            let Some(reference) = type_index
                 .get(&type_id)
                 .cloned()
-                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))?;
+                .or_else(|| builtin_reference(&type_id).map(ToOwned::to_owned))
+            else {
+                // A type of the extended configuration, which an extension
+                // does not hold: the platform prints its identifier.
+                return extension::active()
+                    .is_some()
+                    .then_some(ConstantValueType::TypeId { type_id });
+            };
             Some(ConstantValueType::Reference { reference })
         }
         _ => None,
@@ -38801,9 +39308,9 @@ fn format_chart_of_accounts_source_xml(
         "\t\t\t<UseStandardCommands>{}</UseStandardCommands>\r\n\
 \t\t\t<IncludeHelpInContents>{}</IncludeHelpInContents>\r\n\
 \t\t\t<BasedOn/>\r\n\
-\t\t\t<ExtDimensionTypes>{}</ExtDimensionTypes>\r\n\
+{}\
 \t\t\t<MaxExtDimensionCount>{}</MaxExtDimensionCount>\r\n\
-\t\t\t<CodeMask>{}</CodeMask>\r\n\
+{}\
 \t\t\t<CodeLength>{}</CodeLength>\r\n\
 \t\t\t<DescriptionLength>{}</DescriptionLength>\r\n\
 \t\t\t<CodeSeries>{}</CodeSeries>\r\n\
@@ -38811,9 +39318,23 @@ fn format_chart_of_accounts_source_xml(
 \t\t\t<DefaultPresentation>{}</DefaultPresentation>\r\n",
         xml_bool(chart.use_standard_commands),
         xml_bool(chart.include_help_in_contents),
-        escape_xml_element_text(&chart.ext_dimension_types),
+        if chart.ext_dimension_types.is_empty() {
+            "\t\t\t<ExtDimensionTypes/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<ExtDimensionTypes>{}</ExtDimensionTypes>\r\n",
+                escape_xml_element_text(&chart.ext_dimension_types)
+            )
+        },
         chart.max_ext_dimension_count,
-        escape_xml_element_text(&chart.code_mask),
+        if chart.code_mask.is_empty() {
+            "\t\t\t<CodeMask/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<CodeMask>{}</CodeMask>\r\n",
+                escape_xml_element_text(&chart.code_mask)
+            )
+        },
         chart.code_length,
         chart.description_length,
         chart.code_series,
@@ -38920,7 +39441,7 @@ fn format_chart_of_accounts_source_xml(
     for command in &chart.child_commands {
         push_metadata_child_command_xml(&mut children, command);
     }
-    insert_metadata_child_objects_xml(&mut xml, "ChartOfAccounts", &children);
+    insert_metadata_child_objects_or_empty_xml(&mut xml, "ChartOfAccounts", &children);
     Some(xml)
 }
 
@@ -38985,12 +39506,19 @@ fn format_chart_of_calculation_types_source_xml(
     properties.push_str("\t\t\t<BasedOn/>\r\n");
     properties.push_str(&format!(
         "\t\t\t<DependenceOnCalculationTypes>{}</DependenceOnCalculationTypes>\r\n\
-\t\t\t<BaseCalculationTypes>\r\n\
-\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">{}</xr:Item>\r\n\
-\t\t\t</BaseCalculationTypes>\r\n\
+{}\
 \t\t\t<ActionPeriodUse>{}</ActionPeriodUse>\r\n",
         chart.dependence_on_calculation_types,
-        escape_xml_element_text(&chart.base_calculation_types),
+        if chart.base_calculation_types.is_empty() {
+            "\t\t\t<BaseCalculationTypes/>\r\n".to_string()
+        } else {
+            format!(
+                "\t\t\t<BaseCalculationTypes>\r\n\
+\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">{}</xr:Item>\r\n\
+\t\t\t</BaseCalculationTypes>\r\n",
+                escape_xml_element_text(&chart.base_calculation_types)
+            )
+        },
         xml_bool(chart.action_period_use),
     ));
     push_register_standard_attributes_xml(&mut properties, &chart.standard_attributes);
@@ -39054,7 +39582,7 @@ fn format_chart_of_calculation_types_source_xml(
             escape_xml_element_text(form)
         ));
     }
-    insert_metadata_child_objects_xml(&mut xml, "ChartOfCalculationTypes", &children);
+    insert_metadata_child_objects_or_empty_xml(&mut xml, "ChartOfCalculationTypes", &children);
     Some(xml)
 }
 
@@ -39080,7 +39608,9 @@ fn push_chart_standard_tabular_sections_xml(
     sections: &[MetadataStandardTabularSection],
 ) {
     if sections.is_empty() {
-        xml.push_str("\t\t\t<StandardTabularSections/>\r\n");
+        if extension::active().is_none() {
+            xml.push_str("\t\t\t<StandardTabularSections/>\r\n");
+        }
         return;
     }
     xml.push_str("\t\t\t<StandardTabularSections>\r\n");
@@ -41316,6 +41846,24 @@ fn insert_metadata_child_command_objects_xml(
     insert_metadata_child_objects_xml(xml, owner_kind, &child_objects);
 }
 
+/// [`insert_metadata_child_objects_xml`], and an empty `<ChildObjects/>` when
+/// the owner has no child object at all (the platform always writes the
+/// element).
+fn insert_metadata_child_objects_or_empty_xml(
+    xml: &mut String,
+    owner_kind: &str,
+    child_objects: &str,
+) {
+    if child_objects.is_empty() && !xml.contains("<ChildObjects") {
+        let marker = format!("\t</{owner_kind}>");
+        if let Some(index) = xml.find(&marker) {
+            xml.insert_str(index, "\t\t<ChildObjects/>\r\n");
+        }
+        return;
+    }
+    insert_metadata_child_objects_xml(xml, owner_kind, child_objects);
+}
+
 fn insert_metadata_child_objects_xml(xml: &mut String, owner_kind: &str, child_objects: &str) {
     if child_objects.is_empty() {
         return;
@@ -42659,6 +43207,13 @@ fn format_simple_property_xml(name: &str, value: &str) -> String {
 
 fn format_constant_bound_xml(name: &str, value: Option<&str>) -> String {
     match value {
+        Some(value) if split_typed_bound(value).is_some() => {
+            let (xsi_type, text) = split_typed_bound(value).unwrap_or_default();
+            format!(
+                "<{name} xsi:type=\"{xsi_type}\">{}</{name}>",
+                escape_xml_element_text(text)
+            )
+        }
         Some(value) => format!(
             "<{name} xsi:type=\"xs:string\">{}</{name}>",
             escape_xml_element_text(value)
@@ -43636,6 +44191,16 @@ fn parse_filter_criterion_type_pattern(
             FilterCriterionDecodeReason::Shape,
         )
     })?;
+    // A criterion the extension adopted keeps no type pattern of its own: the
+    // type stays that of the extended configuration.
+    if extension::active().is_some()
+        && fields.len() == 1
+        && fields
+            .first()
+            .is_some_and(|value| owner_graph::FilterCriterionPhysicalSchema::pattern(value.trim()))
+    {
+        return Ok(Vec::new());
+    }
     if fields.len() < 2
         || !fields
             .first()
@@ -44670,6 +45235,7 @@ fn format_form_metadata_types_xml_with_indent(
 {nested}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, &nested);
 
     xml.push_str(&format!("{indent}</Type>\r\n"));
     xml
@@ -44745,6 +45311,7 @@ fn format_type_description_value_types_xml(
 {indent}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, indent);
     xml
 }
 
@@ -44817,9 +45384,33 @@ fn format_metadata_types_xml_with_indent(
 {nested}</v8:DateQualifiers>\r\n"
         ));
     }
+    push_binary_data_qualifiers_xml(&mut xml, value_types, &nested);
 
     xml.push_str(&format!("{indent}</Type>\r\n"));
     xml
+}
+
+/// `<v8:BinaryDataQualifiers>` of a type block that names `xs:base64Binary`, at
+/// the indent of the qualifiers that precede it.
+fn push_binary_data_qualifiers_xml(
+    xml: &mut String,
+    value_types: &[ConstantValueType],
+    outer: &str,
+) {
+    if let Some((length, allowed_length_flag)) =
+        value_types.iter().find_map(|value_type| match value_type {
+            ConstantValueType::BinaryData {
+                length,
+                allowed_length_flag,
+            } => Some((*length, *allowed_length_flag)),
+            _ => None,
+        })
+    {
+        xml.push_str(&format!(
+            "{outer}<v8:BinaryDataQualifiers>\r\n{outer}\t<v8:Length>{length}</v8:Length>\r\n{outer}\t<v8:AllowedLength>{}</v8:AllowedLength>\r\n{outer}</v8:BinaryDataQualifiers>\r\n",
+            string_allowed_length_xml(allowed_length_flag)
+        ));
+    }
 }
 
 fn metadata_type_xml_tag(value_type: &ConstantValueType) -> &'static str {
@@ -44846,6 +45437,7 @@ fn metadata_type_xml_name(value_type: &ConstantValueType) -> String {
         ConstantValueType::String { .. } => "xs:string".to_string(),
         ConstantValueType::Number { .. } => "xs:decimal".to_string(),
         ConstantValueType::DateTime { .. } => "xs:dateTime".to_string(),
+        ConstantValueType::BinaryData { .. } => "xs:base64Binary".to_string(),
         ConstantValueType::Reference { reference, .. }
         | ConstantValueType::ReferenceTypeSet { reference, .. } => reference.clone(),
         ConstantValueType::TypeId { type_id } => type_id.clone(),
@@ -45003,6 +45595,13 @@ fn format_constant_type_member_xml(value_type: &ConstantValueType) -> String {
 \t\t\t\t\t<v8:AllowedSign>{}</v8:AllowedSign>\r\n\
 \t\t\t\t</v8:NumberQualifiers>\r\n",
             number_allowed_sign_xml(*allowed_sign_flag)
+        ),
+        ConstantValueType::BinaryData {
+            length,
+            allowed_length_flag,
+        } => format!(
+            "\t\t\t\t<v8:Type>xs:base64Binary</v8:Type>\r\n\t\t\t\t<v8:BinaryDataQualifiers>\r\n\t\t\t\t\t<v8:Length>{length}</v8:Length>\r\n\t\t\t\t\t<v8:AllowedLength>{}</v8:AllowedLength>\r\n\t\t\t\t</v8:BinaryDataQualifiers>\r\n",
+            string_allowed_length_xml(*allowed_length_flag)
         ),
         ConstantValueType::DateTime { date_fractions } => format!(
             "\t\t\t\t<v8:Type>xs:dateTime</v8:Type>\r\n\
@@ -45340,25 +45939,158 @@ fn quote_ident(value: &str) -> String {
     format!("[{}]", value.replace(']', "]]"))
 }
 
-/// Resolves the storage table's active dynamic generation, makes every later
-/// query on that table read the configuration it publishes, and returns the
-/// row headers under their published names.
+/// Resolves what the storage table publishes -- its active dynamic generation
+/// and, when the run asks for the platform's main configuration, the rows a
+/// completed import staged in `ConfigSave` -- makes every later query on that
+/// table read it, and returns the row headers under their published names.
 ///
-/// A table with no `DynamicallyUpdated` row -- every parity corpus this
-/// project measures except a database an online update left mid-flight --
-/// installs nothing and gets its own headers back unchanged.
+/// A table with no `DynamicallyUpdated` row and nothing staged -- every parity
+/// corpus this project measures except a database an online update left
+/// mid-flight -- installs nothing and gets its own headers back unchanged.
 ///
 /// A marker this reader cannot read is an error rather than "no generation":
 /// reading it as absent would publish the previous configuration silently,
 /// which is the defect this exists to close.
-#[allow(clippy::too_many_arguments)]
-fn install_dynamic_generation_overlay(
+fn install_storage_overlay(
     sql: &crate::sql::SqlExec,
     database: &str,
     table: &str,
     selected_file_names: &BTreeSet<String>,
     headers: Vec<ConfigRowHeader>,
+    main_configuration: bool,
 ) -> Result<Vec<ConfigRowHeader>> {
+    let (overlay, headers) = resolve_storage_overlay(
+        sql,
+        database,
+        table,
+        selected_file_names,
+        headers,
+        main_configuration,
+    )?;
+    if let Some(overlay) = overlay {
+        dynamic_generation::install_storage_generation_overlay(database, table, overlay);
+    }
+    Ok(headers)
+}
+
+/// The overlay [`install_storage_overlay`] installs, if there is one, and the
+/// row headers under their published names. Reads the table, installs nothing.
+fn resolve_storage_overlay(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+    headers: Vec<ConfigRowHeader>,
+    main_configuration: bool,
+) -> Result<(
+    Option<std::sync::Arc<dynamic_generation::StorageGenerationOverlay>>,
+    Vec<ConfigRowHeader>,
+)> {
+    let history = generation_history(sql, database, table, selected_file_names, &headers)?;
+    // Only a full run publishes the staged rows: a run that selected a few
+    // rows by name reads them from the table, as it always did.
+    let staged = if main_configuration && selected_file_names.is_empty() {
+        staged_configuration(sql, database, table)?
+    } else {
+        None
+    };
+    if history.is_none() && staged.is_none() {
+        return Ok((None, headers));
+    }
+
+    // The overlay is a property of the whole table, so a run that selected a
+    // few rows by name still resolves it against every row there is.
+    let inventory = if selected_file_names.is_empty() {
+        None
+    } else {
+        Some(fetch_row_headers(sql, database, table, &BTreeSet::new())?)
+    };
+    let names: &[ConfigRowHeader] = inventory.as_deref().unwrap_or(&headers);
+    let generations = match &history {
+        Some(history) => dynamic_generation::storage_generation_overlay(
+            history,
+            names.iter().map(|row| row.file_name.as_str()),
+        ),
+        None => dynamic_generation::StorageGenerationOverlay::default(),
+    };
+
+    let mut overlay = generations.clone();
+    let mut staged_headers = Vec::new();
+    let mut inventoried = false;
+    if let Some(staged) = staged {
+        let saved = format!(
+            "{}.dbo.{}",
+            quote_ident(database),
+            quote_ident(MssqlConfigurationTableRole::Saved.sql_name())
+        );
+        let candidate = generations.clone().staging(saved, staged.names.clone());
+        let published = candidate
+            .published_names(names.iter().map(|row| row.file_name.as_str()))
+            .chain(staged.names.iter().map(String::as_str));
+        // The staged `versions` is the inventory of the main configuration:
+        // what it does not list is left out of the Config side, and a staged
+        // row it does not list means the stage is not one this reads.
+        match config_dump_info::unlisted_entries(&staged.versions, published) {
+            Ok(unlisted) if unlisted.is_disjoint(&staged.names) => {
+                overlay = candidate.dropping(unlisted);
+                staged_headers = staged.headers;
+                inventoried = true;
+            }
+            Ok(_) => eprintln!(
+                "ConfigSave holds rows its `versions` does not list; the export publishes the Config table"
+            ),
+            Err(error) => eprintln!(
+                "ConfigSave `versions` cannot be read ({error:#}); the export publishes the Config table"
+            ),
+        }
+    }
+    if !inventoried {
+        if overlay.is_empty() {
+            return Ok((None, headers));
+        }
+        overlay = drop_unlisted_names(sql, database, table, overlay, names)?;
+    }
+    let overlay = std::sync::Arc::new(overlay);
+
+    let publish = |mut row: ConfigRowHeader| {
+        if let Some(published) = overlay.published_name(&row.file_name) {
+            row.file_name = published.to_owned();
+            return Some(row);
+        }
+        if dynamic_generation::is_dynamic_generation_alias(&row.file_name)
+            || overlay.hides(&row.file_name)
+        {
+            return None;
+        }
+        Some(row)
+    };
+    let mut published = match inventory {
+        None => headers.into_iter().filter_map(publish).collect::<Vec<_>>(),
+        // A run that selected names read the headers of the *stored* rows with
+        // those names: for an object an online update changed, the plain rows
+        // its alias hides and none of the alias rows that hold what the
+        // infobase reads -- so nothing was left to export (#409 F-1). The
+        // inventory lists every stored row; the selection is made on the
+        // published names.
+        Some(inventory) => inventory
+            .into_iter()
+            .filter_map(publish)
+            .filter(|row| selected_file_names.contains(&row.file_name))
+            .collect(),
+    };
+    published.extend(staged_headers);
+    Ok((Some(overlay), published))
+}
+
+/// The generation history the table's `DynamicallyUpdated` row records, or
+/// `None` when it has none.
+fn generation_history(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    selected_file_names: &BTreeSet<String>,
+    headers: &[ConfigRowHeader],
+) -> Result<Option<Vec<String>>> {
     // A full run already knows every row there is, so a table without the
     // marker costs nothing at all.
     if selected_file_names.is_empty()
@@ -45366,51 +46098,145 @@ fn install_dynamic_generation_overlay(
             .iter()
             .any(|row| row.file_name == DYNAMIC_UPDATE_MARKER_ROW)
     {
-        return Ok(headers);
+        return Ok(None);
     }
     let marker_name = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
     let marker = fetch_config_rows(sql, database, table, &marker_name)?;
     let Some(marker) = marker.into_iter().find(|row| row.part_no == 0) else {
-        return Ok(headers);
+        return Ok(None);
     };
-    let history = dynamic_generation::dynamic_generation_history(&marker.binary_bytes()?)
-        .ok_or_else(|| {
-            anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history")
-        })?;
+    dynamic_generation::dynamic_generation_history(&marker.binary_bytes()?)
+        .map(Some)
+        .ok_or_else(|| anyhow!("{table}.{DYNAMIC_UPDATE_MARKER_ROW} is not a generation history"))
+}
 
-    // The overlay is a property of the whole table, so a run that selected a
-    // few rows by name still resolves it against every row there is.
-    let inventory;
-    let names: &[ConfigRowHeader] = if selected_file_names.is_empty() {
-        &headers
-    } else {
-        inventory = fetch_row_headers(sql, database, table, &BTreeSet::new())?;
-        &inventory
-    };
-    let overlay = dynamic_generation::storage_generation_overlay(
-        &history,
-        names.iter().map(|row| row.file_name.as_str()),
-    );
-    if overlay.is_empty() {
-        return Ok(headers);
+/// The generation history of `database`'s `Config` table, oldest first; empty
+/// when no online generation is active. A marker this reader cannot read is an
+/// error, as it is for the export.
+///
+/// Reads the rows as stored, whatever view an export of this process installed.
+pub(crate) fn active_generation_history(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+) -> Result<Vec<String>> {
+    let _stored = dynamic_generation::StorageViewScope::begin(database);
+    let marker = BTreeSet::from([DYNAMIC_UPDATE_MARKER_ROW.to_owned()]);
+    Ok(generation_history(
+        sql,
+        database,
+        MssqlConfigurationTableRole::Current.sql_name(),
+        &marker,
+        &[],
+    )?
+    .unwrap_or_default())
+}
+
+/// The row that lists a whole configuration, in `Config` and in a stage.
+const STAGE_INVENTORY_ROW: &str = "versions";
+
+/// The row an import or an apply keeps while it is not finished.
+const STAGE_COMMIT_ROW: &str = "commit";
+
+/// The suffix of a row an import or an apply has copied and not yet promoted.
+const STAGE_NEW_SUFFIX: &str = ".new";
+
+/// What a completed import left in `ConfigSave`: the main configuration.
+struct StagedConfiguration {
+    /// The row headers of the stage.
+    headers: Vec<ConfigRowHeader>,
+    /// The names it holds a row for.
+    names: BTreeSet<String>,
+    /// Its `versions` row, the inventory of the whole configuration.
+    versions: Vec<u8>,
+}
+
+/// The main configuration staged in `ConfigSave`, when there is one.
+///
+/// The platform's export does not publish `Config` alone. An import stages the
+/// configuration it read in `ConfigSave` -- a `versions` row that lists all of
+/// it and the rows of the objects whose version changed -- and it stays there
+/// until an apply moves it into `Config` and empties the table; until then the
+/// export writes the staged configuration: the staged rows in place of their
+/// namesakes, the staged `versions` for `ConfigDumpInfo.xml`.
+///
+/// A `ConfigSave` without a `versions` row, or with the `commit` marker or a
+/// `.new` row of an import or an apply that did not finish, is not a stage this
+/// reads: the export publishes `Config` and says so. An empty table, and a
+/// database read from a folder of rows, have nothing staged.
+fn staged_configuration(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+) -> Result<Option<StagedConfiguration>> {
+    if table != MssqlConfigurationTableRole::Current.sql_name() || offline_rows::active().is_some()
+    {
+        return Ok(None);
     }
-    dynamic_generation::install_storage_generation_overlay(table, overlay.clone());
+    let saved = MssqlConfigurationTableRole::Saved.sql_name();
+    let headers = fetch_row_headers(sql, database, saved, &BTreeSet::new())?;
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let names = headers
+        .iter()
+        .map(|row| row.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    let unfinished = names.contains(STAGE_COMMIT_ROW)
+        || names.iter().any(|name| name.ends_with(STAGE_NEW_SUFFIX));
+    if !names.contains(STAGE_INVENTORY_ROW) || unfinished {
+        eprintln!(
+            "{saved} holds no complete stage (no `versions` row, or the markers of an unfinished import or apply); the export publishes the {table} table"
+        );
+        return Ok(None);
+    }
+    let versions = fetch_binary_rows(
+        sql,
+        database,
+        saved,
+        &BTreeSet::from([STAGE_INVENTORY_ROW.to_owned()]),
+        false,
+    )?
+    .into_iter()
+    .find(|row| row.part_no == 0)
+    .map(|row| row.binary)
+    .ok_or_else(|| anyhow!("{saved} has a `versions` header but no part 0 of it"))?;
+    Ok(Some(StagedConfiguration {
+        headers,
+        names,
+        versions,
+    }))
+}
 
-    Ok(headers
-        .into_iter()
-        .filter_map(|mut row| {
-            if let Some(published) = overlay.published_name(&row.file_name) {
-                row.file_name = published.to_owned();
-                return Some(row);
-            }
-            if dynamic_generation::is_dynamic_generation_alias(&row.file_name)
-                || overlay.hides(&row.file_name)
-            {
-                return None;
-            }
-            Some(row)
-        })
-        .collect())
+/// Leaves out the published names the active `versions` row does not list.
+///
+/// An online update that removes an object leaves its rows in the table: the
+/// plain ones, or the aliases of the generation that wrote them. The `versions`
+/// row of the newer generation no longer lists the object and the platform,
+/// and so its own export, publishes nothing for it -- while this export would
+/// publish the stale rows and then refuse the whole run, because the manifest
+/// has names the inventory does not.
+///
+/// The row is read by its stored name before the overlay is installed, on the
+/// clustered key of the table itself. A table without a readable `versions`
+/// row keeps its overlay as it is; the export reports that row where it needs
+/// it.
+fn drop_unlisted_names(
+    sql: &crate::sql::SqlExec,
+    database: &str,
+    table: &str,
+    overlay: dynamic_generation::StorageGenerationOverlay,
+    stored: &[ConfigRowHeader],
+) -> Result<dynamic_generation::StorageGenerationOverlay> {
+    let versions_row = BTreeSet::from([overlay.stored_name(STAGE_INVENTORY_ROW).to_owned()]);
+    let rows = fetch_binary_rows(sql, database, table, &versions_row, false)?;
+    let Some(versions) = rows.iter().find(|row| row.part_no == 0) else {
+        return Ok(overlay);
+    };
+    let published = overlay.published_names(stored.iter().map(|row| row.file_name.as_str()));
+    let Ok(unlisted) = config_dump_info::unlisted_entries(&versions.binary, published) else {
+        return Ok(overlay);
+    };
+    Ok(overlay.dropping(unlisted))
 }
 
 /// The storage row an online update records its generation history in.
@@ -45422,10 +46248,23 @@ const DYNAMIC_UPDATE_MARKER_ROW: &str = "DynamicallyUpdated";
 /// it always was. With one, it is a derived table that reads the configuration
 /// that generation publishes -- see [`dynamic_generation`].
 fn qualified_storage_table(database: &str, table: &str) -> String {
+    qualified_storage_table_for(database, table, dynamic_generation::Selection::All)
+}
+
+/// [`qualified_storage_table`] for a query that keeps only `selection`: with an
+/// active dynamic generation the scan under the derived table is limited to the
+/// stored rows that can publish it, so a bounded read seeks instead of reading
+/// the whole table (#409 F-15).
+fn qualified_storage_table_for(
+    database: &str,
+    table: &str,
+    selection: dynamic_generation::Selection<'_>,
+) -> String {
     let qualified = format!("{}.dbo.{}", quote_ident(database), quote_ident(table));
-    dynamic_generation::storage_table_expression(
+    dynamic_generation::storage_table_expression_for(
         &qualified,
-        dynamic_generation::storage_generation_overlay_for(table).as_ref(),
+        dynamic_generation::storage_generation_overlay_for(database, table).as_deref(),
+        selection,
     )
 }
 

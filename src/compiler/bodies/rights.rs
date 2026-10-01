@@ -542,6 +542,9 @@ fn parse_root_bool(value: &NativeValue, field: &'static str) -> Result<bool, Rig
     match required_token(value, field)? {
         "0" | "4294967295" => Ok(false),
         "1" => Ok(true),
+        // A configuration extension's role stores `false` of a defaulted flag
+        // as 2.
+        "2" if crate::mssql_dump::extension::active().is_some() => Ok(false),
         _ => Err(RightsCodecError::InvalidShape(field)),
     }
 }

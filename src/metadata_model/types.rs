@@ -1095,7 +1095,10 @@ pub(crate) mod tests {
 
     #[test]
     fn any_ref_reads_as_the_any_ib_ref_type_set() {
-        assert_eq!(builtin_type_id("cfg:AnyRef"), builtin_type_id("cfg:AnyIBRef"));
+        assert_eq!(
+            builtin_type_id("cfg:AnyRef"),
+            builtin_type_id("cfg:AnyIBRef")
+        );
         assert!(builtin_type_id("cfg:AnyRef").is_some());
         assert_eq!(
             builtin_type_qname("280f5f0e-9c8a-49cc-bf6d-4d296cc17a63"),

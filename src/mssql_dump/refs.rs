@@ -43,11 +43,25 @@ pub(super) fn build_metadata_command_reference_index_from_texts(
     index
 }
 
+/// The `<UseStandardCommands>` of a kind whose row the metadata model decodes,
+/// read at the slot the model writes the object's own XML from. The platform
+/// keeps the raw `<code>:<uuid>` sentinel for such an object when it is
+/// `false`: measured on a database whose staged constant has
+/// `<UseStandardCommands>false</UseStandardCommands>`, where the subsystem that
+/// hides the constant's `Open` command prints the sentinel and this export
+/// printed the name.
+fn model_use_standard_commands(kind: &str, text: &str) -> Option<bool> {
+    let row = crate::metadata_model::brace::parse_row(text.as_bytes()).ok()?;
+    crate::metadata_model::simple::export::use_standard_commands(kind, &row)
+}
+
 /// The target's own `<UseStandardCommands>`, read through the same decoder and
 /// at the same slot the kind's own properties parser uses -- offset 31 of the
 /// normalized owner fields for `Catalog`, offset 23 for `Document`, logical
 /// field 7 for `InformationRegister`, and slot 7 of the object fields for
-/// `Report`. `None` for every other kind, or when the decode fails: the caller
+/// `Report`, and the flag the metadata model itself reads for the kinds it
+/// decodes (`Constant`). `None` for every other kind, or when the decode
+/// fails: the caller
 /// then keeps the pre-existing `true` assumption rather than a guessed offset,
 /// per the project's fail-closed rule on unevidenced field positions.
 ///
@@ -128,7 +142,7 @@ fn metadata_use_standard_commands(kind: &str, text: &str, header: &MetadataHeade
         // document's own `Documents/<name>.xml`, through the same owner-graph
         // decoder.
         "Document" => owner_graph::OwnerGraphFamily::Document,
-        _ => return None,
+        _ => return model_use_standard_commands(kind, text),
     };
     let slot = match kind {
         "Catalog" => 31,
@@ -2983,11 +2997,18 @@ pub(super) fn metadata_declared_leaves_exclude_string(
                 ConstantValueType::Boolean
                 | ConstantValueType::Number { .. }
                 | ConstantValueType::DateTime { .. }
+                | ConstantValueType::BinaryData { .. }
                 | ConstantValueType::Reference { .. } => {}
                 ConstantValueType::String { .. } => excludes = false,
                 // An unresolved form type can itself be string-like; without
-                // its definition this predicate has no safe answer.
-                ConstantValueType::TypeId { .. } => return None,
+                // its definition this predicate has no safe answer. An
+                // extension names the types of the configuration it extends
+                // by id only, and the platform reads them as references there.
+                ConstantValueType::TypeId { .. } => {
+                    if super::extension::active().is_none() {
+                        return None;
+                    }
+                }
                 ConstantValueType::ReferenceTypeSet { reference } => {
                     let leaves = type_set_leaves.get(reference)?;
                     if !visiting.insert(reference.clone()) {
@@ -3781,6 +3802,47 @@ fn insert_configuration_properties_8_5_1_xml(
     Some(())
 }
 
+/// The parts of a configuration extension's root row that the extension export
+/// prints itself (`extension::root`): the header, the properties tuple as
+/// trimmed member texts, the contained objects and the root's children.
+pub(super) struct ExtensionRootParts {
+    pub(super) header: MetadataHeader,
+    /// The uuid of the md header (the row's own uuid names the element).
+    pub(super) header_uuid: String,
+    pub(super) fields: Vec<String>,
+    pub(super) contained_objects: Vec<ConfigurationContainedObject>,
+    pub(super) child_objects: Option<Vec<ConfigurationRootChildObject>>,
+}
+
+pub(super) fn extension_root_parts(
+    text: &str,
+    uuid: &str,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<ExtensionRootParts> {
+    let header_uuid = parse_configuration_header_uuid(text)?;
+    let mut header = parse_metadata_header_from_text(text, &header_uuid)?;
+    header.uuid = uuid.to_string();
+    let layout = parse_configuration_root_layout(text, uuid)?;
+    let envelope = parse_configuration_root_envelope(text)?;
+    let contained_fields = split_1c_braced_fields(envelope.sections.first()?.trim(), 0)?;
+    let payload_fields = split_1c_braced_fields(contained_fields.get(1)?.trim(), 0)?;
+    if payload_fields.first()?.trim() != "1" {
+        return None;
+    }
+    let fields = split_1c_braced_fields(payload_fields.get(1)?.trim(), 0)?
+        .iter()
+        .map(|field| field.trim().to_owned())
+        .collect();
+    let child_objects = resolve_configuration_root_child_objects(&layout, object_refs);
+    Some(ExtensionRootParts {
+        header,
+        header_uuid,
+        fields,
+        contained_objects: layout.contained_objects,
+        child_objects,
+    })
+}
+
 pub(super) fn extract_configuration_source_xml(
     text: &str,
     uuid: &str,
@@ -3789,6 +3851,16 @@ pub(super) fn extract_configuration_source_xml(
 ) -> Option<String> {
     if !text.trim_start().starts_with("{2,") {
         return None;
+    }
+    if let Some(extension) = super::extension::active() {
+        // A configuration extension prints its root object its own way.
+        return super::extension::root::extension_root_xml(
+            &extension,
+            text,
+            uuid,
+            object_refs,
+            source_version,
+        );
     }
     let fields = split_1c_braced_fields(text, 0)?;
     if fields.first()?.trim() != "2" {
@@ -4538,10 +4610,11 @@ pub(super) fn parse_configuration_used_mobile_application_functionalities(
         }
         let sequential = flags.keys().copied().eq(0..count as u32);
         if !sequential {
-            if flags
-                .keys()
-                .any(|id| !CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES.iter().any(|(known, _)| known == id))
-            {
+            if flags.keys().any(|id| {
+                !CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES
+                    .iter()
+                    .any(|(known, _)| known == id)
+            }) {
                 return None;
             }
             let functionalities = CONFIGURATION_MOBILE_APPLICATION_FUNCTIONALITIES
@@ -5090,9 +5163,9 @@ fn classify_configuration_root_footer(field: &str) -> Option<ConfigurationRootFo
     if marker.len() == 3
         && fields.len() == 1
         && marker.first().map(|value| value.trim()) == Some("0")
-        && marker[1..]
-            .iter()
-            .all(|field| parse_1c_quoted_string(field.trim()).is_some_and(|value| !value.is_empty()))
+        && marker[1..].iter().all(|field| {
+            parse_1c_quoted_string(field.trim()).is_some_and(|value| !value.is_empty())
+        })
     {
         return Some(ConfigurationRootFooter::Bare);
     }
@@ -5367,6 +5440,20 @@ const PACKED_PLATFORM_VERSION_8_5_1: u32 = 80501;
 
 pub(super) fn configuration_compatibility_mode_xml(value: &str) -> Option<String> {
     configuration_compatibility_mode_xml_under(value, MAX_EVIDENCED_PACKED_PLATFORM_VERSION)
+}
+
+/// As `configuration_compatibility_mode_xml`, by the edition that writes the
+/// XML: 8.5 prints `80501` as `Version8_5_1`, where 8.3.27 clamps it.
+pub(super) fn configuration_compatibility_mode_xml_for(
+    value: &str,
+    source_version: InfobaseConfigSourceVersion,
+) -> Option<String> {
+    let ceiling = if source_version == InfobaseConfigSourceVersion::V2_21 {
+        PACKED_PLATFORM_VERSION_8_5_1
+    } else {
+        MAX_EVIDENCED_PACKED_PLATFORM_VERSION
+    };
+    configuration_compatibility_mode_xml_under(value, ceiling)
 }
 
 fn configuration_compatibility_mode_xml_under(value: &str, ceiling: u32) -> Option<String> {

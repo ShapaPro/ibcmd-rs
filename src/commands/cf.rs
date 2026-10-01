@@ -787,10 +787,11 @@ fn bootstrap_base_free(
     args: CfBootstrapArgs,
     storage_profile: StorageProfileId,
 ) -> Result<CfCommandReport, CfCommandError> {
-    let (patch, retained) = crate::mssql::base_free_cf::base_free_patch(&args.source_dir, args.source_version)
-        .map_err(|source| {
-            bootstrap_failure(&args, "base_free_compile_failed", format!("{source:#}"))
-        })?;
+    let (patch, retained) =
+        crate::mssql::base_free_cf::base_free_patch(&args.source_dir, args.source_version)
+            .map_err(|source| {
+                bootstrap_failure(&args, "base_free_compile_failed", format!("{source:#}"))
+            })?;
     let storage_entries = patch.len();
     let limits = limits_for_len(retained)
         .map_err(|message| bootstrap_failure(&args, "source_tree_invalid", message))?;

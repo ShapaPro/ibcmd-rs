@@ -3,8 +3,13 @@
 //!
 //! - `infobase config export` and `infobase config import` are served
 //!   (`crate::infobase`), for Microsoft SQL Server infobases;
+//! - `infobase config apply` is served by the own exclusive apply
+//!   (`crate::mssql_config_apply`, [`apply`]): it moves the staged
+//!   configuration into the active one, refuses what needs a restructuring
+//!   (`требуется штатный config apply: ...`) and what a connected session
+//!   keeps from an exclusive lock;
 //! - every other native mode, command and option is recognized and refused
-//!   by name with exit code 1 (`Команда `infobase config apply` не
+//!   by name with exit code 1 (`Команда `infobase config check` не
 //!   поддерживается в этой версии ibcmd-rs (планируется в следующих)`);
 //!   the platform is never launched in its place.
 //!
@@ -16,8 +21,10 @@
 //! platform's (measured on 8.3.27.2214): 0 success, 2 a malformed or
 //! incomplete command line, -1 a failed operation (255 to a POSIX shell).
 //! 1 is ibcmd-rs's own: a mode, command, option or DBMS this version does
-//! not serve, which the platform would have run.
+//! not serve, which the platform would have run (the platform itself exits
+//! 1 for `config apply` only when its metadata check finds errors).
 
+pub mod apply;
 pub mod help;
 pub mod parse;
 
@@ -27,9 +34,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::cli::{InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode};
+use crate::cli::{
+    InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode,
+    InfobaseImportVerify,
+};
 use crate::infobase::OutputDirectoryNotEmpty;
-pub use parse::{Common, ExportRequest, ImportRequest, Invocation, Refusal};
+pub use parse::{ApplyRequest, Common, ExportRequest, ImportRequest, Invocation, Refusal};
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
 
@@ -50,13 +60,15 @@ pub fn refusal_exit_code(refusal: &Refusal) -> i32 {
         | Refusal::Incomplete { .. }
         | Refusal::UnknownDbms(_)
         | Refusal::InvalidValue { .. }
+        | Refusal::BadValue(_)
         | Refusal::Conflict { .. } => EXIT_MALFORMED,
         Refusal::UnsupportedCommand(_)
         | Refusal::UnsupportedOption { .. }
         | Refusal::UnsupportedServer(_)
         | Refusal::UnsupportedDbms(_)
         | Refusal::FileInfobase
-        | Refusal::ImportArchive(_) => EXIT_UNSUPPORTED,
+        | Refusal::ImportArchive(_)
+        | Refusal::Unsupported(_) => EXIT_UNSUPPORTED,
     }
 }
 
@@ -91,6 +103,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         }
         Ok(Invocation::Export(request)) => run_export(request),
         Ok(Invocation::Import(request)) => run_import(request),
+        Ok(Invocation::Apply(request)) => apply::run(request),
         Err(refusal) => {
             print_refusal(&refusal, &program_name());
             refusal_exit_code(&refusal)
@@ -170,9 +183,11 @@ pub fn refusal_message(refusal: &Refusal, program: &str) -> (String, bool) {
         Refusal::InvalidValue { option, value } => {
             format!("Недопустимое значение параметра {option}: {value}")
         }
+        Refusal::BadValue(name) => format!("Некорректное значение параметра: {name}"),
         Refusal::Conflict { first, second } => {
             format!("Параметры {first} и {second} нельзя указывать вместе")
         }
+        Refusal::Unsupported(message) => message.clone(),
     };
     (message, false)
 }
@@ -292,6 +307,7 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         password_env: "IBCMD_USER_PSW".to_string(),
         // the built-in SQL Server client, unless `--sqlcmd` asks for sqlcmd.exe
         sqlcmd: common.sqlcmd.clone(),
+        extension: request.extension.clone(),
         overwrite: false,
         count_files: common.report.is_some(),
         output_dir: PathBuf::from(&request.path),
@@ -335,6 +351,13 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         } else {
             InfobaseImportStageMode::Auto
         },
+        verify: if request.no_verify {
+            InfobaseImportVerify::Off
+        } else if request.verify {
+            InfobaseImportVerify::On
+        } else {
+            InfobaseImportVerify::Auto
+        },
         source_dir: PathBuf::from(&request.path),
     }
 }
@@ -367,6 +390,8 @@ struct Operation {
     command: &'static str,
     /// `Экспорт конфигурации в XML`.
     title: &'static str,
+    /// The participle that agrees with the title: `завершен` or `завершено`.
+    ended: &'static str,
 }
 
 impl Operation {
@@ -381,7 +406,7 @@ impl Operation {
         {
             return self.fail_with(&format!("{error:#}"), None);
         }
-        println!("[INFO] {} успешно завершен", self.title);
+        println!("[INFO] {} успешно {}", self.title, self.ended);
         0
     }
 
@@ -389,9 +414,19 @@ impl Operation {
         for line in message.lines() {
             eprintln!("[ERROR] {line}");
         }
-        eprintln!("[ERROR] {} завершен с ошибкой", self.title);
+        eprintln!("[ERROR] {} {} с ошибкой", self.title, self.ended);
         self.record_failure(message, report);
         EXIT_FAILED
+    }
+
+    /// The operation is not carried out because this version does not serve
+    /// what it needs: the reason alone, exit 1.
+    fn refuse_with(&self, message: &str, report: Option<&Path>) -> i32 {
+        for line in message.lines() {
+            eprintln!("[ERROR] {line}");
+        }
+        self.record_failure(message, report);
+        EXIT_UNSUPPORTED
     }
 
     fn record_failure(&self, message: &str, report: Option<&Path>) {
@@ -411,11 +446,19 @@ impl Operation {
 const EXPORT: Operation = Operation {
     command: "infobase config export",
     title: "Экспорт конфигурации в XML",
+    ended: "завершен",
 };
 
 const IMPORT: Operation = Operation {
     command: "infobase config import",
     title: "Импорт конфигурации из XML",
+    ended: "завершен",
+};
+
+const APPLY: Operation = Operation {
+    command: "infobase config apply",
+    title: "Обновление конфигурации базы данных",
+    ended: "завершено",
 };
 
 fn run_export(mut request: ExportRequest) -> i32 {
@@ -555,9 +598,11 @@ mod tests {
                 ..common()
             },
             threads: Some(4),
+            extension: Some("Расширение".to_string()),
             path: OsString::from("out"),
         };
         let args = export_args(&export);
+        assert_eq!(args.extension.as_deref(), Some("Расширение"));
         assert_eq!(args.db_server.as_deref(), Some("sql01"));
         assert_eq!(sql_server_name("sql01/inst"), r"sql01\inst");
         assert_eq!(sql_server_name(r"lpc:sql01\inst"), r"lpc:sql01\inst");
@@ -573,11 +618,14 @@ mod tests {
                 ..common()
             },
             base_free: false,
+            verify: false,
+            no_verify: false,
             path: OsString::from("tree"),
         };
         let args = import_args(&import);
         assert!(args.replace_config_save && args.allow_non_lab);
         assert_eq!(args.stage_mode, InfobaseImportStageMode::Auto);
+        assert_eq!(args.verify, InfobaseImportVerify::Auto);
         assert_eq!(
             args.script_output,
             Some(
@@ -589,20 +637,30 @@ mod tests {
         );
         let args = import_args(&ImportRequest {
             base_free: true,
-            ..import
+            ..import.clone()
         });
         assert_eq!(args.stage_mode, InfobaseImportStageMode::BaseFree);
+        let args = import_args(&ImportRequest {
+            no_verify: true,
+            ..import.clone()
+        });
+        assert_eq!(args.verify, InfobaseImportVerify::Off);
+        let args = import_args(&ImportRequest {
+            verify: true,
+            ..import
+        });
+        assert_eq!(args.verify, InfobaseImportVerify::On);
     }
 
     #[test]
     fn refusals_speak_russian_and_name_what_is_refused() {
         let (message, stdout) = refusal_message(
-            &Refusal::UnsupportedCommand("infobase config apply".to_string()),
+            &Refusal::UnsupportedCommand("infobase config check".to_string()),
             "ibcmd",
         );
         assert_eq!(
             message,
-            "Команда `infobase config apply` не поддерживается в этой версии ibcmd-rs (планируется в следующих)"
+            "Команда `infobase config check` не поддерживается в этой версии ibcmd-rs (планируется в следующих)"
         );
         assert!(!stdout);
         assert_eq!(
@@ -639,14 +697,21 @@ mod tests {
                 option: "--threads".to_string(),
                 value: "many".to_string(),
             },
+            Refusal::BadValue("dynamic".to_string()),
         ] {
             assert_eq!(refusal_exit_code(&refusal), EXIT_MALFORMED, "{refusal:?}");
         }
+        // the platform's words for a wrong `--dynamic` or `--session-terminate`
+        assert_eq!(
+            refusal_message(&Refusal::BadValue("session-terminate".to_string()), "ibcmd").0,
+            "Некорректное значение параметра: session-terminate"
+        );
         // what the platform would run exits 1, a code it never uses for them
         for refusal in [
-            Refusal::UnsupportedCommand("infobase config apply".to_string()),
+            Refusal::UnsupportedCommand("infobase config check".to_string()),
             Refusal::UnsupportedDbms("PostgreSQL".to_string()),
             Refusal::FileInfobase,
+            Refusal::Unsupported("Параметр `--sqlcmd` не поддерживается".to_string()),
         ] {
             assert_eq!(refusal_exit_code(&refusal), EXIT_UNSUPPORTED, "{refusal:?}");
         }

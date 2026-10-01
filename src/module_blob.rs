@@ -3682,13 +3682,15 @@ fn native_mobile_device_command_bar_content(
         match found {
             Some(id) => ids.push(id),
             // `<id>:<item class>`: an item the form no longer has.
-            None if name
-                .split_once(':')
-                .is_some_and(|(id, class)| {
-                    class == "02023637-7868-4a5f-8576-835a76e0c9ba" && id.parse::<u64>().is_ok()
-                }) =>
+            None if name.split_once(':').is_some_and(|(id, class)| {
+                class == "02023637-7868-4a5f-8576-835a76e0c9ba" && id.parse::<u64>().is_ok()
+            }) =>
             {
-                ids.push(name.split_once(':').map(|(id, _)| id.to_string()).unwrap_or_default());
+                ids.push(
+                    name.split_once(':')
+                        .map(|(id, _)| id.to_string())
+                        .unwrap_or_default(),
+                );
             }
             None => {
                 return Err(anyhow!(
@@ -8080,11 +8082,13 @@ fn native_embedded_settings(
     attribute: &str,
     encode: impl Fn(&str) -> Result<String>,
 ) -> Result<String> {
-    let missing =
-        || anyhow!("the attribute {attribute} spells no <Settings> the writer can find");
+    let missing = || anyhow!("the attribute {attribute} spells no <Settings> the writer can find");
     let head = format!("<Attribute name=\"{attribute}\"");
     let start = form_text.find(&head).ok_or_else(missing)?;
-    let end = form_text[start..].find("</Attribute>").ok_or_else(missing)? + start;
+    let end = form_text[start..]
+        .find("</Attribute>")
+        .ok_or_else(missing)?
+        + start;
     let block = &form_text[start..end];
     let open = block.find("<Settings ").ok_or_else(missing)?;
     let close = block.rfind("</Settings>").ok_or_else(missing)? + "</Settings>".len();
@@ -8394,8 +8398,8 @@ fn native_form_body_blockers(properties: &FormXmlBodyProperties) -> Vec<String> 
             attribute.types.first().map(|value| value.trim()) == Some("mxl:SpreadsheetDocument");
         // A chart's `<Settings>` is written by the chart codec, which refuses
         // on its own what it cannot place (rt-embedded.md §1.2).
-        let embedded_chart = native_embedded_chart_kind(attribute).is_some()
-            || native_embedded_flowchart(attribute);
+        let embedded_chart =
+            native_embedded_chart_kind(attribute).is_some() || native_embedded_flowchart(attribute);
         if attribute.settings.is_some()
             && attribute.types.first().map(|value| value.trim()) != Some("cfg:DynamicList")
             && !embedded_spreadsheet
@@ -8564,7 +8568,9 @@ fn format_native_form_body(
                 // A storage the configuration no longer has is its bare uuid.
                 if is_uuid_text(reference.trim()) {
                     reference.trim().to_ascii_lowercase()
-                } else if reference.contains(".Form.") || reference.trim().starts_with("CommonForm.") {
+                } else if reference.contains(".Form.")
+                    || reference.trim().starts_with("CommonForm.")
+                {
                     source.resolve_form_uuid(reference)?
                 } else {
                     source.resolve_metadata_reference_uuid(reference)?
@@ -8958,9 +8964,13 @@ fn format_native_form_body(
         } else if attribute.settings.is_some() && native_embedded_flowchart(attribute) {
             let text = form_text
                 .ok_or_else(|| anyhow!("an embedded graphical scheme needs the Form.xml text"))?;
-            Some(native_embedded_settings(text, &attribute.name, |settings| {
-                crate::compiler::bodies::form_chart::format_form_embedded_flowchart(settings)
-            })?)
+            Some(native_embedded_settings(
+                text,
+                &attribute.name,
+                |settings| {
+                    crate::compiler::bodies::form_chart::format_form_embedded_flowchart(settings)
+                },
+            )?)
         } else if attribute.settings.is_some()
             && let Some(gantt) = native_embedded_chart_kind(attribute)
         {
@@ -26014,10 +26024,54 @@ pub fn pack_exchange_plan_content_blob_from_xml(
     })
 }
 
+/// The tree's predefined data against the stored row.
+pub enum PredefinedPatch {
+    /// The same items: the row with the tree's names, codes, descriptions and
+    /// folder flags patched in.
+    Patched(PackedRawDeflatedBlob),
+    /// Not the same items: uuids only the tree has (`added`) and uuids only
+    /// the row has (`removed`). A row cannot be patched into that shape; the
+    /// data has to be compiled from the tree.
+    ItemsDiffer {
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
+}
+
+/// As [`pack_predefined_data_blob_from_xml`], but a difference in the set of
+/// items -- an item added or removed in the tree -- is an answer, not an error.
+pub fn patch_predefined_data_blob_from_xml(
+    base_blob: &[u8],
+    xml: &[u8],
+) -> Result<PredefinedPatch> {
+    let (packed, added, removed) = patch_predefined_data(base_blob, xml)?;
+    if added.is_empty() && removed.is_empty() {
+        Ok(PredefinedPatch::Patched(packed))
+    } else {
+        Ok(PredefinedPatch::ItemsDiffer { added, removed })
+    }
+}
+
 pub fn pack_predefined_data_blob_from_xml(
     base_blob: &[u8],
     xml: &[u8],
 ) -> Result<PackedRawDeflatedBlob> {
+    let (packed, added, _removed) = patch_predefined_data(base_blob, xml)?;
+    if !added.is_empty() {
+        return Err(anyhow!(
+            "PredefinedData XML contains items missing in base blob: {}",
+            added.join(", ")
+        ));
+    }
+    Ok(packed)
+}
+
+/// The row patched with the tree's items, the uuids the tree has and the row
+/// lacks, and those the row has and the tree lacks.
+fn patch_predefined_data(
+    base_blob: &[u8],
+    xml: &[u8],
+) -> Result<(PackedRawDeflatedBlob, Vec<String>, Vec<String>)> {
     let items = parse_predefined_data_xml(xml)?;
     let by_id = flatten_predefined_xml_items(&items)?;
     let inflated = inflate_raw(base_blob).context("failed to inflate base PredefinedData blob")?;
@@ -26041,18 +26095,28 @@ pub fn pack_predefined_data_blob_from_xml(
         .clone();
     let mut replacements = Vec::<(Range<usize>, String)>::new();
     let mut seen = BTreeSet::<String>::new();
-    collect_predefined_replacements(&plain, table_range, &by_id, &mut seen, &mut replacements)?;
+    let mut base_ids = BTreeSet::<String>::new();
+    collect_predefined_replacements(
+        &plain,
+        table_range,
+        &by_id,
+        &mut seen,
+        &mut base_ids,
+        &mut replacements,
+    )?;
     let missing = by_id
         .keys()
         .filter(|id| !seen.contains(*id))
         .cloned()
         .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(anyhow!(
-            "PredefinedData XML contains items missing in base blob: {}",
-            missing.join(", ")
-        ));
-    }
+    // The nil uuid is the root row of a hierarchical catalog's table, which
+    // no item of the XML stands for.
+    let removed = base_ids
+        .iter()
+        .filter(|id| id.as_str() != NATIVE_ZERO_UUID)
+        .filter(|id| !by_id.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
 
     replacements.sort_by(|left, right| right.0.start.cmp(&left.0.start));
     for (range, replacement) in replacements {
@@ -26060,11 +26124,15 @@ pub fn pack_predefined_data_blob_from_xml(
     }
     let blob = deflate_raw(plain.as_bytes())?;
     let output_sha256 = hex_sha256(&blob);
-    Ok(PackedRawDeflatedBlob {
-        blob,
-        plain_bytes: plain.len(),
-        output_sha256,
-    })
+    Ok((
+        PackedRawDeflatedBlob {
+            blob,
+            plain_bytes: plain.len(),
+            output_sha256,
+        },
+        missing,
+        removed,
+    ))
 }
 
 pub fn predefined_data_base_free_blockers(xml: &[u8]) -> Result<Vec<String>> {
@@ -27583,6 +27651,7 @@ fn collect_predefined_replacements(
     table_range: Range<usize>,
     by_id: &BTreeMap<String, PredefinedDataXmlItem>,
     seen: &mut BTreeSet<String>,
+    base_ids: &mut BTreeSet<String>,
     replacements: &mut Vec<(Range<usize>, String)>,
 ) -> Result<()> {
     let table_fields = scan_wrapped_braced_fields(plain, table_range)?;
@@ -27614,6 +27683,7 @@ fn collect_predefined_replacements(
                     child_field,
                     by_id,
                     seen,
+                    base_ids,
                     replacements,
                 )?;
             }
@@ -27627,6 +27697,7 @@ fn collect_predefined_children_replacements(
     children_range: Range<usize>,
     by_id: &BTreeMap<String, PredefinedDataXmlItem>,
     seen: &mut BTreeSet<String>,
+    base_ids: &mut BTreeSet<String>,
     replacements: &mut Vec<(Range<usize>, String)>,
 ) -> Result<()> {
     let fields = scan_wrapped_braced_fields(plain, children_range)?;
@@ -27642,7 +27713,14 @@ fn collect_predefined_children_replacements(
         .parse::<usize>()
         .context("invalid PredefinedData children count")?;
     for item_range in fields.into_iter().skip(2).take(count) {
-        collect_predefined_item_replacements(plain, item_range, by_id, seen, replacements)?;
+        collect_predefined_item_replacements(
+            plain,
+            item_range,
+            by_id,
+            seen,
+            base_ids,
+            replacements,
+        )?;
     }
     Ok(())
 }
@@ -27652,6 +27730,7 @@ fn collect_predefined_item_replacements(
     item_range: Range<usize>,
     by_id: &BTreeMap<String, PredefinedDataXmlItem>,
     seen: &mut BTreeSet<String>,
+    base_ids: &mut BTreeSet<String>,
     replacements: &mut Vec<(Range<usize>, String)>,
 ) -> Result<()> {
     let fields = scan_wrapped_braced_fields(plain, item_range)?;
@@ -27675,6 +27754,7 @@ fn collect_predefined_item_replacements(
         ));
     }
     let id = parse_predefined_uuid_value_from_plain(plain, fields[value_start].clone())?;
+    base_ids.insert(id.clone());
     if let Some(item) = by_id.get(&id) {
         seen.insert(id);
         let is_folder_range = fields[value_start + 1].clone();
@@ -27727,6 +27807,7 @@ fn collect_predefined_item_replacements(
             children_range.clone(),
             by_id,
             seen,
+            base_ids,
             replacements,
         )?;
     }
@@ -28322,8 +28403,11 @@ pub fn pack_ext_picture_blob_from_xml_and_bytes(
 ///
 /// A pure partition over every common picture of both corpora (БСП 610 + 1,
 /// ERP УХ 3 060 + 187): `LoadTransparent` false with no `TransparentPixel`
-/// stores `{0,0,-1,-1}`, and `true` with a pixel stores `{1,0,x,y}`. The two
-/// mixed shapes never occur and are refused rather than guessed.
+/// stores `{0,0,-1,-1}`, and `true` with a pixel stores `{1,0,x,y}`. The
+/// extensions of the БСП 8.3.27 clone add one more shape: `true` with no pixel
+/// stores `{1,0,-1,-1}` (6 of 6 pictures, the SVG and PNG pictures of
+/// `ServiceDesk`). The remaining mixed shape (`false` with a pixel) never
+/// occurs and is refused rather than guessed.
 fn ext_picture_header_from_xml(xml: &[u8]) -> Result<String> {
     let text = std::str::from_utf8(xml).context("ExtPicture XML is not UTF-8")?;
     let load_transparent = match text
@@ -28360,6 +28444,7 @@ fn ext_picture_header_from_xml(xml: &[u8]) -> Result<String> {
     };
     match (load_transparent, pixel) {
         (false, None) => Ok("{0,0,-1,-1}".to_string()),
+        (true, None) => Ok("{1,0,-1,-1}".to_string()),
         (true, Some((x, y))) => Ok(format!("{{1,0,{x},{y}}}")),
         (load_transparent, pixel) => Err(anyhow!(
             "unobserved ExtPicture transparency: LoadTransparent {load_transparent}, TransparentPixel {pixel:?}"
@@ -31582,6 +31667,11 @@ fn scan_1c_quoted_string_end(text: &str, start: usize) -> Result<usize> {
         if bytes[index] == b'"' {
             if bytes.get(index + 1) == Some(&b'"') {
                 index += 2;
+            } else if is_1c_string_escape_unit(bytes, index + 1) {
+                // A quote, a backslash and four lowercase hex digits spell one
+                // UTF-16 unit of a character outside the basic plane; the
+                // literal goes on behind them.
+                index += 6;
             } else {
                 return Ok(index + 1);
             }
@@ -31592,13 +31682,91 @@ fn scan_1c_quoted_string_end(text: &str, start: usize) -> Result<usize> {
     Err(anyhow!("unterminated 1C string at byte {start}"))
 }
 
+/// Whether `bytes[at..]` starts with `\` and four lowercase hex digits (the
+/// rest of a `"\d83d`-style code unit escape inside a 1C string literal).
+fn is_1c_string_escape_unit(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at) == Some(&b'\\')
+        && bytes.get(at + 1..at + 5).is_some_and(|digits| {
+            digits
+                .iter()
+                .all(|digit| digit.is_ascii_digit() || (b'a'..=b'f').contains(digit))
+        })
+}
+
+/// The characters of the inside of a 1C string literal: `""` is a quote and
+/// `"\xxxx` one UTF-16 code unit, a high one waiting for its low partner.
+fn decode_1c_string_body(inner: &str) -> Result<String> {
+    let mut output = String::with_capacity(inner.len());
+    let mut pending_high: Option<u16> = None;
+    let mut rest = inner;
+    while let Some(character) = rest.chars().next() {
+        if character != '"' {
+            if pending_high.is_some() {
+                return Err(anyhow!("unpaired high surrogate in a 1C string"));
+            }
+            output.push(character);
+            rest = &rest[character.len_utf8()..];
+            continue;
+        }
+        let tail = &rest[1..];
+        if tail.starts_with('"') {
+            if pending_high.is_some() {
+                return Err(anyhow!("unpaired high surrogate in a 1C string"));
+            }
+            output.push('"');
+            rest = &tail[1..];
+            continue;
+        }
+        if is_1c_string_escape_unit(tail.as_bytes(), 0) {
+            let unit = u16::from_str_radix(&tail[1..5], 16)
+                .map_err(|_| anyhow!("bad code unit escape in a 1C string"))?;
+            match unit {
+                0xD800..=0xDBFF => {
+                    if pending_high.is_some() {
+                        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+                    }
+                    pending_high = Some(unit);
+                }
+                0xDC00..=0xDFFF => {
+                    let high = u32::from(
+                        pending_high
+                            .take()
+                            .ok_or_else(|| anyhow!("unpaired low surrogate in a 1C string"))?,
+                    );
+                    let scalar = 0x10000 + ((high - 0xD800) << 10) + (u32::from(unit) - 0xDC00);
+                    output.push(
+                        char::from_u32(scalar)
+                            .ok_or_else(|| anyhow!("bad surrogate pair in a 1C string"))?,
+                    );
+                }
+                _ => {
+                    if pending_high.is_some() {
+                        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+                    }
+                    output.push(
+                        char::from_u32(u32::from(unit))
+                            .ok_or_else(|| anyhow!("bad code unit in a 1C string"))?,
+                    );
+                }
+            }
+            rest = &tail[5..];
+            continue;
+        }
+        return Err(anyhow!("unexpected quote inside a 1C string"));
+    }
+    if pending_high.is_some() {
+        return Err(anyhow!("unpaired high surrogate in a 1C string"));
+    }
+    Ok(output)
+}
+
 fn parse_1c_quoted_string(text: &str) -> Result<String> {
     let text = text.trim();
     let end = scan_1c_quoted_string_end(text, 0)?;
     if end != text.len() {
         return Err(anyhow!("unexpected trailing data after 1C string"));
     }
-    Ok(text[1..end - 1].replace("\"\"", "\""))
+    decode_1c_string_body(&text[1..end - 1])
 }
 
 fn scan_balanced_braces(text: &str, start: usize) -> Result<usize> {
@@ -32661,6 +32829,32 @@ mod tests {
         parse_common_command_representation,
     };
     use crate::v8_container::{V8Element, make_v8_element_header, parse_v8_container};
+
+    /// A character outside the basic plane is written inside a string literal
+    /// as two code unit escapes, each behind a quote (`"\d83d"\dcce`): the
+    /// literal goes on behind them, and neither the scan for the end of the
+    /// literal nor the decoding may stop at the quote.
+    #[test]
+    fn a_string_literal_holds_code_unit_escapes() {
+        let literal = "\"a>\"\\d83d\"\\dcce \"\" b\"";
+        assert_eq!(
+            super::scan_1c_quoted_string_end(literal, 0).unwrap(),
+            literal.len()
+        );
+        assert_eq!(
+            super::parse_1c_quoted_string(literal).unwrap(),
+            "a>\u{1F4CE} \" b"
+        );
+        // Lone halves are refused, not replaced.
+        assert!(super::parse_1c_quoted_string("\"\"\\d83d\"").is_err());
+        assert!(super::parse_1c_quoted_string("\"\"\\dcce\"").is_err());
+        // A closing quote followed by text that merely looks like an escape
+        // (uppercase digits, a short run) still closes the literal.
+        assert_eq!(
+            super::scan_1c_quoted_string_end("\"x\",\\D83D", 0).unwrap(),
+            3
+        );
+    }
 
     /// Every `<ExcludedCommand>` name the compiler accepts must be the name the
     /// export writes for the uuid it packs, and no accepted name may share its
@@ -43790,14 +43984,24 @@ aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,dddddd
         Ok(())
     }
 
+    const PREDEFINED_TYPE: &str = "ae135932-4f94-44df-92c1-c91f15a92848";
+    const PREDEFINED_FOLDER: &str = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+    const PREDEFINED_ITEM: &str = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
+
+    /// A stored predefined table of a hierarchical catalog: the root row
+    /// "Элементы" (the nil uuid), a folder and an item below it.
+    fn predefined_base_plain() -> String {
+        let (type_uuid, folder_uuid, item_uuid) =
+            (PREDEFINED_TYPE, PREDEFINED_FOLDER, PREDEFINED_ITEM);
+        format!(
+            "{{0,{{1,{{7}},{{2,{{1,1,{{2,0,5,{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"B\",1}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Элементы\"}},{{\"S\",\"\"}},1,{{1,1,{{2,1,7,{{\"#\",{type_uuid},{{1,{folder_uuid}}}}},{{\"B\",1}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Folder\"}},{{\"S\",\"F\"}},{{\"S\",\"Folder description\"}},{{\"N\",0}},1,{{1,1,{{2,2,7,{{\"#\",{type_uuid},{{1,{item_uuid}}}}},{{\"B\",0}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Item\"}},{{\"S\",\"I\"}},{{\"S\",\"Item description\"}},{{\"N\",0}},0}}}}}}}}}}}}}},-1,3}}}}"
+        )
+    }
+
     #[test]
     fn packs_predefined_data_xml_preserving_base_shape() -> anyhow::Result<()> {
-        let type_uuid = "ae135932-4f94-44df-92c1-c91f15a92848";
-        let folder_uuid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
-        let item_uuid = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
-        let base_plain = format!(
-            "{{0,{{1,{{7}},{{2,{{1,1,{{2,0,5,{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"B\",1}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Элементы\"}},{{\"S\",\"\"}},1,{{1,1,{{2,1,7,{{\"#\",{type_uuid},{{1,{folder_uuid}}}}},{{\"B\",1}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Folder\"}},{{\"S\",\"F\"}},{{\"S\",\"Folder description\"}},{{\"N\",0}},1,{{1,1,{{2,2,7,{{\"#\",{type_uuid},{{1,{item_uuid}}}}},{{\"B\",0}},{{\"#\",{type_uuid},{{1,00000000-0000-0000-0000-000000000000}}}},{{\"S\",\"Item\"}},{{\"S\",\"I\"}},{{\"S\",\"Item description\"}},{{\"N\",0}},0}}}}}}}}}}}}}},-1,3}}}}"
-        );
+        let (folder_uuid, item_uuid) = (PREDEFINED_FOLDER, PREDEFINED_ITEM);
+        let base_plain = predefined_base_plain();
         let base = super::deflate_raw(base_plain.as_bytes())?;
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -43831,6 +44035,72 @@ aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,dddddd
         assert!(text.contains(r#"{"S","New item description"}"#));
         assert_eq!(packed.plain_bytes, text.len());
 
+        Ok(())
+    }
+
+    #[test]
+    fn a_different_set_of_predefined_items_is_reported_not_patched() -> anyhow::Result<()> {
+        let (folder_uuid, item_uuid) = (PREDEFINED_FOLDER, PREDEFINED_ITEM);
+        // A uuid the stored table lacks (built, not written out: the policy
+        // guard keeps the literals of this file to a known set).
+        let new_uuid = format!("{}-dddd-4ddd-dddd-{}", "dddddddd", "dddddddddddd");
+        let new_uuid = new_uuid.as_str();
+        // The stored table opens with a root row of the nil uuid, which no item
+        // of the XML stands for.
+        let base_plain = predefined_base_plain();
+        let base = super::deflate_raw(base_plain.as_bytes())?;
+        let xml = |items: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<PredefinedData xmlns="http://v8.1c.ru/8.3/xcf/predef" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CatalogPredefinedItems" version="2.20">{items}</PredefinedData>
+"#
+            )
+        };
+        let item = |id: &str, name: &str, folder: bool, children: &str| {
+            format!(
+                "<Item id=\"{id}\"><Name>{name}</Name><Code>C</Code><Description>D</Description><IsFolder>{folder}</IsFolder>{children}</Item>"
+            )
+        };
+        let leaf = item(item_uuid, "Item", false, "");
+        let folder_with = |children: &str| {
+            item(
+                folder_uuid,
+                "Folder",
+                true,
+                &format!("<ChildItems>{children}</ChildItems>"),
+            )
+        };
+
+        // The same items: patched, the nil root row does not count as removed.
+        let same = xml(&folder_with(&leaf));
+        assert!(matches!(
+            super::patch_predefined_data_blob_from_xml(&base, same.as_bytes())?,
+            super::PredefinedPatch::Patched(_)
+        ));
+        // An item the row lacks.
+        let added = xml(&folder_with(&format!(
+            "{leaf}{}",
+            item(new_uuid, "New", false, "")
+        )));
+        match super::patch_predefined_data_blob_from_xml(&base, added.as_bytes())? {
+            super::PredefinedPatch::ItemsDiffer { added, removed } => {
+                assert_eq!(added, [new_uuid]);
+                assert!(removed.is_empty());
+            }
+            super::PredefinedPatch::Patched(_) => panic!("an added item was patched"),
+        }
+        // An item the tree no longer has.
+        let removed = xml(&folder_with(""));
+        match super::patch_predefined_data_blob_from_xml(&base, removed.as_bytes())? {
+            super::PredefinedPatch::ItemsDiffer { added, removed } => {
+                assert!(added.is_empty());
+                assert_eq!(removed, [item_uuid]);
+            }
+            super::PredefinedPatch::Patched(_) => panic!("a removed item was patched"),
+        }
+        // The older entry point still refuses only an added item.
+        assert!(super::pack_predefined_data_blob_from_xml(&base, added.as_bytes()).is_err());
+        assert!(super::pack_predefined_data_blob_from_xml(&base, removed.as_bytes()).is_ok());
         Ok(())
     }
 
@@ -46195,6 +46465,40 @@ aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,dddddd
         assert!(output.contains(&format!("\"file.5\",{}", addition.new_uuid)));
 
         Ok(())
+    }
+
+    #[test]
+    fn an_ext_picture_header_follows_the_declared_transparency() {
+        let xml = |body: &str| {
+            format!(
+                "<ExtPicture><Picture><xr:Abs>Picture.svg</xr:Abs>{body}</Picture></ExtPicture>"
+            )
+            .into_bytes()
+        };
+        let header = |body: &str| super::ext_picture_header_from_xml(&xml(body));
+        assert_eq!(header("").unwrap(), "{0,0,-1,-1}");
+        assert_eq!(
+            header("<xr:LoadTransparent>false</xr:LoadTransparent>").unwrap(),
+            "{0,0,-1,-1}"
+        );
+        // Six pictures of the БСП 8.3.27 extensions store it so.
+        assert_eq!(
+            header("<xr:LoadTransparent>true</xr:LoadTransparent>").unwrap(),
+            "{1,0,-1,-1}"
+        );
+        assert_eq!(
+            header(
+                "<xr:LoadTransparent>true</xr:LoadTransparent><xr:TransparentPixel x=\"3\" y=\"4\"/>"
+            )
+            .unwrap(),
+            "{1,0,3,4}"
+        );
+        assert!(
+            header(
+                "<xr:LoadTransparent>false</xr:LoadTransparent><xr:TransparentPixel x=\"3\" y=\"4\"/>"
+            )
+            .is_err()
+        );
     }
 
     #[test]

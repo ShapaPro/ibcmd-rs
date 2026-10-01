@@ -986,7 +986,9 @@ fn client_application_interface_model(root: &Node) -> Result<ClientApplicationIn
             [spr] if spr.name == "spr" => Some(match spr.leaf()?.trim() {
                 "Picture" => "0",
                 "PictureOnLeftAndText" => "4",
-                other => bail!("<panelDef> <spr> `{other}` is not something the writer has evidence for"),
+                other => {
+                    bail!("<panelDef> <spr> `{other}` is not something the writer has evidence for")
+                }
             }),
             _ => bail!("a <panelDef> with elements is not something the writer has evidence for"),
         };

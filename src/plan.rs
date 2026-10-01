@@ -1545,7 +1545,7 @@ fn attributes_fingerprint(event: &BytesStart<'_>) -> Result<String> {
     Ok(attributes.join("|"))
 }
 
-fn diff_indexed_xml_values(
+pub(crate) fn diff_indexed_xml_values(
     left: &BTreeMap<String, String>,
     right: &BTreeMap<String, String>,
     leaf_path_prefixes: &[String],

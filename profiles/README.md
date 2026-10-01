@@ -36,6 +36,14 @@ fingerprint and extension-registry read evidence; main and extension writes
 remain explicitly unsupported because the native generation-selection protocol
 is not yet reproduced.
 
+The own exclusive `config apply` (`mssql-config-apply`, `docs/apply/own-apply.md`)
+has a capability of its own, `mssql.config.apply`: it moves a stage that needs no
+restructuring from `ConfigSave` into `Config` in one transaction and does not select
+a generation. It is declared supported only for the builds on which its end state was
+compared with the native apply on twins: `8.3.27.2214` and `8.5.1.1150`. It is
+independent of `mssql.main.write`, so 8.5.1 can admit it while main writes stay
+unsupported; `8.3.27.1989` declares neither and fails closed.
+
 `profile_registry::BUNDLED_PROFILES` embeds these files at compile time and
 `load_bundled_profile_registry` resolves them without filesystem or platform
 access.
