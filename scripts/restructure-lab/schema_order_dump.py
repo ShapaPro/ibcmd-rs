@@ -48,13 +48,16 @@ def compare(before_path, after_path, log_path):
     print("moved to the end: %d tables at positions %d-%d: %s" % (len(tail), start, len(after) - 1, ", ".join(tail)))
     print("ConfigChngR: position %d before, %d after (of %d)" % (before.index("ConfigChngR"), after.index("ConfigChngR"), len(after)))
     print("the order of the other tables is the stored one: True")
-    if log_path and os.path.exists(log_path):
+    if log_path:
         expected = {}
         with open(log_path, encoding="utf-8") as f:
             for line in f:
                 m = re.match(r"^(\S+)\s+pos in 1: (\d+)\s+pos in 2: ", line)
                 if m:
                     expected[m.group(1)] = int(m.group(2))
+        if not expected or set(tail) != set(expected):
+            print("missing native positions, or moved-table set differs from the native log")
+            return 1
         bad = [(name, want, after.index(name) if name in after else None) for name, want in expected.items() if not name in after or after.index(name) != want]
         print("the platform's positions (rcheck's twin, %d tables): %s" % (len(expected), "all equal" if not bad else "DIFFERENT %s" % bad))
         return 0 if not bad else 1

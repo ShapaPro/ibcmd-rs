@@ -1149,16 +1149,19 @@ garbage collection of `ConfigCAS` (12 797 rows against native's 636) and `Files`
    on the БСП (the platform rebuilds it after the others), and not on the УХ, where the register is empty, the platform does not
    rebuild `ConfigChngR` and it stays in the middle of the list. Since the merge of 12.15 the plan places a rebuilt table at the
    end, ahead of `ConfigChngR` only when that is the last table (`DbSchema::insert_rebuilt`); the created tables of S1-F come
-   first, in the same place. Proved by unit tests for both shapes and the real relative orders of rcheck's logs; the УХ twin
-   itself is rcheck's `run_case_uha.ps1`. Rebuilding tables with data and УХ 8.5: not measured; the size guard decides most of it.
+   first, in the same place. Proved by unit tests for both shapes and a fresh ERP UH clone on 2026-10-01:
+   `uha_order_proof.ps1` stages rcheck's b1 files with native import, then runs our drop-in apply. All six rebuilt tables
+   occupy the native twin's positions 16 851-16 856 in the same order, after ExtensionsInfoNGS, and every other table keeps
+   its stored relative order. ConfigChngR stays in the middle (position 4 809 before, 4 803 after). Evidence:
+   `s1-mix-release-20261001.txt`. Rebuilding UH tables with data and UH 8.5: not measured; the size guard decides most of it.
 10. **The dynamic history**: the apply folds it; a restructure over an active dynamic update (`Status` not 100) is refused.
 11. **A running server across the restructure** (0.5): the guids of `siVersions` of a cache row that changed.
 12. **The alter method** (9.5): kept as a research switch of the direct command; it is not offered to the apply (the physical
     order then differs from native's, and the byte-level twin comparison stops working).
 13. **`ByField` numbers**: an attribute created *with* the index flag gets an extra `DBNames` entry of kind `ByField`
     (`dbnames-kinds.txt`); switching the flag later does not (g, and d0, d1 on the БСП: `DBNames` did not change). The
-    planner still refuses new indexed attributes (an added attribute with `Index`): that is the addition of an attribute with
-    an index, not a switch, and is not built.
+    planner builds new indexed attributes, including their extra `ByField` entries: case m7 of 12.15 covers seven of them
+    with both import routes and an offline comparison against the native result.
 
 ### 12.10 Evidence
 
@@ -1172,6 +1175,11 @@ binary values shortened), and for wave 1 (12.11) `s2-wave1-twin-compare.txt` (th
 `xe/s1_t1/`, `snap/ibcmd_rs_04_ddl_s1_*`. Tools: `scripts/restructure-lab/` (`compare_tables.ps1`, `compare_config.ps1`,
 `dbschema_cmp.py`, `params_row.ps1`, `cache_variant.ps1`, `edit_cases_s1.py`, `jobs/types_t1.bsl`). Tests: `tests_s1.rs` (the gate),
 `tests_plan.rs` (`the_phase_text_is_the_statements_with_assertions`), `tests_corpus.rs` (the types case).
+
+For the combination matrix (12.15): `s1-mix-matrix.txt` (m1-m7, f1, f3 and the eight refusals, both import routes),
+`s1-mix-check12-m6.txt` (rollback of the largest stage), and `s1-mix-release-20261001.txt` (the final quick gates,
+the completed f1 and r7 runs, and the ERP UH DBSchema order proof). The matrix records historical measurements;
+the release evidence distinguishes the fresh merged-code runs from those earlier results.
 
 ### 12.11 Wave 1: delete an attribute (S1-B #398) and widen a string (S1-C #399)
 
@@ -1479,8 +1487,13 @@ run with one native write per case (`mix_ours.ps1`, the check 7).
 | **m5** | 56.1 s | 299.5 s | equal | 0 rows | 3 071 of 9 841 | «не требуется» | 4 file(s) differ: 3 edited forms and `ConfigDumpInfo.xml` |
 | **m6** | 105.2 s | 546.9 s | equal | 0 rows | 3 082 of 9 841 | «не требуется» | 6 file(s) differ: 5 edited forms and `ConfigDumpInfo.xml` |
 | **m7** | 44.8 s | 445.5 s | equal | 0 rows | 3 070 of 9 841 | «не требуется» | 1 file(s) differ: `ConfigDumpInfo.xml` only |
-| **f1** | 80.7 s | -- | -- | -- | -- | -- | not run to the end: our import first refused the hand-made catalog file (no `<Use>`, below); with the fixed file the rerun (`mix_ours.ps1 -Case f1`) was stopped by the pause of 2026-09-30 |
+| **f1** (2026-10-01) | 15.3 s (9 staged rows) | 8.3 s | equal (15 of 16) | 0 rows (5 tables) | 27 of 9 840 | «не требуется» | 1 file differs: `ConfigDumpInfo.xml` only; 12 199 equal |
 | **f3** | 23.1 s (160.3 s in the first run) | 62.2 s (252 s) | equal (15 of 16) | 0 rows (10 tables) | 30 of 9 841 | «не требуется» | 1 file differs: `ConfigDumpInfo.xml` only |
+
+The m1-m7 and f3 measurements are the historical runs of 2026-09-30. The completed f1 run of 2026-10-01 uses
+the merged integration code and its delta importer: unchanged rows stay byte-identical (9 792 of 9 840); only 9 rows
+are staged, instead of recompiling the full configuration. The 27 text differences against the platform-staged twin
+are confined to object descriptors, object parts and `versions`; checks 2, 3, 5, 6, 7 and 8 pass as shown.
 
 * The **check 3** (`EXCEPT` both ways of every rebuilt table) and the checks 2, 5, 6 are the ones that matter for S1: the structure phase and
   the data of the rebuilt tables do not depend on how the stage got into `ConfigSave`.
@@ -1506,7 +1519,9 @@ run with one native write per case (`mix_ours.ps1`, the check 7).
   What a user does is what `form_bindings.py` does: the elements bound to `Объект.<attribute>` / `Список.<attribute>` and the query columns are
   taken out of the forms (m1 3 forms, m4 3, m5 3, m6 5).
 
-**The refusals** (`mix_case.ps1 -Refused`; r7 could not be staged when the work was paused: the platform's partial import refuses `КлассификаторБанков`'s forms, which `edit_cases_s5.py` copies into the stage for `Configuration.xml` and which still bind `Список.КоррСчет` -- the copied forms of an object that loses an attribute must lose those bindings, `form_bindings.py`): the drop-in must exit 1 and leave the database as it was (the digest of check 12 before and after).
+**The refusals** (`mix_case.ps1 -Refused`): the drop-in must exit 1 and leave the database as it was (the digest of check 12 before and after).
+For r7 the copied forms of `КлассификаторБанков` now lose their bindings to `КоррСчет` through `form_bindings.py`, so the
+platform stages the Configuration.xml case successfully. The gate then refuses the intended F + B combination, before a backup or write.
 
 | case | the stage | the reason the gate gives | exit | database |
 |---|---|---|---|---|
@@ -1516,7 +1531,7 @@ run with one native write per case (`mix_ours.ps1`, the check 7).
 | **r4** | valid operations on three objects, and a string that gets shorter (`ОчередьЗаданий.ИмяПользователя` 32 -> 16) | `S1: length-not-widened: Catalog.ОчередьЗаданий: ChildObjects/Attribute[ИмяПользователя]/Properties/Type/StringQualifiers/Length: 32 -> 16` | 1 | unchanged (digest of check 12) |
 | **r5** | valid operations on three objects, and an attribute that changes its type (`ОчередьЗаданий.ИмяПользователя` string -> number) | `S1: attribute-property-outside-s1: Catalog.ОчередьЗаданий: ChildObjects/Attribute[ИмяПользователя]/Properties/Type/Type: xs:string -> xs:decimal` | 1 | unchanged (digest of check 12) |
 | **r6** | valid operations on three objects, and a subordinate catalog's own attributes (`_ДемоБанковскиеСчета`: one deleted, one widened) | `S1: catalog _ДемоБанковскиеСчета is subordinate to owners: its owner field is not covered` | 1 | unchanged (digest of check 12) |
-| **r7** | **F + B**: a new document `ДемоДокН4` (S1-F, N4) and an attribute deleted from a catalog (`КлассификаторБанков.КоррСчет`), with a widening elsewhere | expected: `S1: a new object together with removed attributes of existing objects is not built: the caches of the new object are chained on the additions only` (the refusal is in `plan()` and was not reached: **not staged yet**, below) | -- | -- |
+| **r7** | **F + B**: a new document `ДемоДокН4` (S1-F, N4) and an attribute deleted from a catalog (`КлассификаторБанков.КоррСчет`), with a widening elsewhere | `S1: a new object together with removed attributes of existing objects is not built: the caches of the new object are chained on the additions only` | 1 (dry run and drop-in) | unchanged (digest of check 12); backup not made |
 | **r8** | **F + E**: a new catalog `ДемоКатН1` and new tabular sections of existing objects (a section of `КлючевыеОперации`, an attribute of the section of `_ДемоОприходованиеТоваров`), with a widening elsewhere | `S1: a new object together with new tabular sections (or attributes of them) of existing objects is not built: both rewrite the registry, the index of the generated types and the XDTO model` | 1 | unchanged (digest of check 12) |
 
 Each refused stage also contains valid operations on other objects (r3-r6 three of them on other objects, r1 and r2 one or two), and none of them is
@@ -1528,12 +1543,15 @@ attribute of another (r7: the caches of a new object are chained on additions on
 rewrite the registry, the index of the generated types and the XDTO model); a subordinate catalog's own attributes (the owner field, r6; its sections
 are built); and, as before, everything of 12.14 "not traced" and the refusals of 12.9.
 
-Evidence (`docs/apply/evidence/restructuring/`): `s1-mix-matrix.txt` (the summaries of all cases, both routes), `s1-mix-check12-m6.txt`;
+Evidence (`docs/apply/evidence/restructuring/`): `s1-mix-matrix.txt` (the summaries of all cases, both routes), `s1-mix-check12-m6.txt`,
+`s1-mix-release-20261001.txt` (the final code's gates and completed f1, r7 and ERP UH order proof);
 tools `scripts/restructure-lab/`: `edit_cases_s4.py`, `edit_cases_s5.py`, `mix_case.ps1`, `mix_ours.ps1`, `form_bindings.py`, `mix_forms.py`,
 `config_compare.py`, `diff_paths.py`, `assemble_mix_evidence.py`, `uha_order_proof.ps1`, `schema_order_dump.py`. Tests: `tests_corpus.rs` (`corpus_mix_*`, nine
 cases), `tests_sections.rs` (`a_new_attribute_comes_indexed_with_the_entries_of_a_switch`), `tests_schema.rs` (the place of the rebuilt tables).
 
-**State at the pause (2026-09-30).** Run and verified: m1-m7, f1 (platform route), f3 (both routes), r1-r6, r8, check 12 on m6, the order of the tables in the
-unit tests. Not run: the route through our import for f1, the staging of r7, the ERP УХ twin of the table order (`uha_order_proof.ps1`: a fresh УХ clone,
-rcheck's stage of `b1`, the native import, our drop-in apply, the positions of the moved tables against rcheck's log; written and parsed, never run; rcheck's own
-`run_case_uha.ps1 -Cases b1,c1 -Exe <the binary of this branch>` reproduces the check 5 the same way). The evidence file is `s1-mix-matrix.txt`.
+**Completed for release (2026-10-01).** The earlier matrix proves m1-m7, f1 (platform route), f3 (both routes), r1-r6 and r8,
+and rollback check 12 on m6. The final merged code passes quick fmt, policy guard, layer clippy and root library tests
+(3 586 passed, 9 ignored). Fresh runs complete f1 through our import, the r7 refusal after a valid native stage, and the
+ERP UH order proof described in 12.9. The UH proof compares the entire unchanged relative order and the six moved-table
+positions against the saved native twin result; it does not claim a new full UH twin data/export comparison. The known
+`c4629235` ordering approximation of S1-F remains documented, as do the out-of-scope/refused compositions above.
