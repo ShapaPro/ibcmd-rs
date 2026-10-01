@@ -913,14 +913,18 @@ fn render_online_transition(sql: &mut String, plan: &MainActivationPlan) {
 }
 
 fn render_expected_table(sql: &mut String, variable: &str, rows: &[MainStorageRow]) {
-    writeln!(sql, "DECLARE @{variable} TABLE (FileName nvarchar(4000) NOT NULL, PartNo int NOT NULL, DataSize bigint NOT NULL, Digest varbinary(32) NOT NULL, PRIMARY KEY(FileName,PartNo));").unwrap();
+    writeln!(sql, "DECLARE @{variable} TABLE (FileName nvarchar(4000) NOT NULL, PartNo int NOT NULL, Creation varchar(27) NOT NULL, Modified varchar(27) NOT NULL, Attributes int NOT NULL, DataSize bigint NOT NULL, ByteLength bigint NOT NULL, Digest varbinary(32) NOT NULL, PRIMARY KEY(FileName,PartNo));").unwrap();
     for row in rows {
         writeln!(
             sql,
-            "INSERT @{variable} VALUES (N'{}',{}, {},0x{});",
+            "INSERT @{variable} VALUES (N'{}',{},'{}','{}',{},{},{},0x{});",
             quote_string(&row.file_name),
             row.part_no,
+            quote_string(&row.creation),
+            quote_string(&row.modified),
+            row.attributes,
             row.data_size,
+            row.binary_data.len(),
             hex(&row.sha256())
         )
         .unwrap();
@@ -928,11 +932,11 @@ fn render_expected_table(sql: &mut String, variable: &str, rows: &[MainStorageRo
 }
 
 fn render_exact_set_assertion(sql: &mut String, table: &str, expected: &str, code: u32) {
-    writeln!(sql, "IF EXISTS (SELECT FileName,PartNo,CONVERT(bigint,DataSize),HASHBYTES('SHA2_256',BinaryData) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) EXCEPT SELECT FileName,PartNo,DataSize,Digest FROM @{expected}) OR EXISTS (SELECT FileName,PartNo,DataSize,Digest FROM @{expected} EXCEPT SELECT FileName,PartNo,CONVERT(bigint,DataSize),HASHBYTES('SHA2_256',BinaryData) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK)) THROW {code}, '{table} exact snapshot drifted', 1;").unwrap();
+    writeln!(sql, "IF EXISTS (SELECT FileName,PartNo,CONVERT(varchar(27),Creation,121),CONVERT(varchar(27),Modified,121),CONVERT(int,Attributes),CONVERT(bigint,DataSize),CONVERT(bigint,DATALENGTH(BinaryData)),HASHBYTES('SHA2_256',BinaryData) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) EXCEPT SELECT FileName,PartNo,Creation,Modified,Attributes,DataSize,ByteLength,Digest FROM @{expected}) OR EXISTS (SELECT FileName,PartNo,Creation,Modified,Attributes,DataSize,ByteLength,Digest FROM @{expected} EXCEPT SELECT FileName,PartNo,CONVERT(varchar(27),Creation,121),CONVERT(varchar(27),Modified,121),CONVERT(int,Attributes),CONVERT(bigint,DataSize),CONVERT(bigint,DATALENGTH(BinaryData)),HASHBYTES('SHA2_256',BinaryData) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK)) THROW {code}, '{table} exact snapshot drifted', 1;").unwrap();
 }
 
 fn render_selected_assertion(sql: &mut String, table: &str, expected: &str, code: u32) {
-    writeln!(sql, "IF EXISTS (SELECT E.FileName,E.PartNo FROM @{expected} E LEFT JOIN dbo.{table} T WITH (UPDLOCK,HOLDLOCK) ON T.FileName=E.FileName AND T.PartNo=E.PartNo AND CONVERT(bigint,T.DataSize)=E.DataSize AND HASHBYTES('SHA2_256',T.BinaryData)=E.Digest WHERE T.FileName IS NULL) THROW {code}, '{table} selected snapshot drifted', 1;").unwrap();
+    writeln!(sql, "IF EXISTS (SELECT E.FileName,E.PartNo FROM @{expected} E LEFT JOIN dbo.{table} T WITH (UPDLOCK,HOLDLOCK) ON T.FileName=E.FileName AND T.PartNo=E.PartNo AND CONVERT(varchar(27),T.Creation,121)=E.Creation AND CONVERT(varchar(27),T.Modified,121)=E.Modified AND CONVERT(int,T.Attributes)=E.Attributes AND CONVERT(bigint,T.DataSize)=E.DataSize AND CONVERT(bigint,DATALENGTH(T.BinaryData))=E.ByteLength AND HASHBYTES('SHA2_256',T.BinaryData)=E.Digest WHERE T.FileName IS NULL) THROW {code}, '{table} selected snapshot drifted', 1;").unwrap();
 }
 
 fn render_marker_assertion(
@@ -942,7 +946,7 @@ fn render_marker_assertion(
     code: u32,
 ) {
     match marker {
-        Some(row) => writeln!(sql, "IF (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated') <> 1 OR (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 AND CONVERT(bigint,DataSize)={} AND HASHBYTES('SHA2_256',BinaryData)=0x{}) <> 1 THROW {code}, '{table}.DynamicallyUpdated drifted', 1;", row.data_size, hex(&row.sha256())).unwrap(),
+        Some(row) => writeln!(sql, "IF (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated') <> 1 OR (SELECT COUNT_BIG(*) FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 AND CONVERT(varchar(27),Creation,121)='{}' AND CONVERT(varchar(27),Modified,121)='{}' AND CONVERT(int,Attributes)={} AND CONVERT(bigint,DataSize)={} AND DATALENGTH(BinaryData)={} AND HASHBYTES('SHA2_256',BinaryData)=0x{}) <> 1 THROW {code}, '{table}.DynamicallyUpdated drifted', 1;", quote_string(&row.creation), quote_string(&row.modified), row.attributes, row.data_size, row.binary_data.len(), hex(&row.sha256())).unwrap(),
         None => writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WITH (UPDLOCK,HOLDLOCK) WHERE FileName=N'DynamicallyUpdated') THROW {code}, 'unexpected {table}.DynamicallyUpdated row', 1;").unwrap(),
     }
 }
@@ -1673,8 +1677,12 @@ mod tests {
         let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
         // asserted with the stage (the ConfigSave the transaction expects holds it), emptied with it (6 rows: 5 + 1)
         assert!(sql.contains(&format!(
-            "INSERT @ExpectedStage VALUES (N'deleted',0, {},0x{})",
+            "INSERT @ExpectedStage VALUES (N'deleted',0,'{}','{}',{},{},{},0x{})",
+            quote_string(&deleted.creation),
+            quote_string(&deleted.modified),
+            deleted.attributes,
             deleted.data_size,
+            deleted.binary_data.len(),
             hex(&deleted.sha256())
         )));
         assert!(sql.contains("IF @@ROWCOUNT <> 6 THROW 57220, 'ConfigSave cleanup drifted', 1;"));
@@ -2200,11 +2208,9 @@ mod tests {
         let guard = script.sql.find("SHA2_256").unwrap();
         let mutation = script.sql.find("DELETE FROM dbo.Config WHERE").unwrap();
         assert!(guard < mutation);
-        assert!(
-            script
-                .sql
-                .contains("EXCEPT SELECT FileName,PartNo,DataSize,Digest")
-        );
+        assert!(script.sql.contains(
+            "EXCEPT SELECT FileName,PartNo,Creation,Modified,Attributes,DataSize,ByteLength,Digest"
+        ));
         assert!(script.sql.contains("ConfigSave exact snapshot drifted"));
     }
 
@@ -2326,6 +2332,43 @@ mod tests {
         assert_eq!(report.recovery_token.len(), 64);
         assert_eq!(plan.recovery().overwritten_config_rows.len(), 5);
         assert_eq!(report.touched_tables, ["Config", "ConfigSave", "Params"]);
+    }
+
+    #[test]
+    fn header_only_drift_is_bound_to_recovery_and_sql_before_any_write() {
+        let base = fixture(MainActivationMode::Online);
+        for field in ["creation", "modified", "attributes"] {
+            let mut active = base.active_rows.clone();
+            match field {
+                "creation" => active[0].creation = "4026-10-01 01:02:03.004".to_owned(),
+                "modified" => active[0].modified = "4026-10-01 01:02:04.007".to_owned(),
+                _ => active[0].attributes = 17,
+            }
+            let plan = prepare_main_activation(
+                MainActivationMode::Online,
+                base.staged_rows.clone(),
+                MainActivationSnapshot {
+                    config_rows: active,
+                    config_dynamically_updated: None,
+                    params_dynamically_updated: None,
+                },
+                &base.changed_targets,
+                true,
+            )
+            .unwrap();
+            assert_ne!(
+                plan.dry_run_report().recovery_token,
+                base.dry_run_report().recovery_token
+            );
+            let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+            let cas = sql.find("Config selected snapshot drifted").unwrap();
+            let write = sql.find("DELETE FROM dbo.Config WHERE").unwrap();
+            assert!(cas < write);
+            assert!(sql[..cas].contains("CONVERT(varchar(27),T.Creation,121)=E.Creation"));
+            assert!(sql[..cas].contains("CONVERT(varchar(27),T.Modified,121)=E.Modified"));
+            assert!(sql[..cas].contains("CONVERT(int,T.Attributes)=E.Attributes"));
+            assert!(sql[..cas].contains("DATALENGTH(T.BinaryData)"));
+        }
     }
 
     #[test]
