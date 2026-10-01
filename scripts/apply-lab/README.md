@@ -45,3 +45,14 @@ import lab with the form `ВсеЗаметки` and the template `ДатыПас
 | `cluster/with-cluster.ps1 -Track <t> -Run <script>` | start, run a script, stop whatever happens |
 | `cluster/session.ps1` | one COM session of a clone, held until a release file appears |
 | `cluster/smoke.ps1` | start, register one clone (`register-ib.ps1 -Cluster worker`), one COM session and one 1cv8c session listed by `rac session list`, unregister, stop, no process left, the other clusters unchanged |
+
+## The live gate: F-9 and F-10 of #409 (`live/`, `docs/apply/online-activation.md` 6.7)
+
+Run against the worker lab cluster (`cluster/`), on a marker-free FULL-recovery clone; the tail files go to `F:\ibcmd\lab\05\live\bak`.
+
+| Script | What |
+|---|---|
+| `live/f9_f10.ps1` | the cases: no log chain, no tail directory, a directory the SQL Server account cannot write, a session with an open transaction, the same accepted with `--interrupt-sessions`, the direct `activate-staged-main` route, `--dry-run`, and a clean run. `-Label red` runs the old tool (the defect is reproduced), `-Label green` the fixed one |
+| `live/hold_txn.ps1` | a session that holds an open transaction with a row written (`dbo.IbcmdRsLiveProbe`) until a release file appears: the work in flight the live switch would roll back |
+| `live/marker_free.ps1` | a marker-free clone: the two `DynamicallyUpdated` markers and the `_dynupdate_` rows deleted (`live` refuses a database with online generations) |
+| `live/live_trees.py` | one source tree per tag (a module with the marker `LIVE-<tag>`), so that every run promotes something new |

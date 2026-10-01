@@ -1469,6 +1469,29 @@ mod tests {
     }
 
     #[test]
+    fn the_folders_of_the_8_5_kinds_are_configuration_files_too() {
+        // PaletteColors is a top-level folder of a 2.21 tree; a base-free stage lists the walk of the
+        // tree, and a folder the listing does not know left the export's files "in the database".
+        let files: &[(&str, &[u8])] = &[
+            ("Configuration.xml", b"<a/>"),
+            ("PaletteColors/ВниманиеБИПЦветФона.xml", b"<p1/>"),
+            ("PaletteColors/НеверноеЗначениеЦветФона.xml", b"<p2/>"),
+            ("ExternalDataSources/Source.xml", b"<s/>"),
+        ];
+        let (_, root) = comparer(files, &[]);
+        let walked = source_listing::walk(&root);
+        let comparer = TreeComparer::hashing(&root.join("virtual"), &root, walked.files, &[]);
+        for (relative, bytes) in files {
+            produce(&comparer, relative, bytes);
+        }
+        let result = comparer.finish().unwrap();
+        assert_eq!(result.compared, 4);
+        assert_eq!(result.identical, 4);
+        assert!(result.differences.is_empty(), "{:?}", result.differences);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_path_prefix_limits_the_comparison() {
         let (comparer, root) = comparer(
             &[

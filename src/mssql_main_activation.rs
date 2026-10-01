@@ -526,10 +526,38 @@ pub fn preflight_tail_log(
     }
 }
 
+/// Refuses, before anything is staged, `--interrupt-sessions` for a mode that does not interrupt sessions: it is the operator's
+/// acceptance of what `live` does (#409 F-10) and means nothing elsewhere.
+pub fn preflight_interrupt_sessions(
+    mode: MainActivationMode,
+    interrupt_sessions: bool,
+) -> Result<(), MainActivationError> {
+    if interrupt_sessions && mode != MainActivationMode::Live {
+        return Err(MainActivationError::SafetyGate(
+            "--interrupt-sessions is only valid for live activation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The script of a mode, with the live switch's sessions gate as it stands when nobody accepted an interruption
+/// ([`render_main_activation_sql_with`]).
 pub fn render_main_activation_sql(
     database: &str,
     plan: &MainActivationPlan,
     tail_log_output: Option<&str>,
+) -> Result<MainActivationScript, MainActivationError> {
+    render_main_activation_sql_with(database, plan, tail_log_output, false)
+}
+
+/// The script of a mode. `interrupt_sessions` is the operator's acceptance that the live switch rolls back the open work of the
+/// sessions of the database (`--interrupt-sessions`, live only; #409 F-10): without it the script refuses to start, and rolls the
+/// promotion back if such work appears before its `COMMIT`.
+pub fn render_main_activation_sql_with(
+    database: &str,
+    plan: &MainActivationPlan,
+    tail_log_output: Option<&str>,
+    interrupt_sessions: bool,
 ) -> Result<MainActivationScript, MainActivationError> {
     if plan.is_carried_out_by_config_apply() {
         return Err(MainActivationError::SafetyGate(
@@ -558,11 +586,16 @@ pub fn render_main_activation_sql(
     writeln!(sql, "SET NOCOUNT ON;").unwrap();
     writeln!(sql, "SET XACT_ABORT ON;").unwrap();
     if let Some(tail) = live_tail.as_deref() {
-        writeln!(sql, "USE [master];").unwrap();
-        writeln!(sql, "IF DB_ID(N'{database_literal}') IS NULL THROW 57230, 'live activation database does not exist', 1;").unwrap();
-        writeln!(sql, "IF (SELECT recovery_model FROM sys.databases WHERE name=N'{database_literal}') NOT IN (1,2) THROW 57231, 'live activation requires FULL or BULK_LOGGED recovery', 1;").unwrap();
-        writeln!(sql, "IF (SELECT state FROM sys.databases WHERE name=N'{database_literal}') <> 0 THROW 57232, 'live activation requires an ONLINE database', 1;").unwrap();
-        writeln!(sql, "IF EXISTS (SELECT 1 FROM sys.dm_os_file_exists(N'{}') WHERE file_exists=1 OR file_is_a_directory=1) THROW 57233, 'tail-log output already exists or is a directory', 1;", quote_string(tail)).unwrap();
+        // The gate of the live switch, before the transaction: the database, its recovery model and state, the tail file, the log
+        // backup chain, the directory and the account's right to write there, the sessions with open work (#409 F-9, F-10).
+        sql.push_str(&crate::mssql_live_gate::render_live_gate(
+            &crate::mssql_live_gate::LiveGateSettings {
+                database: database_name,
+                tail_log_output: tail,
+                interrupt_sessions,
+                probe: true,
+            },
+        )?);
     }
     writeln!(sql, "USE {database};").unwrap();
     writeln!(sql, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;").unwrap();
@@ -620,6 +653,15 @@ pub fn render_main_activation_sql(
     .unwrap();
     render_postconditions(&mut sql, plan);
     writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.ConfigSave) THROW 57221, 'ConfigSave postcondition failed', 1;").unwrap();
+    if live_tail.is_some() {
+        // work that started after the gate ran rolls the promotion back, instead of being rolled back by the interruption
+        sql.push_str(
+            &crate::mssql_live_gate::render_sessions_check_in_transaction(
+                database_name,
+                interrupt_sessions,
+            ),
+        );
+    }
     writeln!(sql, "COMMIT TRANSACTION;").unwrap();
     render_catch(&mut sql, None);
     if let Some(tail) = live_tail.as_deref() {
@@ -897,7 +939,7 @@ fn render_live_recovery(
     writeln!(sql, "END CATCH;").unwrap();
 }
 
-fn validate_tail_log_output(path: &str) -> Result<String, MainActivationError> {
+pub(crate) fn validate_tail_log_output(path: &str) -> Result<String, MainActivationError> {
     if path.is_empty()
         || path.encode_utf16().count() > 2048
         || path.chars().any(|ch| ch == '\0' || ch.is_control())
@@ -1191,7 +1233,7 @@ fn quote_ident(value: &str) -> Result<String, MainActivationError> {
     Ok(format!("[{}]", value.replace(']', "]]")))
 }
 
-fn quote_string(value: &str) -> String {
+pub(crate) fn quote_string(value: &str) -> String {
     value.replace('\'', "''")
 }
 
@@ -1410,7 +1452,13 @@ mod tests {
                 .sql
                 .contains("WITH NORECOVERY, NOINIT, COMPRESSION, CHECKSUM")
         );
-        assert!(!script.sql.contains("COPY_ONLY"));
+        for (index, _) in script.sql.match_indices("BACKUP LOG") {
+            let statement = &script.sql[index..index + script.sql[index..].find(';').unwrap()];
+            assert!(
+                !statement.contains("COPY_ONLY"),
+                "a copy-only tail backup would not advance the chain: {statement}"
+            );
+        }
         assert!(script.sql.contains("SET MULTI_USER"));
         assert!(
             script
@@ -1424,6 +1472,91 @@ mod tests {
             script.report.touched_tables,
             ["Config", "ConfigSave", "Params"]
         );
+    }
+
+    #[test]
+    fn the_live_gate_is_at_the_head_of_the_script_and_the_sessions_are_checked_again_before_the_commit()
+     {
+        // #409 F-9 (log chain, directory, the account's right to write) and F-10 (sessions with open work)
+        let plan = fixture(MainActivationMode::Live);
+        let tail = Some(r"C:\tail\generation.trn");
+        let script = render_main_activation_sql("lab", &plan, tail).unwrap();
+        let at = |needle: &str| {
+            script
+                .sql
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in the script"))
+        };
+        let (chain, directory, probe, sessions) = (
+            at("THROW 57235"),
+            at("THROW 57236"),
+            at("BACKUP DATABASE [model]"),
+            at("THROW 57238"),
+        );
+        let begin = at("BEGIN TRANSACTION");
+        let again = at("THROW 57239");
+        let commit = at("COMMIT TRANSACTION");
+        assert!(
+            chain < directory && directory < probe && probe < sessions,
+            "the gate checks what costs least first"
+        );
+        assert!(
+            sessions < begin,
+            "nothing is written before the gate has passed"
+        );
+        assert!(
+            begin < again && again < commit,
+            "work that appears meanwhile rolls the promotion back"
+        );
+        assert!(
+            script.sql.contains("BACKUP DATABASE [model]") && script.sql.contains("xp_delete_file")
+        );
+        // the tail-log backups come after the gate and the commit, as before
+        assert!(commit < at("BACKUP LOG"));
+
+        // the operator accepts the interruption: no sessions check, in the gate or before the commit; the rest stays
+        let accepted = render_main_activation_sql_with("lab", &plan, tail, true).unwrap();
+        assert!(!accepted.sql.contains("THROW 57238") && !accepted.sql.contains("THROW 57239"));
+        assert!(
+            accepted.sql.contains("THROW 57235")
+                && accepted.sql.contains("BACKUP DATABASE [model]")
+        );
+        assert_eq!(
+            accepted.report, script.report,
+            "the acceptance is not part of the plan"
+        );
+
+        // the other modes have no live gate
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Online,
+            MainActivationMode::Worker,
+        ] {
+            let other = render_main_activation_sql("lab", &fixture(mode), None).unwrap();
+            for code in ["57235", "57236", "57238", "57239"] {
+                assert!(!other.sql.contains(code), "{mode:?}: {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn interrupting_sessions_is_accepted_for_the_live_mode_only() {
+        assert!(preflight_interrupt_sessions(MainActivationMode::Live, true).is_ok());
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Online,
+            MainActivationMode::Worker,
+        ] {
+            assert!(
+                preflight_interrupt_sessions(mode, false).is_ok(),
+                "{mode:?}"
+            );
+            let error = preflight_interrupt_sessions(mode, true).unwrap_err();
+            assert!(
+                error.to_string().contains("only valid for live"),
+                "{mode:?}: {error}"
+            );
+        }
     }
 
     fn markers(ordinary: &str, history: &[&str]) -> (MainStorageRow, MainStorageRow) {
