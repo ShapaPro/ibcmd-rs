@@ -8327,7 +8327,9 @@ fn form_dynamic_list_main_table_auto_fields(
         form_dynamic_list_declared_std_attribute_pairs(pairs, &base_table, declarations)
             .map(|(ru, _)| (*ru).to_string())
             .collect();
-    if FORM_DYNAMIC_LIST_REGISTER_KINDS.contains(&kind) {
+    if FORM_DYNAMIC_LIST_REGISTER_KINDS.contains(&kind)
+        && !declarations.is_some_and(MetadataFieldDeclarationIndex::register_dimensions_withheld)
+    {
         candidates.extend(form_dynamic_list_main_table_children(
             &base_table,
             object_refs,
@@ -25655,7 +25657,18 @@ fn walk_form_bound_chain_members(
             [marker] if marker.trim().starts_with('-') => {
                 let name = match (previous_type, previous_metadata_reference) {
                     (Some(reference), _) => {
-                        form_standard_attribute_name_for_type_reference(reference, marker.trim())?
+                        let name =
+                            form_standard_attribute_name_for_type_reference(reference, marker.trim())?;
+                        // A catalogue's `Owner` reaches its one owner's own
+                        // reference, so a further standard member of the
+                        // owner can still be named (`….Owner.Owner`).
+                        if name == "Owner" {
+                            reached_type = owner_scoped_bindings
+                                .metadata_field_types
+                                .get(&format!("owner-of:{reference}"))
+                                .map(String::as_str);
+                        }
+                        name
                     }
                     (None, Some(reference)) => {
                         form_tabular_section_standard_attribute_name(reference, marker.trim())?

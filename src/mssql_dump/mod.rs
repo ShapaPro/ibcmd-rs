@@ -3392,6 +3392,13 @@ fn dump_table_rows_with_options_mode(
                                                 &type_index,
                                             )
                                             .written_as(source_version)
+                                            .withholding_register_dimensions(
+                                                !form_compatibility_from_texts(
+                                                    metadata_texts,
+                                                    source_version,
+                                                )
+                                                .no_main_table_default_picture_marked,
+                                            )
                                         } else {
                                             MetadataFieldDeclarationIndex::default()
                                         }
@@ -4648,6 +4655,10 @@ fn dump_table_rows_streamed(
             &type_index,
         )
         .written_as(source_version)
+        .withholding_register_dimensions(
+            !form_compatibility_from_texts(&index_metadata_texts, source_version)
+                .no_main_table_default_picture_marked,
+        )
     } else {
         MetadataFieldDeclarationIndex::default()
     };

@@ -307,6 +307,13 @@ pub(super) struct MetadataConstantDeclaration {
 /// The declarations a dynamic list's resolvable-field universe is built from.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(super) struct MetadataFieldDeclarationIndex {
+    /// Whether a manual-query dynamic list leaves the main register's
+    /// dimensions out of its automatic fields: under compatibility 8.3.17
+    /// (Документооборот 3.0, ERP WE 2.5) the platform marks an unselected
+    /// dimension `~`, under 8.3.24 (Документооборот 3.0 Холдинг) it does
+    /// not. The boundary between is unobserved; the 8.3.19 boundary the
+    /// default-picture marker moves at is taken for it.
+    register_dimensions_withheld: bool,
     tables: BTreeMap<String, MetadataTableStandardAttributes>,
     /// Top-level data fields declared by each metadata table, folded to lower
     /// case. The object-reference index supplies these names independently of
@@ -342,6 +349,15 @@ pub(super) struct MetadataFieldDeclarationIndex {
 
 impl MetadataFieldDeclarationIndex {
     /// The index as the writer of `source_version` reads it.
+    pub(super) fn withholding_register_dimensions(mut self, withheld: bool) -> Self {
+        self.register_dimensions_withheld = withheld;
+        self
+    }
+
+    pub(super) fn register_dimensions_withheld(&self) -> bool {
+        self.register_dimensions_withheld
+    }
+
     pub(super) fn written_as(mut self, source_version: InfobaseConfigSourceVersion) -> Self {
         self.writes_value_storage_constants = source_version == InfobaseConfigSourceVersion::V2_21;
         self
@@ -2588,7 +2604,66 @@ pub(super) fn build_metadata_field_type_reference_index_from_texts(
     for pairs in found {
         index.extend(pairs);
     }
+    index.extend(catalog_single_owner_type_entries(rows));
     index
+}
+
+/// `owner-of:cfg:CatalogRef.<catalogue>` -> `cfg:CatalogRef.<owner>` for every
+/// catalogue whose `<Owners>` names exactly one catalogue: the type a chain
+/// reaches through the catalogue's `Owner`, so that a further member of the
+/// owner can be named. 1С:Конвертация данных `Catalogs/Свойства` binds
+/// `Объект.СвойствоВышестоящегоРелиза.Owner.Owner`.
+fn catalog_single_owner_type_entries(rows: &[MetadataTextRow]) -> Vec<(String, String)> {
+    let catalogs = rows
+        .iter()
+        .filter(|row| row.kind.as_deref() == Some("Catalog"))
+        .filter_map(|row| Some((row.header.as_ref()?.uuid.to_ascii_lowercase(), row)))
+        .collect::<BTreeMap<_, _>>();
+    let mut entries = Vec::new();
+    for row in catalogs.values() {
+        let Some(header) = row.header.as_ref() else {
+            continue;
+        };
+        let mut diagnostic = None;
+        let Some(graph) = decode_owner_graph_for_family_parser(
+            owner_graph::OwnerGraphFamily::Catalog,
+            &row.text,
+            header,
+            &mut diagnostic,
+        ) else {
+            continue;
+        };
+        let Some(owners) = graph
+            .owner_fields
+            .get(CATALOG_OWNER_FIELD_OWNERS)
+            .and_then(|field| split_information_register_braced_fields(field))
+        else {
+            continue;
+        };
+        if metadata_reference_collection_len(graph.owner_fields[CATALOG_OWNER_FIELD_OWNERS])
+            != Some(1)
+        {
+            continue;
+        }
+        let Some(owner_uuid) = owners.get(2).and_then(|owner| {
+            let typed = split_information_register_braced_fields(owner)?;
+            let payload = split_information_register_braced_fields(typed.get(2)?)?;
+            parse_information_register_non_zero_uuid(payload.get(1)?)
+        }) else {
+            continue;
+        };
+        let Some(owner) = catalogs
+            .get(&owner_uuid.to_ascii_lowercase())
+            .and_then(|owner| owner.header.as_ref())
+        else {
+            continue;
+        };
+        entries.push((
+            format!("owner-of:cfg:CatalogRef.{}", header.name),
+            format!("cfg:CatalogRef.{}", owner.name),
+        ));
+    }
+    entries
 }
 
 /// The *ordered* names of every information-register dimension that declares
