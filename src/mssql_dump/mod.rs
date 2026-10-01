@@ -969,6 +969,7 @@ pub mod cas;
 mod command_interface;
 mod config_dump_info;
 mod config_rows;
+pub mod config_save;
 mod configuration_properties_evidence;
 mod dcs;
 mod dynamic_generation;

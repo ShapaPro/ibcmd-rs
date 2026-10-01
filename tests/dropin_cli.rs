@@ -147,7 +147,7 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
                 assert_malformed(&args, "Указана неполная команда");
             }
             // served: without its path it asks for one
-            NodeKind::Export | NodeKind::Import => {
+            NodeKind::Export | NodeKind::Import | NodeKind::Save => {
                 assert_malformed(&args, "Не указано значение параметра");
             }
             // served, and it needs no path: it starts, and stops at the
@@ -377,6 +377,65 @@ fn import_reports_a_missing_tree_in_the_platforms_words() {
             .trim_end()
             .ends_with("[ERROR] Импорт конфигурации из XML завершен с ошибкой"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn save_starts_in_the_platforms_words_and_stops_at_the_connection() {
+    // served: it starts, and stops at the connection (a user without a
+    // password never reaches the server); no file is written
+    let out = TempDir::new("save");
+    let file = out.path().join("saved.cf");
+    let report = out.path().join("report.json");
+    let output = run(&[
+        "infobase",
+        "config",
+        "save",
+        "--dbms=MSSQLServer",
+        "--db-name=ibcmd_rs_dropin_test",
+        "--db-user=sa",
+        "--db",
+        &format!("--report={}", report.display()),
+        file.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(FAILED));
+    assert_eq!(text(&output.stdout), "[INFO] Выгрузка конфигурации...\n");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("не указан пароль пользователя сервера СУБД"),
+        "{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .ends_with("[ERROR] Выгрузка конфигурации завершена с ошибкой"),
+        "{stderr}"
+    );
+    assert!(!file.exists());
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["operation"], "infobase config save");
+    // `--extension` is the platform's, not served yet; a missing file is the
+    // command line's error
+    assert_refused(
+        &[
+            "infobase",
+            "config",
+            "save",
+            "--db-name=b",
+            "--extension=E",
+            "x.cf",
+        ],
+        "Параметр `--extension` команды `infobase config save` не поддерживается",
+    );
+    assert_malformed(
+        &["infobase", "config", "save", "--db-name=b"],
+        "Не указано значение параметра: путь к файлу конфигурации",
+    );
+    // load is still refused by name
+    assert_refused(
+        &["infobase", "config", "load", "--db-name=b", "x.cf"],
+        "Команда `infobase config load` не поддерживается",
     );
 }
 

@@ -8,6 +8,8 @@
 //!   configuration into the active one, refuses what needs a restructuring
 //!   (`требуется штатный config apply: ...`) and what a connected session
 //!   keeps from an exclusive lock;
+//! - `infobase config save [--db] <file>` writes the configuration's rows as
+//!   a `.cf` (`crate::infobase::save_config`, Untru/ibcmd-rs#352);
 //! - every other native mode, command and option is recognized and refused
 //!   by name with exit code 1 (`Команда `infobase config check` не
 //!   поддерживается в этой версии ibcmd-rs (планируется в следующих)`);
@@ -35,11 +37,13 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::cli::{
-    InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseImportStageMode,
-    InfobaseImportVerify,
+    InfobaseConfigExportArgs, InfobaseConfigImportArgs, InfobaseConfigSaveArgs,
+    InfobaseImportStageMode, InfobaseImportVerify,
 };
 use crate::infobase::OutputDirectoryNotEmpty;
-pub use parse::{ApplyRequest, Common, ExportRequest, ImportRequest, Invocation, Refusal};
+pub use parse::{
+    ApplyRequest, Common, ExportRequest, ImportRequest, Invocation, Refusal, SaveRequest,
+};
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
 
@@ -104,6 +108,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         Ok(Invocation::Export(request)) => run_export(request),
         Ok(Invocation::Import(request)) => run_import(request),
         Ok(Invocation::Apply(request)) => apply::run(request),
+        Ok(Invocation::Save(request)) => run_save(request),
         Err(refusal) => {
             print_refusal(&refusal, &program_name());
             refusal_exit_code(&refusal)
@@ -362,6 +367,30 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
     }
 }
 
+pub fn save_args(request: &SaveRequest) -> InfobaseConfigSaveArgs {
+    let common = &request.common;
+    InfobaseConfigSaveArgs {
+        settings: common.settings.clone(),
+        native_config: common.native_config.clone(),
+        dbms: common.dbms.clone(),
+        db_server: common.db_server.as_deref().map(sql_server_name),
+        db_name: common.db_name.clone(),
+        db_user: common.db_user.clone(),
+        db_pwd: common.db_pwd.clone(),
+        db_pwd_env: common
+            .db_pwd_env
+            .clone()
+            .unwrap_or_else(|| "IBCMD_DB_PSW".to_string()),
+        sqlcmd: common.sqlcmd.clone(),
+        database_configuration: request.database_configuration,
+        // Saving to a file that exists replaces it, as saving a file does;
+        // the old one stays whole until the new one is complete. The
+        // platform's own behaviour here is not measured.
+        overwrite: true,
+        output: PathBuf::from(&request.path),
+    }
+}
+
 /// The failure a `--report` file records.
 #[derive(Serialize)]
 struct FailureReport<'a> {
@@ -461,6 +490,15 @@ const APPLY: Operation = Operation {
     ended: "завершено",
 };
 
+/// The title is the platform's own name of the command (`ibcmd help
+/// infobase`: `save - Выгрузка конфигурации`), as every served command's
+/// title is; the lines `config save` itself prints are not measured.
+const SAVE: Operation = Operation {
+    command: "infobase config save",
+    title: "Выгрузка конфигурации",
+    ended: "завершена",
+};
+
 fn run_export(mut request: ExportRequest) -> i32 {
     let report = request.common.report.clone();
     if let Err(message) = read_requested_password(&mut request.common) {
@@ -503,6 +541,20 @@ fn run_import(mut request: ImportRequest) -> i32 {
     match crate::infobase::import_config(&args) {
         Ok(value) => IMPORT.succeed(report.as_deref(), &value),
         Err(error) => IMPORT.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+fn run_save(mut request: SaveRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        SAVE.start();
+        return SAVE.fail_with(&message, report.as_deref());
+    }
+    let args = save_args(&request);
+    SAVE.start();
+    match crate::infobase::save_config(&args) {
+        Ok(value) => SAVE.succeed(report.as_deref(), &value),
+        Err(error) => SAVE.fail_with(&format!("{error:#}"), report.as_deref()),
     }
 }
 
@@ -650,6 +702,20 @@ mod tests {
             ..import
         });
         assert_eq!(args.verify, InfobaseImportVerify::On);
+
+        let save = SaveRequest {
+            common: Common {
+                db_server: Some("sql01/inst".to_string()),
+                ..common()
+            },
+            database_configuration: true,
+            path: OsString::from("out.cf"),
+        };
+        let args = save_args(&save);
+        assert!(args.database_configuration && args.overwrite);
+        assert_eq!(args.db_server.as_deref(), Some(r"sql01\inst"));
+        assert_eq!(args.db_pwd_env, "IBCMD_DB_PSW");
+        assert_eq!(args.output, PathBuf::from("out.cf"));
     }
 
     #[test]

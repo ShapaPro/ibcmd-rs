@@ -10,8 +10,9 @@
 //!   (`--user`, `--password`) after `config`, `export`'s after `export`.
 //!
 //! The whole native command tree is known, so every native command is
-//! recognized: `config export` and `config import` are served, everything
-//! else is refused by name (see `super`).
+//! recognized: `config export`, `config import`, `config apply` and
+//! `config save` are served, everything else is refused by name (see
+//! `super`).
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -65,6 +66,8 @@ pub enum Opt {
     IgnoreUnresolvedRefs,
     // `config import`
     Out,
+    // `config save`
+    Db,
     // `config apply`
     Dynamic,
     SessionTerminate,
@@ -181,6 +184,13 @@ const IMPORT_OPTIONS: &[OptSpec] = &[
     flag(Opt::NoVerify, &["no-verify"], None),
 ];
 
+/// `config save [--db] [--extension=<name>] <path>`: the native options (the
+/// issue's syntax, Untru/ibcmd-rs#352); `--extension` is refused by name.
+const SAVE_OPTIONS: &[OptSpec] = &[
+    flag(Opt::Db, &["db"], None),
+    valued(Opt::Extension, &["extension"], Some('e')),
+];
+
 const APPLY_OPTIONS: &[OptSpec] = &[
     valued(Opt::Extension, &["extension"], Some('e')),
     flag(Opt::Force, &["force"], Some('F')),
@@ -207,6 +217,8 @@ pub enum NodeKind {
     Import,
     /// `infobase config apply`.
     Apply,
+    /// `infobase config save`.
+    Save,
     /// A native command ibcmd-rs does not implement yet.
     Unsupported,
 }
@@ -251,7 +263,13 @@ pub static INFOBASE: Node = Node {
             options: CONFIG_OPTIONS,
             children: &[
                 unsupported("load", "Загрузка конфигурации"),
-                unsupported("save", "Выгрузка конфигурации"),
+                Node {
+                    name: "save",
+                    summary: "Выгрузка конфигурации",
+                    kind: NodeKind::Save,
+                    options: SAVE_OPTIONS,
+                    children: &[],
+                },
                 unsupported("check", "Проверка конфигурации"),
                 Node {
                     name: "apply",
@@ -509,6 +527,16 @@ pub struct ApplyRequest {
     pub backup: BackupPolicy,
 }
 
+/// `infobase config save [--db] <file>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveRequest {
+    pub common: Common,
+    /// `--db`: the database configuration (Config) instead of the main one.
+    pub database_configuration: bool,
+    /// The file as given.
+    pub path: OsString,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     Help,
@@ -516,6 +544,7 @@ pub enum Invocation {
     Export(ExportRequest),
     Import(ImportRequest),
     Apply(ApplyRequest),
+    Save(SaveRequest),
 }
 
 /// The tokens of one command line, resolved against the tree.
@@ -682,10 +711,13 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
                 path: scan.path.iter().map(|node| node.name).collect(),
             });
         }
-        NodeKind::Export | NodeKind::Import | NodeKind::Apply => {}
+        NodeKind::Export | NodeKind::Import | NodeKind::Apply | NodeKind::Save => {}
     }
     if node.kind == NodeKind::Apply {
         return parse_apply(&scan);
+    }
+    if node.kind == NodeKind::Save {
+        return parse_save(&scan);
     }
     if let Some(error) = scan.error.clone() {
         return Err(error);
@@ -854,6 +886,41 @@ fn parse_apply(scan: &Scan) -> Result<Invocation, Refusal> {
         session_terminate_message: scan.value(Opt::SessionTerminateMessage).map(str::to_string),
         exclusivity,
         backup,
+    }))
+}
+
+/// `infobase config save`: one file argument, `--db`, and the connection.
+/// The words of a missing path are this program's (the platform's own for
+/// `config save` are not measured).
+fn parse_save(scan: &Scan) -> Result<Invocation, Refusal> {
+    if let Some(error) = scan.error.clone() {
+        return Err(error);
+    }
+    for opt in [Opt::Pid, Opt::Remote] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedServer(spelled.to_string()));
+        }
+    }
+    if let Some(spelled) = scan.spelled(Opt::Extension) {
+        return Err(Refusal::UnsupportedOption {
+            option: spelled.to_string(),
+            command: scan.command(),
+        });
+    }
+    let common = common(scan)?;
+    let path = match scan.arguments.as_slice() {
+        [] => {
+            return Err(Refusal::MissingValue(
+                "путь к файлу конфигурации".to_string(),
+            ));
+        }
+        [path] => path.clone(),
+        [_, extra, ..] => return Err(Refusal::Parse(extra.to_string_lossy().into_owned())),
+    };
+    Ok(Invocation::Save(SaveRequest {
+        common,
+        database_configuration: scan.has(Opt::Db),
+        path,
     }))
 }
 
@@ -1406,7 +1473,7 @@ mod tests {
                     "{path:?}: {result:?}"
                 ),
                 // served: without its path it asks for one
-                NodeKind::Export | NodeKind::Import => assert!(
+                NodeKind::Export | NodeKind::Import | NodeKind::Save => assert!(
                     matches!(result, Err(Refusal::MissingValue(_))),
                     "{path:?}: {result:?}"
                 ),
@@ -1486,9 +1553,9 @@ mod tests {
             Err(Refusal::UnsupportedCommand("infobase create".to_string()))
         );
         assert_eq!(
-            parse(&["config", "save", "--db-name=b", "--user=Админ", "a.cf"]),
+            parse(&["config", "load", "--db-name=b", "--user=Админ", "a.cf"]),
             Err(Refusal::UnsupportedCommand(
-                "infobase config save".to_string()
+                "infobase config load".to_string()
             ))
         );
         assert_eq!(
@@ -1817,5 +1884,72 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn save_takes_one_file_and_db() {
+        match parse(&[
+            "config",
+            "save",
+            "--dbms=MSSQLServer",
+            "--db-name=b",
+            "--db",
+            "--user=Админ",
+            "out.cf",
+        ]) {
+            Ok(Invocation::Save(request)) => {
+                assert!(request.database_configuration);
+                assert_eq!(request.path, OsString::from("out.cf"));
+                assert_eq!(request.common.db_name.as_deref(), Some("b"));
+                assert_eq!(request.common.user.as_deref(), Some("Админ"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["config", "save", "--db-name=b", "out.cf"]) {
+            Ok(Invocation::Save(request)) => assert!(!request.database_configuration),
+            other => panic!("{other:?}"),
+        }
+        // `--db` is `save`'s own: before the command it is not known yet
+        assert_eq!(
+            parse(&["config", "--db", "save", "out.cf"]),
+            Err(Refusal::Parse("--db".to_string()))
+        );
+        // a flag takes no value; the platform names it without the dashes
+        assert_eq!(
+            parse(&["config", "save", "--db=yes", "out.cf"]),
+            Err(Refusal::Parse("db".to_string()))
+        );
+        // export's options are not save's
+        assert_eq!(
+            parse(&["config", "save", "--force", "out.cf"]),
+            Err(Refusal::Parse("--force".to_string()))
+        );
+        for option in [vec!["--extension=E"], vec!["-e", "E"]] {
+            let mut list = vec!["config", "save", "--db-name=b"];
+            list.extend(option.iter().copied());
+            list.push("out.cf");
+            assert_eq!(
+                parse(&list),
+                Err(Refusal::UnsupportedOption {
+                    option: option[0].split('=').next().unwrap().to_string(),
+                    command: "infobase config save".to_string(),
+                }),
+                "{option:?}"
+            );
+        }
+        assert_eq!(
+            parse(&["config", "save", "--db-name=b"]),
+            Err(Refusal::MissingValue(
+                "путь к файлу конфигурации".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&["config", "save", "--db-name=b", "a.cf", "b.cf"]),
+            Err(Refusal::Parse("b.cf".to_string()))
+        );
+        assert!(matches!(
+            parse(&["config", "save", "--remote=http://host:1545", "a.cf"]),
+            Err(Refusal::UnsupportedServer(_))
+        ));
     }
 }

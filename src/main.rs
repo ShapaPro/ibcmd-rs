@@ -595,6 +595,10 @@ fn run() -> Result<()> {
             let report = ibcmd_rs::mssql_dump::dump_config(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Commands::MssqlSaveConfig(args) => {
+            let report = ibcmd_rs::mssql_dump::config_save::save_config_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Commands::MssqlExtensionList(args) => {
             let report = ibcmd_rs::mssql_extensions::list_extensions(&args)?;
             match args.format {

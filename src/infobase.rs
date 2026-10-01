@@ -1,8 +1,10 @@
-//! `infobase config export` and `infobase config import` against a Microsoft
-//! SQL Server infobase, without the platform: the export reads the Config
-//! table and writes the XML tree (`mssql_dump`), the import stages the tree
-//! into ConfigSave (`mssql::stage_source_objects`), where the platform's own
-//! `config apply` finds it, as it finds what its own `config import` wrote.
+//! `infobase config export`, `import` and `save` against a Microsoft SQL
+//! Server infobase, without the platform: the export reads the Config table
+//! and writes the XML tree (`mssql_dump`), the import stages the tree into
+//! ConfigSave (`mssql::stage_source_objects`), where the platform's own
+//! `config apply` finds it, as it finds what its own `config import` wrote,
+//! and the save writes the rows themselves as a `.cf`
+//! (`mssql_dump::config_save`).
 //!
 //! The drop-in command line (`crate::dropin`) and the research round trip
 //! (`crate::infobase_oracle`, `platform-oracle` builds only) call these.
@@ -20,8 +22,9 @@ use walkdir::WalkDir;
 use crate::adapters::mssql_legacy::MssqlLegacyAdapter;
 use crate::cli::{
     InfobaseConfigExportArgs, InfobaseConfigFormat, InfobaseConfigImportArgs,
-    InfobaseConfigSourceVersion, InfobaseImportStageMode, InfobaseImportVerify,
-    MssqlDumpConfigArgs, MssqlDumpExtensionArgs, MssqlExtensionImage, MssqlStageSourceObjectsArgs,
+    InfobaseConfigSaveArgs, InfobaseConfigSourceVersion, InfobaseImportStageMode,
+    InfobaseImportVerify, MssqlDumpConfigArgs, MssqlDumpExtensionArgs, MssqlExtensionImage,
+    MssqlStageSourceObjectsArgs,
 };
 use crate::legacy_version::LegacyVersionAxes;
 use crate::platform::PlatformSpec;
@@ -209,6 +212,86 @@ impl InfobaseConfigImportArgs {
             },
         }
     }
+}
+
+/// What `infobase config save` did.
+#[derive(Debug, Serialize)]
+pub struct InfobaseConfigSaveReport {
+    pub operation: &'static str,
+    pub backend: &'static str,
+    pub dbms: String,
+    pub db_server: String,
+    pub db_name: String,
+    pub db_user: Option<String>,
+    pub password_source: Option<String>,
+    pub native_config: Option<PathBuf>,
+    pub save: crate::mssql_dump::config_save::ConfigSaveReport,
+}
+
+impl InfobaseConfigSaveArgs {
+    fn connection(&self) -> ConnectionRequest<'_> {
+        ConnectionRequest {
+            settings: self.settings.as_deref(),
+            native_config: self.native_config.as_deref(),
+            format: None,
+            platform: None,
+            source_version: None,
+            dbms: self.dbms.as_deref(),
+            db_server: self.db_server.as_deref(),
+            db_name: self.db_name.as_deref(),
+            db_user: self.db_user.as_deref(),
+            db_pwd: self.db_pwd.as_deref(),
+            db_pwd_env: &self.db_pwd_env,
+            // A .cf holds the stored rows: no XML format is read or written.
+            need: PlatformNeed::Given,
+        }
+    }
+}
+
+/// `infobase config save`: the configuration of the connection's database
+/// written as a `.cf` from its rows (`mssql_dump::config_save`).
+pub fn save_config(args: &InfobaseConfigSaveArgs) -> Result<InfobaseConfigSaveReport> {
+    use crate::mssql_dump::config_save::{ConfigSaveRequest, SavedConfiguration, save_config};
+
+    let config = resolve_connection(args.connection())?;
+    ensure_mssql(&config.dbms)?;
+    let output = if args.output.is_absolute() {
+        args.output.clone()
+    } else {
+        env::current_dir()?.join(&args.output)
+    };
+    let sql = crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
+        sqlcmd: args.sqlcmd.as_deref(),
+        bcp: None,
+        server: &config.db_server,
+        user: config.db_user.as_deref(),
+        password: config.db_pwd.as_deref(),
+        password_env: &args.db_pwd_env,
+        trust_server_certificate: true,
+    })?;
+    let save = save_config(&ConfigSaveRequest {
+        sql: &sql,
+        database: &config.db_name,
+        rows_dir: None,
+        configuration: if args.database_configuration {
+            SavedConfiguration::Database
+        } else {
+            SavedConfiguration::Main
+        },
+        output: &output,
+        overwrite: args.overwrite,
+    })?;
+    Ok(InfobaseConfigSaveReport {
+        operation: "infobase config save",
+        backend: "mssql-config-rows",
+        dbms: config.dbms,
+        db_server: config.db_server,
+        db_name: config.db_name,
+        db_user: config.db_user,
+        password_source: config.password_source,
+        native_config: config.native_config,
+        save,
+    })
 }
 
 pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigExportReport> {

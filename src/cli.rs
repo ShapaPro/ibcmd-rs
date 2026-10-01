@@ -26,10 +26,10 @@ pub enum Commands {
     Convert(ConvertArgs),
     /// Inspect, verify, export, or overlay CF without an installed 1C platform.
     Cf(CfArgs),
-    /// Drop-in `ibcmd infobase`: `config export`, `config import` and
-    /// `config apply` in the platform ibcmd's syntax, against Microsoft SQL
-    /// Server; other commands are refused. `infobase --help` prints its help
-    /// (in Russian).
+    /// Drop-in `ibcmd infobase`: `config export`, `config import`,
+    /// `config apply` and `config save` in the platform ibcmd's syntax,
+    /// against Microsoft SQL Server; other commands are refused.
+    /// `infobase --help` prints its help (in Russian).
     #[command(disable_help_flag = true)]
     Infobase(NativeModeArgs),
     /// The platform ibcmd's other modes, refused with a clear message.
@@ -140,6 +140,9 @@ pub enum Commands {
     DumpSources(DumpSourcesArgs),
     /// Dump Config/ConfigSave storage rows directly from SQL Server.
     MssqlDumpConfig(MssqlDumpConfigArgs),
+    /// Write the configuration of a database (or of a folder of its Config
+    /// rows) as a .cf straight from the rows, as `infobase config save`.
+    MssqlSaveConfig(MssqlSaveConfigArgs),
     /// List configuration extensions directly from the SQL Server registry.
     MssqlExtensionList(MssqlExtensionListArgs),
     /// Export one or all configuration extensions directly from SQL Server CAS.
@@ -802,6 +805,34 @@ pub struct InfobaseConfigImportArgs {
     pub verify: InfobaseImportVerify,
     /// Root directory with hierarchical XML sources.
     pub source_dir: PathBuf,
+}
+
+/// `infobase config save [--db] <file>`: what the drop-in command line
+/// (`crate::dropin`) asks for.
+#[derive(Debug, Clone)]
+pub struct InfobaseConfigSaveArgs {
+    /// Optional JSON settings file (vRunner DB keys and ibcmd-rs keys).
+    pub settings: Option<PathBuf>,
+    /// The platform ibcmd's configuration file (`--config`/`-c`), kept for
+    /// the settings layer.
+    pub native_config: Option<PathBuf>,
+    /// DBMS type. Only MSSQLServer is served.
+    pub dbms: Option<String>,
+    pub db_server: Option<String>,
+    pub db_name: Option<String>,
+    pub db_user: Option<String>,
+    pub db_pwd: Option<String>,
+    /// Environment variable containing the database password.
+    pub db_pwd_env: String,
+    /// sqlcmd.exe (and bcp.exe beside it) to run instead of the built-in SQL
+    /// Server client (`--sqlcmd`).
+    pub sqlcmd: Option<PathBuf>,
+    /// `--db`: the database configuration (Config) instead of the main one.
+    pub database_configuration: bool,
+    /// Replace an existing file.
+    pub overwrite: bool,
+    /// The .cf to write.
+    pub output: PathBuf,
 }
 
 /// Research commands under `infobase config` that run the installed
@@ -1580,6 +1611,49 @@ pub struct DumpSourcesArgs {
     /// Convert TaxiEnableVersion8_2 to TaxiEnableOld in exported Configuration.xml.
     #[arg(long)]
     pub normalize_taxi_old: bool,
+}
+
+/// `mssql-save-config`: the configuration as a .cf, from SQL Server or from
+/// a folder of stored Config rows (`--rows-dir`).
+#[derive(Debug, Args)]
+pub struct MssqlSaveConfigArgs {
+    /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
+    /// client.
+    #[arg(long)]
+    pub sqlcmd: Option<PathBuf>,
+    /// The bcp.exe of the --sqlcmd path (default: the one beside sqlcmd).
+    #[arg(long)]
+    pub bcp_executable: Option<PathBuf>,
+    /// SQL Server name.
+    #[arg(long, default_value = "localhost")]
+    pub server: String,
+    /// SQL Server login. Uses Windows (integrated) authentication when omitted.
+    #[arg(long)]
+    pub sql_user: Option<String>,
+    /// SQL Server password. Prefer --sql-pwd-env for shell history.
+    #[arg(long)]
+    pub sql_pwd: Option<String>,
+    /// Environment variable containing the SQL Server password.
+    #[arg(long, default_value = "IBCMD_DB_PSW")]
+    pub sql_pwd_env: String,
+    /// SQL Server database name (not needed with --rows-dir).
+    #[arg(long, default_value = "")]
+    pub database: String,
+    /// Read the Config table from a folder of `<FileName>__part<N>.bin`
+    /// files (the stored BinaryData, raw deflate) instead of SQL Server; no
+    /// server or database is contacted.
+    #[arg(long)]
+    pub rows_dir: Option<PathBuf>,
+    /// Save the database configuration (the Config table alone), as
+    /// `config save --db`. Without it the main configuration is saved: a
+    /// completed stage in ConfigSave over Config, as `config export` reads it.
+    #[arg(long)]
+    pub db: bool,
+    /// Replace an existing file (only once the new one is complete).
+    #[arg(long)]
+    pub overwrite: bool,
+    /// The .cf to write.
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Args)]

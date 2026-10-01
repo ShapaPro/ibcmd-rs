@@ -167,6 +167,20 @@ pub fn infobase_help(program: &str) -> String {
                 --session-terminate-message=<message>
                     Принимается и не используется
 
+            save
+                Выгрузка конфигурации в файл .cf: строки конфигурации
+                записываются в файл как есть, без XML. Без --db - основная
+                конфигурация (загруженная командой import и еще не
+                примененная, если она есть, иначе конфигурация базы данных),
+                с --db - конфигурация базы данных (таблица Config).
+                Существующий файл заменяется, когда новый записан и проверен
+
+                --db
+                    Выгрузить конфигурацию базы данных
+
+                <path>
+                    путь к файлу конфигурации
+
 Параметры ibcmd-rs (у ibcmd их нет):
 
     --report=<file>
@@ -226,6 +240,7 @@ pub fn infobase_help(program: &str) -> String {
         параметры export --base, --file, --sync, --archive
         параметры import --out, --extension
         параметры apply --extension, --dynamic=force, --sqlcmd
+        параметр save --extension
         общие параметры --pid, --remote
         режимы {modes}
 
@@ -253,7 +268,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config import, config apply
+{infobase:<23}{summary}: config export, config import, config apply, config save
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -292,6 +307,10 @@ mod tests {
         assert!(!help.contains("config support disable"));
         // apply is served: described with its words, not listed as refused
         assert!(!help.contains("ibcmd infobase config apply"));
+        // so is save; load is not
+        assert!(!help.contains("ibcmd infobase config save"));
+        assert!(help.contains("ibcmd infobase config load"));
+        assert!(help.contains("путь к файлу конфигурации"));
         for word in [
             "--dynamic=<auto|disable|prompt|force>",
             "--session-terminate=<disable|prompt|force>",
