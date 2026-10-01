@@ -6262,7 +6262,7 @@ fn prepare_form_body_row(
     // (`cf load`): the form, its interceptors' call types, the base form.
     if CF_LOAD_COMPILE.load(std::sync::atomic::Ordering::Relaxed)
         && !BASE_FREE_STAGE.load(std::sync::atomic::Ordering::Relaxed)
-        && form_xml.windows(10).any(|window| window == b"<BaseForm ")
+        && offline_compile::requires_adoption_adapter(&form_xml, &fs::read(xml_path)?)?
     {
         let base_body = fetch_config_blob(sql, database, &body_id)?;
         let items_root = form_path.with_file_name("Form").join("Items");

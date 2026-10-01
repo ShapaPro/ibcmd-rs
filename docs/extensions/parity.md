@@ -226,10 +226,14 @@ test per family (`business_object.rs`). The tests fail on the previous layouts.
   (upstream fixtures `adopted/form_events`, `form_events_shared`). The command
   handlers (`<Action>`) of an adopted form are written `Before`: all six on
   record say so, and where a command record keeps an interceptor code is not on
-  record. An adopted form that carries no base form record (the common form
-  `СвязанныеДокументы` of the БСП 8.3.27 ServiceDesk) gets `Before` on all its
-  events and commands from the export's own pass (`extension::form`), for lack
-  of a second sample.
+  record. For an adopted form without a base form record, the export reads
+  each event's actual code from the stored event block. Native Before, After
+  and Override samples of `СвязанныеДокументы` in БСП 8.3.27 ServiceDesk
+  prove the reader and compiler. Unknown or malformed codes fail the form
+  export and remove its projected outputs. Commands retain the observed
+  `Before` behavior; no-base After/Override commands are refused on load.
+  [Wave1 evidence](evidence/form-interceptors-20261001.md) records the native
+  and our staged/applied twins and the remaining Version-edit limitation.
 * **`Usual` group behavior.** An explicit `<Behavior>Usual</Behavior>` follows
   the compatibility mode of the configuration the extension EXTENDS, not the
   extension's own: `VAExtension` (mode 8.3.14) extends a configuration in 8.3.27
@@ -513,8 +517,9 @@ These are read off a single native sample; the evidence is in the lab folder
 * the `dcssch` boundary: 8.3.14 writes none, 8.3.21 and 8.3.24 write it, 8.3.15 is
   assumed;
 * `EnableDrag` of a planner field is option slot 6 (the only planner on record);
-* `callType="Before"` on the events and commands of an adopted form without a
-  base form record (one form on record);
+* `callType="Before"` on commands of an adopted form without a base form
+  record (one form on record); its events now have three native call-type
+  samples, as recorded above;
 * the completion of old items is proved on 8 forms of one extension (ids, order,
   the dynamic list defaults); other kinds of items (pages, groups) that an older
   platform completed may exist;
@@ -531,8 +536,12 @@ These are read off a single native sample; the evidence is in the lab folder
 * the load of an 8.5 extension (the 8.5 form loader has the planner bag entry
   and the empty-source characteristic compiles, but no 8.5 extension was loaded);
 * the whole-tree load on the 8.5 clone (extension writes are declared
-  unsupported for 8.5), of interceptors of an adopted form and of a binary
-  template (`Template.bin`): the compiler has them, no case ran;
+  unsupported for 8.5) and of a binary template (`Template.bin`): no case ran;
+* adopted-form interceptor writes beyond the measured 8.3.27 no-base common
+  form handler edits, including no-base After/Override command actions;
+* a direct root `Configuration.xml` Version edit in the extension loader:
+  the wave1 twins establish the new Version natively before our handler-only
+  load. This guard is unchanged and #348 is not fully closed by that proof;
 * a structural change of an extension (a new attribute, an object with a table,
   a body added to an object that has none) is the platform's own load: the
   load refuses it by file and the activation restructures nothing;

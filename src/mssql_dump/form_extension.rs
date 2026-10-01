@@ -112,7 +112,7 @@ impl EventCallTypes {
     }
 
     /// The call type of `handler` bound to the event `event` (its XML name).
-    fn get(&self, event: &str, handler: &str) -> Option<&'static str> {
+    pub(super) fn get(&self, event: &str, handler: &str) -> Option<&'static str> {
         match self.by_event.get(&(event.to_owned(), handler.to_owned())) {
             Some(known) => *known,
             None => self.by_handler.get(handler).copied().flatten(),
