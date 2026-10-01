@@ -6520,6 +6520,9 @@ fn moxel_chart_type(code: &str) -> Option<&'static str> {
         // and both spell `chartType` code `6`, matching
         // `<d3p1:chartType>Column3D</d3p1:chartType>` in both native exports.
         "6" => Some("Column3D"),
+        // The form chart's table names `2` `Area` (Монитор
+        // `Catalogs/Запросы/Forms/ФормаАнализа`).
+        "2" => Some("Area"),
         _ => None,
     }
 }
@@ -7168,6 +7171,8 @@ fn gantt_series_key_record_base_data(text: &str) -> Option<String> {
 /// reader has not observed and therefore does not guess at.
 fn moxel_gantt_time_measure(code: &str) -> Option<&'static str> {
     match code.trim() {
+        // The form Gantt chart's table publishes `5` as `Second`.
+        "5" => Some("Second"),
         "10" => Some("Minute"),
         "20" => Some("Hour"),
         "30" => Some("Day"),

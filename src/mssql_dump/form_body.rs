@@ -667,6 +667,10 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         .owner_scoped_bindings
         .attribute_ids_without_declared_owner =
         form_attribute_ids_without_declared_owner(&attributes, context.metadata_field_declarations);
+    child_item_indexes
+        .owner_scoped_bindings
+        .undeclared_root_standard_attributes =
+        form_attribute_undeclared_standard_attributes(&attributes, context.metadata_field_declarations);
     apply_form_attribute_save_field_bindings(
         &mut attributes,
         &attribute_save_field_bindings,
@@ -756,6 +760,11 @@ pub(super) fn extract_form_body_xml_from_body_detailed_timed(
         withhold_form_button_commands_the_table_lacks(&mut child_items, &ownership);
         if let Some(command_bar) = auto_command_bar.as_mut() {
             withhold_form_button_commands_the_table_lacks(&mut command_bar.child_items, &ownership);
+        }
+        let excluded = &properties.command_set_excluded_commands;
+        withhold_form_button_commands_the_form_excludes(&mut child_items, excluded);
+        if let Some(command_bar) = auto_command_bar.as_mut() {
+            withhold_form_button_commands_the_form_excludes(&mut command_bar.child_items, excluded);
         }
     }
     if let Some(timings) = timings.as_deref_mut() {
@@ -3396,7 +3405,9 @@ pub(super) fn extract_form_settings_storage(
         fields.len(),
     )?;
     let uuid = parse_non_zero_uuid(fields.get(schema.slot())?.trim())?;
-    reference_index.get(&uuid).cloned()
+    // A storage the configuration no longer has is written as its bare uuid
+    // (Монитор `DataProcessors/НастройкаМониторинг/Forms/Форма`).
+    Some(reference_index.get(&uuid).cloned().unwrap_or(uuid))
 }
 
 pub(super) fn extract_form_custom_settings_folder(
@@ -10839,6 +10850,38 @@ fn form_attribute_ids_without_declared_owner(
         .collect()
 }
 
+fn form_attribute_undeclared_standard_attributes(
+    attributes: &[FormAttribute],
+    declarations: Option<&MetadataFieldDeclarationIndex>,
+) -> BTreeSet<(String, &'static str)> {
+    let Some(declarations) = declarations else {
+        return BTreeSet::new();
+    };
+    let mut undeclared = BTreeSet::new();
+    for attribute in attributes {
+        let [ConstantValueType::Reference { reference }] = attribute.value_types.as_slice() else {
+            continue;
+        };
+        let Some(owner) = form_generated_owner_type_from_type_reference(reference) else {
+            continue;
+        };
+        if owner.family() != GeneratedMetadataOwnerFamily::Catalog {
+            continue;
+        }
+        let Some(table) = declarations.table(&owner.owner_reference()) else {
+            continue;
+        };
+        // `Parent` under a non-hierarchical catalogue too: Монитор
+        // `Catalogs/ПолучателиУведомлений/Forms/ФормаЭлемента` writes `1/-4`.
+        for name in ["Code", "Description", "Parent"] {
+            if !table.declares(name) {
+                undeclared.insert((attribute.id.clone(), name));
+            }
+        }
+    }
+    undeclared
+}
+
 pub(super) fn form_attribute_metadata_owners_by_id(
     attributes: &[FormAttribute],
 ) -> BTreeMap<String, FormAttributeMetadataOwner> {
@@ -11240,6 +11283,13 @@ pub(super) struct FormOwnerScopedBindingIndexes {
     /// physically. Read from the very declaration index the root command set
     /// reads `Parent` and `IsFolder` from.
     attribute_ids_without_declared_owner: BTreeSet<String>,
+    /// `(attribute id, standard attribute)` pairs whose catalogue does not
+    /// declare that standard attribute at all -- `Code` under `<CodeLength>0`,
+    /// `Description` under `<DescriptionLength>0`. A chain that names one is
+    /// written physically, `<attribute id>/<marker>` (Монитор
+    /// `Catalogs/Индексы/Forms/ФормаЭлемента`: `<DataPath>1/-2</DataPath>` on a
+    /// catalogue with no code).
+    undeclared_root_standard_attributes: BTreeSet<(String, &'static str)>,
     /// The same fact keyed the way a *form item* addresses it: the table item
     /// id paired with the column id its terminals carry. A data path written
     /// `Items.<table>.CurrentData.<column>` is spelled from the item side and
@@ -13215,7 +13265,19 @@ fn parse_form_child_item_with_metadata_owners(
         owner_scoped_bindings,
         object_refs,
     );
-    let data_path_resolution = data_paths.primary;
+    let mut data_path_resolution = data_paths.primary;
+    if let Some(resolved) = data_path_resolution.as_mut()
+        && let Some(binding) = form_child_item_binding_fields(tag, &fields).first()
+        && let Some(physical) = form_item_unnamed_binding_physical_path(
+            binding,
+            &resolved.data_path,
+            attribute_metadata_owners_by_id,
+            owner_scoped_bindings,
+            object_refs,
+        )
+    {
+        resolved.data_path = physical;
+    }
     let footer_data_path = data_paths.footer;
     let multiple_value_data_path = data_paths.multiple_value;
     let multiple_value_picture_data_path = data_paths.multiple_value_picture;
@@ -14914,7 +14976,16 @@ fn parse_form_child_item_with_metadata_owners(
             fields
                 .get(FORM_TABLE_TITLE_TEXT_COLOR_SLOT)
                 .and_then(|field| parse_form_control_color(field, object_refs))
-        } else if field_schema_and_options.is_some() {
+        } else if field_schema_and_options.is_some()
+            // The special fields keep it in the shared field slot beside the
+            // title font they already read there (Монитор `Catalogs/ДанныеСУБД/
+            // Forms/ФормаАнализа`, ChartField `СУБД_Диаграмма`: `style:AccentColor`).
+            || (wrapper == "37"
+                && matches!(
+                    tag,
+                    "ProgressBarField" | "TrackBarField" | "ChartField" | "GanttChartField"
+                ))
+        {
             fields
                 .get(FieldSlot::TitleTextColor.index(input_field_top_level_offset))
                 .and_then(|field| parse_form_control_color(field, object_refs))
@@ -16894,6 +16965,8 @@ fn form_control_web_color_name(code: i32) -> Option<&'static str> {
         57 => Some("web:IndianRed"),      // 1
         70 => Some("web:LightGreen"),     // 15
         75 => Some("web:LightSkyBlue"),   // 1
+        // Монитор `DataProcessors/НастройкаМониторинг/Forms/Форма`.
+        81 => Some("web:LimeGreen"),
         91 => Some("web:MediumSeaGreen"), // 6
         // 1C:Документооборот `Documents/Отсутствие/Forms/ФормаДокумента`
         // `ЗаместителиТекст` holds `{3,2,{125}}` and writes `web:Seagreen`.
@@ -19061,6 +19134,79 @@ pub(super) fn parse_form_input_field_type_link(
 /// Those 31 are the whole of what this fallback answers for.
 ///
 /// A chain with no segment at all has nothing to spell and keeps the refusal.
+/// The physical spelling of an item's bound chain when the name the chain
+/// resolved to is one the configuration does not have.
+///
+/// Two shapes on Монитор `Catalogs/Индексы/Forms/ФормаЭлемента`: `{2,{1},{-2}}`
+/// names the catalogue's `Code` under `<CodeLength>0`, and
+/// `{3,{1},{0,86344377-…},{-2}}` a tabular section the configuration no
+/// longer declares. The platform writes `1/-2` and
+/// `1/0:86344377-…/-2`; the names this reader found for both come from the
+/// form's own remembered binding, not from the metadata.
+fn form_item_unnamed_binding_physical_path(
+    binding: &str,
+    resolved: &str,
+    attribute_metadata_owners_by_id: &BTreeMap<String, FormAttributeMetadataOwner>,
+    owner_scoped_bindings: &FormOwnerScopedBindingIndexes,
+    object_refs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let fields = split_1c_braced_fields(binding.trim(), 0)?;
+    let count = fields.first()?.trim().parse::<usize>().ok()?;
+    let segments = fields.get(1..)?;
+    if count != segments.len() || count < 2 {
+        return None;
+    }
+    let root = split_1c_braced_fields(segments.first()?.trim(), 0)?;
+    let [attribute_id] = root.as_slice() else {
+        return None;
+    };
+    // Only a chain rooted at a metadata object's own value walks metadata
+    // members; a platform type (a settings composer, a value table) names
+    // its members by uuids no configuration declares.
+    let metadata_root = attribute_metadata_owners_by_id
+        .get(attribute_id.trim())
+        .and_then(|owner| owner.exact_single_type_reference.as_deref())
+        .and_then(form_generated_owner_type_from_type_reference)
+        .is_some_and(|owner| {
+            owner.role() == GeneratedMetadataOwnerRole::Object
+                && !matches!(
+                    owner.family(),
+                    GeneratedMetadataOwnerFamily::Report
+                        | GeneratedMetadataOwnerFamily::DataProcessor
+                )
+        });
+    if !metadata_root {
+        return None;
+    }
+    let mut unnamed = false;
+    // The object's own member: what follows it may be a value table's index
+    // or a platform member, named by uuids no configuration declares.
+    for segment in &segments[1..2] {
+        let members = split_1c_braced_fields(segment.trim(), 0)?;
+        if let [kind, uuid] = members.as_slice()
+            && kind.trim() == "0"
+            && let Some(uuid) = parse_non_zero_uuid(uuid.trim())
+            && !object_refs.contains_key(&uuid)
+        {
+            unnamed = true;
+        }
+    }
+    if segments.len() == 2 {
+        let terminal = split_1c_braced_fields(segments.get(1)?.trim(), 0)?;
+        if let [marker] = terminal.as_slice()
+            && marker.trim().starts_with('-')
+            && let Some((_, name)) = resolved.rsplit_once('.')
+            && owner_scoped_bindings
+                .undeclared_root_standard_attributes
+                .iter()
+                .any(|(id, undeclared)| id == attribute_id.trim() && *undeclared == name)
+        {
+            unnamed = true;
+        }
+    }
+    unnamed.then(|| form_physical_chain_spelling(segments)).flatten()
+}
+
 fn form_physical_chain_spelling(segments: &[&str]) -> Option<String> {
     if segments.is_empty() {
         return None;
@@ -22284,6 +22430,12 @@ pub(super) fn parse_form_field_tooltip_representation(
 ) -> Option<&'static str> {
     let slot = if let Some(schema) = table_schema {
         schema.tooltip_representation_slot(fields)?
+    } else if tag == "GanttChartField" && wrapper == "37" {
+        // The Gantt chart keeps the shared field slot 50, which a reverse
+        // offset cannot reach once its nested table trails the record. Монитор
+        // `Catalogs/Блокировки/Forms/ФормаЭлемента` stores `2` there and the
+        // platform writes `Balloon`.
+        50 + form_input_field_top_level_offset(fields)
     } else {
         form_tooltip_representation_schema(
             wrapper,
@@ -25513,7 +25665,17 @@ fn walk_form_bound_chain_members(
                     // -- the same fact the two-segment button route read
                     // through a table of its own until this walker reached it.
                     (None, None) if index == 0 => {
-                        form_standard_attribute_name_for_type_reference(root_type?, marker.trim())?
+                        let name = form_standard_attribute_name_for_type_reference(
+                            root_type?,
+                            marker.trim(),
+                        )?;
+                        if owner_scoped_bindings
+                            .undeclared_root_standard_attributes
+                            .contains(&(attribute_id.to_string(), name))
+                        {
+                            return None;
+                        }
+                        name
                     }
                     (None, None) => return None,
                 };
@@ -29153,6 +29315,37 @@ pub(super) fn form_table_owns_button_standard_command(
         return false;
     }
     true
+}
+
+/// Put back the raw sentinel on every `<Button>` that names a form standard
+/// command the form's own command set excludes: Монитор
+/// `Catalogs/Кластеры/Forms/ФормаВыбора` excludes `Change` and the platform
+/// writes its button's command as `0:6886601d-…`, the way it already writes an
+/// excluded `Help`.
+fn withhold_form_button_commands_the_form_excludes(items: &mut [FormChildItem], excluded: &[&str]) {
+    if excluded.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if item.tag == "Button"
+            && let Some(command) = item
+                .command_name
+                .as_deref()
+                .and_then(|name| name.strip_prefix("Form.StandardCommand."))
+            && excluded.contains(&command)
+            && let Some(record) = item.command_record.as_deref()
+            && let Some(fields) = split_1c_braced_fields(record, 0)
+            && let (Some(kind), Some(uuid)) = (
+                fields.first().map(|field| field.trim()),
+                fields
+                    .get(1)
+                    .and_then(|field| parse_non_zero_uuid(field.trim())),
+            )
+        {
+            item.command_name = Some(form_command_record_sentinel(kind, &uuid));
+        }
+        withhold_form_button_commands_the_form_excludes(&mut item.child_items, excluded);
+    }
 }
 
 /// Put back the raw sentinel on every `<Button>` that names a standard command
@@ -32971,6 +33164,8 @@ pub(super) fn format_form_child_item_xml(
             | "ProgressBarField"
             | "TrackBarField"
             | "ChartField"
+            // Монитор `Catalogs/Блокировки`: `ToolTip` behind `TitleLocation`.
+            | "GanttChartField"
             | "ColumnGroup"
             | "TextDocumentField"
             | "FormattedDocumentField"
@@ -34966,6 +35161,7 @@ pub(super) fn format_form_child_item_xml(
             | "ProgressBarField"
             | "TrackBarField"
             | "ChartField"
+            | "GanttChartField"
             | "ColumnGroup"
             | "TextDocumentField"
             | "FormattedDocumentField"
@@ -38715,6 +38911,9 @@ fn form_gantt_chart_series_like_xml(
 /// stay unguessed.
 fn form_gantt_time_measure(code: &str) -> Option<&'static str> {
     match code.trim() {
+        // Монитор `Catalogs/Блокировки/Forms/ФормаЭлемента`: `5` on the level
+        // and on `noneVariantMeasure`, both published `Second`.
+        "5" => Some("Second"),
         "10" => Some("Minute"),
         "20" => Some("Hour"),
         "30" => Some("Day"),
@@ -39260,6 +39459,9 @@ fn form_chart_line_xml(name: &str, field: &str, indent: usize) -> Option<String>
         return None;
     }
     let style = match fields.get(3)?.trim() {
+        // Монитор `Catalogs/Блокировки/Forms/ФормаЭлемента`: a time-scale
+        // level line stored `0` and published `None`.
+        "0" => "None",
         "1" => "Solid",
         "2" => "Dotted",
         _ => return None,
@@ -39950,6 +40152,8 @@ fn format_form_chart_settings_body_xml(
             t.get(2)?,
             &[
                 ("0", "Line"),
+                // Монитор `Catalogs/Запросы/Forms/ФормаАнализа`.
+                ("2", "Area"),
                 ("6", "Column3D"),
                 ("12", "Pie"),
                 ("38", "Gauge"),

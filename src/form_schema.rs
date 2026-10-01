@@ -7150,7 +7150,11 @@ impl FormSpecialFieldSchema {
         let slot = match self.kind {
             FormSpecialFieldKind::ProgressBar => 11,
             FormSpecialFieldKind::TrackBar => 13,
-            FormSpecialFieldKind::Chart | FormSpecialFieldKind::GanttChart => return None,
+            // Gantt option member 6: `1` on every chart the platform writes no
+            // `AutoMaxWidth` for, `0` on Монитор `Catalogs/Блокировки` whose
+            // two charts publish `<AutoMaxWidth>false</AutoMaxWidth>`.
+            FormSpecialFieldKind::GanttChart => 6,
+            FormSpecialFieldKind::Chart => return None,
         };
         (options.get(slot).map(|field| field.trim()) == Some("0")).then_some(false)
     }
@@ -7227,6 +7231,12 @@ impl FormSpecialFieldSchema {
     pub(crate) fn group_vertical_align(self, fields: &[&str]) -> Option<&'static str> {
         match self.kind {
             FormSpecialFieldKind::ProgressBar => form_group_vertical_align_xml(fields.get(54)?),
+            // The same shared slot on the Gantt chart: Монитор
+            // `Catalogs/Блокировки/Forms/ФормаЭлемента` stores `1` and the
+            // platform writes `Center`.
+            FormSpecialFieldKind::GanttChart => {
+                form_group_vertical_align_xml(fields.get(54 + self.top_level_offset)?)
+            }
             _ => None,
         }
     }
@@ -7327,7 +7337,8 @@ impl FormTooltipRepresentationItemKind {
             "CalendarField" => Self::CalendarField,
             "ProgressBarField" => Self::ProgressBarField,
             "TrackBarField" => Self::TrackBarField,
-            "ChartField" => Self::ChartField,
+            // The Gantt chart field writes the property where the chart does.
+            "ChartField" | "GanttChartField" => Self::ChartField,
             "SpreadSheetDocumentField" => Self::SpreadSheetDocumentField,
             "HTMLDocumentField" => Self::HTMLDocumentField,
             "FormattedDocumentField" => Self::FormattedDocumentField,
@@ -9145,7 +9156,13 @@ impl FormSpreadsheetDocumentFieldProperties {
             // the platform writes `<ViewScalingMode>Normal</ViewScalingMode>`
             // on and `0` on the other 182, with no miss on either side.  The
             // slot had no reader, so none of the 40 was ever written.
-            view_scaling_mode: (option(19) == Some("1")).then_some("Normal"),
+            // `2` is `Large`: Монитор `Catalogs/Взаимоблокировки/Forms/
+            // ФормаАнализа`, `СхемаДедлока`.
+            view_scaling_mode: match option(19) {
+                Some("1") => Some("Normal"),
+                Some("2") => Some("Large"),
+                _ => None,
+            },
             // Slot 14 is the group ruler switch: 218 of the 222 native
             // `SpreadSheetDocumentField` option tuples hold `1` and carry no
             // `<ShowGroups>`, and the 4 that hold `0` are exactly the 4 the

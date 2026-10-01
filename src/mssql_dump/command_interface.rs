@@ -762,6 +762,8 @@ pub(super) fn parse_client_application_interface_text(
 fn client_application_panel_def_spr(panel_def_fields: &[&str]) -> Option<&'static str> {
     match panel_def_fields.get(1)?.trim() {
         "2" => match panel_def_fields.get(2)?.trim() {
+            // Монитор `Ext/ClientApplicationInterface`: `{<panel>,2,0}`.
+            "0" => Some("Picture"),
             "4" => Some("PictureOnLeftAndText"),
             _ => None,
         },

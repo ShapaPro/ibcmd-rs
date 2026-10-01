@@ -34962,6 +34962,34 @@ const STANDARD_PICTURES: &[(&str, &str)] = &[
     (STD_PICTURE_INFORMATION_UUID, "StdPicture.Information"),
     (STD_PICTURE_SAVE_FILE_UUID, "StdPicture.SaveFile"),
     (STD_PICTURE_USER_UUID, "StdPicture.User"),
+    // Монитор `Catalogs/Триггеры` (list form) and
+    // `DataProcessors/График/Forms/Форма`.
+    (
+        "cf10e497-9779-44a7-82d8-811b88193215",
+        "StdPicture.AppearanceCircleBlack",
+    ),
+    (
+        "bbd37b6b-2742-48f3-9efa-d7c245f125b0",
+        "StdPicture.AppearanceFlagGreen",
+    ),
+    // Монитор `Catalogs/Запросы/Forms/ФормаАнализа`, three commands.
+    (
+        "7a2a6f5c-7677-45e1-a2d3-ce2444d99a63",
+        "StdPicture.AppearanceDownTriangleRed",
+    ),
+    (
+        "8da615a0-65a5-4511-a8d4-00dc156478fb",
+        "StdPicture.AppearanceUpTriangleGreen",
+    ),
+    (
+        "879ca050-8650-4135-b799-f3ef9e00a65a",
+        "StdPicture.AppearanceBoxesEmpty",
+    ),
+    // Монитор `Catalogs/Алгоритмы/Forms/ФормаЭлемента`, two buttons.
+    (
+        "f16ab927-3ac6-4cdd-bcf1-d8acf005a255",
+        "StdPicture.UserWithoutNecessaryProperties",
+    ),
     (STD_PICTURE_LOAD_REPORT_SETTINGS_UUID, "StdPicture.LoadReportSettings"),
     ("942e0303-a3ec-4fe8-887c-5aea8516d424", "StdPicture.ReportSettings"),
     // Platform 8.5.1.1150 BSP: two forms, two references each.
