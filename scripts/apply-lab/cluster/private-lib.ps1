@@ -96,6 +96,37 @@ function Private-Remember($State){
  }
  $State.known=@($identities.Values);Write-State $State
 }
+function Private-StateDigest {
+ $path=Require-PrivatePath $script:StateFile
+ $stream=[IO.File]::OpenRead($path)
+ try{
+  $buffer=[byte[]]::new(65537);$read=0
+  while($read -lt $buffer.Length){$next=$stream.Read($buffer,$read,$buffer.Length-$read);if(!$next){break};$read+=$next}
+  if(!$read -or $read -gt 65536){throw 'state exceeds refusal receipt byte budget or is empty'}
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$buffer[0..($read-1)]))
+ }finally{$stream.Dispose()}
+}
+function Private-PublishRefusalReceipt($Receipt){
+ $bytes=[Text.Encoding]::UTF8.GetBytes(($Receipt|ConvertTo-Json -Depth 7))
+ if($bytes.Length -gt 65536){throw 'refusal receipt exceeds byte budget'}
+ $path=Require-PrivatePath (Join-Path $script:Logs ('listener-refusal-'+[guid]::NewGuid().ToString('N')+'.json'))
+ $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+ try{$file.Write($bytes);$file.Flush($true)}finally{$file.Dispose()}
+ return $path
+}
+function Private-ListenerRefusal($State,$FailedListener,$Listeners,$Processes,$OwnedIds){
+ # Diagnostics consume only the existing listener/process censuses. They never
+ # perform another census for admission, retry or process signal.
+ try{
+  $receipt=[ordered]@{format=1;captured_utc=[DateTime]::UtcNow.ToString('o');root=$script:Root;state_sha256=$(if($State){Private-StateDigest}else{$null});failed_listener=$FailedListener;listeners=@($Listeners|ForEach-Object{[ordered]@{port=$_.LocalPort;pid=$_.OwningProcess;address=$_.LocalAddress}});owned_ids=@($OwnedIds);process_census=@($Processes|ForEach-Object{
+   [ordered]@{pid=$_.ProcessId;parent=$_.ParentProcessId;born=$_.CreationDate.ToUniversalTime().ToString('o');name=$_.Name;executable=$_.ExecutablePath;command_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$_.CommandLine)));root_marker=([string]$_.CommandLine).IndexOf($script:Root,[StringComparison]::OrdinalIgnoreCase) -ge 0}
+  });admission='refused';additional_admission_censuses=0}
+  $path=Private-PublishRefusalReceipt $receipt
+ }catch{
+  throw 'private port has foreign/unproved listener; no signal permitted; diagnostic receipt unavailable'
+ }
+ throw "private port has foreign/unproved listener; no signal permitted; retained receipt $path"
+}
 function Private-RequireListeners($State){
  # Take listeners first, then use ONE process census for both ancestry proof
  # and unknown-process refusal. A child born between independent process
@@ -103,7 +134,7 @@ function Private-RequireListeners($State){
  # did not contain it. Every admitted PID still needs exact ancestry/identity.
  $listeners=@(Get-ClusterListeners);$processes=@(Get-ServerProcesses)
  $live=@(Private-Owned $State -Processes $processes);$ids=@($live.ProcessId)
- foreach($listener in $listeners){if($listener.OwningProcess -notin $ids){throw 'private port has foreign/unproved listener; no signal permitted'}}
+ foreach($listener in $listeners){if($listener.OwningProcess -notin $ids){Private-ListenerRefusal $State ([ordered]@{port=$listener.LocalPort;pid=$listener.OwningProcess;address=$listener.LocalAddress}) $listeners $processes $ids}}
  foreach($process in $processes){
   $marked=$process.CommandLine -and ($process.CommandLine.IndexOf($script:Root,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $process.CommandLine -match '(?i)(?:^|\s)(?:-port[= ]5540|-regport[= ]5541|--port=5545|-range[= ]5560:5591)(?:\s|$)')
   if($marked -and $process.ProcessId -notin $ids){throw 'unknown private-looking process; ports/root are not ownership'}

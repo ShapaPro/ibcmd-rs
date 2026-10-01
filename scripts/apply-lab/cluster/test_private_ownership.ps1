@@ -28,6 +28,8 @@ function Get-ChildItem{param($LiteralPath,[switch]$Recurse,[switch]$Force);if($g
 $global:Private83RacFailure=''
 function Invoke-LiveBounded{param($Executable,$Arguments,$TimeoutSeconds);if($global:Private83RacFailure -eq 'timeout'){throw 'mock bounded timeout'};$text='';if(($Arguments -join ' ') -like '*cluster list*'){$text="cluster : $cluster"};if(($Arguments -join ' ') -like '*infobase summary list*'){$text=$global:Private83Registration};[pscustomobject]@{ExitCode=$(if($global:Private83RacFailure -eq 'exit'){1}else{0});Stdout=$text;Stderr=$(if($global:Private83RacFailure -eq 'stderr'){'warning'}else{''})}}
 function Refuse([scriptblock]$Run,[string]$Pattern){$caught=$false;$detail='no exception';try{& $Run|Out-Null}catch{$detail=$_.Exception.Message;$caught=$detail -match $Pattern;if(!$caught){$detail+="`n"+$_.ScriptStackTrace}};if(!$caught){throw "expected refusal: $Pattern; actual: $detail"}}
+function Private-StateDigest{[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($global:Private83FakeJson)))}
+function Private-PublishRefusalReceipt($Receipt){$global:Private83LastRefusal=$Receipt;return 'mock-receipt-no-file-write'}
 $state=[pscustomobject]@{format=1;platform=$script:Platform;root=$script:Root;track='load';fresh=$true;cluster=$cluster;anchors=@((Private-Identity $agent),(Private-Identity $ras));known=@();worker_lease=$global:Private83FakeLease}
 Write-State $state;$validated=Read-State
 if(@(Private-Owned $validated).Count -ne 3){throw 'foreign included/own child missing'}
@@ -50,6 +52,12 @@ if($global:Private83CensusCount -ne 1){throw 'listener guard used inconsistent p
 $global:Private83FakeProcesses=@($agent,$ras,$child);$global:Private83SpawnAtListen=$foreign
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5560;OwningProcess=700004})
 Refuse {Private-RequireListeners $state} 'foreign/unproved'
+# A listener sampled before its process exits must remain refused. The receipt
+# captures that exact census; diagnostics must not resample it into admission.
+$global:Private83FakeProcesses=@($agent,$ras,$child);$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700099;LocalAddress='127.0.0.1'});$global:Private83CensusCount=0;$global:Private83LastRefusal=$null
+Refuse {Private-RequireListeners $state} 'foreign/unproved'
+if($global:Private83CensusCount -ne 1 -or !$global:Private83LastRefusal -or $global:Private83LastRefusal.failed_listener.pid -ne 700099 -or $global:Private83LastRefusal.failed_listener.port -ne 5561 -or $global:Private83LastRefusal.process_census.Count -ne 3 -or 700099 -in $global:Private83LastRefusal.owned_ids -or $global:Private83LastRefusal.admission -cne 'refused' -or $global:Private83LastRefusal.additional_admission_censuses -ne 0 -or $global:Private83LastRefusal.state_sha256 -cne (Private-StateDigest)){throw 'transient listener census/refusal receipt incorrect'}
+foreach($entry in $global:Private83LastRefusal.process_census){if($entry.Contains('command') -or $entry.command_sha256 -cnotmatch '^[A-F0-9]{64}$' -or !$entry.born -or !$entry.executable){throw 'receipt command/identity sanitization incorrect'}}
 $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@()
 Private-RequireNames @('ibcmd_rs_05_load_w3_mock')
 foreach($origin in @('from F:..\..\lab\05\wave3\load\own.bak','from \ibcmd\lab\05\wave3\load\own.bak')){$global:Private83FakeOrigin=$origin;Refuse {Private-RequireNames @('ibcmd_rs_05_load_w3_mock')} 'foreign/unmanifested'};$global:Private83FakeOrigin='from F:\ibcmd\lab\05\wave3\load\own.bak'
