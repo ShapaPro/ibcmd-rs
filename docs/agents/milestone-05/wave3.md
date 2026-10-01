@@ -58,10 +58,12 @@ DB ibcmd_rs_05_p85_w3_*.
 Worktree F:/ibcmd/src/ibcmd-rs-05-load-wave3; feat/0.5-load-readiness.
 Lab wave3/load; Track load; DB ibcmd_rs_05_load_w3_*.
 
-- [ ] W1 Reuse scripts/apply-lab/live and observer/readiness evidence. Select
+- [x] W1 Reuse scripts/apply-lab/live and observer/readiness evidence. Select
   reproducible writable BSP document and report/read operations; use applicable
   1C skills/help/syntax validation for BSL instead of guessed APIs. Create an
   owned registration and bounded N-client harness with explicit cleanup.
+  Accepted bounded checkpoint: load-wave3-w1w2 evidence, three clients and1434
+  confirmed posted UUID/report pairs. W2 broader native/own matrix remains open.
 - [ ] W2 Native control and own repeated dynamic generations under the same
   workload: committed operations, latency/error counters, old/new client/server
   marker observations, captured SQL/RAS ownership and storage/source evidence.
@@ -77,6 +79,14 @@ Lab wave3/load; Track load; DB ibcmd_rs_05_load_w3_*.
   (after workload checkpoint moves to review); default-guard cleanup afterwards.
 
 ## C — coordinator and subsequent remaining work
+
+Accepted additional checkpoints: full physical header capture/admission and
+online replacement/retained preimages; compact standalone format2 recovery
+(LIVE format1 unchanged); Unicode root containment and periodic watch content
+verification; direct activation certificate-policy propagation. Exact85 initial
+CommonModule native/own acceptance is integrated; forms/extensions/repeated85
+and general worker/LIVE remain open. Each checkpoint has scoped immutable review
+and quick gates; historical full wave2 gates do not cover subsequent Rust code.
 
 - [ ] C1 Maintain visible owners/three current issue tracks/read-back, resolve
   shared-file ownership and independently review immutable source/raw proof.
