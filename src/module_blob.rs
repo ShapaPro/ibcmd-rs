@@ -44624,6 +44624,34 @@ aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb,dddddd
         );
     }
 
+    /// The writer's own value table spells the same identifier for every
+    /// name as the crate's one standard picture table
+    /// (`metadata_model::standard_pictures`), so the two cannot drift apart
+    /// the way the exporters' two copies did (Untru/ibcmd-rs#413).
+    #[test]
+    fn std_picture_values_agree_with_the_one_standard_picture_table() {
+        for (name, value) in super::STD_PICTURE_VALUES {
+            // The seventeen pictures stored by a bare code, not a uuid, are
+            // the descriptor compiler's `STANDARD_PICTURE_CODES`.
+            if let Some(code) = value
+                .strip_prefix("{-")
+                .and_then(|rest| rest.strip_suffix('}'))
+            {
+                let expected = crate::metadata_model::registers::parts::STANDARD_PICTURE_CODES
+                    .iter()
+                    .find_map(|(candidate, code)| (*candidate == *name).then_some(*code))
+                    .unwrap_or_else(|| panic!("StdPicture.{name} has no measured code"));
+                assert_eq!(expected, -code.parse::<i64>().unwrap(), "StdPicture.{name}");
+                continue;
+            }
+            let uuid = crate::metadata_model::standard_pictures::standard_picture_uuid(&format!(
+                "StdPicture.{name}"
+            ))
+            .unwrap_or_else(|| panic!("StdPicture.{name} is not in the standard picture table"));
+            assert_eq!(*value, format!("{{0,{uuid}}}"), "StdPicture.{name}");
+        }
+    }
+
     #[test]
     fn resolves_common_command_standard_picture_uuids() {
         assert_eq!(
