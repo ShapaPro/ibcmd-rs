@@ -108,6 +108,10 @@ predefined item `predefdel` removed while the forms' queries still name it (the 
 
 ### 3.1 Platform 8.5 (dialect 2.21) and the parent configuration row
 
+Release continuation: [the 8.5 acceptance evidence](8.5-acceptance.md) covers the
+native-empty/default-import cycle, an actual palette-color edit, and current
+add/remove reruns with strict service-inventory checks against native twins.
+
 The same kit on the 8.5 БСП (3.2.1.356; `run_override_acceptance.ps1 -Platform 8.5`, which runs the native ibcmd of
 8.5.1.1150 as "Администратор (обычное приложение)"; `-ApplyWith ours` applies with the drop-in `infobase config apply`
 instead of the platform's). The trees are the 8.5 native export with the same edits of `edits.py`.

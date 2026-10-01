@@ -494,6 +494,32 @@ def c_tpldel(t):
     return {"object": "DataProcessor.ЗаполнениеКалендарныхГрафиков", "template": "ДатыПасха"}
 
 
+@change("formdel_demo", "owned object removed", "non-default demo form ДокументыКонтрагентов removed from Catalog._ДемоКонтрагенты")
+def c_formdel_demo(t):
+    owner = "Catalogs/_ДемоКонтрагенты"
+    name = "ДокументыКонтрагентов"
+    t.delete(owner + "/Forms/" + name + ".xml")
+    t.delete(owner + "/Forms/" + name)
+    text = t.read(owner + ".xml")
+    key = "\t\t\t<Form>" + name + "</Form>\n"
+    assert key in text
+    t.write(owner + ".xml", text.replace(key, "", 1))
+    return {"object": "Catalog._ДемоКонтрагенты", "form": name}
+
+
+@change("tpldel_demo", "owned object removed", "demo template Логотип removed from DataProcessor._ДемоШаблонСообщенияДляЗаказаПокупателя")
+def c_tpldel_demo(t):
+    owner = "DataProcessors/_ДемоШаблонСообщенияДляЗаказаПокупателя"
+    name = "Логотип"
+    t.delete(owner + "/Templates/" + name + ".xml")
+    t.delete(owner + "/Templates/" + name)
+    text = t.read(owner + ".xml")
+    key = "\t\t\t<Template>" + name + "</Template>\n"
+    assert key in text
+    t.write(owner + ".xml", text.replace(key, "", 1))
+    return {"object": "DataProcessor._ДемоШаблонСообщенияДляЗаказаПокупателя", "template": name}
+
+
 @change("catfile", "object file removed, listing kept", "Catalogs/Удалить_ДемоОбщиеСведения.xml removed but Configuration.xml still lists it")
 def c_catfile(t):
     t.delete("Catalogs/Удалить_ДемоОбщиеСведения.xml")
