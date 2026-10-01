@@ -1482,18 +1482,8 @@ fn safe_file_stem(value: &str) -> String {
 }
 
 fn write_new_or_identical(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    match fs::read(path) {
-        Ok(existing) if existing == bytes => Ok(()),
-        Ok(_) => bail!("refusing to overwrite existing artifact {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
-        }
-        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
-    }
+    crate::mssql_artifact::write_new_or_identical(path, bytes)
+        .with_context(|| format!("failed to publish artifact {}", path.display()))
 }
 
 pub fn write_activation_diff(report: &MssqlActivationDiffReport, output: &Path) -> Result<()> {

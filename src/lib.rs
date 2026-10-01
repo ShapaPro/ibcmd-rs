@@ -24,6 +24,7 @@ pub(crate) mod metadata_owner_graph;
 pub mod module_blob;
 pub mod mssql;
 pub mod mssql_apply;
+mod mssql_artifact;
 pub mod mssql_config_apply;
 pub mod mssql_dump;
 pub mod mssql_effective_row;

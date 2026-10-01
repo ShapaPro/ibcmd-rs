@@ -61,6 +61,11 @@ Lab F:/ibcmd/lab/05/wave2/extensions; clone owner Track ext.
 
 ## Coordinator
 
+- [x] C0 Repair the #409 F-8 artifact publication race in
+  `src/mssql.rs::write_new_or_identical`: publish fully written adjacent temp
+  files without overwriting a concurrent artifact; bounded identical-file
+  comparisons, concurrency/crash-boundary tests and independent review.
+  Row-header completeness and online undo semantics remain separate F-8 items.
 - [ ] C1 Review each source delta and real evidence, then integrate accepted
   commits into PR #420; review any shared-file resolution independently.
 - [ ] C2 Appropriate combined validation and current Windows/Linux PR CI.
@@ -74,3 +79,9 @@ hold the worker ticket; heavy operations serialize. Four build/test jobs,
 worktree-local iter cache, no full/release track build, no .env reads, no old
 DB/worktree/cache changes. Preserve wave1 fixes and fail-closed gates. Agents
 commit locally; coordinator alone integrates/pushes and maintains board state.
+
+Coordinator C0 accepted: independent review PASS, standalone four concurrency/
+interruption tests PASS, no-default all-targets check PASS, required debug quick
+gates PASS (3652 passed, 0 failed, 10 ignored). Publication is complete and
+no-clobber; whole F-8 row headers/online undo and power-loss durability are not
+claimed. Raw evidence: F:/ibcmd/lab/05/wave2/coordinator.
