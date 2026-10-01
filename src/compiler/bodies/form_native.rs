@@ -8657,6 +8657,9 @@ const DATA_PATH_STANDARD_ATTRIBUTES: &[(&str, &str, &str)] = &[
     ("AccumulationRegister", "RecordType", "-9"),
     ("BusinessProcess", "Number", "-2"),
     ("BusinessProcess", "Date", "-3"),
+    // The exporter names `-5` `Ref` on a business process object (64 buttons
+    // of the stand), as it does on a task.
+    ("BusinessProcess", "Ref", "-5"),
     ("Catalog", "Code", "-2"),
     ("Catalog", "Description", "-3"),
     ("Catalog", "Parent", "-4"),
