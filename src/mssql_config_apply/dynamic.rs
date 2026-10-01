@@ -555,6 +555,9 @@ fn require_judged_image(table: &str, judged: &[RowMeta], image: &[MainStorageRow
         let key = (row.file_name.to_lowercase(), row.part_no);
         let same = expected.get(&key).is_some_and(|meta| {
             u64::try_from(meta.data_size).ok() == Some(row.data_size)
+                && i32::from(meta.attributes) == row.attributes
+                && meta.creation == row.creation
+                && meta.modified == row.modified
                 && usize::try_from(meta.byte_len).ok() == Some(row.binary_data.len())
                 && meta.sha256.eq_ignore_ascii_case(&hex_lower(&row.sha256()))
         });
@@ -2032,13 +2035,62 @@ mod tests {
     }
 
     #[test]
+    fn judged_image_refuses_each_physical_header_drift_before_publication() {
+        for table in ["ConfigSave", "Config"] {
+            for name in ["deleted", "root", "313d9858-3995-4a4c-b2b0-15d2350417b4.0"] {
+                let row = MainStorageRow {
+                    file_name: name.to_owned(),
+                    part_no: 0,
+                    creation: "2026-01-01 00:00:00.000".to_owned(),
+                    modified: "2026-01-01 00:00:00.003".to_owned(),
+                    attributes: 0,
+                    data_size: 1,
+                    binary_data: b"0".to_vec(),
+                };
+                let judged = RowMeta {
+                    name: name.to_owned(),
+                    part: 0,
+                    data_size: 1,
+                    byte_len: 1,
+                    attributes: 0,
+                    creation: row.creation.clone(),
+                    modified: row.modified.clone(),
+                    sha256: hex_lower(&row.sha256()),
+                };
+                require_judged_image(
+                    table,
+                    std::slice::from_ref(&judged),
+                    std::slice::from_ref(&row),
+                )
+                .unwrap();
+                for header in 0..3 {
+                    let mut changed = row.clone();
+                    match header {
+                        0 => changed.attributes = 1,
+                        1 => changed.creation = "2026-01-01 00:00:00.006".to_owned(),
+                        2 => changed.modified = "2026-01-01 00:00:00.009".to_owned(),
+                        _ => unreachable!(),
+                    }
+                    let error =
+                        require_judged_image(table, std::slice::from_ref(&judged), &[changed])
+                            .expect_err("header-only drift must refuse");
+                    assert!(
+                        error.to_string().contains("no publication was attempted"),
+                        "{table}/{name}/{header}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_changed_deleted_list_cannot_replace_the_image_already_judged() {
         let bytes = b"0".to_vec();
         let row = MainStorageRow {
             file_name: "deleted".to_owned(),
             part_no: 0,
-            creation: String::new(),
-            modified: String::new(),
+            creation: meta("deleted", "").creation,
+            modified: meta("deleted", "").modified,
             attributes: 0,
             data_size: 1,
             binary_data: bytes,
