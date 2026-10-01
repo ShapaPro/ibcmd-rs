@@ -26,7 +26,11 @@ as the own twin, the platform's `config apply --dynamic=disable` on the native t
 
 Logs: `F:\ibcmd\lab\04\restructure-check\dn\logs\{prepare,own}_mix.out`, `mix_check5.txt`, `mix_check6.txt`.
 
-## What check 6 finds: the synonym in the object registry
+## Historical finding: the synonym in the object registry
+
+**Resolved by the synonym rewrite.** This page retains the original measurement of the older build.
+The fresh `syn2` / `mix2` twin runs and cluster-session comparison are in [synonyms.md](synonyms.md).
+The following 15/16 result describes the pre-fix build, not the current apply.
 
 The registry row `1a621f0f` lists every metadata object with its synonym (`derived-caches.md`, sections 4 and 5). The native apply
 rewrites the records of the two objects whose synonym changed: `{"ru","Валюты (проверка)"}` and `{"ru","Демо: Заказ покупателя (проверка)"}`;

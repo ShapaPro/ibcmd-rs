@@ -150,8 +150,9 @@ gate refuses descriptors, the restructuring check names no change in them" where
 would have held a synonym changed in *another* object against an S1 change: the S1 gate withdraws the conservative "descriptor's
 text differs" blocker of a row that the check has read and no reason of it names (as it does for the planned objects, `root`, the
 created rows and the listing), so an attribute change with a synonym change elsewhere is applied
-(`evidence/dropin-apply/s1-mixed-stage.md`; the registry row `1a621f0f` keeps the old synonym of the second object, as after a
-synonym-only apply). When both gates refuse, the reasons are the first gate's, then the S1 gate's own (`S1: ...`); the
+(`evidence/dropin-apply/s1-mixed-stage.md`). The apply now also updates each changed synonym in the registry
+row `1a621f0f`, for both the plain and S1 gates; the former stale-cache gap is covered by
+[`evidence/dropin-apply/synonyms.md`](evidence/dropin-apply/synonyms.md). When both gates refuse, the reasons are the first gate's, then the S1 gate's own (`S1: ...`); the
 conservative lines are kept only where they are what refuses the stage.
 
 The platform of the database is `--platform`, else the settings, else 8.3.27 (a release stands
