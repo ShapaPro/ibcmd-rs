@@ -149,6 +149,37 @@ pub fn infobase_help(program: &str) -> String {
                 <path>
                     путь к каталогу с файлами конфигурации
 
+                Дополнительные команды:
+                    files
+                        Импорт выбранных файлов конфигурации из XML: в
+                        ConfigSave записываются только строки, которые
+                        собираются из перечисленных файлов (описание объекта,
+                        модуль, форма, макет, справка...), и root, version,
+                        versions; остальные строки остаются как в
+                        конфигурации базы. Объект каждого файла должен быть
+                        в базе, а файл его описания (Catalogs/X.xml для
+                        Catalogs/X/Ext/ObjectModule.bsl) - в каталоге.
+                        Удаление файлов и объектов, новые объекты и
+                        Configuration.xml не загружаются: код возврата 1
+
+                        --base-dir=<path>
+                            Каталог, относительно которого указаны файлы.
+                            Файл вне его не загружается
+
+                        --partial
+                            Каталог содержит только часть файлов
+                            конфигурации. Без него каталог должен быть полной
+                            выгрузкой (с Configuration.xml)
+
+                        --no-check
+                            Не проверять перед записью, что выгрузка
+                            загруженных строк совпадает с перечисленными
+                            файлами (по умолчанию проверяется)
+
+                        <file> ...
+                            файлы конфигурации для загрузки, относительно
+                            --base-dir
+
             apply
                 Обновление конфигурации базы данных: переносит конфигурацию,
                 сохраненную командой import (таблица ConfigSave), в действующую
@@ -285,7 +316,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config import, config apply, config save
+{infobase:<23}{summary}: config export, config import, config import files, config apply, config save
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -314,11 +345,16 @@ mod tests {
             "ibcmd infobase create",
             "ibcmd infobase config check",
             "ibcmd infobase config export info",
-            "ibcmd infobase config import files",
+            "ibcmd infobase config import all-extensions",
             "ibcmd infobase config support",
             "ibcmd infobase config extension",
         ] {
             assert!(help.contains(command), "{command}");
+        }
+        // import files is served (#363): described, not listed as refused
+        assert!(!help.contains("ibcmd infobase config import files"));
+        for word in ["--base-dir=<path>", "--partial", "--no-check", "<file> ..."] {
+            assert!(help.contains(word), "{word}");
         }
         // children of a refused command are covered by it
         assert!(!help.contains("config support disable"));

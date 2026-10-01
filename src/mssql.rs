@@ -95,6 +95,7 @@ pub mod base_free_cf;
 pub mod cf_load_stage;
 mod delta_stage;
 mod empty_stage;
+pub mod files_stage;
 mod offline_compile;
 mod override_stage;
 mod patch_refusal;
@@ -3574,9 +3575,48 @@ pub fn import_target_state(
 pub fn stage_source_objects(
     args: &MssqlStageSourceObjectsArgs,
 ) -> Result<StageSourceObjectsReport> {
+    if !args.files.is_empty() {
+        return stage_source_files(args);
+    }
     if args.base_free {
         return empty_stage::stage_source_objects_base_free(args);
     }
+    stage_source_objects_patch(args, None)
+}
+
+/// `--file` (`infobase config import files`, #363): the objects the listed
+/// files belong to, prepared as `--path-prefix` prepares them, and of their
+/// rows the ones the files compile to (`files_stage`).
+fn stage_source_files(args: &MssqlStageSourceObjectsArgs) -> Result<StageSourceObjectsReport> {
+    if args.base_free {
+        bail!(
+            "a partial import of files patches the target's rows: --file and --base-free do not go together"
+        );
+    }
+    if !args.path_prefix.is_empty() {
+        bail!("--file selects the objects itself: it does not go with --path-prefix");
+    }
+    let selection = files_stage::select(&args.source_root, &args.files)?;
+    let mut scoped = args.clone();
+    scoped.path_prefix = selection.owners().to_vec();
+    scoped.files = selection.files().to_vec();
+    // A sparse directory has no Configuration.xml to name its XML version:
+    // the guard then exports in the version the listed objects declare.
+    if scoped.source_version.is_none()
+        && crate::metadata_model::export::tree_version(&scoped.source_root).is_none()
+        && let Some(owner) = selection.owners().first()
+        && let Some(version) = source_xml_version(&scoped.source_root.join(owner))?
+    {
+        scoped.source_version =
+            <InfobaseConfigSourceVersion as clap::ValueEnum>::from_str(&version, true).ok();
+    }
+    stage_source_objects_patch(&scoped, Some(&selection))
+}
+
+fn stage_source_objects_patch(
+    args: &MssqlStageSourceObjectsArgs,
+    selection: Option<&files_stage::FilesSelection>,
+) -> Result<StageSourceObjectsReport> {
     require_non_lab_confirmation(args.allow_non_lab, "source tree staging")?;
     if !args.replace_config_save {
         return Err(anyhow!(
@@ -3585,8 +3625,14 @@ pub fn stage_source_objects(
     }
     stage_timing::reset_from_env();
 
+    // A partial import of files also scans the files themselves: the guard
+    // compares them, and nothing else, with the staged state.
+    let scan_prefixes = match selection {
+        Some(selection) => selection.scan_prefixes(),
+        None => args.path_prefix.clone(),
+    };
     let manifest = timed_stage_step("scan the tree", || {
-        scan_sources_with_prefixes(&args.source_root, &args.path_prefix)
+        scan_sources_with_prefixes(&args.source_root, &scan_prefixes)
     })?;
     let metadata_xmls = filter_source_paths_by_prefix(
         source_metadata_xmls(&manifest, &args.source_root),
@@ -3639,6 +3685,9 @@ pub fn stage_source_objects(
     } else {
         override_stage::Plan::default()
     };
+    if let Some(selection) = selection {
+        selection.refuse_added(&plan.added)?;
+    }
     let leave_to_the_build =
         |xml: &PathBuf| plan.is_added(&source_relative_path(&args.source_root, xml));
     let metadata_xmls = metadata_xmls
@@ -3676,7 +3725,8 @@ pub fn stage_source_objects(
     // they come from stay the target's (`delta_stage`).
     let mut delta = None;
     let mut all_rows_because = None;
-    if overriding {
+    // The files of a partial import say themselves which rows change.
+    if overriding && selection.is_none() {
         let aliases = BASE_ROW_ALIASES
             .get()
             .filter(|(aliased_database, _)| aliased_database == &args.database)
@@ -3847,6 +3897,13 @@ pub fn stage_source_objects(
         let mut compiled_files = built.compiled_files;
         compiled_files.truncate(60);
         metadata_objects.extend(built.objects);
+        if let Some(selection) = selection {
+            selection.trim(
+                &args.source_root,
+                &mut metadata_objects,
+                &mut common_modules,
+            )?;
+        }
         let metadata_object_count = metadata_objects.len();
         let common_module_count = common_modules.len();
         ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;

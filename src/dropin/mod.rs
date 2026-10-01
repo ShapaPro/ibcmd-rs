@@ -2,7 +2,9 @@
 //! written for it run against ibcmd-rs renamed to `ibcmd`.
 //!
 //! - `infobase config export` and `infobase config import` are served
-//!   (`crate::infobase`), for Microsoft SQL Server infobases;
+//!   (`crate::infobase`), for Microsoft SQL Server infobases, and so is
+//!   `infobase config import files` (the partial import of listed files,
+//!   `crate::mssql::files_stage`, Untru/ibcmd-rs#363);
 //! - `infobase config apply` is served by the own exclusive apply
 //!   (`crate::mssql_config_apply`, [`apply`]): it moves the staged
 //!   configuration into the active one, refuses what needs a restructuring
@@ -42,7 +44,8 @@ use crate::cli::{
 };
 use crate::infobase::OutputDirectoryNotEmpty;
 pub use parse::{
-    ApplyRequest, Common, ExportRequest, ImportRequest, Invocation, Refusal, SaveRequest,
+    ApplyRequest, Common, ExportRequest, ImportFilesRequest, ImportRequest, Invocation, Refusal,
+    SaveRequest,
 };
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
@@ -107,6 +110,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         }
         Ok(Invocation::Export(request)) => run_export(request),
         Ok(Invocation::Import(request)) => run_import(request),
+        Ok(Invocation::ImportFiles(request)) => run_import_files(request),
         Ok(Invocation::Apply(request)) => apply::run(request),
         Ok(Invocation::Save(request)) => run_save(request),
         Err(refusal) => {
@@ -352,6 +356,7 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         allow_non_lab: true,
         batch_size: None,
         path_prefix: Vec::new(),
+        files: Vec::new(),
         script_output: Some(script),
         stage_mode: if request.base_free {
             InfobaseImportStageMode::BaseFree
@@ -367,6 +372,21 @@ pub fn import_args(request: &ImportRequest) -> InfobaseConfigImportArgs {
         },
         source_dir: PathBuf::from(&request.path),
     }
+}
+
+/// The import of `import files`: the patch import of the directory, limited
+/// to the rows of the listed files.
+pub fn import_files_args(request: &ImportFilesRequest) -> InfobaseConfigImportArgs {
+    let mut args = import_args(&ImportRequest {
+        common: request.common.clone(),
+        base_free: false,
+        verify: request.verify,
+        no_verify: request.no_check,
+        path: request.base_dir.clone().into_os_string(),
+    });
+    args.stage_mode = InfobaseImportStageMode::Patch;
+    args.files = request.files.clone();
+    args
 }
 
 pub fn save_args(request: &SaveRequest) -> InfobaseConfigSaveArgs {
@@ -486,6 +506,16 @@ const IMPORT: Operation = Operation {
     ended: "завершен",
 };
 
+/// The platform's own lines of `import files` (8.3.27 and 8.5, recorded in
+/// `docs/import/evidence/419/add85-vs-native.json` and
+/// `native-partial-rem-refusal.json`): `[INFO] Импорт файлов конфигурации из
+/// XML...`, `... успешно завершен`, `... завершен с ошибкой`.
+const IMPORT_FILES: Operation = Operation {
+    command: "infobase config import files",
+    title: "Импорт файлов конфигурации из XML",
+    ended: "завершен",
+};
+
 const APPLY: Operation = Operation {
     command: "infobase config apply",
     title: "Обновление конфигурации базы данных",
@@ -543,6 +573,48 @@ fn run_import(mut request: ImportRequest) -> i32 {
     match crate::infobase::import_config(&args) {
         Ok(value) => IMPORT.succeed(report.as_deref(), &value),
         Err(error) => IMPORT.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+fn run_import_files(mut request: ImportFilesRequest) -> i32 {
+    use crate::mssql::files_stage::{FilesRefused, select};
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        IMPORT_FILES.start();
+        return IMPORT_FILES.fail_with(&message, report.as_deref());
+    }
+    IMPORT_FILES.start();
+    let refused = |refused: &FilesRefused| {
+        if refused.unsupported {
+            IMPORT_FILES.refuse_with(&refused.message, report.as_deref())
+        } else {
+            IMPORT_FILES.fail_with(&refused.message, report.as_deref())
+        }
+    };
+    // The files are checked against the directory before any connection.
+    if let Err(refusal) = select(&request.base_dir, &request.files) {
+        return refused(&refusal);
+    }
+    // Without `--partial` the directory is taken for a whole export of the
+    // configuration. What the platform does with a directory that is not one
+    // is not measured, so such a directory is refused rather than guessed at.
+    if !request.partial && !request.base_dir.join("Configuration.xml").is_file() {
+        return IMPORT_FILES.refuse_with(
+            &format!(
+                "Каталог {} не является полной выгрузкой конфигурации (в нем нет Configuration.xml); \
+                 для каталога с частью файлов конфигурации укажите --partial",
+                request.base_dir.display()
+            ),
+            report.as_deref(),
+        );
+    }
+    let args = import_files_args(&request);
+    match crate::infobase::import_config(&args) {
+        Ok(value) => IMPORT_FILES.succeed(report.as_deref(), &value),
+        Err(error) => match error.downcast_ref::<FilesRefused>() {
+            Some(refusal) => refused(refusal),
+            None => IMPORT_FILES.fail_with(&format!("{error:#}"), report.as_deref()),
+        },
     }
 }
 

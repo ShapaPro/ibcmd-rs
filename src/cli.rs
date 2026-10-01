@@ -815,6 +815,9 @@ pub struct InfobaseConfigImportArgs {
     pub batch_size: Option<usize>,
     /// Optional source path prefix to import. Can be repeated.
     pub path_prefix: Vec<String>,
+    /// `import files`: only the rows these files compile to (paths relative
+    /// to `source_dir`); empty for the whole tree.
+    pub files: Vec<String>,
     /// Optional path for the generated SQL scripts (and the bulk rows file).
     pub script_output: Option<PathBuf>,
     /// Patch the target's rows, compile every row, or decide by the target.
@@ -3003,7 +3006,7 @@ pub struct MssqlStageSourceCommonModuleObjectsArgs {
     pub script_output: Option<PathBuf>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct MssqlStageSourceObjectsArgs {
     /// SQL Server name.
     #[arg(long, default_value = "localhost")]
@@ -3051,6 +3054,17 @@ pub struct MssqlStageSourceObjectsArgs {
     /// Optional source path prefix to stage. Can be repeated.
     #[arg(long)]
     pub path_prefix: Vec<String>,
+    /// Stage only the rows these files of the tree compile to (a path
+    /// relative to --source-root; repeated): the partial import of
+    /// `infobase config import files`. Each file's object is prepared from
+    /// the target's rows, its other rows stay the target's, and --verify
+    /// compares the listed files.
+    #[arg(
+        long = "file",
+        value_name = "PATH",
+        conflicts_with_all = ["path_prefix", "base_free"]
+    )]
+    pub files: Vec<String>,
     /// Optional path for generated SQL script. Defaults to C:\temp\ibcmd-rs.
     #[arg(long)]
     pub script_output: Option<PathBuf>,

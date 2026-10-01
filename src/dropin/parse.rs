@@ -10,9 +10,9 @@
 //!   (`--user`, `--password`) after `config`, `export`'s after `export`.
 //!
 //! The whole native command tree is known, so every native command is
-//! recognized: `config export`, `config import`, `config apply` and
-//! `config save` are served, everything else is refused by name (see
-//! `super`).
+//! recognized: `config export`, `config import`, `config import files`,
+//! `config apply` and `config save` are served, everything else is refused
+//! by name (see `super`).
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -66,6 +66,10 @@ pub enum Opt {
     IgnoreUnresolvedRefs,
     // `config import`
     Out,
+    // `config import files`
+    BaseDir,
+    Partial,
+    NoCheck,
     // `config save`
     Db,
     // `config apply`
@@ -184,6 +188,17 @@ const IMPORT_OPTIONS: &[OptSpec] = &[
     flag(Opt::NoVerify, &["no-verify"], None),
 ];
 
+/// `config import files --base-dir=<dir> [--partial] [--no-check] <files>`:
+/// the options the lab's scripts give the platform
+/// (`scripts/apply-trace/lab/validate_sparse_import.ps1`,
+/// `scripts/restructure-lab/import_files.ps1`) and the issue's syntax
+/// (Untru/ibcmd-rs#363). The platform's own help for them is not recorded.
+const IMPORT_FILES_OPTIONS: &[OptSpec] = &[
+    valued(Opt::BaseDir, &["base-dir"], None),
+    flag(Opt::Partial, &["partial"], None),
+    flag(Opt::NoCheck, &["no-check"], None),
+];
+
 /// `config save [--db] [--extension=<name>] <path>`: the native options (the
 /// issue's syntax, Untru/ibcmd-rs#352); `--extension` is refused by name.
 const SAVE_OPTIONS: &[OptSpec] = &[
@@ -215,6 +230,8 @@ pub enum NodeKind {
     Export,
     /// `infobase config import`.
     Import,
+    /// `infobase config import files`.
+    ImportFiles,
     /// `infobase config apply`.
     Apply,
     /// `infobase config save`.
@@ -310,7 +327,13 @@ pub static INFOBASE: Node = Node {
                     kind: NodeKind::Import,
                     options: IMPORT_OPTIONS,
                     children: &[
-                        unsupported("files", "Импорт выбранных файлов конфигурации из XML"),
+                        Node {
+                            name: "files",
+                            summary: "Импорт выбранных файлов конфигурации из XML",
+                            kind: NodeKind::ImportFiles,
+                            options: IMPORT_FILES_OPTIONS,
+                            children: &[],
+                        },
                         unsupported(
                             "all-extensions",
                             "Импорт всех расширений конфигурации из XML",
@@ -532,6 +555,24 @@ pub struct ApplyRequest {
     pub backup: BackupPolicy,
 }
 
+/// `infobase config import files --base-dir=<dir> [--partial] [--no-check]
+/// <files>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportFilesRequest {
+    pub common: Common,
+    /// `--base-dir`: the directory the files are relative to.
+    pub base_dir: PathBuf,
+    /// The files as given.
+    pub files: Vec<String>,
+    /// `--partial`: the directory holds part of the configuration's files.
+    pub partial: bool,
+    /// `--verify` (ibcmd-rs's own): check the staged files (the default).
+    pub verify: bool,
+    /// `--no-check` (or ibcmd-rs's `--no-verify`): check nothing before
+    /// the write.
+    pub no_check: bool,
+}
+
 /// `infobase config save [--db] <file>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveRequest {
@@ -548,6 +589,7 @@ pub enum Invocation {
     Version,
     Export(ExportRequest),
     Import(ImportRequest),
+    ImportFiles(ImportFilesRequest),
     Apply(ApplyRequest),
     Save(SaveRequest),
 }
@@ -716,10 +758,17 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
                 path: scan.path.iter().map(|node| node.name).collect(),
             });
         }
-        NodeKind::Export | NodeKind::Import | NodeKind::Apply | NodeKind::Save => {}
+        NodeKind::Export
+        | NodeKind::Import
+        | NodeKind::ImportFiles
+        | NodeKind::Apply
+        | NodeKind::Save => {}
     }
     if node.kind == NodeKind::Apply {
         return parse_apply(&scan);
+    }
+    if node.kind == NodeKind::ImportFiles {
+        return parse_import_files(&scan);
     }
     if node.kind == NodeKind::Save {
         return parse_save(&scan);
@@ -914,6 +963,73 @@ fn parse_apply(scan: &Scan) -> Result<Invocation, Refusal> {
         session_terminate_message: scan.value(Opt::SessionTerminateMessage).map(str::to_string),
         exclusivity,
         backup,
+    }))
+}
+
+/// `infobase config import files`: `--base-dir`, the files, `--partial`,
+/// `--no-check`, and the connection. The words of a missing `--base-dir` or
+/// file list are this program's (the platform's are not measured).
+fn parse_import_files(scan: &Scan) -> Result<Invocation, Refusal> {
+    if let Some(error) = scan.error.clone() {
+        return Err(error);
+    }
+    for opt in [Opt::Pid, Opt::Remote] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedServer(spelled.to_string()));
+        }
+    }
+    let command = scan.command();
+    for opt in [Opt::Out, Opt::Extension] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedOption {
+                option: spelled.to_string(),
+                command,
+            });
+        }
+    }
+    if scan.has(Opt::BaseFree) {
+        return Err(Refusal::Unsupported(format!(
+            "Параметр `--base-free` не применяется к команде `{command}`: частичная загрузка \
+             изменяет строки конфигурации базы, а не собирает ее с нуля"
+        )));
+    }
+    if scan.has(Opt::Verify) {
+        for opt in [Opt::NoCheck, Opt::NoVerify] {
+            if let Some(spelled) = scan.spelled(opt) {
+                return Err(Refusal::Conflict {
+                    first: "--verify".to_string(),
+                    second: spelled.to_string(),
+                });
+            }
+        }
+    }
+    let common = common(scan)?;
+    let base_dir = match scan.value(Opt::BaseDir) {
+        None => return Err(Refusal::MissingValue("base-dir".to_string())),
+        Some(value) if value.trim().is_empty() => {
+            return Err(Refusal::InvalidValue {
+                option: "--base-dir".to_string(),
+                value: value.to_string(),
+            });
+        }
+        Some(value) => PathBuf::from(value),
+    };
+    if scan.arguments.is_empty() {
+        return Err(Refusal::MissingValue(
+            "файлы конфигурации для загрузки".to_string(),
+        ));
+    }
+    Ok(Invocation::ImportFiles(ImportFilesRequest {
+        common,
+        base_dir,
+        files: scan
+            .arguments
+            .iter()
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect(),
+        partial: scan.has(Opt::Partial),
+        verify: scan.has(Opt::Verify),
+        no_check: scan.has(Opt::NoCheck) || scan.has(Opt::NoVerify),
     }))
 }
 
@@ -1149,6 +1265,54 @@ mod tests {
             OsString::from(r"F:\ibcmd\lab\parity\bsp\native")
         );
         assert!(!request.base_free);
+    }
+
+    #[test]
+    fn the_native_import_files_line_of_the_lab_scripts_parses() {
+        // scripts/restructure-lab/import_files.ps1: `infobase config import
+        // files <connection> --base-dir=<dir> --partial <files>`
+        let request = match parse(&[
+            "config",
+            "import",
+            "files",
+            "--dbms=MSSQLServer",
+            "--db-server=localhost",
+            "--db-name=base",
+            r"--data=C:\ibdata\base",
+            "--user=Администратор",
+            r"--base-dir=C:\trees\stage",
+            "--partial",
+            "Catalogs/X.xml",
+            "Catalogs/X/Ext/ObjectModule.bsl",
+        ]) {
+            Ok(Invocation::ImportFiles(request)) => request,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(request.common.db_name.as_deref(), Some("base"));
+        assert_eq!(request.base_dir, PathBuf::from(r"C:\trees\stage"));
+        assert_eq!(
+            request.files,
+            ["Catalogs/X.xml", "Catalogs/X/Ext/ObjectModule.bsl"]
+        );
+        assert!(request.partial && !request.verify && !request.no_check);
+        // `--no-check`, and this program's `--no-verify`, skip the check
+        for skip in ["--no-check", "--no-verify"] {
+            match parse(&["config", "import", "files", "--base-dir", "d", skip, "f"]) {
+                Ok(Invocation::ImportFiles(request)) => {
+                    assert!(request.no_check && !request.partial, "{skip}");
+                }
+                other => panic!("{skip}: {other:?}"),
+            }
+        }
+        // the options of `files` are its own
+        assert_eq!(
+            parse(&["config", "import", "--partial", "d"]),
+            Err(Refusal::Parse("--partial".to_string()))
+        );
+        assert_eq!(
+            parse(&["config", "import", "files", "f"]),
+            Err(Refusal::MissingValue("base-dir".to_string()))
+        );
     }
 
     #[test]
@@ -1538,11 +1702,13 @@ mod tests {
                     matches!(result, Err(Refusal::Incomplete { .. })),
                     "{path:?}: {result:?}"
                 ),
-                // served: without its path it asks for one
-                NodeKind::Export | NodeKind::Import | NodeKind::Save => assert!(
-                    matches!(result, Err(Refusal::MissingValue(_))),
-                    "{path:?}: {result:?}"
-                ),
+                // served: without its path (or directory) it asks for one
+                NodeKind::Export | NodeKind::Import | NodeKind::ImportFiles | NodeKind::Save => {
+                    assert!(
+                        matches!(result, Err(Refusal::MissingValue(_))),
+                        "{path:?}: {result:?}"
+                    )
+                }
                 // served, and needs nothing but the connection
                 NodeKind::Apply => assert!(
                     matches!(result, Ok(Invocation::Apply(_))),

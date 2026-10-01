@@ -389,6 +389,7 @@ pub fn apply_source_change(
                 platform: None,
                 source_version: Some(args.source_version),
                 path_prefix: vec![path_prefix.clone()],
+                files: Vec::new(),
                 script_output: None,
                 script_only: false,
                 bulk: false,

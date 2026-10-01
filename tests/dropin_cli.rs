@@ -150,6 +150,10 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
             NodeKind::Export | NodeKind::Import | NodeKind::Save => {
                 assert_malformed(&args, "Не указано значение параметра");
             }
+            // served: without its directory it asks for one
+            NodeKind::ImportFiles => {
+                assert_malformed(&args, "Не указано значение параметра: base-dir");
+            }
             // served, and it needs no path: it starts, and stops at the
             // connection (a user without a password never reaches the server)
             NodeKind::Apply => {
@@ -708,4 +712,145 @@ fn apply_failure_is_told_in_the_platforms_shape_and_recorded() {
     let report: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
     assert_eq!(report["ok"], false);
     assert_eq!(report["operation"], "infobase config apply");
+}
+
+/// `infobase config import files` (Untru/ibcmd-rs#363): the platform's lines,
+/// the files checked against `--base-dir` before any connection, what is not
+/// served refused with exit code 1.
+#[test]
+fn import_files_checks_the_files_before_the_connection() {
+    let out = TempDir::new("import-files");
+    let tree = out.path().join("tree");
+    for file in [
+        "Configuration.xml",
+        "Catalogs/X.xml",
+        "Catalogs/X/Ext/ObjectModule.bsl",
+    ] {
+        let path = tree.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    let sparse = out.path().join("sparse");
+    fs::create_dir_all(sparse.join("Catalogs/X/Ext")).unwrap();
+    fs::write(sparse.join("Catalogs/X.xml"), b"x").unwrap();
+    fs::write(sparse.join("Catalogs/X/Ext/ObjectModule.bsl"), b"x").unwrap();
+    let base_dir = format!("--base-dir={}", tree.display());
+    let sparse_dir = format!("--base-dir={}", sparse.display());
+    fn line<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec![
+            "infobase",
+            "config",
+            "import",
+            "files",
+            "--dbms=MSSQLServer",
+            "--db-name=ibcmd_rs_dropin_test",
+            "--db-user=sa",
+        ];
+        args.extend_from_slice(extra);
+        args
+    }
+
+    // the command line
+    assert_malformed(
+        &line(&[&base_dir]),
+        "Не указано значение параметра: файлы конфигурации для загрузки",
+    );
+    assert_malformed(
+        &line(&[&base_dir, "--verify", "--no-check", "Catalogs/X.xml"]),
+        "Параметры --verify и --no-check нельзя указывать вместе",
+    );
+    assert_malformed(
+        &[
+            "infobase",
+            "config",
+            "import",
+            "--partial",
+            tree.to_str().unwrap(),
+        ],
+        "Ошибка разбора параметра: --partial",
+    );
+    assert_refused(
+        &line(&[&base_dir, "--extension=E", "Catalogs/X.xml"]),
+        "Параметр `--extension` команды `infobase config import files`",
+    );
+    assert_refused(
+        &line(&[&base_dir, "--base-free", "Catalogs/X.xml"]),
+        "Параметр `--base-free` не применяется",
+    );
+
+    // the files, before any connection: the platform's first line, the
+    // reason, and the exit code
+    for (extra, code, needle) in [
+        (
+            vec![base_dir.as_str(), "../elsewhere.xml"],
+            FAILED,
+            "находится вне каталога",
+        ),
+        (
+            vec![base_dir.as_str(), "Catalogs/Y.xml"],
+            UNSUPPORTED,
+            "удаление файлов и объектов частичной загрузкой не поддерживается",
+        ),
+        (
+            vec![base_dir.as_str(), "Configuration.xml"],
+            UNSUPPORTED,
+            "частичная загрузка Configuration.xml не поддерживается",
+        ),
+        (
+            vec![sparse_dir.as_str(), "Catalogs/X/Ext/ObjectModule.bsl"],
+            UNSUPPORTED,
+            "укажите --partial",
+        ),
+    ] {
+        let output = assert_exit(&line(&extra), code, needle);
+        assert_eq!(
+            text(&output.stdout),
+            "[INFO] Импорт файлов конфигурации из XML...\n",
+            "{extra:?}"
+        );
+    }
+    let report = out.path().join("report.json");
+    let report_arg = format!("--report={}", report.display());
+    let output = assert_exit(
+        &line(&[&base_dir, &report_arg, "Catalogs/Y.xml"]),
+        UNSUPPORTED,
+        "удаление",
+    );
+    assert!(!text(&output.stderr).contains("завершен с ошибкой"));
+    let recorded: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(recorded["ok"], false);
+    assert_eq!(recorded["operation"], "infobase config import files");
+
+    // files it can place: it goes on, and stops at the connection (a user
+    // without a password never reaches the server)
+    for extra in [
+        vec![
+            base_dir.as_str(),
+            "Catalogs/X/Ext/ObjectModule.bsl",
+            "Catalogs/X.xml",
+        ],
+        vec![
+            sparse_dir.as_str(),
+            "--partial",
+            "--no-check",
+            "Catalogs/X/Ext/ObjectModule.bsl",
+        ],
+    ] {
+        let output = assert_exit(
+            &line(&extra),
+            FAILED,
+            "не указан пароль пользователя сервера СУБД",
+        );
+        assert_eq!(
+            text(&output.stdout),
+            "[INFO] Импорт файлов конфигурации из XML...\n"
+        );
+        assert!(
+            text(&output.stderr)
+                .trim_end()
+                .ends_with("[ERROR] Импорт файлов конфигурации из XML завершен с ошибкой"),
+            "{}",
+            text(&output.stderr)
+        );
+    }
 }

@@ -77,6 +77,10 @@ pub struct InfobaseConfigImportReport {
     pub stage_mode: &'static str,
     /// Why that mode: asked for, or what the target's Config holds.
     pub stage_mode_reason: String,
+    /// `import files`: the files whose rows were staged (relative to
+    /// `source_dir`); absent for the whole tree.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
     /// Rows in the target's Config before the import (-1: not read).
     pub target_config_rows: i64,
     pub staged_rows_before: i64,
@@ -542,6 +546,20 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         );
     }
     let (base_free, reason, target_config_rows) = match args.stage_mode {
+        // A partial import patches the rows of the objects it names; a
+        // sparse directory has no Configuration.xml to compare the target by.
+        _ if !args.files.is_empty() => {
+            if matches!(args.stage_mode, InfobaseImportStageMode::BaseFree) {
+                bail!(
+                    "частичная загрузка файлов не собирает конфигурацию с нуля: --base-free не применим"
+                );
+            }
+            (
+                false,
+                format!("a partial import of {} files", args.files.len()),
+                -1,
+            )
+        }
         InfobaseImportStageMode::BaseFree => (true, "asked for (--base-free)".to_string(), -1),
         InfobaseImportStageMode::Patch => (false, "asked for".to_string(), -1),
         InfobaseImportStageMode::Auto => {
@@ -587,6 +605,7 @@ pub fn import_config(args: &InfobaseConfigImportArgs) -> Result<InfobaseConfigIm
         source_dir: stage_args.source_root,
         stage_mode: if base_free { "base-free" } else { "patch" },
         stage_mode_reason: reason,
+        files: args.files.clone(),
         target_config_rows,
         staged_rows_before: report.before.row_count,
         staged_rows_after: report.after.row_count,
@@ -628,6 +647,7 @@ fn build_import_stage_args(
             None
         },
         path_prefix: args.path_prefix.clone(),
+        files: args.files.clone(),
         script_output: args.script_output.clone(),
         script_only: false,
         bulk: false,
@@ -1251,6 +1271,7 @@ mod tests {
             allow_non_lab: true,
             batch_size: Some(250),
             path_prefix: vec!["Catalogs/Валюты".to_string()],
+            files: Vec::new(),
             script_output: Some(PathBuf::from(r"C:\temp\stage.sql")),
             stage_mode: InfobaseImportStageMode::Auto,
             verify: InfobaseImportVerify::Auto,

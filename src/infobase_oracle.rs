@@ -236,6 +236,7 @@ pub fn roundtrip_config(
         allow_non_lab: args.allow_non_lab,
         batch_size: args.batch_size,
         path_prefix: args.path_prefix.clone(),
+        files: Vec::new(),
         script_output: args.script_output.clone(),
         // A clone of the source database: its own rows are patched.
         stage_mode: InfobaseImportStageMode::Patch,
