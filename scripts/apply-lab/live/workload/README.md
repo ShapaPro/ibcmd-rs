@@ -25,3 +25,10 @@ no child-execution-only overlap count is inferred without separate timestamps.
 Raw failures, source/EPF/CLI hashes and actual native flags remain on F. See
 `docs/apply/evidence/live-gate/load-wave3-2026-10-01.md`. This kit proves a bounded
 BSP document/report workload, not a throughput ceiling or LIVE readiness.
+
+`analyze_isolated.py <lab root>` reconciles the private83 journals against final
+physical posted rows, retains unreturned attempts including commits without a
+response, and counts completions against actual native-child bookends. Its
+point-in-time SQL UUID mapping depends on the earlier W2 COM reconciliation.
+See `docs/apply/evidence/live-gate/load-wave3-private83-2026-10-01.md` for the
+separate current3ff DEBUG provenance, setup/harness failures and readiness limits.
