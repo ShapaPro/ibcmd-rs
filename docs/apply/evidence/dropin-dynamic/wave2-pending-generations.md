@@ -132,8 +132,10 @@ refused a node classification change with unchanged node count.
 The raw native/own payloads of three derived help/search indexes are retained in
 `snapshots/help-index-raw`. Native first and second payloads are identical; own
 payloads remain exactly the original preimage. Inflated bytes differ too, so
-compression-only equality is **not** claimed. Strict UTF-16LE decoding failed;
-no new codec or semantic equivalence is claimed. This is the inherited uncovered
+compression-only equality is **not** claimed. Strict UTF-16LE decoding failed for
+`userPostings_ru.bin`; successful decoding of Docs and Vocabulary does not prove
+their complete codec or semantics. No new codec or semantic equivalence is
+claimed. This is the inherited uncovered
 help-search index boundary already recorded by the exclusive apply, now also
 reported by dynamic `not_written`. No full storage parity is claimed.
 
@@ -159,4 +161,6 @@ focused stage-flag, full-header/no-op ordering and recovery-reuse regressions pl
 matching quick gates; the two actual DB publications used the explicitly named earlier build.
 The temporary driver was preserved in the lab and removed from the product tree.
 Final binary hashes/gates are recorded in `wave2/checkpoint.json` and `STATUS.md`.
-Independent review is pending; no completion of issue #347 is claimed.
+Final code/spec/evidence review passed on immutable `cce4ef91` after the recovery
+preimage repair. The measured storage/client limits remain open; no completion
+of issue #347 is claimed.

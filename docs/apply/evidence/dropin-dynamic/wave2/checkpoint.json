@@ -98,7 +98,17 @@
   },
   "committed_log_copy_changes": "Only final blank lines removed; raw lab originals unchanged",
   "issue_347_complete": false,
-  "independent_review": "Cycle 1 P2 repaired; cycle 2 final immutable review pending",
+  "independent_review": {
+    "result": "PASS",
+    "reviewed_head": "cce4ef91f30448e5b2173e497e5cb0da02448a68",
+    "cycle": 2,
+    "reports": [
+      "F:/ibcmd/lab/05/wave2/coordinator/review-dynamic-root-cce4ef91.md",
+      "F:/ibcmd/lab/05/wave2/coordinator/review-dynamic-cce4ef91.md",
+      "F:/ibcmd/lab/05/wave2/coordinator/review-dynamic-shared-cce4ef91.md"
+    ],
+    "scope": "Measured source/storage publication only; whole issue 347 remains open"
+  },
   "previous_final_cli": {
     "path": "F:\\ibcmd\\lab\\05\\wave2\\dynamic\\bin\\ibcmd-rs-shipped-stage-header-final-v2.exe",
     "sha256": "1ecfc9ccb64b3d375e1290f4d0c79d48ba0cc675309d2ac7eb327035e2dd3291",
