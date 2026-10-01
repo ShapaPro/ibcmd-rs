@@ -242,9 +242,9 @@ fn judge_rows(
     Ok(reasons)
 }
 
-/// The first 8.5 oracle measured exactly one existing common-module body and no
-/// previous generation or SI collection. Keep that profile independent of later
-/// 8.3 owner/body coverage. Ordinary semantic and physical checks still run.
+/// Experimental initial CommonForm control extends the same five-row cohort.
+/// No previous generation or SI collection is admitted. Independent native/OWN
+/// form evidence is required before this experimental seam can be published.
 fn judge_initial_85_cohort(
     staged: &[RowMeta],
     active: &HashMap<(String, i32), RowMeta>,
@@ -254,7 +254,7 @@ fn judge_initial_85_cohort(
     has_marker: bool,
 ) -> Vec<String> {
     let refusal = || {
-        vec!["platform-8.5.1.1150: only an initial five-row delta of one existing CommonModule .0 with its unchanged descriptor and root/version/versions is measured; history, overlays, removals and other owners/bodies require native apply".to_owned()]
+        vec!["platform-8.5.1.1150: only an initial five-row delta of one existing CommonModule or CommonForm .0 with its unchanged descriptor and root/version/versions is admitted by this experimental control; history, overlays, removals and other owners/bodies require native apply".to_owned()]
     };
     if has_marker || !history.is_empty() || !overlay.is_empty() || staged.len() != 5 {
         return refusal();
@@ -269,7 +269,10 @@ fn judge_initial_85_cohort(
     let [(owner, body)] = bodies.as_slice() else {
         return refusal();
     };
-    if kinds.get(&owner.to_ascii_lowercase()) != Some(&"CommonModule") {
+    if !matches!(
+        kinds.get(&owner.to_ascii_lowercase()).copied(),
+        Some("CommonModule" | "CommonForm")
+    ) {
         return refusal();
     }
     let names: HashSet<_> = staged
@@ -777,17 +780,33 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
                 &history_names,
                 &judged_effective,
             )?
-            .ok_or_else(|| anyhow!("8.5 module active body vanished"))?;
-            match (
-                initial_85_module_text(&active_bytes),
-                initial_85_module_text(&staged_bytes),
-            ) {
-                (Ok(old), Ok(new)) if old != new => {}
-                (Ok(_), Ok(_)) => reasons.push(
-                    "8.5 module text is unchanged; only a real initial body change is measured"
-                        .to_owned(),
-                ),
-                _ => reasons.push("8.5 module has an unmeasured body/info layout".to_owned()),
+            .ok_or_else(|| anyhow!("8.5 active body vanished"))?;
+            let kind = match classify_name(&body.name) {
+                RowName::Body { owner, .. } => kinds.get(&owner.to_ascii_lowercase()).copied(),
+                _ => None,
+            };
+            match kind {
+                Some("CommonModule") => match (
+                    initial_85_module_text(&active_bytes),
+                    initial_85_module_text(&staged_bytes),
+                ) {
+                    (Ok(old), Ok(new)) if old != new => {}
+                    (Ok(_), Ok(_)) => reasons.push(
+                        "8.5 module text is unchanged; only a real initial body change is measured"
+                            .to_owned(),
+                    ),
+                    _ => reasons.push("8.5 module has an unmeasured body/info layout".to_owned()),
+                },
+                Some("CommonForm") => {
+                    if let Err(error) = super::dynamic_platform85::require_form_module_only_change(
+                        options.platform_profile,
+                        &active_bytes,
+                        &staged_bytes,
+                    ) {
+                        reasons.push(format!("8.5 form module-only guard: {error:#}"));
+                    }
+                }
+                _ => reasons.push("8.5 initial body kind is unmeasured".to_owned()),
             }
         }
     }
@@ -1520,14 +1539,17 @@ mod tests {
     }
 
     #[test]
-    fn initial_85_cohort_accepts_only_one_existing_common_module_body() {
+    fn initial_85_experimental_cohort_accepts_only_one_existing_top_level_body() {
         let stage = delta();
         let active = all_active();
         let check = |rows: &[RowMeta], kinds: &HashMap<String, &'static str>| {
             judge_initial_85_cohort(rows, &active, kinds, &[], &[], false)
         };
         assert!(check(&stage, &kinds()).is_empty());
-        for kind in ["CommonForm", "Catalog", "Template", "HTTPService"] {
+        let mut form = kinds();
+        form.insert(MODULE.to_owned(), "CommonForm");
+        assert!(check(&stage, &form).is_empty());
+        for kind in ["Form", "Catalog", "Template", "HTTPService"] {
             let mut owners = kinds();
             owners.insert(MODULE.to_owned(), kind);
             assert!(!check(&stage, &owners).is_empty(), "{kind}");
