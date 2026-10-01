@@ -1531,6 +1531,14 @@ pub fn write_compare_report(report: &MssqlCompareReport, output: &Path) -> Resul
 pub fn audit_source_parity(
     args: &MssqlAuditSourceParityArgs,
 ) -> Result<MssqlSourceParityAuditReport> {
+    audit_source_parity_with_sql(args, None)
+}
+
+/// Source apply supplies the same explicit connection policy as its preflights.
+pub(crate) fn audit_source_parity_with_sql(
+    args: &MssqlAuditSourceParityArgs,
+    sql_override: Option<SqlExec>,
+) -> Result<MssqlSourceParityAuditReport> {
     let manifest = scan_sources_with_prefixes(&args.source_root, &args.path_prefix)?;
     let source_coverage = audit_source_load_coverage_from_manifest(&manifest)?;
     let metadata_xmls = filter_source_paths_by_prefix(
@@ -1555,7 +1563,12 @@ pub fn audit_source_parity(
     }
     let bootstrap_readiness =
         source_bootstrap_readiness_report(&args.source_root, &metadata_xmls, &common_module_xmls)?;
-    let sql = SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?;
+    let sql = match sql_override {
+        Some(sql) => sql,
+        None => {
+            SqlExec::from_options(SqlOptions::integrated(&args.server, args.sqlcmd.as_deref()))?
+        }
+    };
 
     install_always_used_constants_source(&sql, &args.database, Some(&args.source_root));
     let source = MetadataSourceContext::new(args.source_root.clone());
@@ -3711,6 +3724,14 @@ pub fn import_target_state(
 pub fn stage_source_objects(
     args: &MssqlStageSourceObjectsArgs,
 ) -> Result<StageSourceObjectsReport> {
+    stage_source_objects_with_sql(args, None)
+}
+
+/// Reuse source apply's SQL handle for every preparation read and stage write.
+pub(crate) fn stage_source_objects_with_sql(
+    args: &MssqlStageSourceObjectsArgs,
+    sql_override: Option<SqlExec>,
+) -> Result<StageSourceObjectsReport> {
     if args.base_free {
         return empty_stage::stage_source_objects_base_free(args);
     }
@@ -3754,6 +3775,8 @@ pub fn stage_source_objects(
     let sql = if offline {
         OFFLINE_STAGE.store(true, std::sync::atomic::Ordering::Relaxed);
         SqlExec::detached("an offline --script-only stage reaches no database")
+    } else if let Some(sql) = sql_override {
+        sql
     } else {
         stage_sql(
             args.sqlcmd.as_deref(),

@@ -111,11 +111,6 @@ pub fn apply_source_change(
     if !args.dry_run && !args.allow_non_lab {
         bail!("--allow-non-lab acknowledgement is required for source activation");
     }
-    if args.extension.is_none() && !args.sqlcmd_trust_cert {
-        bail!(
-            "main source apply requires explicit --sqlcmd-trust-cert because the legacy main SQL runner trusts the server certificate"
-        );
-    }
     if args.extension.is_some()
         && matches!(
             args.mode,
@@ -174,36 +169,39 @@ pub fn apply_source_change(
     )? {
         generation
     } else {
-        let report = crate::mssql_dump::dump_config(&MssqlDumpConfigArgs {
-            rows_dir: None,
-            model_export: false,
-            legacy_export: false,
-            sqlcmd: args.sqlcmd.clone(),
-            bcp_executable: args.bcp_executable.clone(),
-            runtime_journal: None,
-            server: args.server.clone(),
-            sql_user: args.sql_user.clone(),
-            sql_pwd: args.sql_pwd.clone(),
-            sql_pwd_env: args.sql_pwd_env.clone(),
-            database: args.database.clone(),
-            output_dir: active_root.clone(),
-            overwrite: false,
-            include_config_save: false,
-            main_configuration: false,
-            file_names: selected_storage_file_names.clone(),
-            file_name_lists: Vec::new(),
-            inflate: false,
-            extract_module_text: true,
-            extract_metadata_xml: true,
-            require_complete_root_metadata: false,
-            require_complete_source_assets: false,
-            collect_all_source_asset_diagnostics: false,
-            platform: None,
-            source_version: args.source_version,
-            no_binary_rows: true,
-            write_binary_rows: false,
-            write_manifest: false,
-        })?;
+        let report = crate::mssql_dump::dump_config_with_sql(
+            &MssqlDumpConfigArgs {
+                rows_dir: None,
+                model_export: false,
+                legacy_export: false,
+                sqlcmd: args.sqlcmd.clone(),
+                bcp_executable: args.bcp_executable.clone(),
+                runtime_journal: None,
+                server: args.server.clone(),
+                sql_user: args.sql_user.clone(),
+                sql_pwd: args.sql_pwd.clone(),
+                sql_pwd_env: args.sql_pwd_env.clone(),
+                database: args.database.clone(),
+                output_dir: active_root.clone(),
+                overwrite: false,
+                include_config_save: false,
+                main_configuration: false,
+                file_names: selected_storage_file_names.clone(),
+                file_name_lists: Vec::new(),
+                inflate: false,
+                extract_module_text: true,
+                extract_metadata_xml: true,
+                require_complete_root_metadata: false,
+                require_complete_source_assets: false,
+                collect_all_source_asset_diagnostics: false,
+                platform: None,
+                source_version: args.source_version,
+                no_binary_rows: true,
+                write_binary_rows: false,
+                write_manifest: false,
+            },
+            Some(main_read_sql(args)?),
+        )?;
         ensure_bounded_export_complete(
             &active_root,
             &bounded_source_paths,
@@ -361,7 +359,7 @@ pub fn apply_source_change(
                 "main dry-run with SQL authentication is not yet supported by the parity auditor"
             );
         }
-        serde_json::to_value(crate::mssql::audit_source_parity(
+        serde_json::to_value(crate::mssql::audit_source_parity_with_sql(
             &MssqlAuditSourceParityArgs {
                 server: args.server.clone(),
                 database: args.database.clone(),
@@ -373,9 +371,10 @@ pub fn apply_source_change(
                 path_prefix: vec![path_prefix.clone()],
                 output: None,
             },
+            Some(main_read_sql(args)?),
         )?)?
     } else {
-        serde_json::to_value(crate::mssql::stage_source_objects(
+        serde_json::to_value(crate::mssql::stage_source_objects_with_sql(
             &MssqlStageSourceObjectsArgs {
                 server: args.server.clone(),
                 sql_user: args.sql_user.clone(),
@@ -400,6 +399,7 @@ pub fn apply_source_change(
                 base_free: false,
                 verify: false,
             },
+            Some(main_read_sql(args)?),
         )?)?
     };
     if args.dry_run && args.extension.is_none() {
@@ -1226,8 +1226,7 @@ fn main_read_sql(args: &MssqlApplySourceChangeArgs) -> Result<SqlExec> {
     } else {
         None
     };
-    // Propagate the caller's existing certificate policy. Source apply still
-    // requires explicit trust because its legacy dump/stage paths do.
+    // Export, parity preparation, staging and activation share this policy.
     SqlExec::from_options(SqlOptions {
         sqlcmd: args.sqlcmd.as_deref(),
         bcp: args.bcp_executable.as_deref(),
@@ -1513,6 +1512,9 @@ impl Drop for TemporaryApplyRoot {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
+
+#[cfg(test)]
+mod certificate_policy_tests;
 
 #[cfg(test)]
 mod tests {

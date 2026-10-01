@@ -2046,6 +2046,14 @@ struct MssqlDumpRowManifest {
 }
 
 pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+    dump_config_with_sql(args, None)
+}
+
+/// Source apply retains its certificate policy through the active export.
+pub(crate) fn dump_config_with_sql(
+    args: &MssqlDumpConfigArgs,
+    sql_override: Option<crate::sql::SqlExec>,
+) -> Result<MssqlDumpConfigReport> {
     let password_marker = if args.sql_user.is_none() {
         password_source_marker(PASSWORD_SOURCE_NONE)
     } else if args.sql_pwd.as_ref().is_some_and(|value| !value.is_empty()) {
@@ -2059,7 +2067,7 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
         &args.database,
         args.runtime_journal.as_deref(),
     )?;
-    match dump_config_inner(args) {
+    match dump_config_inner(args, sql_override) {
         Ok(report) => {
             subprocess_journal.finish_passed()?;
             Ok(report)
@@ -2075,7 +2083,10 @@ pub fn dump_config(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> 
     }
 }
 
-fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport> {
+fn dump_config_inner(
+    args: &MssqlDumpConfigArgs,
+    sql_override: Option<crate::sql::SqlExec>,
+) -> Result<MssqlDumpConfigReport> {
     // Lab aid: `IBCMD_RS_EXTENSION_MODE=1` runs this export as an extension
     // export's converters run (rows written by `IBCMD_RS_EXTENSION_NORMALIZED_ROWS_OUT`),
     // to probe one row without a database.
@@ -2144,6 +2155,8 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
     // `--rows-dir` answers every read from its folder; no login is needed.
     let sql = if args.rows_dir.is_some() {
         crate::sql::SqlExec::detached("--rows-dir reads every row from its folder")
+    } else if let Some(sql) = sql_override {
+        sql
     } else {
         crate::sql::SqlExec::from_options(crate::sql::SqlOptions {
             sqlcmd: args.sqlcmd.as_deref(),

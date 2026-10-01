@@ -131,7 +131,9 @@ mod tests {
         );
         assert!(
             apply.find("preflight_classified_worker_source(").unwrap()
-                < apply.find("stage_source_objects(").unwrap()
+                < apply
+                    .find("crate::mssql::stage_source_objects")
+                    .expect("main source staging must remain guarded")
         );
         let watch = source.split("pub fn watch_source_changes(").nth(1).unwrap();
         assert!(
