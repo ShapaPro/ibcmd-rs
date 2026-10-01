@@ -992,42 +992,17 @@ pub fn activate_staged_main(
         password.as_deref(),
         &args.sql_pwd_env,
     )?;
-    let empty = BTreeSet::new();
-    let staged =
-        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, "ConfigSave", &empty)?;
-    if staged.is_empty() {
+    let inputs = read_activation_inputs(&sql, &args.database)?;
+    if inputs.staged.is_empty() {
         bail!("ConfigSave is empty; there is no staged main-configuration change");
     }
-    let selected = staged
-        .iter()
-        .map(|row| row.file_name.clone())
-        .collect::<BTreeSet<_>>();
-    let active =
-        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, "Config", &selected)?;
-    let marker_name = BTreeSet::from(["DynamicallyUpdated".to_owned()]);
-    let config_marker = exactly_one_optional_marker(
-        "Config",
-        crate::mssql_dump::fetch_main_activation_rows(
-            &sql,
-            &args.database,
-            "Config",
-            &marker_name,
-        )?,
-    )?;
-    let params_marker = exactly_one_optional_marker(
-        "Params",
-        crate::mssql_dump::fetch_main_activation_rows(
-            &sql,
-            &args.database,
-            "Params",
-            &marker_name,
-        )?,
-    )?;
-    let allowed_targets = staged
-        .iter()
-        .filter(|row| !matches!(row.file_name.as_str(), "root" | "version" | "versions"))
-        .map(|row| row.file_name.clone())
-        .collect::<Vec<_>>();
+    let allowed_targets = allowed_activation_targets(&inputs.staged);
+    let ActivationInputs {
+        staged,
+        active,
+        config_marker,
+        params_marker,
+    } = inputs;
     let mode = match args.mode {
         MssqlMainActivationModeArg::Exclusive => MainActivationMode::Exclusive,
         MssqlMainActivationModeArg::Online => MainActivationMode::Online,
@@ -1193,6 +1168,59 @@ pub fn activate_staged_main(
         config_apply: None,
         live_gate,
     })
+}
+
+/// What a main activation plans from, as stored: the exact `ConfigSave` image, the `Config` rows of the
+/// same names and the `DynamicallyUpdated` markers of `Config` and `Params`.
+pub(crate) struct ActivationInputs {
+    pub staged: Vec<MainStorageRow>,
+    pub active: Vec<MainStorageRow>,
+    pub config_marker: Option<MainStorageRow>,
+    pub params_marker: Option<MainStorageRow>,
+}
+
+/// Reads the [`ActivationInputs`] of `database` (`staged` is empty when nothing is staged).
+pub(crate) fn read_activation_inputs(sql: &SqlExec, database: &str) -> Result<ActivationInputs> {
+    let empty = BTreeSet::new();
+    let staged =
+        crate::mssql_dump::fetch_main_activation_rows(sql, database, "ConfigSave", &empty)?;
+    if staged.is_empty() {
+        return Ok(ActivationInputs {
+            staged,
+            active: Vec::new(),
+            config_marker: None,
+            params_marker: None,
+        });
+    }
+    let selected = staged
+        .iter()
+        .map(|row| row.file_name.clone())
+        .collect::<BTreeSet<_>>();
+    let active = crate::mssql_dump::fetch_main_activation_rows(sql, database, "Config", &selected)?;
+    let marker_name = BTreeSet::from(["DynamicallyUpdated".to_owned()]);
+    let config_marker = exactly_one_optional_marker(
+        "Config",
+        crate::mssql_dump::fetch_main_activation_rows(sql, database, "Config", &marker_name)?,
+    )?;
+    let params_marker = exactly_one_optional_marker(
+        "Params",
+        crate::mssql_dump::fetch_main_activation_rows(sql, database, "Params", &marker_name)?,
+    )?;
+    Ok(ActivationInputs {
+        staged,
+        active,
+        config_marker,
+        params_marker,
+    })
+}
+
+/// The staged names an activation may change: every row but the three service rows.
+pub(crate) fn allowed_activation_targets(staged: &[MainStorageRow]) -> Vec<String> {
+    staged
+        .iter()
+        .filter(|row| !matches!(row.file_name.as_str(), "root" | "version" | "versions"))
+        .map(|row| row.file_name.clone())
+        .collect()
 }
 
 /// The exclusive promotion of the staged ConfigSave, carried out by the own apply (#408 step 2, F-4 of #344).

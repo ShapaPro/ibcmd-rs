@@ -17,7 +17,8 @@
     "mssql.extension.registry-read": "supported",
     "mssql.extension.write": "unsupported",
     "mssql.main.write": "unsupported",
-    "mssql.config.apply": "supported"
+    "mssql.config.apply": "supported",
+    "mssql.config.apply.dynamic": "unsupported"
   },
   "evidence": [
     "docs/apply/own-apply.md",

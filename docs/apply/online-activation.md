@@ -700,6 +700,11 @@ one generation, measured), or restart the working process (worker: the tool's ow
   database connection: sessions with open work are refused unless `--interrupt-sessions` is given (F-10).
 - `worker` needs exactly one dedicated `rphost` for the infobase, RAS and `rac` on the same host.
 - The observed BSP client shows a modal message after a lost database connection; nothing here changes that.
+- The drop-in's `infobase config apply --dynamic=force` (#347, [`dropin-dynamic.md`](dropin-dynamic.md)) runs the `online`
+  transition unchanged with two additions a plan can carry: the writes the platform's `force` makes besides the rows (the
+  change registrations and `MobileVersions.dat`, `MainActivationPlan::with_parity_sql`) and the platform's timestamps for the
+  markers (`with_platform_timestamps`; the plans of this file's own commands keep UTC). Its twin against the platform's `force`
+  is in `evidence/dropin-dynamic/acceptance.md`.
 
 ## 9. Evidence and how to repeat
 

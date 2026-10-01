@@ -9,8 +9,18 @@
 //! - the platform's default, `--dynamic=auto`, applies exactly like
 //!   `--dynamic=disable` when the exclusive lock can be taken: the staged rows
 //!   replace the active ones in place, no `_dynupdate_` rows are written. So
-//!   `auto`, `disable` and `prompt` are served by the exclusive apply;
-//!   `--dynamic=force` (dynamic update only) is refused by name at parsing;
+//!   `auto`, `disable` and `prompt` are served by the exclusive apply, and
+//!   with sessions connected they are refused (below), never turned into a
+//!   dynamic update the user did not ask for: this program has no prompt;
+//! - `--dynamic=force` (dynamic update only) is served by the dynamic apply
+//!   (`crate::mssql_config_apply::dynamic`, `docs/apply/dropin-dynamic.md`,
+//!   the second seam [`call_apply_dynamic`]): a small stage of common-module
+//!   and common-form bodies is published as a generation while sessions stay
+//!   connected, with the writes the platform's own `force` makes; any other
+//!   stage is refused with `требуется штатный config apply: <reasons>` (exit
+//!   1), and a platform without the capability is named as not served. The
+//!   refusal for the sessions of `auto` and `prompt` ends with the line
+//!   [`DYNAMIC_HINT`] when the stage would qualify;
 //! - the platform run against a database (`--dbms=...`) does not look for other
 //!   sessions at all. This apply does: with sessions connected it refuses, in
 //!   the platform's words for a lock it cannot take. `--session-terminate=force`
@@ -40,16 +50,16 @@ use uuid::Uuid;
 use crate::infobase::{ConnectionRequest, PlatformNeed, ensure_mssql, resolve_connection};
 use crate::mssql_config_apply::gate::GateVerdict;
 use crate::mssql_config_apply::{
-    AllowRestructure, BackupRequired, ConfigApplyOptions, ConfigApplyReport,
-    ExclusiveAccessRefused, ExclusiveAccessUnprovable, Exclusivity, NativeCommand,
-    NeedsNativeApply, OtherSession, StructuralRefusal,
+    AllowRestructure, BackupRequired, ConfigApplyOptions, ConfigApplyReport, DynamicPublication,
+    DynamicUnsupported, ExclusiveAccessRefused, ExclusiveAccessUnprovable, Exclusivity,
+    NativeCommand, NeedsNativeApply, OtherSession, StructuralRefusal,
 };
 use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::platform::PlatformSpec;
 use crate::settings::{DatabaseTarget, PlatformHint, Settings};
 use crate::sql::{SqlExec, SqlOptions};
 
-use super::parse::{ApplyRequest, Common, ExclusivityMode, SessionTerminate};
+use super::parse::{ApplyRequest, Common, DynamicMode, ExclusivityMode, SessionTerminate};
 use super::{APPLY, read_requested_password, sql_server_name, write_json};
 
 /// What one `config apply` came to, before it is told to the user.
@@ -78,6 +88,10 @@ struct ApplyReportFile<'a> {
 /// The sessions the messages list before "and N more".
 const SESSIONS_SHOWN: usize = 10;
 
+/// The last line of the refusal for the sessions when the staged configuration could be applied
+/// dynamically (`--dynamic=force`, `crate::mssql_config_apply::dynamic`).
+pub const DYNAMIC_HINT: &str = "можно применить динамически: --dynamic=force";
+
 /// `ibcmd infobase config apply ...`: the exit code.
 pub fn run(mut request: ApplyRequest) -> i32 {
     let report = request.common.report.clone();
@@ -99,6 +113,9 @@ fn tell(outcome: Outcome, report: Option<&Path>) -> i32 {
             {
                 println!("[INFO] Создано поколение конфигурации: {generation}");
             }
+            if let Some(warning) = applied.published.as_ref().and_then(overlay_warning) {
+                eprintln!("{warning}");
+            }
             let file = report_file(&applied, true, false);
             APPLY.succeed(report, &file)
         }
@@ -117,6 +134,17 @@ fn tell(outcome: Outcome, report: Option<&Path>) -> i32 {
     }
 }
 
+/// The overlay of dynamic updates grows with every generation until an exclusive apply folds it: past
+/// the number the apply names (50) the platform's `[WARN]` line says so.
+fn overlay_warning(published: &DynamicPublication) -> Option<String> {
+    (published.history.len() > published.warn_after_generations).then(|| {
+        format!(
+            "[WARN] В информационной базе накоплено динамических поколений конфигурации: {}; их сворачивает обычное обновление (config apply --dynamic=disable, когда к базе никто не подключён)",
+            published.history.len()
+        )
+    })
+}
+
 fn report_file(
     report: &ConfigApplyReport,
     ok: bool,
@@ -131,16 +159,38 @@ fn report_file(
 }
 
 /// Connects, applies and classifies what came back.
+///
+/// `--dynamic=force` is the dynamic apply and nothing else: it is never turned into an exclusive
+/// one. Every other value is the exclusive apply, and when that one is refused for the sessions
+/// connected, the refusal says whether the stage could have been applied dynamically.
 pub fn execute(request: &ApplyRequest) -> Outcome {
     let (sql, options) = match connect(request) {
         Ok(connected) => connected,
         Err(error) => return Outcome::Failed(format!("{error:#}")),
     };
-    match call_apply(&sql, &options) {
+    let dynamic = request.dynamic == DynamicMode::Force;
+    let result = if dynamic {
+        call_apply_dynamic(&sql, &options)
+    } else {
+        call_apply(&sql, &options)
+    };
+    match result {
         Ok(report) if report.nothing_to_apply => Outcome::NothingToApply(Box::new(report)),
         Ok(report) => Outcome::Applied(Box::new(report)),
-        Err(error) => classify(&error, request.session_terminate),
+        Err(error) => {
+            let hint = points_at_force(request.dynamic)
+                && error.downcast_ref::<ExclusiveAccessRefused>().is_some()
+                && call_would_qualify(&sql, &options);
+            classify_with(&error, request.session_terminate, hint)
+        }
     }
+}
+
+/// Whether the refusal for the sessions may point at `--dynamic=force`: `auto` and `prompt` leave the
+/// choice to the program, so it says what is possible; `disable` said no to a dynamic update, and
+/// `force` is the dynamic apply itself.
+fn points_at_force(mode: DynamicMode) -> bool {
+    matches!(mode, DynamicMode::Auto | DynamicMode::Prompt)
 }
 
 /// THE SEAM: the one call into the own apply (`crate::mssql_config_apply`,
@@ -152,6 +202,18 @@ pub fn execute(request: &ApplyRequest) -> Outcome {
 /// result.
 fn call_apply(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyReport> {
     crate::mssql_config_apply::apply_staged_configuration(sql, options)
+}
+
+/// THE SECOND SEAM: `--dynamic=force`. The staged configuration is published as a dynamic
+/// generation while sessions stay connected (`crate::mssql_config_apply::dynamic`), or refused with
+/// the reasons the stage is not one.
+fn call_apply_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyReport> {
+    crate::mssql_config_apply::dynamic::apply_dynamic(sql, options)
+}
+
+/// Whether the staged configuration would be applied dynamically: a look that writes nothing.
+fn call_would_qualify(sql: &SqlExec, options: &ConfigApplyOptions) -> bool {
+    crate::mssql_config_apply::dynamic::would_qualify(sql, options)
 }
 
 /// The SQL handle and the apply options of a request.
@@ -262,8 +324,25 @@ pub fn profile_of(spec: PlatformSpec) -> Result<MssqlNativePlatformProfile> {
 /// | `BackupRequired` | its words: name `--recovery-backup` or `--i-have-a-backup` | 1 |
 /// | `ExclusiveAccessRefused` | the platform's lock words and the sessions | -1 (1 when `--session-terminate` asked to end them) |
 /// | `ExclusiveAccessUnprovable` | the reason and `--exclusivity=assumed` | -1 |
+/// | `DynamicUnsupported` | `--dynamic=force` named as not served for the platform | 1 |
 /// | anything else | the error and its context | -1 |
 pub fn classify(error: &anyhow::Error, terminate: SessionTerminate) -> Outcome {
+    classify_with(error, terminate, false)
+}
+
+/// [`classify`], with the hint a refusal for the sessions gives when the stage could have been
+/// applied dynamically (`dynamic_hint`).
+pub fn classify_with(
+    error: &anyhow::Error,
+    terminate: SessionTerminate,
+    dynamic_hint: bool,
+) -> Outcome {
+    if let Some(unsupported) = error.downcast_ref::<DynamicUnsupported>() {
+        return Outcome::Refused(format!(
+            "Параметр `--dynamic=force` команды `{}` не поддерживается для платформы {}: динамическое обновление измерено только на 8.3.27.2214 ({})",
+            APPLY.command, unsupported.platform, unsupported.reason
+        ));
+    }
     if let Some(refusal) = error.downcast_ref::<StructuralRefusal>() {
         return Outcome::Refused(structural_text(&refusal.verdict));
     }
@@ -274,7 +353,12 @@ pub fn classify(error: &anyhow::Error, terminate: SessionTerminate) -> Outcome {
         return Outcome::Refused(BackupRequired.to_string());
     }
     if let Some(refusal) = error.downcast_ref::<ExclusiveAccessRefused>() {
-        return sessions_outcome(&refusal.sessions, terminate, &format!("{error:#}"));
+        return sessions_outcome(
+            &refusal.sessions,
+            terminate,
+            &format!("{error:#}"),
+            dynamic_hint,
+        );
     }
     if let Some(unprovable) = error.downcast_ref::<ExclusiveAccessUnprovable>() {
         return Outcome::Failed(format!(
@@ -327,8 +411,13 @@ fn sessions_outcome(
     sessions: &[OtherSession],
     terminate: SessionTerminate,
     detail: &str,
+    dynamic_hint: bool,
 ) -> Outcome {
-    let listing = sessions_text(sessions, detail);
+    let mut listing = sessions_text(sessions, detail);
+    if dynamic_hint {
+        listing.push('\n');
+        listing.push_str(DYNAMIC_HINT);
+    }
     match terminate {
         SessionTerminate::Disable => Outcome::Failed(listing),
         SessionTerminate::Prompt | SessionTerminate::Force => Outcome::Refused(format!(
@@ -396,8 +485,8 @@ mod tests {
 
     use super::*;
     use crate::dropin::parse::{Invocation, parse_infobase};
-    use crate::mssql_config_apply::BackupPolicy;
     use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
+    use crate::mssql_config_apply::{ApplyMode, BackupPolicy};
 
     fn request(list: &[&str]) -> ApplyRequest {
         let args = list
@@ -546,6 +635,119 @@ mod tests {
                     "{text}"
                 );
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_refusal_for_the_sessions_points_at_force_when_the_stage_would_qualify() {
+        let error = refused_by_sessions(vec![session(57, "DESKTOP-1", "1CV8")], false);
+        // without the hint it is what it always was
+        let plain = match classify(&error, SessionTerminate::Disable) {
+            Outcome::Failed(text) => text,
+            other => panic!("{other:?}"),
+        };
+        assert!(!plain.contains("--dynamic=force"), "{plain}");
+        // with it, one more line, the last, and the exit code is the same (-1)
+        match classify_with(&error, SessionTerminate::Disable, true) {
+            Outcome::Failed(text) => {
+                assert_eq!(
+                    text,
+                    format!("{plain}\nможно применить динамически: --dynamic=force")
+                );
+                assert_eq!(text.lines().last(), Some(DYNAMIC_HINT));
+            }
+            other => panic!("{other:?}"),
+        }
+        // the sessions and a wish to end them: still «не поддерживается», still exit 1, and the hint is there
+        match classify_with(&error, SessionTerminate::Force, true) {
+            Outcome::Refused(text) => {
+                assert!(text.contains("не поддерживается"), "{text}");
+                assert!(text.ends_with(DYNAMIC_HINT), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // only a refusal for the sessions carries it
+        match classify_with(
+            &anyhow::Error::new(NeedsNativeApply::apply("a deleted list")),
+            SessionTerminate::Disable,
+            true,
+        ) {
+            Outcome::Refused(text) => assert!(!text.contains("--dynamic=force"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_overlay_is_warned_about_on_stderr_words_past_the_named_number() {
+        let published = |count: usize| DynamicPublication {
+            generation: "40cfe0ac-6f3b-4851-85ba-295e568663f6".to_string(),
+            previous_generation: "a3d987b5-e2d0-6e47-b11e-2b29ebd47040".to_string(),
+            history: (0..count).map(|index| format!("g{index}")).collect(),
+            alias_rows: Vec::new(),
+            replaced_in_place: Vec::new(),
+            warn_after_generations: 50,
+        };
+        assert_eq!(overlay_warning(&published(50)), None);
+        let warning = overlay_warning(&published(51)).unwrap();
+        assert!(warning.starts_with("[WARN] "), "{warning}");
+        assert!(warning.contains(": 51;"), "{warning}");
+    }
+
+    #[test]
+    fn only_auto_and_prompt_are_pointed_at_force() {
+        assert!(points_at_force(DynamicMode::Auto));
+        assert!(points_at_force(DynamicMode::Prompt));
+        // `disable` said no to a dynamic update, and `force` is one
+        assert!(!points_at_force(DynamicMode::Disable));
+        assert!(!points_at_force(DynamicMode::Force));
+        // and the request carries the word to the two seams: nothing but `force` is dynamic
+        for (word, dynamic) in [
+            ("auto", false),
+            ("disable", false),
+            ("prompt", false),
+            ("force", true),
+        ] {
+            let request = request(&["config", "apply", &format!("--dynamic={word}")]);
+            assert_eq!(request.dynamic == DynamicMode::Force, dynamic, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_platform_without_the_dynamic_apply_is_named_and_is_exit_one_material() {
+        let error = anyhow::Error::new(DynamicUnsupported {
+            platform: "platform-8.5.1.1150".to_string(),
+            reason: "capability `mssql.config.apply.dynamic` is explicitly unsupported for platform profile `platform-8.5.1.1150`".to_string(),
+        })
+        .context("planning");
+        match classify(&error, SessionTerminate::Disable) {
+            Outcome::Refused(text) => {
+                assert!(
+                    text.starts_with("Параметр `--dynamic=force` команды `infobase config apply` не поддерживается для платформы platform-8.5.1.1150"),
+                    "{text}"
+                );
+                assert!(text.contains("mssql.config.apply.dynamic"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stage_that_is_no_dynamic_update_is_the_native_applys_to_do() {
+        // the words of the dynamic apply's refusal are the ones every stage the own apply leaves to
+        // the platform has: `требуется штатный config apply: <reasons>`, exit 1
+        let reasons = vec![
+            "9521 rows".to_string(),
+            "5eab8a1b-1111-4222-8333-444455556666: the object is a Catalog".to_string(),
+        ];
+        let error = anyhow::Error::new(NeedsNativeApply::apply(
+            crate::mssql_config_apply::dynamic::refusal_reason(&reasons),
+        ));
+        match classify(&error, SessionTerminate::Disable) {
+            Outcome::Refused(text) => assert_eq!(
+                text,
+                "требуется штатный config apply: 9521 rows; 5eab8a1b-1111-4222-8333-444455556666: the object is a Catalog"
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -807,11 +1009,57 @@ mod tests {
         assert_eq!(value["ok"], true);
         assert_eq!(value["nothing_to_apply"], false);
         assert_eq!(value["apply"]["database"], "db");
+        // an exclusive apply publishes no generation: the key is not there
+        assert_eq!(value["apply"]["mode"], "exclusive");
+        assert!(value["apply"].get("published").is_none());
+    }
+
+    #[test]
+    fn the_report_of_a_dynamic_apply_names_the_mode_the_alias_rows_and_the_history() {
+        let mut report = sample_report();
+        report.mode = ApplyMode::Dynamic;
+        report.exclusivity = Exclusivity::NotRequired;
+        report.published = Some(crate::mssql_config_apply::DynamicPublication {
+            generation: "40cfe0ac-6f3b-4851-85ba-295e568663f6".to_string(),
+            previous_generation: "a3d987b5-e2d0-6e47-b11e-2b29ebd47040".to_string(),
+            history: vec![
+                "a3d987b5-e2d0-6e47-b11e-2b29ebd47040".to_string(),
+                "40cfe0ac-6f3b-4851-85ba-295e568663f6".to_string(),
+            ],
+            alias_rows: vec!["x_dynupdate_40cfe0ac-6f3b-4851-85ba-295e568663f6.0".to_string()],
+            replaced_in_place: vec!["root".to_string(), "version".to_string()],
+            warn_after_generations: 50,
+        });
+        let value = serde_json::to_value(ApplyReportFile {
+            operation: "infobase config apply",
+            ok: true,
+            nothing_to_apply: false,
+            apply: &report,
+        })
+        .unwrap();
+        assert_eq!(value["apply"]["mode"], "dynamic");
+        assert_eq!(value["apply"]["exclusivity"], "not_required");
+        assert_eq!(
+            value["apply"]["published"]["alias_rows"][0],
+            "x_dynupdate_40cfe0ac-6f3b-4851-85ba-295e568663f6.0"
+        );
+        assert_eq!(
+            value["apply"]["published"]["history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            value["apply"]["published"]["replaced_in_place"][1],
+            "version"
+        );
     }
 
     fn sample_report() -> ConfigApplyReport {
         ConfigApplyReport {
             schema_version: 1,
+            mode: ApplyMode::Exclusive,
             database: "db".to_string(),
             platform_profile: "platform-8.3.27.2214".to_string(),
             storage_schema_sha256: String::new(),
@@ -824,6 +1072,7 @@ mod tests {
             new_generation: Some("40cfe0ac-6f3b-4851-85ba-295e568663f6".to_string()),
             stage: None,
             dynamic: None,
+            published: None,
             gate: None,
             new_objects: None,
             removals: None,

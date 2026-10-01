@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use crate::mssql_platform_profile::{OwnRasProcess, exclusive_session_gate};
 
-const MAX_ROW_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PLAN_BYTES: usize = 32 * 1024 * 1024;
-const MAX_ROWS: usize = 128;
+pub(crate) const MAX_ROW_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_PLAN_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_ROWS: usize = 128;
 const MAX_INFLATED_VERSIONS_BYTES: usize = 16 * 1024 * 1024;
 const SERVICE_NAMES: [&str; 3] = ["root", "version", "versions"];
 
@@ -143,6 +143,13 @@ pub struct MainActivationPlan {
     no_op: bool,
     recovery: MainActivationRecoverySnapshot,
     own_ras_processes: Vec<OwnRasProcess>,
+    /// Writes the caller's apply makes in the same transaction (see [`Self::with_parity_sql`]).
+    parity_sql: Option<String>,
+    /// T-SQL that declares `@now`, the timestamp as the platform writes it (see
+    /// [`Self::with_platform_timestamps`]).
+    platform_timestamps: Option<String>,
+    /// Staged rows the publication consumes without publishing them (see [`Self::with_consumed_stage_rows`]).
+    consumed_stage_rows: Vec<MainStorageRow>,
     executor: MainActivationExecutor,
 }
 
@@ -211,6 +218,26 @@ impl MainActivationPlan {
         &self.recovery
     }
 
+    /// The dynamic generations the database holds before this publication, oldest first.
+    pub fn dynamic_history(&self) -> &[Uuid] {
+        &self.dynamic_history
+    }
+
+    /// The rows an `online` publication writes beside the active ones, by the name they get
+    /// (`<name>_dynupdate_<generation>`, the storage suffix last). `root` and `version` are
+    /// replaced in place and are not among them.
+    pub fn alias_rows(&self) -> Vec<String> {
+        let generation = self.new_generation.hyphenated().to_string();
+        self.staged_rows
+            .iter()
+            .filter(|row| !matches!(row.file_name.as_str(), "root" | "version"))
+            .map(|row| match row.file_name.as_str() {
+                "versions" => format!("versions_dynupdate_{generation}"),
+                name => dynamic_alias(name, &generation),
+            })
+            .collect()
+    }
+
     /// The worker processes the exclusive session gate leaves out (see [`Self::with_own_ras_processes`]).
     pub fn own_ras_processes(&self) -> &[OwnRasProcess] {
         &self.own_ras_processes
@@ -223,6 +250,42 @@ impl MainActivationPlan {
     pub fn with_own_ras_processes(mut self, own: Vec<OwnRasProcess>) -> Self {
         self.own_ras_processes = own;
         self
+    }
+
+    /// The plan with T-SQL the transaction runs after the rows are published and before the stage
+    /// is consumed (`ConfigSave` still holds the staged rows): the writes an apply makes besides
+    /// moving rows -- the change registrations and `Files.MobileVersions.dat` -- which the
+    /// exclusive apply renders and the dynamic apply of the drop-in shares
+    /// (`mssql_config_apply::sqlgen::render_parity_writes`). Only an `online` publication takes
+    /// it, and an unchanged stage (`no_op`) writes nothing, so nothing of it either.
+    pub fn with_parity_sql(mut self, sql: String) -> Self {
+        self.parity_sql = Some(sql).filter(|sql| !sql.trim().is_empty());
+        self
+    }
+
+    /// The plan whose `online` publication stamps the `DynamicallyUpdated` markers the way the
+    /// platform does -- local time shifted by the infobase's year offset, the `@now` the
+    /// `declarations` declare -- instead of UTC (the default, which the source-driven online apply
+    /// has always written). The declarations are run at the start of the transition, so the same
+    /// `@now` serves the parity writes ([`Self::with_parity_sql`]).
+    pub fn with_platform_timestamps(mut self, declarations: String) -> Self {
+        self.platform_timestamps = Some(declarations).filter(|sql| !sql.trim().is_empty());
+        self
+    }
+
+    /// The plan for a stage that holds rows besides the ones published: the caller has judged them (the
+    /// empty `deleted` list of an import stage; nonempty lists are refused by the dynamic caller)
+    /// and this publication neither publishes nor acts on them. They are part of the exact stage
+    /// the transaction asserts and go with `ConfigSave` when it is emptied; the plan validated and
+    /// published only the rows it was prepared with.
+    pub fn with_consumed_stage_rows(mut self, rows: Vec<MainStorageRow>) -> Self {
+        self.consumed_stage_rows = rows;
+        self
+    }
+
+    /// How many rows the stage holds in all: the published and the consumed.
+    fn stage_row_count(&self) -> usize {
+        self.staged_rows.len() + self.consumed_stage_rows.len()
     }
 
     pub fn dry_run_report(&self) -> MainActivationDryRunReport {
@@ -424,6 +487,9 @@ pub fn prepare_main_activation_for(
         no_op,
         recovery,
         own_ras_processes: Vec::new(),
+        parity_sql: None,
+        platform_timestamps: None,
+        consumed_stage_rows: Vec::new(),
         executor,
     })
 }
@@ -609,7 +675,13 @@ pub fn render_main_activation_sql_with(
     )
     .unwrap();
 
-    render_expected_table(&mut sql, "ExpectedStage", &plan.staged_rows);
+    let exact_stage: Vec<MainStorageRow> = plan
+        .staged_rows
+        .iter()
+        .chain(&plan.consumed_stage_rows)
+        .cloned()
+        .collect();
+    render_expected_table(&mut sql, "ExpectedStage", &exact_stage);
     render_expected_table(&mut sql, "ExpectedActive", &plan.active_rows);
     render_exact_set_assertion(&mut sql, "ConfigSave", "ExpectedStage", 57201);
     render_selected_assertion(&mut sql, "Config", "ExpectedActive", 57202);
@@ -624,7 +696,7 @@ pub fn render_main_activation_sql_with(
         writeln!(
             sql,
             "IF @@ROWCOUNT <> {} THROW 57205, 'ConfigSave cleanup drifted', 1;",
-            plan.staged_rows.len()
+            plan.stage_row_count()
         )
         .unwrap();
         writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.ConfigSave) THROW 57206, 'ConfigSave postcondition failed', 1;").unwrap();
@@ -637,6 +709,14 @@ pub fn render_main_activation_sql_with(
         });
     }
 
+    if plan.mode == MainActivationMode::Online
+        && let Some(declarations) = &plan.platform_timestamps
+    {
+        sql.push_str(declarations);
+        if !declarations.ends_with('\n') {
+            sql.push('\n');
+        }
+    }
     match plan.mode {
         MainActivationMode::Exclusive => render_ordinary_transition(&mut sql, plan, true),
         MainActivationMode::Online => render_online_transition(&mut sql, plan),
@@ -644,11 +724,20 @@ pub fn render_main_activation_sql_with(
             render_ordinary_transition(&mut sql, plan, false)
         }
     }
+    if plan.mode == MainActivationMode::Online
+        && let Some(parity) = &plan.parity_sql
+    {
+        writeln!(sql, "-- the writes of the apply besides the rows").unwrap();
+        sql.push_str(parity);
+        if !parity.ends_with('\n') {
+            sql.push('\n');
+        }
+    }
     writeln!(sql, "DELETE FROM dbo.ConfigSave;").unwrap();
     writeln!(
         sql,
         "IF @@ROWCOUNT <> {} THROW 57220, 'ConfigSave cleanup drifted', 1;",
-        plan.staged_rows.len()
+        plan.stage_row_count()
     )
     .unwrap();
     render_postconditions(&mut sql, plan);
@@ -745,8 +834,13 @@ fn render_online_transition(sql: &mut String, plan: &MainActivationPlan) {
         .unwrap();
     }
     let (config_payload, params_payload) = next_dynamic_marker_payloads(plan);
-    render_marker_upsert(sql, "Config", &config_payload, 57213);
-    render_marker_upsert(sql, "Params", &params_payload, 57214);
+    let stamp = if plan.platform_timestamps.is_some() {
+        "@now"
+    } else {
+        "SYSUTCDATETIME()"
+    };
+    render_marker_upsert(sql, "Config", &config_payload, 57213, stamp);
+    render_marker_upsert(sql, "Params", &params_payload, 57214, stamp);
 }
 
 fn render_expected_table(sql: &mut String, variable: &str, rows: &[MainStorageRow]) {
@@ -824,9 +918,9 @@ fn online_history_refusal(mode: MainActivationMode, evidence: &str) -> String {
     )
 }
 
-fn render_marker_upsert(sql: &mut String, table: &str, payload: &[u8], code: u32) {
+fn render_marker_upsert(sql: &mut String, table: &str, payload: &[u8], code: u32, stamp: &str) {
     let data = hex(payload);
-    writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0) UPDATE dbo.{table} SET Modified=SYSUTCDATETIME(),DataSize={},BinaryData=0x{} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 ELSE INSERT dbo.{table} (FileName,Creation,Modified,Attributes,DataSize,BinaryData,PartNo) VALUES (N'DynamicallyUpdated',SYSUTCDATETIME(),SYSUTCDATETIME(),0,{},0x{},0);", payload.len(), data, payload.len(), data).unwrap();
+    writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0) UPDATE dbo.{table} SET Modified={stamp},DataSize={},BinaryData=0x{} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 ELSE INSERT dbo.{table} (FileName,Creation,Modified,Attributes,DataSize,BinaryData,PartNo) VALUES (N'DynamicallyUpdated',{stamp},{stamp},0,{},0x{},0);", payload.len(), data, payload.len(), data).unwrap();
     writeln!(
         sql,
         "IF @@ROWCOUNT <> 1 THROW {code}, '{table}.DynamicallyUpdated upsert failed', 1;"
@@ -1394,6 +1488,160 @@ mod tests {
         assert!(script.sql.contains("EFBBBF7B302C322C"));
         assert!(script.report.online_protocol_verified);
         assert!(script.report.existing_sessions_retain_generation);
+    }
+
+    #[test]
+    fn the_parity_sql_runs_in_the_online_transaction_before_the_stage_is_consumed() {
+        let parity = "UPDATE dbo._ConfigChngR SET _MessageNo = NULL; -- parity\n";
+        let plan = fixture(MainActivationMode::Online).with_parity_sql(parity.to_owned());
+        let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+        let upsert = sql
+            .find("Params.DynamicallyUpdated upsert failed")
+            .expect("the markers are written");
+        let at = sql.find(parity).expect("the parity sql is in the script");
+        let consumed = sql.find("DELETE FROM dbo.ConfigSave;").unwrap();
+        // after the rows and the markers, while ConfigSave still holds the stage, inside the
+        // transaction the postconditions and the commit close
+        assert!(upsert < at && at < consumed, "{upsert} {at} {consumed}");
+        assert!(at < sql.find("COMMIT TRANSACTION;").unwrap());
+        // only the online publication takes it: the ordinary ones fold the overlay away and
+        // replace rows in place, which is the exclusive apply's script
+        for mode in [
+            MainActivationMode::Exclusive,
+            MainActivationMode::Live,
+            MainActivationMode::Worker,
+        ] {
+            let plan = fixture(mode).with_parity_sql(parity.to_owned());
+            let sql = render_main_activation_sql("lab", &plan, Some(r"C:\tail.trn"))
+                .or_else(|_| render_main_activation_sql("lab", &plan, None))
+                .unwrap()
+                .sql;
+            assert!(!sql.contains(parity), "{mode:?}");
+        }
+        // an empty fragment is no fragment, and an unchanged stage writes nothing at all
+        let plain = render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None)
+            .unwrap()
+            .sql;
+        let empty = fixture(MainActivationMode::Online).with_parity_sql("  \n".to_owned());
+        assert_eq!(
+            render_main_activation_sql("lab", &empty, None).unwrap().sql,
+            plain
+        );
+        assert!(!plain.contains("parity"));
+    }
+
+    #[test]
+    fn the_markers_are_stamped_in_utc_unless_the_plan_brings_the_platforms_timestamps() {
+        let plain = render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None)
+            .unwrap()
+            .sql;
+        assert!(plain.contains("SYSUTCDATETIME()"));
+        assert!(!plain.contains("@now"));
+        let declarations = "DECLARE @now datetime2(6) = SYSDATETIME(); -- platform\n";
+        let stamped = render_main_activation_sql(
+            "lab",
+            &fixture(MainActivationMode::Online).with_platform_timestamps(declarations.to_owned()),
+            None,
+        )
+        .unwrap()
+        .sql;
+        // declared before the first row is written, used for both markers, and no UTC left
+        let declared = stamped.find(declarations).unwrap();
+        let first_write = stamped
+            .find("DELETE FROM dbo.Config WHERE FileName=N'root'")
+            .unwrap();
+        assert!(declared < first_write);
+        assert!(!stamped.contains("SYSUTCDATETIME()"));
+        assert_eq!(stamped.matches("Modified=@now").count(), 2);
+        assert!(stamped.contains("VALUES (N'DynamicallyUpdated',@now,@now,0,"));
+        // the ordinary modes take no such thing
+        let exclusive = render_main_activation_sql(
+            "lab",
+            &fixture(MainActivationMode::Exclusive)
+                .with_platform_timestamps(declarations.to_owned()),
+            None,
+        )
+        .unwrap()
+        .sql;
+        assert!(!exclusive.contains("@now"));
+    }
+
+    #[test]
+    fn a_consumed_stage_row_is_part_of_the_exact_stage_and_published_nowhere() {
+        let deleted = row("deleted", b"0".to_vec());
+        let plan =
+            fixture(MainActivationMode::Online).with_consumed_stage_rows(vec![deleted.clone()]);
+        let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+        // asserted with the stage (the ConfigSave the transaction expects holds it), emptied with it (6 rows: 5 + 1)
+        assert!(sql.contains(&format!(
+            "INSERT @ExpectedStage VALUES (N'deleted',0, {},0x{})",
+            deleted.data_size,
+            hex(&deleted.sha256())
+        )));
+        assert!(sql.contains("IF @@ROWCOUNT <> 6 THROW 57220, 'ConfigSave cleanup drifted', 1;"));
+        // and neither moved, aliased nor expected in Config afterwards
+        assert!(!sql.contains("deleted_dynupdate_"));
+        assert!(!sql.contains("FileName=N'deleted' AND PartNo=0"));
+        assert!(
+            !plan
+                .alias_rows()
+                .iter()
+                .any(|alias| alias.contains("deleted"))
+        );
+        assert_eq!(plan.dry_run_report().staged_rows, 5);
+        let plain = render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None)
+            .unwrap()
+            .sql;
+        assert!(plain.contains("IF @@ROWCOUNT <> 5 THROW 57220"));
+    }
+
+    #[test]
+    fn online_noop_consumes_the_exact_stage_without_parity_or_marker_writes() {
+        let active = fixture(MainActivationMode::Online).active_rows;
+        let plan = prepare_main_activation(
+            MainActivationMode::Online,
+            active.clone(),
+            MainActivationSnapshot {
+                config_rows: active,
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[BODY.to_owned(), format!("{BODY}.0")],
+            true,
+        )
+        .unwrap()
+        .with_consumed_stage_rows(vec![row("deleted", b"0".to_vec())])
+        .with_parity_sql("UPDATE dbo.Files SET BinaryData=0x01; -- must not run".to_owned())
+        .with_platform_timestamps("DECLARE @now datetime2(6) = SYSDATETIME();".to_owned());
+        assert!(plan.is_no_op());
+        let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+        assert!(sql.contains("INSERT @ExpectedStage VALUES (N'deleted'"));
+        assert!(sql.contains("DELETE FROM dbo.ConfigSave;"));
+        assert!(sql.contains("IF @@ROWCOUNT <> 6 THROW 57205"));
+        assert!(!sql.contains("must not run"));
+        assert!(!sql.contains("DECLARE @now"));
+        assert!(!sql.contains("INSERT dbo.Config"));
+        assert!(!sql.contains("UPDATE dbo.Params"));
+        assert!(!sql.contains("DELETE FROM dbo.Config WHERE"));
+    }
+
+    #[test]
+    fn the_alias_rows_of_a_publication_are_named_as_the_transition_writes_them() {
+        let plan = fixture(MainActivationMode::Online);
+        assert_eq!(
+            plan.alias_rows(),
+            vec![
+                format!("{BODY}_dynupdate_{NEW}"),
+                format!("{BODY}_dynupdate_{NEW}.0"),
+                format!("versions_dynupdate_{NEW}"),
+            ]
+        );
+        assert!(plan.dynamic_history().is_empty());
+        // and each of them is a row of the script
+        let sql = render_main_activation_sql("lab", &plan, None).unwrap().sql;
+        for alias in plan.alias_rows() {
+            assert!(sql.contains(&format!("N'{alias}'")), "{alias}");
+        }
     }
 
     #[test]

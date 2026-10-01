@@ -211,7 +211,7 @@ pub struct NodeLiteral {
 }
 
 /// Everything the script is rendered from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScriptInputs {
     pub database: String,
     /// The client process: its own sessions do not count as "other".
@@ -501,18 +501,7 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
         );
     }
 
-    // Timestamps as the platform writes them: local time, shifted by the
-    // infobase's year offset.
-    writeln!(
-        sql,
-        "DECLARE @offset int = ISNULL((SELECT TOP (1) Offset FROM dbo._YearOffset), 0);"
-    )
-    .unwrap();
-    writeln!(
-        sql,
-        "DECLARE @now datetime2(6) = DATEADD(year, @offset, CONVERT(datetime2(6), SYSDATETIME()));"
-    )
-    .unwrap();
+    render_timestamps(&mut sql);
 
     // A restructuring the gate let through: the tables are rebuilt and the schema published inside
     // this transaction, so a failed assertion below rolls them back too.
@@ -645,60 +634,8 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
 
     // Change registrations: every object that owns a staged row is changed for
     // every node again, and new objects are registered.
-    if input.reset_change_registrations {
-        let predicate = staged_objects_predicate_with("dbo.", &input.extra_changed_objects);
-        writeln!(
-            sql,
-            "UPDATE r SET _MessageNo = NULL FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate};"
-        )
-        .unwrap();
-        throw(
-            &mut sql,
-            &format!(
-                "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate})"
-            ),
-            code::CHANGE_REGISTRATION,
-            "a change registration of a staged object was not reset",
-        );
-        // New objects first: their check of the nodes counts the nodes the register holds, which the
-        // additions below change.
-        render_new_registrations(&mut sql, input);
-        render_registration_additions(&mut sql, input);
-    }
-
-    for rewrite in &input.files_rewrites {
-        let name = quote_string(&rewrite.file_name);
-        throw(
-            &mut sql,
-            &format!(
-                "(SELECT COUNT_BIG(*) FROM dbo.Files WHERE FileName = N'{name}' AND PartNo = 0 AND CONVERT(bigint, DataSize) = {} AND HASHBYTES('SHA2_256', BinaryData) = 0x{}) <> 1",
-                rewrite.old_data_size, rewrite.old_sha256_hex
-            ),
-            code::FILES_DRIFTED,
-            &format!(
-                "Files.{} changed since the plan was made",
-                rewrite.file_name
-            ),
-        );
-        writeln!(
-            sql,
-            "DELETE FROM dbo.Files WHERE FileName = N'{name}' AND PartNo <> 0;"
-        )
-        .unwrap();
-        writeln!(
-            sql,
-            "UPDATE dbo.Files SET Creation = @now, Modified = @now, DataSize = {}, BinaryData = 0x{} WHERE FileName = N'{name}' AND PartNo = 0;",
-            rewrite.new_bytes.len(),
-            hex_upper(&rewrite.new_bytes)
-        )
-        .unwrap();
-        throw(
-            &mut sql,
-            "@@ROWCOUNT <> 1",
-            code::FILES_WRITE,
-            &format!("Files.{} was not rewritten", rewrite.file_name),
-        );
-    }
+    render_change_registrations(&mut sql, input);
+    render_files_rewrites(&mut sql, input);
     for rewrite in &input.params_rewrites {
         let name = quote_string(&rewrite.file_name);
         throw(
@@ -794,6 +731,110 @@ pub fn render_apply_script(input: &ScriptInputs) -> Result<String> {
     writeln!(sql, "THROW;").unwrap();
     writeln!(sql, "END CATCH;").unwrap();
     Ok(sql)
+}
+
+/// The declarations of `@offset` and `@now`: timestamps as the platform writes them, local time
+/// shifted by the infobase's year offset.
+pub fn timestamp_declarations() -> String {
+    let mut sql = String::new();
+    render_timestamps(&mut sql);
+    sql
+}
+
+/// Timestamps as the platform writes them: local time, shifted by the infobase's year offset
+/// (`@offset`, `@now`).
+fn render_timestamps(sql: &mut String) {
+    writeln!(
+        sql,
+        "DECLARE @offset int = ISNULL((SELECT TOP (1) Offset FROM dbo._YearOffset), 0);"
+    )
+    .unwrap();
+    writeln!(
+        sql,
+        "DECLARE @now datetime2(6) = DATEADD(year, @offset, CONVERT(datetime2(6), SYSDATETIME()));"
+    )
+    .unwrap();
+}
+
+/// The change registrations of the objects that own a staged row: every node is told again
+/// (`_MessageNo` NULL), a node with no row of a changed object gets one (#412), new objects are
+/// registered. Run while `ConfigSave` still holds the staged rows.
+fn render_change_registrations(sql: &mut String, input: &ScriptInputs) {
+    if !input.reset_change_registrations {
+        return;
+    }
+    let predicate = staged_objects_predicate_with("dbo.", &input.extra_changed_objects);
+    writeln!(
+        sql,
+        "UPDATE r SET _MessageNo = NULL FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate};"
+    )
+    .unwrap();
+    throw(
+        sql,
+        &format!(
+            "EXISTS (SELECT 1 FROM dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {predicate})"
+        ),
+        code::CHANGE_REGISTRATION,
+        "a change registration of a staged object was not reset",
+    );
+    // New objects first: their check of the nodes counts the nodes the register holds, which the
+    // additions below change.
+    render_new_registrations(sql, input);
+    render_registration_additions(sql, input);
+}
+
+/// The `Files` rows the apply rewrites (`MobileVersions.dat`: a fresh GUID at the head), guarded by
+/// the digest the plan saw. Needs `@now`.
+fn render_files_rewrites(sql: &mut String, input: &ScriptInputs) {
+    for rewrite in &input.files_rewrites {
+        let name = quote_string(&rewrite.file_name);
+        throw(
+            sql,
+            &format!(
+                "(SELECT COUNT_BIG(*) FROM dbo.Files WHERE FileName = N'{name}' AND PartNo = 0 AND CONVERT(bigint, DataSize) = {} AND HASHBYTES('SHA2_256', BinaryData) = 0x{}) <> 1",
+                rewrite.old_data_size, rewrite.old_sha256_hex
+            ),
+            code::FILES_DRIFTED,
+            &format!(
+                "Files.{} changed since the plan was made",
+                rewrite.file_name
+            ),
+        );
+        writeln!(
+            sql,
+            "DELETE FROM dbo.Files WHERE FileName = N'{name}' AND PartNo <> 0;"
+        )
+        .unwrap();
+        writeln!(
+            sql,
+            "UPDATE dbo.Files SET Creation = @now, Modified = @now, DataSize = {}, BinaryData = 0x{} WHERE FileName = N'{name}' AND PartNo = 0;",
+            rewrite.new_bytes.len(),
+            hex_upper(&rewrite.new_bytes)
+        )
+        .unwrap();
+        throw(
+            sql,
+            "@@ROWCOUNT <> 1",
+            code::FILES_WRITE,
+            &format!("Files.{} was not rewritten", rewrite.file_name),
+        );
+    }
+}
+
+/// The per-apply writes every apply of a stage makes besides moving its rows -- the change
+/// registrations of the changed objects and `Files.MobileVersions.dat` -- as a fragment of a
+/// transaction that is open: the exclusive apply renders the same text into its script
+/// ([`render_apply_script`]), and the dynamic apply hands it to the online transition
+/// (`mssql_main_activation::MainActivationPlan::with_parity_sql`). It reads `ConfigSave`, so it
+/// runs before the stage is consumed, and needs `@now` declared ([`timestamp_declarations`]).
+///
+/// Only what the inputs carry is rendered (`reset_change_registrations`, the registration
+/// additions, `files_rewrites`); the rest of [`ScriptInputs`] is the exclusive script's.
+pub fn render_parity_writes(input: &ScriptInputs) -> String {
+    let mut sql = String::new();
+    render_change_registrations(&mut sql, input);
+    render_files_rewrites(&mut sql, input);
+    sql
 }
 
 /// The rows a node with no rows gets for the objects the stage changes: inserted with `_MessageNo` NULL,
@@ -1438,6 +1479,64 @@ SELECT 1;"
         assert!(sql.contains("(0x000003DD, 0x"));
         // ids continue the table's sequence from its greatest id
         assert!(sql.contains("MAX(_IDRRef) FROM dbo._ConfigChngR"));
+    }
+
+    #[test]
+    fn the_parity_writes_are_the_exclusive_scripts_own_text() {
+        // the dynamic apply runs the writes the platform's `force` makes besides the rows -- the
+        // change registrations and MobileVersions.dat -- and they are the exclusive apply's SQL, not a copy
+        let mut input = inputs();
+        input.nodes = two_nodes();
+        input.plan_node_counts = vec![(989, 2)];
+        input.registration_additions = vec![ObjectRegistration {
+            object_hex: "11".repeat(16),
+            files: vec!["one.0".to_owned()],
+        }];
+        input.registration_rows_expected = 2;
+        input.registration_file_rows_expected = 2;
+        input.files_rewrites = vec![FilesRewrite {
+            file_name: "MobileVersions.dat".to_owned(),
+            old_data_size: 10,
+            old_sha256_hex: "AB".to_owned(),
+            new_bytes: vec![1, 2, 3],
+        }];
+        let parity = render_parity_writes(&input);
+        let script = render_apply_script(&input).unwrap();
+        // every statement of the fragment is in the script the exclusive apply runs, in the same words
+        for line in parity.lines() {
+            assert!(script.contains(line), "{line}");
+        }
+        // the order: the reset, the additions, the file; the timestamps are declared by the caller with the
+        // same text the exclusive script declares them with
+        let reset = parity.find("UPDATE r SET _MessageNo = NULL").unwrap();
+        let additions = parity.find("CREATE TABLE #reg_add").unwrap();
+        let file = parity
+            .find("UPDATE dbo.Files SET Creation = @now, Modified = @now, DataSize = 3")
+            .unwrap();
+        assert!(reset < additions && additions < file);
+        assert!(!parity.contains("DECLARE @now"));
+        for line in timestamp_declarations().lines() {
+            assert!(script.contains(line), "{line}");
+        }
+        assert!(
+            timestamp_declarations().contains("DECLARE @now datetime2(6) = DATEADD(year, @offset")
+        );
+        // it reads the stage, so the caller runs it before ConfigSave is emptied; it takes no table lock,
+        // opens no transaction and looks at no session
+        for forbidden in [
+            "TABLOCKX",
+            "BEGIN TRANSACTION",
+            "COMMIT",
+            "DELETE FROM dbo.ConfigSave",
+            "dm_exec_sessions",
+        ] {
+            assert!(!parity.contains(forbidden), "{forbidden}");
+        }
+        // what the inputs do not carry is not rendered
+        let mut bare = ScriptInputs::default();
+        bare.reset_change_registrations = false;
+        let text = render_parity_writes(&bare);
+        assert!(!text.contains("_ConfigChngR") && !text.contains("dbo.Files"));
     }
 
     #[test]

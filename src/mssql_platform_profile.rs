@@ -24,6 +24,10 @@ pub const CAPABILITY_MAIN_WRITE: &str = "mssql.main.write";
 /// The own exclusive `config apply` (`mssql-config-apply`): a stage that needs no
 /// restructuring moved from `ConfigSave` into `Config` in one transaction.
 pub const CAPABILITY_CONFIG_APPLY: &str = "mssql.config.apply";
+/// The dynamic (online) `config apply` of the drop-in (`--dynamic=force`): a small delta stage
+/// published as a generation while sessions are connected, with the writes the platform's own
+/// `force` makes besides (`docs/apply/dropin-dynamic.md`).
+pub const CAPABILITY_CONFIG_APPLY_DYNAMIC: &str = "mssql.config.apply.dynamic";
 /// Capability that admits extension writes for a platform profile.
 pub const CAPABILITY_EXTENSION_WRITE: &str = "mssql.extension.write";
 /// Profile fingerprint key for `IBVersion`/`PlatformVersionReq`.
@@ -94,6 +98,12 @@ impl MssqlNativePlatformProfile {
     /// the native apply on this build.
     pub fn require_config_apply_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_CONFIG_APPLY)
+    }
+
+    /// The dynamic apply requires that its generation, its change registrations and
+    /// `MobileVersions.dat` were compared with the native `--dynamic=force` on this build.
+    pub fn require_config_apply_dynamic_supported(self) -> Result<()> {
+        self.require_capability(CAPABILITY_CONFIG_APPLY_DYNAMIC)
     }
 
     /// Extension mutation requires an evidenced CAS/registry protocol.

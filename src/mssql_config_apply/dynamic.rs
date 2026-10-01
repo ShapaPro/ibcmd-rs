@@ -1,0 +1,1358 @@
+//! The dynamic (online) `config apply`: `ibcmd infobase config apply --dynamic=force`.
+//!
+//! A small stage -- the rows of a few objects and the three service rows, the "delta" the platform's
+//! own partial import stages -- is published as a generation **beside** the active rows while
+//! sessions stay connected. The exclusive apply of this module's parent replaces rows in place with the
+//! database to itself; this one writes `<name>_dynupdate_<generation>` rows and the
+//! `DynamicallyUpdated` markers, replaces only `root` and `version`, and takes no table lock. Sessions
+//! that are open keep the generation they loaded, sessions that open afterwards read the new one
+//! (measured with a real client, `docs/apply/online-activation.md`); the next exclusive apply folds
+//! every generation into the ordinary rows.
+//!
+//! Nothing here writes a row itself. The transition is the online engine's
+//! (`mssql_main_activation`, mode `online`: aliases, markers, exact-stage assertions, an application
+//! lock, row locks in a short serializable transaction), and the writes the platform's `force` makes
+//! besides -- the change registrations of the changed objects (`_MessageNo` reset, the #412 rows of
+//! the imaged nodes) and `Files.MobileVersions.dat` -- are the exclusive apply's own SQL
+//! ([`sqlgen::render_parity_writes`]) run in the same transaction.
+//!
+//! What qualifies, and why it is narrower than what the engine takes (`docs/apply/dropin-dynamic.md`):
+//!
+//! - the stage is a delta: at most [`MAX_ROWS`] rows and [`MAX_PLAN_BYTES`] bytes, one part each;
+//! - `root`, `version` and `versions` are staged, `root` and `version` unchanged;
+//! - every other row is the descriptor or the `.0` body of a **common module or common form** that
+//!   already exists, and a descriptor is unchanged in text: the kinds a session was measured with
+//!   (other kinds are #345's), no new object, no removal, no change of an object's properties;
+//! - the restructure check ([`ApplyCheckGate`]) finds no restructuring;
+//! - the database is settled (no unfinished operation, no overlay in `Params`) and its platform
+//!   declares `mssql.config.apply.dynamic`.
+//!
+//! A stage that does not qualify is refused with the reasons ([`NeedsNativeApply`]); nothing is
+//! written. A dynamic apply never falls back to an exclusive one: what a user asked to be dynamic is
+//! not applied under a lock they did not ask for.
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use anyhow::{Context, Result, anyhow, bail};
+use sha2::{Digest, Sha256};
+
+use crate::metadata_model::brace::parse_row;
+use crate::metadata_model::export::names::root_kinds;
+use crate::mssql_main_activation::{
+    MAX_PLAN_BYTES, MAX_ROW_BYTES, MAX_ROWS, MainActivationError, MainActivationMode,
+    MainActivationSnapshot, MainStorageRow, prepare_main_activation, render_main_activation_sql,
+};
+use crate::sql::{ScriptVariables, SqlClient, SqlExec, SqlParam};
+
+use super::check_gate::ApplyCheckGate;
+use super::errors::{self, DynamicUnsupported, NeedsNativeApply};
+use super::gate::{GateInput, GateVerdict, StructuralGate};
+use super::model::{RowMeta, RowName, classify_name, hex_lower, quote_ident};
+use super::sqlgen::{self, ScriptInputs};
+use super::{
+    ApplyMode, ApplyTimings, ConfigApplyOptions, ConfigApplyReport, DynamicPublication,
+    ROW_COLUMNS, RegistrationSummary, StageSummary, blank_report, ms, node_literals,
+    other_sessions, plan_mobile_versions, read_blob, read_row_metas, recovery, registrations,
+    require_client, require_no_unfinished_operation, require_settled_storage, scalar_i64, versions,
+    write_artifact, xml_version_of,
+};
+
+/// The number of generations past which the report warns that the overlay grows.
+pub const WARN_GENERATIONS: usize = 50;
+
+/// The kinds of object whose bodies are published dynamically: the two a session was measured with
+/// (`docs/apply/online-activation.md`).
+const DYNAMIC_KINDS: [&str; 2] = ["CommonModule", "CommonForm"];
+
+/// The reasons listed in a refusal before "и ещё N".
+const REASONS_SHOWN: usize = 8;
+
+/// The stage and the script of a dynamic apply, built from a read-only look at the database.
+pub struct DynamicPlan {
+    pub report: ConfigApplyReport,
+    /// The transaction, when there is something to publish.
+    pub script: Option<String>,
+    staged: Vec<RowMeta>,
+    replaced: Vec<RowMeta>,
+    mobile_versions_before: Option<Vec<u8>>,
+    registration: registrations::RegistrationPlan,
+    reset_change_registrations: bool,
+}
+
+/// What the size of `ConfigSave` alone says: rows, bytes, the largest row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StageSize {
+    rows: i64,
+    bytes: i64,
+    largest: i64,
+}
+
+/// The reasons the size of a stage rules a dynamic update out (empty when it fits).
+fn size_reasons(size: StageSize) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if size.rows > MAX_ROWS as i64 {
+        reasons.push(format!(
+            "the stage holds {} rows and a dynamic update takes at most {MAX_ROWS} (the rows of a few objects and the service rows); a whole-tree stage of `config import` is not one (#395)",
+            size.rows
+        ));
+    }
+    if size.bytes > MAX_PLAN_BYTES as i64 {
+        reasons.push(format!(
+            "the stage holds {} bytes and a dynamic update takes at most {MAX_PLAN_BYTES}",
+            size.bytes
+        ));
+    }
+    if size.largest > MAX_ROW_BYTES as i64 {
+        reasons.push(format!(
+            "the largest row of the stage is {} bytes and a dynamic update takes rows of at most {MAX_ROW_BYTES}",
+            size.largest
+        ));
+    }
+    reasons
+}
+
+/// The words of a refusal: the first reasons, then how many more.
+pub fn refusal_reason(reasons: &[String]) -> String {
+    let mut parts: Vec<String> = reasons.iter().take(REASONS_SHOWN).cloned().collect();
+    if reasons.len() > parts.len() {
+        parts.push(format!("и ещё {}", reasons.len() - parts.len()));
+    }
+    parts.join("; ")
+}
+
+/// Judges the rows of a stage for a dynamic update, from what is known without their bytes: the
+/// reasons it does not qualify (empty when it does). `same_text(name)` says whether the staged row
+/// `name` has the text of the active one (asked for the descriptors and for `root` and `version`
+/// when their bytes differ).
+fn judge_rows(
+    staged: &[RowMeta],
+    active: &HashMap<(String, i32), RowMeta>,
+    kinds: &HashMap<String, &'static str>,
+    same_text: &mut dyn FnMut(&str) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let mut reasons = Vec::new();
+    let mut services: HashSet<&str> = HashSet::new();
+    let mut refused_owners: HashSet<String> = HashSet::new();
+    for row in staged {
+        let name = row.name.as_str();
+        if row.part != 0 {
+            reasons.push(format!(
+                "{name}: a row of several parts (part {})",
+                row.part
+            ));
+            continue;
+        }
+        let known = active.get(&row.key());
+        match classify_name(name) {
+            RowName::Service(service) => {
+                services.insert(service);
+                if service != "versions" {
+                    let identical = known.is_some_and(|known| known.sha256 == row.sha256);
+                    if known.is_none() {
+                        reasons.push(format!("{name}: the active configuration has no such row"));
+                    } else if !identical && !same_text(name)? {
+                        reasons.push(format!(
+                            "{name}: the service row differs from the active one"
+                        ));
+                    }
+                } else if known.is_none() {
+                    reasons.push(format!("{name}: the active configuration has no such row"));
+                }
+            }
+            RowName::Descriptor(owner) | RowName::Body { owner, .. } => {
+                let body_suffix = match classify_name(name) {
+                    RowName::Body { suffix, .. } => Some(suffix),
+                    _ => None,
+                };
+                if known.is_none() {
+                    reasons.push(format!(
+                        "{name}: no row of this name in Config; a new object, form or file is not published dynamically"
+                    ));
+                    continue;
+                }
+                // one reason for an object, however many of its rows are staged
+                match kinds.get(&owner.to_ascii_lowercase()) {
+                    Some(kind) if DYNAMIC_KINDS.contains(kind) => {}
+                    Some(kind) => {
+                        if refused_owners.insert(owner.to_ascii_lowercase()) {
+                            reasons.push(format!(
+                                "{owner}: the object is a {kind}; only common modules and common forms are published dynamically (other kinds are not measured with sessions connected yet)"
+                            ));
+                        }
+                        continue;
+                    }
+                    None => {
+                        if refused_owners.insert(owner.to_ascii_lowercase()) {
+                            reasons.push(format!(
+                                "{owner}: not a top-level object of the active configuration; only common modules and common forms are published dynamically"
+                            ));
+                        }
+                        continue;
+                    }
+                }
+                match body_suffix {
+                    Some("0") => {}
+                    Some(suffix) => reasons.push(format!(
+                        "{name}: a body with the suffix .{suffix}; only the .0 body of a common module or common form is published dynamically"
+                    )),
+                    // a descriptor is published beside its body only when it is the same text
+                    None => {
+                        if !same_text(name)? {
+                            reasons.push(format!(
+                                "{name}: the descriptor's text differs from the active one; a change of an object's properties is not published dynamically"
+                            ));
+                        }
+                    }
+                }
+            }
+            // the list of removals is judged by [`judge_deleted_list`] and, when it passes, consumed
+            RowName::Other if name.eq_ignore_ascii_case("deleted") => {}
+            RowName::Other => reasons.push(format!(
+                "{name}: not a service row, a descriptor or a body row of an object"
+            )),
+        }
+    }
+    for service in ["root", "version", "versions"] {
+        if !services.contains(service) {
+            reasons.push(format!(
+                "{service}: the stage has no such row; a generation is made of root, version and versions"
+            ));
+        }
+    }
+    Ok(reasons)
+}
+
+/// Judges a stage's `deleted` row, the list of removals: `Ok(what it says)` when a dynamic apply may
+/// consume it, `Err(reason)` when it may not.
+///
+/// It may when the list is empty (the platform's own import writes one to every stage; what the
+/// platform's `force` writes for an empty list is NOT measured, this consumes it and writes nothing).
+///
+/// It may not when it names rows of the online update the database carries (`overlay_rows`,
+/// lower-cased), which is what the import stage of a target with a pending update lists, because the
+/// exclusive apply that stage is made for promotes the update. Measured (evidence/dropin-dynamic/
+/// acceptance.md, section 7): the platform's `force` on such a stage also writes a `deleted_dynupdate_<g>`
+/// row, appends the alias bodies to the file lists of the change register and collects the service
+/// information into `Params` (16 alias rows, 4 MB). This apply does none of it, so it refuses the stage:
+/// apply it exclusively. Any other name is a removal of an object, a form, an attribute: not published
+/// dynamically either.
+fn judge_deleted_list(
+    plain: &[u8],
+    overlay_rows: &HashSet<String>,
+) -> std::result::Result<String, String> {
+    let Some(entries) = super::parse_removals(plain) else {
+        return Err("deleted: a list of removals this apply cannot read".to_owned());
+    };
+    if entries.is_empty() {
+        return Ok("it is empty".to_owned());
+    }
+    let mut of_the_update = 0usize;
+    for (name, flag) in &entries {
+        let lower = name.to_ascii_lowercase();
+        if flag == "0"
+            && super::is_dynamic_update_row(name)
+            && !lower.starts_with("deleted_dynupdate_")
+            && overlay_rows.contains(&lower)
+        {
+            of_the_update += 1;
+        } else {
+            return Err(format!(
+                "deleted: the stage lists the removal of {name}, and removals are not published dynamically"
+            ));
+        }
+    }
+    Err(format!(
+        "deleted: the stage lists {of_the_update} row(s) of the online update the database carries for removal (the import of a target with a pending update does): the platform's dynamic update of it also writes a removal list, register file lists and service information that this apply does not reproduce; apply it exclusively (--dynamic=disable, nobody connected)"
+    ))
+}
+
+/// The rows of the online update `Config` carries, lower-cased: the aliases and the marker.
+fn overlay_rows(client: &dyn SqlClient, db: &str) -> Result<HashSet<String>> {
+    let mut rows = HashSet::new();
+    client.read_rows(
+        &format!(
+            "SELECT FileName FROM {db}.dbo.Config WHERE FileName = N'DynamicallyUpdated' OR FileName LIKE {}",
+            sqlgen::ALIAS_PATTERN
+        ),
+        &[],
+        &mut |row| {
+            rows.insert(row.text(0)?.to_ascii_lowercase());
+            Ok(())
+        },
+    )?;
+    Ok(rows)
+}
+
+/// The kind of every top-level object of the active configuration, by lower-cased uuid: the `root`
+/// row names the configuration's row, which lists them.
+fn object_kinds(client: &dyn SqlClient, database: &str) -> Result<HashMap<String, &'static str>> {
+    let root = read_blob(client, database, "Config", "root")?
+        .ok_or_else(|| anyhow!("Config holds no root row"))?;
+    let plain = versions::inflate_row(&root).context("the root row does not inflate")?;
+    let text = String::from_utf8_lossy(versions::strip_bom(&plain)).into_owned();
+    let configuration = text
+        .trim()
+        .strip_prefix("{2,")
+        .and_then(|rest| rest.split(',').next())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .ok_or_else(|| anyhow!("the root row does not name the configuration"))?;
+    let row = read_blob(client, database, "Config", &configuration)?
+        .ok_or_else(|| anyhow!("Config holds no row {configuration}"))?;
+    let tree = parse_row(&versions::inflate_row(&row)?)
+        .with_context(|| format!("the configuration row {configuration} does not parse"))?;
+    Ok(root_kinds(&tree))
+}
+
+/// The bytes of the row `name` the configuration is read from: its newest alias of a generation the
+/// history lists, or the plain row.
+fn effective_blob(
+    client: &dyn SqlClient,
+    database: &str,
+    name: &str,
+    history: &[String],
+) -> Result<Option<Vec<u8>>> {
+    let db = quote_ident(database)?;
+    let pattern = format!("{name}!_dynupdate!_%");
+    let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+    client.read_rows(
+        &format!(
+            "SELECT FileName, BinaryData FROM {db}.dbo.Config WHERE PartNo = 0 AND (FileName = @P1 OR FileName LIKE @P2 ESCAPE N'!')"
+        ),
+        &[SqlParam::Text(name), SqlParam::Text(&pattern)],
+        &mut |mut row| {
+            let file = row.take_text(0)?;
+            rows.push((file, row.take_binary(1)?));
+            Ok(())
+        },
+    )?;
+    let stored = crate::mssql_dump::stored_row_name(
+        history,
+        name,
+        rows.iter().map(|(file, _)| file.as_str()),
+    );
+    Ok(rows
+        .into_iter()
+        .find(|(file, _)| file.eq_ignore_ascii_case(&stored))
+        .map(|(_, bytes)| bytes))
+}
+
+fn stage_size(client: &dyn SqlClient, db: &str) -> Result<StageSize> {
+    let rows = client.query_rows(
+        &format!(
+            "SELECT COUNT_BIG(*), ISNULL(SUM(CONVERT(bigint, DATALENGTH(BinaryData))), 0), ISNULL(MAX(CONVERT(bigint, DATALENGTH(BinaryData))), 0) FROM {db}.dbo.ConfigSave"
+        ),
+        &[],
+    )?;
+    let row = rows
+        .first()
+        .ok_or_else(|| anyhow!("the size query of ConfigSave returned no row"))?;
+    Ok(StageSize {
+        rows: row.i64(0)?,
+        bytes: row.i64(1)?,
+        largest: row.i64(2)?,
+    })
+}
+
+/// The semantic reader must use the same bytes the bounded stage inventory names.
+fn judged_stage_digest(staged: &[RowMeta], name: &str, bytes: &[u8]) -> bool {
+    staged
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(name) && row.part == 0)
+        .is_some_and(|row| {
+            usize::try_from(row.byte_len).ok() == Some(bytes.len())
+                && row
+                    .sha256
+                    .eq_ignore_ascii_case(&hex_lower(&Sha256::digest(bytes)))
+        })
+}
+
+/// Bind the rows judged above to the exact image the transaction will assert. A concurrent import
+/// must not replace an empty `deleted` list with a nonempty one between judgment and publication.
+fn require_judged_image(table: &str, judged: &[RowMeta], image: &[MainStorageRow]) -> Result<()> {
+    let expected: HashMap<_, _> = judged.iter().map(|row| (row.key(), row)).collect();
+    let actual: HashSet<_> = image
+        .iter()
+        .map(|row| (row.file_name.to_lowercase(), row.part_no))
+        .collect();
+    if expected.len() != judged.len() || actual.len() != image.len() || image.len() != judged.len()
+    {
+        bail!("{table} changed after the dynamic gates judged it; no publication was attempted");
+    }
+    for row in image {
+        let key = (row.file_name.to_lowercase(), row.part_no);
+        let same = expected.get(&key).is_some_and(|meta| {
+            u64::try_from(meta.data_size).ok() == Some(row.data_size)
+                && usize::try_from(meta.byte_len).ok() == Some(row.binary_data.len())
+                && meta.sha256.eq_ignore_ascii_case(&hex_lower(&row.sha256()))
+        });
+        if !same {
+            bail!(
+                "{table}.{} changed after the dynamic gates judged it; no publication was attempted",
+                row.file_name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The transaction may have committed before a connection error reached the caller. Keep the
+/// recovery location visible and never promise a rollback for an ambiguous transport failure.
+fn uncertain_commit_context(database: &str, recovery_dir: &std::path::Path, token: &str) -> String {
+    format!(
+        "the dynamic apply transaction outcome for {database} is uncertain; it may have committed. Inspect ConfigSave and the dynamic markers before any retry; recovery artifact: {} (token {token})",
+        recovery_dir.display()
+    )
+}
+
+/// Maps what the engine refuses to what the user is told: a stage that is too big or names a
+/// target the engine does not take is not a dynamic update ([`NeedsNativeApply`]); the rest is a
+/// failure.
+fn engine_error(error: MainActivationError) -> anyhow::Error {
+    match error {
+        MainActivationError::Limit(_) | MainActivationError::StructuralTarget(_) => {
+            NeedsNativeApply::apply(format!("the online engine refuses the stage: {error}")).into()
+        }
+        other => anyhow::Error::new(other),
+    }
+}
+
+fn platform_unsupported(options: &ConfigApplyOptions, error: &anyhow::Error) -> anyhow::Error {
+    DynamicUnsupported {
+        platform: options.platform_profile.id().to_owned(),
+        reason: format!("{error:#}"),
+    }
+    .into()
+}
+
+/// The warning for an overlay of more than [`WARN_GENERATIONS`] generations: each one keeps its rows beside
+/// the active ones until an exclusive apply folds them.
+pub fn growth_warning(generations: usize) -> Option<String> {
+    (generations > WARN_GENERATIONS).then(|| {
+        format!(
+            "the infobase now holds {generations} dynamic generations; each one keeps its rows beside the active ones until an exclusive apply (`config apply --dynamic=disable` with nobody connected) folds them"
+        )
+    })
+}
+
+/// Plans a dynamic apply of the staged configuration: reads the database and judges the stage.
+///
+/// `Err` of [`NeedsNativeApply`] means the stage does not qualify (the reasons are its words), `Err` of
+/// [`DynamicUnsupported`] that the platform has no dynamic apply. An empty `ConfigSave` is a plan with
+/// `nothing_to_apply`.
+pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<DynamicPlan> {
+    let total = Instant::now();
+    let client = require_client(sql)?;
+    let database = options.database.as_str();
+    let db = quote_ident(database)?;
+    let mut timings = ApplyTimings::default();
+    if options.rehearse {
+        bail!("a rehearsal is not built for the dynamic apply; use --dry-run");
+    }
+    options
+        .platform_profile
+        .require_config_apply_dynamic_supported()
+        .map_err(|error| platform_unsupported(options, &error))?;
+
+    let started = Instant::now();
+    let storage = crate::mssql_platform_profile::verify_mssql_storage_profile(
+        options.platform_profile,
+        client,
+        database,
+    )?;
+    timings.storage_check_ms = ms(started);
+    let mut report = blank_report(options, &storage, ApplyMode::Dynamic);
+
+    let started = Instant::now();
+    let size = stage_size(client, &db)?;
+    if size.rows == 0 {
+        report.nothing_to_apply = true;
+        timings.inventory_ms = ms(started);
+        timings.total_ms = ms(total);
+        report.timings = timings;
+        return Ok(DynamicPlan {
+            report,
+            script: None,
+            staged: Vec::new(),
+            replaced: Vec::new(),
+            mobile_versions_before: None,
+            registration: registrations::RegistrationPlan::default(),
+            reset_change_registrations: false,
+        });
+    }
+    let too_big = size_reasons(size);
+    if !too_big.is_empty() {
+        return Err(NeedsNativeApply::apply(refusal_reason(&too_big)).into());
+    }
+    require_no_unfinished_operation(client, &db)?;
+    require_settled_storage(client, &db)?;
+
+    let staged = read_row_metas(
+        client,
+        &format!("SELECT {ROW_COLUMNS} FROM {db}.dbo.ConfigSave ORDER BY FileName, PartNo"),
+    )?;
+    let replaced = read_row_metas(
+        client,
+        &format!(
+            "SELECT {ROW_COLUMNS} FROM {db}.dbo.Config s WHERE EXISTS (SELECT 1 FROM {db}.dbo.ConfigSave x WHERE x.FileName = s.FileName) ORDER BY FileName, PartNo"
+        ),
+    )?;
+    if staged.len() as i64 != size.rows {
+        bail!("ConfigSave changed while the plan was being made");
+    }
+    let active: HashMap<(String, i32), RowMeta> = replaced
+        .iter()
+        .cloned()
+        .map(|row| (row.key(), row))
+        .collect();
+    let config_marker = read_blob(client, database, "Config", "DynamicallyUpdated")?;
+    let params_marker = read_blob(client, database, "Params", "DynamicallyUpdated")?;
+    let history =
+        versions::parse_dynamic_history(config_marker.as_deref(), params_marker.as_deref())?;
+    let history_names: Vec<String> = history
+        .generations
+        .iter()
+        .map(|generation| generation.hyphenated().to_string())
+        .collect();
+    timings.inventory_ms = ms(started);
+
+    // The rows: kinds, and the text of what must not change.
+    let started = Instant::now();
+    let needs_kinds = staged.iter().any(|row| {
+        matches!(
+            classify_name(&row.name),
+            RowName::Descriptor(_) | RowName::Body { .. }
+        )
+    });
+    let kinds = if needs_kinds {
+        object_kinds(client, database)?
+    } else {
+        HashMap::new()
+    };
+    let mut same_text = |name: &str| -> Result<bool> {
+        let staged_bytes = read_blob(client, database, "ConfigSave", name)?
+            .ok_or_else(|| anyhow!("ConfigSave.{name} vanished"))?;
+        if !judged_stage_digest(&staged, name, &staged_bytes) {
+            bail!(
+                "ConfigSave.{name} changed while its descriptor was judged; no publication was attempted"
+            );
+        }
+        let active_bytes = if matches!(classify_name(name), RowName::Service(_)) {
+            read_blob(client, database, "Config", name)?
+        } else {
+            effective_blob(client, database, name, &history_names)?
+        }
+        .ok_or_else(|| anyhow!("Config.{name} vanished"))?;
+        if matches!(classify_name(name), RowName::Service(_))
+            && !judged_stage_digest(&replaced, name, &active_bytes)
+        {
+            bail!(
+                "Config.{name} changed while its service row was judged; no publication was attempted"
+            );
+        }
+        if staged_bytes == active_bytes {
+            return Ok(true);
+        }
+        Ok(versions::inflate_row(&staged_bytes)? == versions::inflate_row(&active_bytes)?)
+    };
+    let mut reasons = judge_rows(&staged, &active, &kinds, &mut same_text)?;
+    // The list of removals, when the stage has one: consumed if it says nothing a dynamic apply acts on.
+    let mut deleted_note = None;
+    if staged
+        .iter()
+        .any(|row| row.name.eq_ignore_ascii_case("deleted"))
+    {
+        let bytes = read_blob(client, database, "ConfigSave", "deleted")?;
+        if bytes
+            .as_deref()
+            .is_some_and(|bytes| !judged_stage_digest(&staged, "deleted", bytes))
+        {
+            bail!(
+                "ConfigSave.deleted changed while its removal list was judged; no publication was attempted"
+            );
+        }
+        let plain = bytes.and_then(|bytes| versions::inflate_row(&bytes).ok());
+        match plain {
+            None => reasons.push("deleted: a list of removals this apply cannot read".to_owned()),
+            Some(plain) => match judge_deleted_list(&plain, &overlay_rows(client, &db)?) {
+                Ok(note) => deleted_note = Some(note),
+                Err(reason) => reasons.push(reason),
+            },
+        }
+    }
+
+    // The restructure check, only when nothing else rules the stage out.
+    if reasons.is_empty() {
+        let gate = ApplyCheckGate::new(sql, xml_version_of(options.platform_profile));
+        let none_names: HashSet<String> = HashSet::new();
+        let consumed_names: HashSet<String> =
+            deleted_note.iter().map(|_| "deleted".to_owned()).collect();
+        let none_kinds: HashMap<String, &'static str> = HashMap::new();
+        let verdict: GateVerdict = gate.check(&GateInput {
+            client,
+            database,
+            staged: &staged,
+            active: &active,
+            accepted_new_rows: &none_names,
+            accepted_owner_descriptors: &none_names,
+            new_object_kinds: &none_kinds,
+            // a list of removals that passed is no row the check judges
+            consumed_rows: &consumed_names,
+            removed_rows: &none_names,
+        })?;
+        timings.gate_ms = ms(started);
+        if verdict.restructuring_required {
+            for blocker in &verdict.blockers {
+                reasons.push(if blocker.row.is_empty() {
+                    format!("structure: {}", blocker.reason)
+                } else {
+                    format!("{}: {}", blocker.row, blocker.reason)
+                });
+            }
+            if reasons.is_empty() {
+                reasons.push("structure: the restructure check refuses the stage".to_owned());
+            }
+        }
+        report.gate = Some(verdict);
+    }
+    if !reasons.is_empty() {
+        return Err(NeedsNativeApply::apply(refusal_reason(&reasons)).into());
+    }
+
+    // The online engine's plan: the exact stage, the rows it replaces, the markers.
+    let inputs = crate::mssql::read_activation_inputs(sql, database)?;
+    require_judged_image("ConfigSave", &staged, &inputs.staged)?;
+    require_judged_image("Config", &replaced, &inputs.active)?;
+    for (table, judged_marker, image_marker) in [
+        ("Config", &config_marker, &inputs.config_marker),
+        ("Params", &params_marker, &inputs.params_marker),
+    ] {
+        if judged_marker.as_deref() != image_marker.as_ref().map(|row| row.binary_data.as_slice()) {
+            bail!(
+                "{table}.DynamicallyUpdated changed after the dynamic gates judged it; no publication was attempted"
+            );
+        }
+    }
+
+    // the consumed list is asserted with the stage and emptied with it, and published nowhere
+    let (consumed, published): (Vec<_>, Vec<_>) = inputs
+        .staged
+        .into_iter()
+        .partition(|row| row.file_name.eq_ignore_ascii_case("deleted"));
+    let allowed = crate::mssql::allowed_activation_targets(&published);
+    let activation = prepare_main_activation(
+        MainActivationMode::Online,
+        published,
+        MainActivationSnapshot {
+            config_rows: inputs.active,
+            config_dynamically_updated: inputs.config_marker,
+            params_dynamically_updated: inputs.params_marker,
+        },
+        &allowed,
+        true,
+    )
+    .map_err(engine_error)?
+    .with_consumed_stage_rows(consumed);
+
+    // The writes the platform's `force` makes besides the rows, planned by the exclusive apply's own
+    // code: the mobile versions ring and the change registrations.
+    let (files_rewrites, mobile_before) = plan_mobile_versions(client, database, &mut report)?;
+    let has_change_registrations = scalar_i64(
+        client,
+        &format!(
+            "SELECT CASE WHEN OBJECT_ID(N'{db}.dbo._ConfigChngR', N'U') IS NULL OR OBJECT_ID(N'{db}.dbo._ConfigChngR_ExtProps', N'U') IS NULL THEN 0 ELSE 1 END"
+        ),
+    )? == 1;
+    let registration = if has_change_registrations {
+        registrations::plan(client, database, &staged, &[])?
+    } else {
+        registrations::RegistrationPlan::default()
+    };
+    let unchanged = activation.is_no_op();
+    let parity = ScriptInputs {
+        database: database.to_owned(),
+        reset_change_registrations: has_change_registrations,
+        files_rewrites,
+        nodes: node_literals(&registration.nodes),
+        registration_additions: registration.additions.clone(),
+        registration_rows_expected: registration.added_rows,
+        registration_file_rows_expected: registration.added_file_rows,
+        plan_node_counts: registration.node_counts.clone(),
+        ..ScriptInputs::default()
+    };
+    // The markers are stamped as the platform stamps them (local time, the year offset), like the rows
+    // the parity writes touch.
+    let activation = activation
+        .with_platform_timestamps(sqlgen::timestamp_declarations())
+        .with_parity_sql(sqlgen::render_parity_writes(&parity));
+    let rendered = render_main_activation_sql(database, &activation, None).map_err(engine_error)?;
+    // Row locks may wait for a session that holds one; not for ever.
+    let script = format!("SET LOCK_TIMEOUT 30000;\n{}", rendered.sql);
+    let script_sha = hex_lower(&Sha256::digest(script.as_bytes()));
+
+    // The report.
+    let new_generation = activation.new_generation();
+    let old_generation = activation.old_generation();
+    let mut history_after: Vec<String> = activation
+        .dynamic_history()
+        .iter()
+        .map(|generation| generation.hyphenated().to_string())
+        .collect();
+    let mut stage = StageSummary {
+        rows: staged.len(),
+        bytes: staged.iter().map(|row| row.byte_len).sum(),
+        descriptors: 0,
+        bodies: 0,
+        service_rows: 0,
+        new_rows: 0,
+        identical_rows: 0,
+        replaced_rows: replaced.len(),
+        replaced_parts_dropped: 0,
+        consumed_rows: usize::from(deleted_note.is_some()),
+    };
+    for row in &staged {
+        match classify_name(&row.name) {
+            RowName::Service(_) => stage.service_rows += 1,
+            RowName::Descriptor(_) => stage.descriptors += 1,
+            RowName::Body { .. } => stage.bodies += 1,
+            RowName::Other => {}
+        }
+        if active
+            .get(&row.key())
+            .is_some_and(|known| known.sha256 == row.sha256)
+        {
+            stage.identical_rows += 1;
+        }
+    }
+    report.stage = Some(stage);
+    if let Some(note) = &deleted_note {
+        report.warnings.push(format!(
+            "the stage's `deleted` list is consumed, not published: {note}"
+        ));
+    }
+    report.active_generation = Some(old_generation.hyphenated().to_string());
+    if unchanged {
+        report.warnings.push(
+            "the staged rows are the active ones byte for byte: no generation is published, ConfigSave is emptied".to_owned(),
+        );
+    } else {
+        history_after.push(new_generation.hyphenated().to_string());
+        report.new_generation = Some(new_generation.hyphenated().to_string());
+        report.published = Some(DynamicPublication {
+            generation: new_generation.hyphenated().to_string(),
+            previous_generation: old_generation.hyphenated().to_string(),
+            history: history_after.clone(),
+            alias_rows: activation.alias_rows(),
+            replaced_in_place: vec!["root".to_owned(), "version".to_owned()],
+            warn_after_generations: WARN_GENERATIONS,
+        });
+        if let Some(warning) = growth_warning(history_after.len()) {
+            report.warnings.push(warning);
+        }
+    }
+    // An unchanged stage is only consumed: nothing else is written, and nothing of the rest is said.
+    let mut touched = if unchanged {
+        vec!["ConfigSave"]
+    } else {
+        vec!["Config", "ConfigSave", "Params"]
+    };
+    if has_change_registrations && !unchanged {
+        touched.push("_ConfigChngR");
+        if registration.added_file_rows > 0 {
+            touched.push("_ConfigChngR_ExtProps");
+        }
+    }
+    if !parity.files_rewrites.is_empty() && !unchanged {
+        touched.push("Files");
+    }
+    report.tables_touched = touched.into_iter().map(str::to_owned).collect();
+    report.registrations =
+        (has_change_registrations && !unchanged).then_some(RegistrationSummary {
+            nodes: registration.nodes.len(),
+            changed_objects: registration.changed_objects,
+            rows_added: registration.added_rows,
+            file_rows_added: registration.added_file_rows,
+            objects_of_dropped_rows: 0,
+        });
+    if options.backup != super::BackupPolicy::None {
+        report.warnings.push(
+            "a backup option is for a restructuring, which a dynamic apply never does: it is ignored".to_owned(),
+        );
+    }
+    report.not_written = vec![
+        "Params .ui rows (the platform's configuration-licensing records, track ui #340): never written".to_owned(),
+        "the ordinary rows the aliases stand beside: they keep the previous text until an exclusive apply folds the generation".to_owned(),
+    ];
+    report.script_sha256 = Some(script_sha.clone());
+    report.recovery_token = Some(script_sha[..16].to_owned());
+    timings.total_ms = ms(total);
+    report.timings = timings;
+    Ok(DynamicPlan {
+        report,
+        script: Some(script),
+        staged,
+        replaced,
+        mobile_versions_before: if unchanged { None } else { mobile_before },
+        registration,
+        reset_change_registrations: has_change_registrations && !unchanged,
+    })
+}
+
+/// Whether the staged configuration would be applied dynamically: a look, nothing is written. For
+/// the hint the exclusive refusal gives (`можно применить динамически: --dynamic=force`).
+pub fn would_qualify(sql: &SqlExec, options: &ConfigApplyOptions) -> bool {
+    let mut options = options.clone();
+    options.dry_run = true;
+    matches!(plan_dynamic(sql, &options), Ok(plan) if !plan.report.nothing_to_apply)
+}
+
+/// Plans and, unless `dry_run`, applies the staged configuration as a dynamic generation.
+pub fn apply_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<ConfigApplyReport> {
+    let total = Instant::now();
+    let client = require_client(sql)?;
+    let mut plan = plan_dynamic(sql, options)?;
+    if plan.report.nothing_to_apply {
+        return Ok(plan.report);
+    }
+    let script = plan
+        .script
+        .clone()
+        .ok_or_else(|| anyhow!("the plan has no script"))?;
+    if let Some(path) = &options.script_output {
+        write_artifact(path, script.as_bytes())?;
+        plan.report.script_path = Some(path.clone());
+    }
+    if options.dry_run {
+        plan.report.timings.total_ms = ms(total);
+        return Ok(plan.report);
+    }
+
+    // The recovery artifact: what the transaction overwrites, and how to take the generation back.
+    let started = Instant::now();
+    let token = plan
+        .report
+        .recovery_token
+        .clone()
+        .ok_or_else(|| anyhow!("the plan has no recovery token"))?;
+    let dir = options.recovery_dir.clone().unwrap_or_else(|| {
+        recovery::artifact_dir(&recovery::default_root(), &options.database, &token)
+    });
+    let generation = plan
+        .report
+        .published
+        .as_ref()
+        .map(|published| published.generation.clone());
+    recovery::write_recovery(
+        client,
+        &recovery::RecoveryRequest {
+            database: &options.database,
+            dir: &dir,
+            token: &token,
+            blobs: options.recovery_blobs,
+            staged: &plan.staged,
+            replaced: &plan.replaced,
+            mobile_versions_before: plan.mobile_versions_before.as_deref(),
+            reset_change_registrations: plan.reset_change_registrations,
+            new_objects: &super::objects::NewObjects::default(),
+            removals: &super::removals::Removals::default(),
+            registration: &plan.registration,
+            params_rewrites: &[],
+            backup: None,
+            dynamic_generation: generation.as_deref(),
+        },
+    )?;
+    plan.report.recovery_dir = Some(dir.clone());
+    plan.report.timings.recovery_ms = ms(started);
+
+    let started = Instant::now();
+    if let Err(error) = client.run_script(&script, ScriptVariables::Refuse) {
+        if let Some((number, message)) = errors::server_error_of(&error)
+            && let Some(typed) =
+                errors::from_transaction_code(number, &message, &options.database, || {
+                    other_sessions(client, &options.database, &options.own_ras_processes)
+                        .unwrap_or_default()
+                })
+        {
+            return Err(typed);
+        }
+        return Err(error.context(uncertain_commit_context(&options.database, &dir, &token)));
+    }
+    plan.report.timings.sql_ms = ms(started);
+    plan.report.executed = true;
+
+    // A last look, outside the transaction.
+    let db = quote_ident(&options.database)?;
+    let left = scalar_i64(
+        client,
+        &format!("SELECT COUNT_BIG(*) FROM {db}.dbo.ConfigSave"),
+    )
+    .with_context(|| format!(
+        "the dynamic apply committed but its final ConfigSave verification failed; recovery artifact: {} (token {token}); inspect the database before any retry",
+        dir.display()
+    ))?;
+    if left != 0 {
+        bail!(
+            "the dynamic apply committed, but ConfigSave now holds {left} row(s); recovery artifact: {} (token {token}); inspect the database before any retry",
+            dir.display()
+        );
+    }
+    if options.recovery_dir.is_none() && options.recovery_keep > 0 {
+        match recovery::prune(
+            &recovery::default_root(),
+            &options.database,
+            options.recovery_keep,
+        ) {
+            Ok(removed) if !removed.is_empty() => plan.report.warnings.push(format!(
+                "{} older recovery artifact(s) of {} removed from {} (the newest {} are kept)",
+                removed.len(),
+                options.database,
+                recovery::default_root().display(),
+                options.recovery_keep
+            )),
+            Ok(_) => {}
+            Err(error) => plan.report.warnings.push(format!(
+                "could not prune older recovery artifacts: {error:#}"
+            )),
+        }
+    }
+    plan.report.timings.total_ms = ms(total);
+    Ok(plan.report)
+}
+
+/// The rows of a stage by owner, for the reports of the tests.
+#[cfg(test)]
+fn owners_of(staged: &[RowMeta]) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut owners: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for row in staged {
+        match classify_name(&row.name) {
+            RowName::Descriptor(owner) | RowName::Body { owner, .. } => owners
+                .entry(owner.to_ascii_lowercase())
+                .or_default()
+                .push(row.name.clone()),
+            _ => {}
+        }
+    }
+    owners
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODULE: &str = "313d9858-3995-4a4c-b2b0-15d2350417b4";
+    const FORM: &str = "07d3ab2c-5a1c-4d50-9d7e-0c9f3a1c2b44";
+    const CATALOG: &str = "5eab8a1b-1111-4222-8333-444455556666";
+
+    fn meta(name: &str, sha: &str) -> RowMeta {
+        RowMeta {
+            name: name.to_owned(),
+            part: 0,
+            data_size: 10,
+            byte_len: 10,
+            attributes: 0,
+            creation: "2026-01-01 00:00:00".to_owned(),
+            modified: "2026-01-01 00:00:00".to_owned(),
+            sha256: sha.to_owned(),
+        }
+    }
+
+    fn kinds() -> HashMap<String, &'static str> {
+        HashMap::from([
+            (MODULE.to_owned(), "CommonModule"),
+            (FORM.to_owned(), "CommonForm"),
+            (CATALOG.to_owned(), "Catalog"),
+        ])
+    }
+
+    /// The active rows of the names, with the digest "aa".
+    fn active_of(names: &[&str]) -> HashMap<(String, i32), RowMeta> {
+        names
+            .iter()
+            .map(|name| {
+                let row = meta(name, "aa");
+                (row.key(), row)
+            })
+            .collect()
+    }
+
+    fn delta() -> Vec<RowMeta> {
+        vec![
+            meta(MODULE, "aa"),
+            meta(&format!("{MODULE}.0"), "bb"),
+            meta("root", "aa"),
+            meta("version", "aa"),
+            meta("versions", "cc"),
+        ]
+    }
+
+    fn all_active() -> HashMap<(String, i32), RowMeta> {
+        active_of(&[
+            MODULE,
+            &format!("{MODULE}.0"),
+            FORM,
+            &format!("{FORM}.0"),
+            CATALOG,
+            &format!("{CATALOG}.0"),
+            "root",
+            "version",
+            "versions",
+        ])
+    }
+
+    fn judged(staged: &[RowMeta], same: bool) -> Vec<String> {
+        judge_rows(staged, &all_active(), &kinds(), &mut |_| Ok(same)).unwrap()
+    }
+
+    #[test]
+    fn a_module_body_with_its_descriptor_and_the_service_rows_qualifies() {
+        assert_eq!(judged(&delta(), true), Vec::<String>::new());
+        // the same for a common form
+        let form = vec![
+            meta(FORM, "aa"),
+            meta(&format!("{FORM}.0"), "bb"),
+            meta("root", "aa"),
+            meta("version", "aa"),
+            meta("versions", "cc"),
+        ];
+        assert_eq!(judged(&form, true), Vec::<String>::new());
+        assert_eq!(owners_of(&form).len(), 1);
+    }
+
+    #[test]
+    fn the_rows_are_judged_one_by_one_and_every_reason_is_named() {
+        // an object of another kind
+        let catalog = vec![
+            meta(CATALOG, "aa"),
+            meta(&format!("{CATALOG}.0"), "bb"),
+            meta("root", "aa"),
+            meta("version", "aa"),
+            meta("versions", "cc"),
+        ];
+        let reasons = judged(&catalog, true);
+        // one reason for the object, though its descriptor and its body are staged
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].starts_with(&format!("{CATALOG}: the object is a Catalog")),
+            "{reasons:?}"
+        );
+        // a new object: no row in Config
+        let mut new = delta();
+        new.push(meta("99999999-1111-2222-3333-444444444444.0", "dd"));
+        let reasons = judged(&new, true);
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0].contains("no row of this name in Config"),
+            "{reasons:?}"
+        );
+        // an owner the configuration does not list at the top level
+        let mut nested = all_active();
+        let ghost = "aaaaaaaa-1111-2222-3333-444444444444";
+        for name in [ghost.to_owned(), format!("{ghost}.0")] {
+            let row = meta(&name, "aa");
+            nested.insert(row.key(), row);
+        }
+        let stage = vec![
+            meta(&format!("{ghost}.0"), "bb"),
+            meta("root", "aa"),
+            meta("version", "aa"),
+            meta("versions", "cc"),
+        ];
+        let reasons = judge_rows(&stage, &nested, &kinds(), &mut |_| Ok(true)).unwrap();
+        assert!(reasons[0].contains("not a top-level object"), "{reasons:?}");
+        // a body that is not the .0
+        let mut other_suffix = delta();
+        other_suffix[1] = meta(&format!("{MODULE}.1"), "bb");
+        let mut active = all_active();
+        let row = meta(&format!("{MODULE}.1"), "aa");
+        active.insert(row.key(), row);
+        let reasons = judge_rows(&other_suffix, &active, &kinds(), &mut |_| Ok(true)).unwrap();
+        assert!(reasons[0].contains("only the .0 body"), "{reasons:?}");
+        // a name that is nothing an apply knows; the list of removals is judged apart
+        let mut odd = delta();
+        odd.push(meta("something-else", "ee"));
+        odd.push(meta("deleted", "ff"));
+        let reasons = judged(&odd, true);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].starts_with("something-else: not a service row"),
+            "{reasons:?}"
+        );
+    }
+
+    fn overlay() -> HashSet<String> {
+        [
+            "a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",
+            "a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b.0",
+            "dynamicallyupdated",
+            "versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    #[test]
+    fn an_empty_list_of_removals_is_consumed_and_one_that_names_the_online_update_is_refused() {
+        // what the platform's import writes to every stage (unmeasured for the platform's force: consumed)
+        assert_eq!(
+            judge_deleted_list(b"0", &HashSet::new()).unwrap(),
+            "it is empty"
+        );
+        assert_eq!(
+            judge_deleted_list(b"\xef\xbb\xbf0", &overlay()).unwrap(),
+            "it is empty"
+        );
+        // the import stage of a target that carries an online update lists its rows: the platform's force
+        // does more for it than this apply does (section 7 of the acceptance), so it is the exclusive apply's
+        let listed = br#"3,"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",0,"DynamicallyUpdated",0,"versions_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",0"#;
+        let reason = judge_deleted_list(listed, &overlay()).unwrap_err();
+        assert!(
+            reason.starts_with("deleted: the stage lists 3 row(s) of the online update"),
+            "{reason}"
+        );
+        assert!(reason.contains("apply it exclusively"), "{reason}");
+    }
+
+    #[test]
+    fn a_list_that_removes_something_or_cannot_be_read_is_refused() {
+        // an object's row, an attribute (another flag), a row of no update the database carries, a
+        // removal list of an earlier dynamic update, a list that is no list
+        for (text, needle) in [
+            (
+                &br#"1,"313d9858-3995-4a4c-b2b0-15d2350417b4.0",0"#[..],
+                "313d9858-3995-4a4c-b2b0-15d2350417b4.0",
+            ),
+            (
+                &br#"1,"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",1"#[..],
+                "a627e390",
+            ),
+            (
+                &br#"1,"a627e390-8fad-4a95-afe6-674f54813188_dynupdate_ffffffff-0c47-4fad-986a-f08f28287c1b",0"#[..],
+                "ffffffff",
+            ),
+            (
+                &br#"1,"deleted_dynupdate_06cb0442-0c47-4fad-986a-f08f28287c1b",0"#[..],
+                "deleted_dynupdate_",
+            ),
+        ] {
+            let reason = judge_deleted_list(text, &overlay()).unwrap_err();
+            assert!(reason.starts_with("deleted: the stage lists the removal of "), "{reason}");
+            assert!(reason.contains(needle), "{reason}");
+        }
+        let unreadable = judge_deleted_list(b"not a list", &overlay()).unwrap_err();
+        assert!(unreadable.contains("cannot read"), "{unreadable}");
+        // a list that says one name and holds none
+        assert!(judge_deleted_list(b"2,\"x\",0", &overlay()).is_err());
+    }
+
+    #[test]
+    fn a_descriptor_that_changed_and_a_service_row_that_changed_are_refused() {
+        // the descriptor differs in text
+        let mut stage = delta();
+        stage[0] = meta(MODULE, "dd");
+        let reasons = judge_rows(&stage, &all_active(), &kinds(), &mut |name| {
+            Ok(name != MODULE)
+        })
+        .unwrap();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0].contains("descriptor's text differs from the active one"),
+            "{reasons:?}"
+        );
+        // the same bytes are asked about all the same (an alias may hold another text), and
+        // root/version are asked only when their bytes differ
+        let mut asked = Vec::new();
+        judge_rows(&delta(), &all_active(), &kinds(), &mut |name| {
+            asked.push(name.to_owned());
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(asked, vec![MODULE.to_owned()]);
+        let mut changed = delta();
+        changed[2] = meta("root", "zz");
+        let reasons = judge_rows(&changed, &all_active(), &kinds(), &mut |name| {
+            Ok(name != "root")
+        })
+        .unwrap();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0].starts_with("root: the service row differs"),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_generation_is_made_of_root_version_and_versions() {
+        let stage = vec![meta(MODULE, "aa"), meta(&format!("{MODULE}.0"), "bb")];
+        let reasons = judged(&stage, true);
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        for service in ["root", "version", "versions"] {
+            assert!(
+                reasons
+                    .iter()
+                    .any(|reason| reason
+                        .starts_with(&format!("{service}: the stage has no such row"))),
+                "{service}: {reasons:?}"
+            );
+        }
+        // a row of several parts is not a delta row
+        let mut parts = delta();
+        parts.push(RowMeta {
+            part: 1,
+            ..meta(&format!("{MODULE}.0"), "bb")
+        });
+        let reasons = judged(&parts, true);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("a row of several parts"))
+        );
+    }
+
+    #[test]
+    fn the_size_of_the_stage_rules_out_a_whole_tree() {
+        let fits = StageSize {
+            rows: 5,
+            bytes: 350_000,
+            largest: 344_213,
+        };
+        assert!(size_reasons(fits).is_empty());
+        let tree = StageSize {
+            rows: 9_521,
+            bytes: 130 << 20,
+            largest: 300_000,
+        };
+        let reasons = size_reasons(tree);
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        assert!(reasons[0].contains("9521 rows"), "{reasons:?}");
+        assert!(reasons[0].contains("at most 128"), "{reasons:?}");
+        assert!(reasons[0].contains("#395"), "{reasons:?}");
+        let edge = StageSize {
+            rows: 128,
+            bytes: MAX_PLAN_BYTES as i64,
+            largest: MAX_ROW_BYTES as i64,
+        };
+        assert!(size_reasons(edge).is_empty());
+        let over = StageSize {
+            rows: 129,
+            bytes: MAX_PLAN_BYTES as i64 + 1,
+            largest: MAX_ROW_BYTES as i64 + 1,
+        };
+        assert_eq!(size_reasons(over).len(), 3);
+    }
+
+    #[test]
+    fn the_overlay_is_not_capped_but_warned_about_past_fifty_generations() {
+        assert_eq!(WARN_GENERATIONS, 50);
+        assert_eq!(growth_warning(1), None);
+        assert_eq!(growth_warning(50), None);
+        let warning = growth_warning(51).unwrap();
+        assert!(warning.contains("51 dynamic generations"), "{warning}");
+        assert!(growth_warning(4000).is_some());
+    }
+
+    #[test]
+    fn a_refusal_lists_the_first_reasons_and_counts_the_rest() {
+        let few = vec!["a: x".to_owned(), "b: y".to_owned()];
+        assert_eq!(refusal_reason(&few), "a: x; b: y");
+        let many: Vec<String> = (0..11).map(|index| format!("r{index}: z")).collect();
+        let text = refusal_reason(&many);
+        assert!(text.ends_with("; и ещё 3"), "{text}");
+        assert_eq!(text.matches("; ").count(), 8);
+    }
+
+    #[test]
+    fn a_changed_deleted_list_cannot_replace_the_image_already_judged() {
+        let bytes = b"0".to_vec();
+        let row = MainStorageRow {
+            file_name: "deleted".to_owned(),
+            part_no: 0,
+            creation: String::new(),
+            modified: String::new(),
+            attributes: 0,
+            data_size: 1,
+            binary_data: bytes,
+        };
+        let judged = RowMeta {
+            data_size: 1,
+            byte_len: 1,
+            sha256: hex_lower(&row.sha256()),
+            ..meta("deleted", "")
+        };
+        require_judged_image("ConfigSave", &[judged.clone()], std::slice::from_ref(&row)).unwrap();
+        let changed = MainStorageRow {
+            binary_data: br#"1,"DynamicallyUpdated",0"#.to_vec(),
+            ..row.clone()
+        };
+        let error = require_judged_image("ConfigSave", std::slice::from_ref(&judged), &[changed])
+            .unwrap_err();
+        assert!(error.to_string().contains("no publication was attempted"));
+        assert!(require_judged_image("ConfigSave", std::slice::from_ref(&judged), &[]).is_err());
+        assert!(
+            require_judged_image(
+                "ConfigSave",
+                &[judged.clone(), judged.clone()],
+                &[row.clone(), row]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn descriptor_comparison_refuses_bytes_outside_the_judged_inventory() {
+        let original = b"descriptor with original properties";
+        let row = RowMeta {
+            byte_len: original.len() as i64,
+            ..meta(MODULE, &hex_lower(&Sha256::digest(original)))
+        };
+        assert!(judged_stage_digest(
+            std::slice::from_ref(&row),
+            MODULE,
+            original
+        ));
+        assert!(!judged_stage_digest(
+            &[row],
+            MODULE,
+            b"descriptor with changed properties"
+        ));
+        assert!(!judged_stage_digest(&[], MODULE, original));
+    }
+
+    #[test]
+    fn a_transient_empty_deleted_blob_cannot_bypass_a_nonempty_inventory() {
+        let dangerous = br#"1,"DynamicallyUpdated",0"#;
+        let row = RowMeta {
+            byte_len: dangerous.len() as i64,
+            ..meta("deleted", &hex_lower(&Sha256::digest(dangerous)))
+        };
+        assert!(judged_stage_digest(
+            std::slice::from_ref(&row),
+            "deleted",
+            dangerous
+        ));
+        assert!(!judged_stage_digest(&[row], "deleted", b"0"));
+    }
+
+    #[test]
+    fn uncertain_commit_failure_keeps_recovery_evidence_without_claiming_rollback() {
+        let message =
+            uncertain_commit_context("lab", std::path::Path::new("recovery/run1"), "abc123");
+        assert!(message.contains("may have committed"));
+        assert!(message.contains("recovery/run1") || message.contains("recovery\\run1"));
+        assert!(message.contains("abc123"));
+        assert!(message.contains("before any retry"));
+        assert!(!message.contains("database is unchanged"));
+    }
+
+    #[test]
+    fn the_engine_limits_are_the_refusal_of_a_stage_and_the_rest_a_failure() {
+        let limit = engine_error(MainActivationError::Limit(
+            "129 staged rows exceeds 128".into(),
+        ));
+        assert!(limit.downcast_ref::<NeedsNativeApply>().is_some());
+        let target = engine_error(MainActivationError::StructuralTarget("x".into()));
+        assert!(target.downcast_ref::<NeedsNativeApply>().is_some());
+        let versions = engine_error(MainActivationError::Versions("reused".into()));
+        assert!(versions.downcast_ref::<NeedsNativeApply>().is_none());
+    }
+}

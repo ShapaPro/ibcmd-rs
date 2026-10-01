@@ -68,6 +68,10 @@ pub struct RecoveryRequest<'a> {
     /// The backup taken (or acknowledged) before a restructuring; the artifact
     /// names it.
     pub backup: Option<&'a super::BackupRecord>,
+    /// The generation a dynamic apply publishes, when it is one: the artifact then keeps the
+    /// `DynamicallyUpdated` markers only (the alias rows of the earlier generations stay where they
+    /// are; the apply writes new ones and folds none) and says how to take the generation back.
+    pub dynamic_generation: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,12 +292,15 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         "table\tname\tpart\tattributes\tcreation\tmodified\tfile"
     )?;
     let mut special_count = 0usize;
+    // An exclusive apply folds the overlay away, so it keeps every alias row; a dynamic apply adds a
+    // generation and folds nothing, so the markers it rewrites are all it has to keep.
+    let config_special = if request.dynamic_generation.is_some() {
+        "FileName = N'DynamicallyUpdated'"
+    } else {
+        "FileName = N'DynamicallyUpdated' OR FileName LIKE N'%\\_dynupdate\\_%' ESCAPE N'\\'"
+    };
     for (table, filter) in [
-        (
-            "Config",
-            "FileName = N'DynamicallyUpdated' OR FileName LIKE N'%\\_dynupdate\\_%' ESCAPE N'\\'"
-                .to_owned(),
-        ),
+        ("Config", config_special.to_owned()),
         ("Params", "FileName = N'DynamicallyUpdated'".to_owned()),
     ] {
         let query = format!(
@@ -531,6 +538,15 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
         request.dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
+    let dynamic_note = request.dynamic_generation.map_or_else(String::new, |generation| {
+        format!(
+            "\nThis was a DYNAMIC apply: it published the generation {generation} beside the active rows\n\
+             (`<name>_dynupdate_{generation}` in Config, `versions_dynupdate_{generation}`), replaced `root` and\n\
+             `version` in place and rewrote the DynamicallyUpdated markers. To take it back: delete those alias rows,\n\
+             put back `root` and `version` from config_replaced.tsv and the markers from special_rows.tsv,\n\
+             then MobileVersions.dat, the message numbers and the added registrations as below.\n"
+        )
+    });
     fs::write(
         request.dir.join("README.txt"),
         format!(
@@ -554,7 +570,7 @@ pub fn write_recovery(client: &dyn SqlClient, request: &RecoveryRequest<'_>) -> 
              on the stopped database; restore special_rows.tsv, MobileVersions.dat, the Params rows and\n\
              the message numbers with plain INSERT/UPDATE statements, and delete the rows of\n\
              new_registrations.tsv from _ConfigChngR and _ConfigChngR_ExtProps. The `sha256` column proves each row.\n\
-             Names are quoted: {quoted}\n",
+             Names are quoted: {quoted}\n{dynamic_note}",
             db = request.database,
             token = request.token,
             quoted = quote_string(request.database)

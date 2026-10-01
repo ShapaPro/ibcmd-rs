@@ -484,6 +484,19 @@ mod tests {
                 ),
                 _ => assert!(!profile.capabilities.contains_key(&config_apply)),
             }
+            // the dynamic apply of the drop-in: measured on one build, refused by name on 8.5
+            let dynamic = CapabilityId::parse("mssql.config.apply.dynamic").unwrap();
+            match version {
+                "8.3.27.2214" => assert_eq!(
+                    profile.capabilities[&dynamic].value,
+                    CapabilityState::Supported
+                ),
+                "8.5.1.1150" => assert_eq!(
+                    profile.capabilities[&dynamic].value,
+                    CapabilityState::Unsupported
+                ),
+                _ => assert!(!profile.capabilities.contains_key(&dynamic)),
+            }
             match version {
                 "8.3.24.1819" => assert!(profile.capabilities.is_empty()),
                 "8.3.27.1989" => {
