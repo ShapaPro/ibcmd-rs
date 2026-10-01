@@ -73,8 +73,8 @@ m1: mix_ours.ps1, the route through our import
 ----------------------------------------------------------------------------------------------------
 case m1, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ibcmd-rs-mix2.exe
 ours: check 3 (EXCEPT both ways, 3 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (6):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -103,7 +103,7 @@ native apply exit 0
 dry run exit 0
 plan: catalog КлассификаторБанков (Reference2565): widened attributes Fld2567 = Город (50 -> 200), Fld2569 = Телефоны (250 -> 400), Fld5512 = ИНН (12 -> 20); switched indexes Fld2567 = Город (DontIndex -> Index), Fld2569 = Телефоны (DontIndex -> IndexWithAdditionalOrder), Fld5512 = ИНН (Index -> DontIndex) | catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100); switched indexes Fld5283 = ИмяХеш (Index -> DontIndex) | document _ДемоЗаказПокупателя (Document39): widened attributes Fld3825 = ГородДоставки (50 -> 70), Fld3824 = РегионДоставки (50 -> 60); switched indexes Fld3825 = ГородДоставки (DontIndex -> IndexWithAdditionalOrder), Fld3824 = РегионДоставки ...
 tables: 6
-caches: 
+caches:
 drop-in exit 0 in 8.5s, backup file 269 MB
   apply.out: [INFO] Обновление конфигурации базы данных...
   apply.out: [INFO] Создано поколение конфигурации: a11f7fd791f96c4f84a13315980003b600000000
@@ -130,8 +130,8 @@ case m2, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ib
 dry run exit 0
 plan: catalog КлассификаторБанков (Reference2565): widened attributes Fld2567 = Город (50 -> 200), Fld2569 = Телефоны (250 -> 400), Fld5512 = ИНН (12 -> 20); switched indexes Fld2567 = Город (DontIndex -> Index), Fld2569 = Телефоны (DontIndex -> IndexWithAdditionalOrder), Fld5512 = ИНН (Index -> DontIndex) | catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100); switched indexes Fld5283 = ИмяХеш (Index -> DontIndex) | document _ДемоЗаказПокупателя (Document39): widened attributes Fld3825 = ГородДоставки (50 -> 70), Fld3824 = РегионДоставки (50 -> 60); switched indexes Fld3825 = ГородДоставки (DontIndex -> IndexWithAdditionalOrder), Fld3824 = РегионДоставки ...
 drop-in exit 0 in 27.2s
-own: added (0): 
-own: removed (0): 
+own: added (0):
+own: removed (0):
 own: changed (5):
 own: only in 1: []  only in 2: []
 own: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -143,8 +143,8 @@ ours: drop-in exit 0 in 242.1s
   ours apply.out: [INFO] Создано поколение конфигурации: 0ad913007ec49948b1ef9e001a04e0af00000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 6 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (5):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -202,8 +202,8 @@ case m3, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ib
 dry run exit 0
 plan: catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100); new tabular sections VT11034 = ДемоТЧ (2 attribute(s)) | document _ДемоЗаказПокупателя (Document39): new attributes Fld11038 = ДемоРеквизит; widened attributes Fld3825 = ГородДоставки (50 -> 60); new tabular sections VT11040 = ДемоТЧ2 (1 attribute(s)); new attributes of tabular sections СчетаНаОплату: Fld11039 = ДемоСтрока | document ТелефонныйЗвонок (Document1564): new attributes Fld11043 = ДемоРеквизит; new tabular sections VT11044 = ДемоТЧ (1 attribute(s))
 drop-in exit 0 in 28.9s
-own: added (0): 
-own: removed (0): 
+own: added (0):
+own: removed (0):
 own: changed (4):
 own: only in 1: []  only in 2: []
 own: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -215,8 +215,8 @@ ours: drop-in exit 0 in 170.9s
   ours apply.out: [INFO] Создано поколение конфигурации: 77fbc7b6521ac04c9c832f5d313ab11f00000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 11 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (4):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -274,8 +274,8 @@ case m4, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ib
 dry run exit 0
 plan: catalog КлассификаторБанков (Reference2565): removed attributes Fld2566 = КоррСчет, Fld9935 = КодСтраны | catalog КлючевыеОперации (Reference2598): new tabular sections VT11034 = ДемоТЧ (2 attribute(s)) | catalog ШаблоныЗаданийОчереди (Reference3408): removed attributes Fld3520 = Ключ | document _ДемоОприходованиеТоваров (Document578): new attributes of tabular sections Товары: Fld11038 = ДемоЧисло, Fld11039 = ДемоСтрока | document _ДемоСчетФактураПолученный (Document4883): new tabular sections VT11040 = ДемоТЧ (1 attribute(s))
 drop-in exit 0 in 32.8s
-own: added (0): 
-own: removed (0): 
+own: added (0):
+own: removed (0):
 own: changed (6):
 own: only in 1: []  only in 2: []
 own: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -287,8 +287,8 @@ ours: drop-in exit 0 in 223.2s
   ours apply.out: [INFO] Создано поколение конфигурации: fecebe2da94b0f4a98e2cd9439bcd9ce00000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 8 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (6):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -346,8 +346,8 @@ case m5, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ib
 dry run exit 0
 plan: catalog _ДемоПодразделения (Reference21): new attributes Fld11034 = ДемоРеквизит; new attributes of tabular sections Сотрудники: Fld11035 = ДемоСтрока | catalog КлассификаторБанков (Reference2565): removed attributes Fld2566 = КоррСчет; widened attributes Fld2567 = Город (50 -> 200); switched indexes Fld2569 = Телефоны (DontIndex -> IndexWithAdditionalOrder) | catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100); switched indexes Fld2646 = ЦелевоеВремя (DontIndex -> Index); new tabular sections VT11036 = ДемоТЧ (2 attribute(s)) | catalog ТомаХраненияФайлов (Reference576): switched indexes Fld1355 = МаксимальныйРазмер (DontIndex -> Index) | catalog Ш ...
 drop-in exit 0 in 18.1s
-own: added (0): 
-own: removed (0): 
+own: added (0):
+own: removed (0):
 own: changed (7):
 own: only in 1: []  only in 2: []
 own: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -359,8 +359,8 @@ ours: drop-in exit 0 in 299.5s
   ours apply.out: [INFO] Создано поколение конфигурации: b4c637100a7cbe4badd0ea325355e0e000000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 12 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (7):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -436,8 +436,8 @@ ours: drop-in exit 0 in 546.9s
   ours apply.out: [INFO] Создано поколение конфигурации: 2795fb1b9c4f5b4386b18942adac91ae00000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 30 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (9):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -496,8 +496,8 @@ m7: mix_ours.ps1, the route through our import
 ----------------------------------------------------------------------------------------------------
 case m7, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ibcmd-rs-mix2.exe
 ours: check 3 (EXCEPT both ways, 8 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (7):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (2): ['DbCopiesUpdates', 'DbCopies']
@@ -554,18 +554,41 @@ done f1
 ----------------------------------------------------------------------------------------------------
 f1: mix_ours.ps1, the route through our import
 ----------------------------------------------------------------------------------------------------
-case f1, the route through our import, binary F:/ibcmd/lab/04/restructure/bin/ibcmd-rs-mix4.exe
+case f1, the route through our import, binary F:\ibcmd\lab\04\restructure\bin\ibcmd-rs-mix-20261001.exe
 dry run exit 0
 plan: catalog КлассификаторБанков (Reference2565): switched indexes Fld2569 = Телефоны (DontIndex -> IndexWithAdditionalOrder) | catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100) | catalog ТомаХраненияФайлов (Reference576): switched indexes Fld1355 = МаксимальныйРазмер (DontIndex -> Index) | document _ДемоСписаниеБезналичныхДенежныхСредств (Document5028): widened attributes Fld5031 = НазначениеПлатежа (210 -> 300); switched indexes Fld5030 = НомерВходящегоДокумента (DontIndex -> Index) | catalog ДемоКатН1 (Reference11041): new catalog, tables _Reference11041
-drop-in exit 0 in 125.1s
-own: added (0): 
-own: removed (0): 
+drop-in exit 0 in 16.8s
+own: added (0):
+own: removed (0):
 own: changed (4):
 own: only in 1: []  only in 2: []
 own: entries that differ (0): []
 own: DBNames text equal: True 347975 347975
 own: 15 of 16 `.si` rows have the same text (compared after inflate)
-our import exit 0 in 80.7s, 9522 rows in ConfigSave
+our import exit 0 in 15.3s, 9 rows in ConfigSave
+ours: drop-in exit 0 in 8.3s
+  ours apply.out: [INFO] Обновление конфигурации базы данных...
+  ours apply.out: [INFO] Создано поколение конфигурации: 2b5aadcf56c52d418c30f0adc8f9a5e300000000
+  ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
+ours: check 3 (EXCEPT both ways, 5 tables): no row differs
+ours: added (0):
+ours: removed (0):
+ours: changed (4):
+ours: only in 1: []  only in 2: []
+ours: entries that differ (0): []
+ours: DBNames text equal: True 347975 347975
+ours: 15 of 16 `.si` rows have the same text (compared after inflate)
+ours: check 4 (Config rows, informative until #395): rows: 9840 in A, 9840 in B
+ours: check 4 (Config rows, informative until #395): equal bytes: 9792; equal after inflate only: 21; different text: 27; only in A: 0; only in B: 0
+ours: check 4 (Config rows, informative until #395): different text by kind: {'0': 17, 'uuid': 6, '3': 2, '2': 1, 'versions': 1}
+ours: check 7: native apply exit=0 in 37,6s
+ours: check 7: [INFO] Обновление конфигурации базы данных не требуется
+ours: export ibcmd_rs_04_ddl_s2_f1_own : export exit=0 in 23,1s: [INFO] Экспорт конфигурации в XML... | [INFO] Экспорт конфигурации в XML успешно завершен
+ours: export ibcmd_rs_04_ddl_s2_f1_ours : export exit=0 in 15,7s: [INFO] Экспорт конфигурации в XML... | [INFO] Экспорт конфигурации в XML успешно завершен
+ours: check 8 (source-diff of the drop-in twin and ours): {'left_only': 0, 'right_only': 0, 'different': 1, 'unchanged': 12199}
+ours: check 8: 1 file(s) differ; exactly the edited forms and ConfigDumpInfo.xml: True
+ours: check 8: 0 of 0 edited forms come back from the twin's export byte for byte
+done f1 (all)
 
 ====================================================================================================
 CASE f3
@@ -616,8 +639,8 @@ case f3, the route through our import, binary F:/ibcmd/lab/04/restructure/bin/ib
 dry run exit 0
 plan: catalog КлючевыеОперации (Reference2598): widened attributes Fld5283 = ИмяХеш (40 -> 100) | catalog ТомаХраненияФайлов (Reference576): switched indexes Fld1355 = МаксимальныйРазмер (DontIndex -> Index) | catalog ШаблоныЗаданийОчереди (Reference3408): new attributes Fld11049 = КлючНовый | document _ДемоНачислениеЗарплаты (Document996): switched indexes Fld4062 = ПериодРегистрации (IndexWithAdditionalOrder -> DontIndex) | document _ДемоРасходныйКассовыйОрдер (Document1436): new attributes Fld11050 = ДемоРеквизит | catalog ДемоКатН5 (Reference11041): new catalog, tables _Reference11041 | document ДемоДокН5 (Document11042): new document, tables _Document11042, _Document11042_VT11045
 drop-in exit 0 in 21.3s
-own: added (0): 
-own: removed (0): 
+own: added (0):
+own: removed (0):
 own: changed (4):
 own: only in 1: []  only in 2: []
 own: entries that differ (0): []
@@ -629,8 +652,8 @@ ours: drop-in exit 0 in 62.2s
   ours apply.out: [INFO] Создано поколение конфигурации: 168ef1ee64555a4bbe178f8cfe5ce56b00000000
   ours apply.out: [INFO] Обновление конфигурации базы данных успешно завершено
 ours: check 3 (EXCEPT both ways, 10 tables): no row differs
-ours: added (0): 
-ours: removed (0): 
+ours: added (0):
+ours: removed (0):
 ours: changed (4):
 ours: only in 1: []  only in 2: []
 ours: entries that differ (0): []
@@ -771,7 +794,18 @@ CASE r7
 ----------------------------------------------------------------------------------------------------
 r7: mix_case.ps1 (the platform's route)
 ----------------------------------------------------------------------------------------------------
-case r7 (must be refused), binary F:/ibcmd/lab/04/restructure/bin/ibcmd-rs-mix3.exe
+case r7 (must be refused), binary F:\ibcmd\lab\04\restructure\bin\ibcmd-rs-mix-20261001.exe
+dry run exit 1
+  dry.err: Error: the staged configuration needs the platform's own config apply (a restructuring or a change this apply does not do): 7 blocker(s)
+  dry.err:   1153ba8d-0ff5-4da1-97d8-8ddd4b6c7422: [structure] Document.ДемоДокН4: added (Document; an object that owns tables or stored data is added or dropped)
+  dry.err:   344cb0de-315d-4d05-93f8-8a1f53208470: [structure] Catalog.КлючевыеОперации: ChildObjects/Attribute[ИмяХеш]/Properties/Type/StringQualifiers/Length: 40 -> 100 (a property of an attribute no rule covers)
+  dry.err:   66193438-abc5-410b-a1f1-a204102d1a62: [structure] Configuration: ChildObjects/Document[ДемоДокН4]: added (an object that owns tables or stored data is added or dropped)
+  blocker: S1: a new object together with removed attributes of existing objects is not built: the caches of the new object are chained on the additions only (N3, N6 and N7 trace additions)
+drop-in exit 1 in 2.2s, backup file not made
+  apply.out: [INFO] Обновление конфигурации базы данных...
+  apply.err: [ERROR] требуется штатный config apply: 1153ba8d-0ff5-4da1-97d8-8ddd4b6c7422: [structure] Document.ДемоДокН4: added (Document; an object that owns tables or stored data is added or dropped); 344cb0de-315d-4d05-93f8-8a1f53208470: [structure] Catalog.КлючевыеОперации: ChildObjects/Attribute[ИмяХеш]/Properties/Type/StringQualifiers/Length: 40 -> 100 (a property of an attribute no rule covers); 66193438-abc5-410b-a1f1-a204102d1a62: [structure] Configuration: ChildObjects/Document[ДемоДокН4]: added (an object that owns tables or stored data is added or dropped); b56f25d2-72a9-4d80-8998-77ac3097c873: [structure] Catalog.КлассификаторБанков: ChildObjects/Attribute[КоррСчет]: removed (a ...
+refused as required: exit 1 (want 1); the database digest unchanged: True
+done r7
 
 ====================================================================================================
 CASE r8

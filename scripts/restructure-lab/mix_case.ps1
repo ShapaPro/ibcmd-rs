@@ -114,6 +114,7 @@ if ($Refused) {
     $same = ($before -join "`n") -eq ($after -join "`n")
     Note "refused as required: exit $rc (want 1); the database digest unchanged: $same"
     if (-not $same) { $before | Add-Content "$o\digest_before.txt"; $after | Add-Content "$o\digest_after.txt" }
+    if ($dryExit -ne 1 -or $rc -ne 1 -or -not $same) { throw 'refusal acceptance failed (dry/apply must exit 1, digest must be unchanged)' }
 } else {
     if ($rc -ne 0) { throw 'the drop-in apply failed' }
     Log 'checks 2-6'

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from edit_cases_s2 import BANKS, JOBS, KEYOPS, VOLUMES, PAYROLL, Tree, flip, remove_attribute, widen  # noqa: E402
 from edit_cases_s3 import add_section_attribute, section_attribute, s  # noqa: E402
 from edit_cases_s4 import CASH, INTAKE, PAYMENT, own, section_of  # noqa: E402
+from form_bindings import drop_bindings  # noqa: E402
 
 NEWOBJ = os.environ.get("MIX_NEWOBJ", r"F:\ibcmd\lab\04\restructure\newobj")
 BOM = bytes([0xEF, 0xBB, 0xBF])
@@ -126,9 +127,29 @@ if __name__ == "__main__":
             for name in names:
                 source = os.path.join(root, name)
                 target = os.path.join(out, "stage", os.path.relpath(source, os.environ["DDL_NATIVE_TREE"]))
-                if not os.path.exists(target):
+                if not os.path.exists(target) or case == "r7":
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     shutil.copyfile(source, target)
+    # Configuration.xml makes the platform load copied forms too. Remove the
+    # bindings to the deleted attribute on both import routes, before staging.
+    if case == "r7":
+        written = []
+
+        def read_form(rel):
+            with open(os.path.join(out, "stage", rel), "rb") as f:
+                return f.read().decode("utf-8-sig")
+
+        def write_form(rel, text):
+            path = os.path.join(out, "stage", rel)
+            with open(path, "rb") as f:
+                bom = f.read().startswith(BOM)
+            with open(path, "wb") as f:
+                f.write((BOM if bom else b"") + text.encode("utf-8"))
+            written.append(rel)
+
+        drop_bindings(read_form, write_form, BANKS[:-len(".xml")], ["КоррСчет"])
+        with open(os.path.join(out, "forms.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(written)) + "\n")
     # files.txt lists the new objects' files too
     path = os.path.join(out, "files.txt")
     with open(path, encoding="utf-8") as f:

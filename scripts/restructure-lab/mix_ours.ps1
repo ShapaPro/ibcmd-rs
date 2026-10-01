@@ -124,16 +124,20 @@ Get-Content "$o\ours_config.txt" | Select-String -Pattern '^(rows|equal bytes|di
 if ($Phase -ne 'prepare') {
 Log 'check 7: the platform apply on our twin'
 pwsh -NoProfile -File "$kit\apply_only.ps1" -Database $oursDb *> "$o\ours_noop.txt"
+if ($LASTEXITCODE -ne 0) { throw 'check 7: native apply failed' }
+if (-not (Select-String -Path "$o\ours_noop.txt" -Pattern 'не требуется' -Quiet)) { throw 'check 7: native apply was not a no-op' }
 Get-Content "$o\ours_noop.txt" | Select-String -Pattern 'не требуется|exit=' | ForEach-Object { Note "ours: check 7: $($_.Line)" }
 Log 'check 8: exports'
 foreach ($db in $own, $oursDb) {
     Remove-Item -Recurse -Force "$lab\export\$db" -ErrorAction SilentlyContinue
     pwsh -NoProfile -File "$kit\export_tree.ps1" -Database $db -Out "$lab\export\$db" 2>&1 | Select-Object -Last 1 | ForEach-Object { Note "ours: export $db : $_" }
+    if ($LASTEXITCODE -ne 0) { throw "check 8: native export failed for $db" }
 }
 & $Exe source-diff "$lab\export\$own" "$lab\export\$oursDb" > "$o\ours_export_diff.json" 2>&1
 $diff = python -c "import json; d=json.load(open(r'$o\ours_export_diff.json',encoding='utf-8')); print(d['summary'])"
 Note "ours: check 8 (source-diff of the drop-in twin and ours): $diff"
 python "$kit\diff_paths.py" "$o\ours_export_diff.json" "$lab\tree_s2\$Case\forms.txt" "$lab\export\$oursDb" "$lab\tree_s2\$Case\stage_full" | ForEach-Object { Note "ours: check 8: $_" }
+if ($LASTEXITCODE -ne 0) { throw 'check 8: exported differences exceed the declared forms and ConfigDumpInfo.xml' }
 
 if ($Cleanup) {
     Log 'cleanup'

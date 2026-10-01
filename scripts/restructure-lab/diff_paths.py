@@ -28,6 +28,7 @@ def main():
         print("  unexpected:", p)
     for p in missing:
         print("  edited but equal:", p)
+    valid = not extra and not missing
     if len(sys.argv) > 4:
         same = 0
         for rel in sorted(p for p in expected if p != "ConfigDumpInfo.xml"):
@@ -37,6 +38,8 @@ def main():
                 else:
                     print("  the export differs from the imported form:", rel)
         print("%d of %d edited forms come back from the twin's export byte for byte" % (same, len(expected) - 1))
+        valid = valid and same == len(expected) - 1
+    return 0 if valid else 1
 
 
-main()
+raise SystemExit(main())

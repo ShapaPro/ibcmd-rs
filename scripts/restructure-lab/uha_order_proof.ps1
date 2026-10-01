@@ -28,10 +28,14 @@ function Invoke-Heavy([scriptblock]$Body) {
 }
 function Dump-Order($label) {
     python "$kit\schema_order_dump.py" $db "$o\order_$label.txt"
+    if ($LASTEXITCODE -ne 0) { throw 'schema order dump failed' }
 }
 
 Log "restore $db (corpus uha8327)"
-pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus uha8327 -Name $db -Track ddl -Purpose "S1 mix: the order of DBSchema on the ERP UH, rcheck's case $Case" | Select-Object -Last 1
+Invoke-Heavy {
+    pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus uha8327 -Name $db -Track ddl -Purpose "S1 mix: the order of DBSchema on the ERP UH, rcheck's case $Case" | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) { throw 'clone restore failed' }
+}
 $files = @(Get-Content "$suha\$Case\files.txt" -Encoding UTF8 | Where-Object { $_ })
 $data = "$lab\ibdata\$db"
 New-Item -ItemType Directory -Force $data | Out-Null
@@ -60,6 +64,7 @@ if (Test-Path $backup) { Remove-Item -Force $backup }
 if ($rc2 -ne 0) { throw 'the drop-in apply failed' }
 Dump-Order 'after'
 python "$kit\schema_order_dump.py" --compare "$o\order_before.txt" "$o\order_after.txt" "$suha\logs\${Case}_schema_order.txt" | Tee-Object -FilePath "$o\verdict.txt"
+if ($LASTEXITCODE -ne 0) { throw 'schema order does not match the native twin' }
 
 if ($Cleanup) {
     Log 'cleanup'
