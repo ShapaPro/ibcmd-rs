@@ -80,7 +80,10 @@ Worktree `F:\ibcmd\src\ibcmd-rs-05-integration`, branch `feat/0.5-integration`.
 - [x] C1 Inventory preserved branches and define isolated ownership/acceptance.
 - [x] C2 Resolve shared-file conflicts after independent review.
 - [x] C3 Run appropriate integrated gates and record exact verified scope.
-- [ ] C4 Publish a reviewable first-wave PR and attach it to this chat.
+- [x] C4 Publish a reviewable first-wave PR and attach it to this chat.
+
+Published draft [PR #420](https://github.com/Untru/ibcmd-rs/pull/420), attached
+to the coordinator chat. Required GitHub checks govern merge readiness.
 
 Integrated source `e8e88586` passes fmt, physical-adapter policy, all-targets
 check, 2358 SQL-domain unit tests (2 ignored), and 13 drop-in/standalone-boundary

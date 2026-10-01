@@ -24,6 +24,10 @@ matrix. The full portable/offline regressions and release-shaped binaries
 are checked by GitHub CI on the published branch/PR. Required merge checks
 remain those in [release-criteria.md](../../release-criteria.md).
 
+Published as draft [PR #420](https://github.com/Untru/ibcmd-rs/pull/420).
+Use its current checks for live Windows/Linux CI status; local results above
+refer to the reviewed implementation source, not a claim that CI completed.
+
 The branch stays a first-wave milestone checkpoint. No milestone issue is
 closed wholesale; no v0.5 tag or release is created. The remaining acceptance
 is listed in [roadmap.md](roadmap.md), especially warm/native RAS sessions,
