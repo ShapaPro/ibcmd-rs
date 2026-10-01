@@ -604,6 +604,7 @@ mod tests {
             old_generation: Uuid::nil().to_string(),
             new_generation: Uuid::from_u128(1).to_string(),
             overwritten_config_rows: vec![],
+            retained_config_rows: vec![],
             prior_config_dynamically_updated: None,
             prior_params_dynamically_updated: None,
             staged_rows: vec![MainStorageRow {

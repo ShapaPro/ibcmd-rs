@@ -99,6 +99,10 @@ pub struct MainActivationRecoverySnapshot {
     pub old_generation: String,
     pub new_generation: String,
     pub overwritten_config_rows: Vec<MainStorageRow>,
+    /// Ordinary preimages asserted by an online publication but left in place.
+    /// Omitted when empty so historical non-no-op LIVE token bytes stay exact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_config_rows: Vec<MainStorageRow>,
     pub prior_config_dynamically_updated: Option<MainStorageRow>,
     pub prior_params_dynamically_updated: Option<MainStorageRow>,
     pub staged_rows: Vec<MainStorageRow>,
@@ -119,6 +123,12 @@ pub struct MainActivationDryRunReport {
     pub live_session_switch_expected: bool,
     pub requires_tail_log_artifact: bool,
     pub recovery_token: String,
+    /// New Config row names, excluding the root/version replacements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_aliases: Vec<String>,
+    /// Fully qualified marker names inserted or updated by this publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_markers: Vec<String>,
     /// `exclusive` only: the worker processes whose idle `1CV83 Server` sessions
     /// the session gate leaves out because the tool's own RAS verification
     /// opened them (#409 F-3).
@@ -340,6 +350,19 @@ impl MainActivationPlan {
             ),
             requires_tail_log_artifact: self.mode == MainActivationMode::Live && !self.no_op,
             recovery_token: hex(&Sha256::digest(recovery_json)),
+            dynamic_aliases: if self.mode == MainActivationMode::Online && !self.no_op {
+                self.alias_rows()
+            } else {
+                Vec::new()
+            },
+            dynamic_markers: if self.mode == MainActivationMode::Online && !self.no_op {
+                vec![
+                    "Config.DynamicallyUpdated".to_owned(),
+                    "Params.DynamicallyUpdated".to_owned(),
+                ]
+            } else {
+                Vec::new()
+            },
             own_ras_processes: self.own_ras_processes.clone(),
             executor: self.executor,
         }
@@ -477,10 +500,16 @@ pub fn prepare_main_activation_for(
         ));
     }
 
+    let (overwritten, retained) = snapshot.config_rows.iter().cloned().partition(|row| {
+        !no_op
+            && (mode != MainActivationMode::Online
+                || matches!(row.file_name.as_str(), "root" | "version"))
+    });
     let recovery = MainActivationRecoverySnapshot {
         old_generation: old_generation.hyphenated().to_string(),
         new_generation: new_generation.hyphenated().to_string(),
-        overwritten_config_rows: snapshot.config_rows.clone(),
+        overwritten_config_rows: overwritten,
+        retained_config_rows: retained,
         prior_config_dynamically_updated: snapshot.config_dynamically_updated.clone(),
         prior_params_dynamically_updated: snapshot.params_dynamically_updated.clone(),
         staged_rows: staged_rows.clone(),
@@ -2330,8 +2359,101 @@ mod tests {
         let plan = fixture(MainActivationMode::Online);
         let report = plan.dry_run_report();
         assert_eq!(report.recovery_token.len(), 64);
-        assert_eq!(plan.recovery().overwritten_config_rows.len(), 5);
+        assert_eq!(plan.recovery().overwritten_config_rows.len(), 2);
+        assert_eq!(plan.recovery().retained_config_rows.len(), 3);
         assert_eq!(report.touched_tables, ["Config", "ConfigSave", "Params"]);
+    }
+
+    #[test]
+    fn online_recovery_distinguishes_replaced_rows_from_retained_preimages() {
+        let plan = fixture(MainActivationMode::Online);
+        let recovery = plan.recovery();
+        assert_eq!(
+            recovery
+                .overwritten_config_rows
+                .iter()
+                .map(|row| row.file_name.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "version"]
+        );
+        assert_eq!(
+            recovery.retained_config_rows,
+            plan.active_rows
+                .iter()
+                .filter(|row| !matches!(row.file_name.as_str(), "root" | "version"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        let report = plan.dry_run_report();
+        assert_eq!(
+            report.dynamic_aliases,
+            [
+                format!("{BODY}_dynupdate_{NEW}"),
+                format!("{BODY}_dynupdate_{NEW}.0"),
+                format!("versions_dynupdate_{NEW}")
+            ]
+        );
+        assert_eq!(
+            report.dynamic_markers,
+            ["Config.DynamicallyUpdated", "Params.DynamicallyUpdated"]
+        );
+        let decoded: MainActivationRecoverySnapshot =
+            serde_json::from_slice(&serde_json::to_vec(recovery).unwrap()).unwrap();
+        assert_eq!(&decoded, recovery);
+    }
+
+    #[test]
+    fn no_op_recovery_does_not_claim_config_replacements_or_new_aliases() {
+        let base = fixture(MainActivationMode::Online);
+        let plan = prepare_main_activation(
+            MainActivationMode::Online,
+            base.active_rows.clone(),
+            MainActivationSnapshot {
+                config_rows: base.active_rows.clone(),
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[BODY.to_owned(), format!("{BODY}.0")],
+            true,
+        )
+        .unwrap();
+        assert!(plan.is_no_op());
+        assert!(plan.recovery().overwritten_config_rows.is_empty());
+        assert_eq!(plan.recovery().retained_config_rows, base.active_rows);
+        assert!(plan.dry_run_report().dynamic_aliases.is_empty());
+        assert!(plan.dry_run_report().dynamic_markers.is_empty());
+    }
+
+    #[test]
+    fn live_recovery_serializes_exactly_as_the_historical_token_input() {
+        #[derive(Serialize)]
+        struct LegacySnapshot<'a> {
+            old_generation: &'a str,
+            new_generation: &'a str,
+            overwritten_config_rows: &'a [MainStorageRow],
+            prior_config_dynamically_updated: &'a Option<MainStorageRow>,
+            prior_params_dynamically_updated: &'a Option<MainStorageRow>,
+            staged_rows: &'a [MainStorageRow],
+        }
+        let plan = fixture(MainActivationMode::Live);
+        let current = plan.recovery();
+        let legacy = LegacySnapshot {
+            old_generation: &current.old_generation,
+            new_generation: &current.new_generation,
+            overwritten_config_rows: &plan.active_rows,
+            prior_config_dynamically_updated: &current.prior_config_dynamically_updated,
+            prior_params_dynamically_updated: &current.prior_params_dynamically_updated,
+            staged_rows: &current.staged_rows,
+        };
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(serde_json::to_vec(current).unwrap(), bytes);
+        assert_eq!(
+            plan.dry_run_report().recovery_token,
+            hex(&Sha256::digest(&bytes))
+        );
+        let historical: MainActivationRecoverySnapshot = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(&historical, current);
+        assert!(current.retained_config_rows.is_empty());
     }
 
     #[test]
