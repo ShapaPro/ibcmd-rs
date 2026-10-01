@@ -17,6 +17,9 @@ authoritative: `direct-mssql-online-activation`, `add-mssql-live-generation-swit
    Separate committed promotion/cycle 1 from cycle 2. A repeated continuation
    must never blindly run a third cycle. Recovery evidence and unfinished
    session work must remain visible. Existing F-9/F-10 safety gates remain.
+   The first checkpoint completes automatically only on a verified infobase
+   without user sessions; active sessions leave continuation explicitly
+   required. Adaptive warm-session readiness/load proof remains open.
 3. Correct extension form interceptor read/write handling (#348): native
    evidence stores After/Override in an additional-handler list when an
    adopted form has no BaseForm. Require exact export-back equality and

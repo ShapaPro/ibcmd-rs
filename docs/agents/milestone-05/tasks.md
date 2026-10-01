@@ -27,6 +27,9 @@ module(s), `src/mssql.rs`, `src/mssql_apply.rs` only necessary CLI seams,
 
 - [ ] L1 Recover the preserved lab kit and model the first/second cycle states.
 - [ ] L2 Implement bounded readiness that does not wait for idle SQL handles.
+  First checkpoint: automatic completion only when verified RAS has no user
+  sessions; otherwise report continuation required. Adaptive warm-session
+  readiness remains a separate, uncompleted acceptance item.
 - [ ] L3 Implement guarded continuation with database/artifact identity,
   completion detection and refusal of ambiguous/repeated recovery states.
 - [ ] L4 Test idle/active/timeout/already-complete paths and maintain F-9/F-10 gates.
@@ -55,6 +58,11 @@ Worktree `F:\ibcmd\src\ibcmd-rs-05-integration`, branch `feat/0.5-integration`.
 - [ ] C2 Resolve shared-file conflicts after independent review.
 - [ ] C3 Run appropriate integrated gates and record exact verified scope.
 - [ ] C4 Publish a reviewable first-wave PR and attach it to this chat.
+
+Follow-on ownership: dynamic track owns #345/#346 after #347; live track owns
+#349 and remaining #409 readiness/load evidence; extension track owns the
+remaining #348 drop-in/8.5 routes. The coordinator owns #344 final review and
+#418 native marker-rule research after the apply seams have stabilized.
 
 The open milestone is not closed by completing this board. Completion claims
 must cite actual tests/evidence; unmeasured paths remain explicitly open.
