@@ -323,6 +323,12 @@ fn assert_equals_native(plan: &crate::restructure::plan::Plan, after: &Snapshot)
         let name = update.row_name.as_str();
         let native_row = inflate(&after.row("Params", name).unwrap()).unwrap();
         let ours_row = inflate(&update.row).unwrap();
+        if update.what.contains("approximate") {
+            // `c4629235` of a created object: the entries are the platform's, their order is approximate (derived-caches.md 4;
+            // the twin protocol of S1-F counts it as the one row of 16 that differs). The length is exact.
+            assert_eq!(ours_row.len(), native_row.len(), "{name}");
+            continue;
+        }
         if ours_row != native_row {
             let at = ours_row
                 .iter()
@@ -376,12 +382,21 @@ native: {:?}",
         .filter(|(name, entry)| native_map[*name] != **entry)
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(differing, ["DbCopies", "DbCopiesUpdates"]);
-    // The rebuilt tables sit at the end, before ConfigChngR, in the order they were rebuilt.
+    // (A base that had a native apply already has them upgraded: nothing differs there.)
+    assert!(
+        differing
+            .iter()
+            .all(|name| ["DbCopies", "DbCopiesUpdates"].contains(name)),
+        "{differing:?}"
+    );
+    // The created tables (S1-F) and then the rebuilt ones sit at the end, before ConfigChngR (the last table of the БСП),
+    // in the order they were made (`DbSchema::insert_rebuilt`).
     assert_eq!(ours.position("ConfigChngR"), Some(ours.len() - 1));
     let rebuilt: Vec<&str> = plan
         .objects
         .iter()
+        .filter(|object| object.created)
+        .chain(plan.objects.iter().filter(|object| !object.created))
         .map(|object| object.object.as_str())
         .collect();
     let tail: Vec<String> = (ours.len() - 1 - rebuilt.len()..ours.len() - 1)
@@ -738,4 +753,202 @@ fn corpus_plan_of_section_attributes_on_objects_no_extension_adopts_equals_the_n
             .all(|section| section.created.is_none())
     );
     assert_equals_native(&plan, &after);
+}
+
+/// The `.si` rows the plan does not write are the rows the platform left as they were.
+fn assert_other_caches_unchanged(
+    plan: &crate::restructure::plan::Plan,
+    staged: &Snapshot,
+    after: &Snapshot,
+) {
+    let written: BTreeSet<&str> = plan
+        .caches
+        .iter()
+        .map(|cache| cache.row_name.as_str())
+        .collect();
+    let mut compared = 0;
+    for (name, _) in staged
+        .rows("Params")
+        .keys()
+        .filter(|(name, _)| name.ends_with(".si"))
+    {
+        if written.contains(name.as_str()) {
+            continue;
+        }
+        let before = inflate(&staged.row("Params", name).unwrap()).unwrap();
+        let native = inflate(&after.row("Params", name).unwrap()).unwrap();
+        assert!(
+            before == native,
+            "{name} changed natively and the plan does not write it"
+        );
+        compared += 1;
+    }
+    assert!(compared > 0);
+}
+
+/// S1 combinations (`edit_cases_s4.py`, `mix_case.ps1`): the plan of a stage that mixes the built operations, made offline
+/// from the staged snapshot, against the native apply of the same stage -- `DBNames`, every `DBSchema` entry, every cache row
+/// the plan writes, and the rows it does not write are the ones the platform left alone. Returns the plan for the test's own
+/// counts.
+fn corpus_mix(case: &str) -> Option<crate::restructure::plan::Plan> {
+    let staged = Snapshot::open(
+        &format!("ibcmd_rs_04_ddl_s2_{case}_base"),
+        &format!("{case}_staged"),
+    )?;
+    let after = Snapshot::open(&format!("ibcmd_rs_04_ddl_s2_{case}_nat"), "nat_after")?;
+    let plan = plan(&inputs_of(&staged), &PlanOptions::default()).unwrap();
+    eprintln!("{case}: {}", plan.summary());
+    assert_equals_native(&plan, &after);
+    assert_other_caches_unchanged(&plan, &staged, &after);
+    Some(plan)
+}
+
+fn operations(plan: &crate::restructure::plan::Plan) -> [usize; 6] {
+    let count = |pick: fn(&crate::restructure::plan::ObjectPlan) -> usize| -> usize {
+        plan.objects.iter().map(pick).sum()
+    };
+    [
+        count(|object| object.additions.len()),
+        count(|object| object.removals.len()),
+        count(|object| object.widenings.len()),
+        count(|object| object.switches.len()),
+        count(|object| {
+            object
+                .sections
+                .iter()
+                .filter(|section| section.created.is_some())
+                .count()
+        }),
+        count(|object| {
+            object
+                .sections
+                .iter()
+                .filter(|section| section.created.is_none())
+                .map(|section| section.additions.len())
+                .sum()
+        }),
+    ]
+}
+
+/// Mix m1: attributes deleted and strings widened in the same objects (a hierarchical catalog, two flat ones).
+#[test]
+fn corpus_mix_delete_and_widen_in_the_same_objects_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m1") else {
+        eprintln!("skipped: no lab snapshots of mix m1");
+        return;
+    };
+    // [add, delete, widen, switch, new sections, new section attributes]
+    assert_eq!(operations(&plan), [0, 4, 6, 0, 0, 0]);
+    assert_eq!(plan.objects.len(), 3);
+}
+
+/// Mix m4: attributes deleted in some objects, tabular sections and section attributes added in others.
+#[test]
+fn corpus_mix_delete_in_some_objects_and_sections_in_others_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m4") else {
+        eprintln!("skipped: no lab snapshots of mix m4");
+        return;
+    };
+    assert_eq!(operations(&plan), [0, 3, 0, 0, 2, 2]);
+    assert_eq!(plan.objects.len(), 5);
+}
+
+/// Mix m2: the same attribute widened and re-indexed (on, off, the additional order), in a hierarchical catalog, a flat one and a
+/// document.
+#[test]
+fn corpus_mix_widen_and_switch_the_index_of_the_same_attribute_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m2") else {
+        eprintln!("skipped: no lab snapshots of mix m2");
+        return;
+    };
+    assert_eq!(operations(&plan), [0, 0, 6, 6, 0, 0]);
+    assert_eq!(plan.objects.len(), 3);
+    // Nothing is added or removed, so no cache row is written.
+    assert!(plan.caches.is_empty());
+}
+
+/// Mix m5: every operation in one stage on six objects -- a document and a hierarchical catalog get an own attribute, a section
+/// and a section attribute; two catalogs are deleted from, widened, re-indexed; one gets a section.
+#[test]
+fn corpus_mix_every_operation_in_one_stage_on_six_objects_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m5") else {
+        eprintln!("skipped: no lab snapshots of mix m5");
+        return;
+    };
+    assert_eq!(operations(&plan), [3, 2, 2, 4, 2, 2]);
+    assert_eq!(plan.objects.len(), 6);
+}
+
+/// Mix m3: a new section and a widened own attribute in one object; a document with a new section, a new attribute of an old section,
+/// a widened attribute and a new own attribute; a document with a new section and a new own attribute.
+#[test]
+fn corpus_mix_sections_with_widened_and_new_own_attributes_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m3") else {
+        eprintln!("skipped: no lab snapshots of mix m3");
+        return;
+    };
+    assert_eq!(operations(&plan), [2, 0, 2, 0, 3, 1]);
+    assert_eq!(plan.objects.len(), 3);
+}
+
+/// Mix m7: attributes that are added with the index flag (`Index`, `IndexWithAdditionalOrder`), in a flat catalog, a hierarchical
+/// catalog (nullable ones too) and a document: the declared indexes are the ones of a switch.
+#[test]
+fn corpus_mix_new_attributes_that_come_indexed_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m7") else {
+        eprintln!("skipped: no lab snapshots of mix m7");
+        return;
+    };
+    assert_eq!(operations(&plan), [7, 0, 0, 0, 0, 0]);
+    assert_eq!(plan.objects.len(), 5);
+    assert!(
+        plan.objects
+            .iter()
+            .flat_map(|object| &object.additions)
+            .all(|addition| addition.indexing != 0 && !addition.indexes.is_empty())
+    );
+}
+
+/// Mix m6, the large stage: 17 objects, every operation -- deletes, widenings and re-indexing in catalogs and documents that come
+/// with new own attributes, new sections and new attributes of old sections in other objects, all in one plan.
+#[test]
+fn corpus_mix_one_large_stage_on_seventeen_objects_equals_the_native_result() {
+    let Some(plan) = corpus_mix("m6") else {
+        eprintln!("skipped: no lab snapshots of mix m6");
+        return;
+    };
+    assert_eq!(operations(&plan), [4, 4, 6, 8, 4, 4]);
+    assert_eq!(plan.objects.len(), 17);
+}
+
+/// Mix f1 (S1-F): a new flat catalog next to two widened strings and three switched indexes of other objects (a catalog, a
+/// hierarchical one, a document twice).
+#[test]
+fn corpus_mix_a_new_catalog_next_to_widenings_and_index_switches_equals_the_native_result() {
+    let Some(plan) = corpus_mix("f1") else {
+        eprintln!("skipped: no lab snapshots of mix f1");
+        return;
+    };
+    assert_eq!(operations(&plan), [0, 0, 2, 3, 0, 0]);
+    assert_eq!(plan.objects.len(), 5);
+    assert_eq!(
+        plan.objects.iter().filter(|object| object.created).count(),
+        1
+    );
+}
+
+/// Mix f3 (S1-F): a new catalog and a new document next to two new own attributes, a widened string and two switched indexes.
+#[test]
+fn corpus_mix_a_new_catalog_and_document_next_to_every_attribute_operation_equals_the_native_result()
+ {
+    let Some(plan) = corpus_mix("f3") else {
+        eprintln!("skipped: no lab snapshots of mix f3");
+        return;
+    };
+    assert_eq!(operations(&plan), [2, 0, 1, 2, 0, 0]);
+    assert_eq!(plan.objects.len(), 7);
+    assert_eq!(
+        plan.objects.iter().filter(|object| object.created).count(),
+        2
+    );
 }

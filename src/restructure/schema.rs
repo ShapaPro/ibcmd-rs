@@ -129,6 +129,22 @@ impl DbSchema {
             None => self.tables.push(entry),
         }
     }
+
+    /// Puts a table the platform makes or rebuilds where the platform puts it: at the **end** of the list, in the order it
+    /// makes them, ahead of `ConfigChngR` when that is the last table. On the БСП the change register is the last table
+    /// because the platform rebuilds it in every apply, after the others; on the ERP УХ, where the register is empty, the
+    /// platform does not rebuild it, it stays in the middle of the list and the rebuilt tables go to the very end (traced by
+    /// track rcheck on the УХ: `b1` positions 16 851-16 856 of 16 857, `c1` the same). Created tables come before the rebuilt
+    /// ones (S1-F); both use this place, so the three placements compose.
+    pub fn insert_rebuilt(&mut self, entry: Brace) {
+        let last = self.tables.len().checked_sub(1);
+        match last {
+            Some(last) if table_name(&self.tables[last]) == Some("ConfigChngR") => {
+                self.tables.insert(last, entry)
+            }
+            _ => self.tables.push(entry),
+        }
+    }
 }
 
 fn table_name(table: &Brace) -> Option<&str> {

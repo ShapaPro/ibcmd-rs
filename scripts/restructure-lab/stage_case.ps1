@@ -15,10 +15,15 @@ $tools = "$lab\tools"
 $db = "ibcmd_rs_04_ddl_s2_${Case}_base"
 function Log($m) { "[{0}] {1}" -f (Get-Date -Format s), $m }
 Log "restore $db"
-pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus $Base -Name $db -Track ddl -Purpose "S1 wave 1, case ${Case}: pristine БСП; the case is staged by the native partial import, then a COPY_ONLY backup for the twins" | Select-Object -Last 1
+# MIX_BASE_BAK: a base that already had a native apply (the cases that create an object: the platform stages a new object on such a base only)
+$baseArgs = if ($env:MIX_BASE_BAK) { @('-Corpus', 'bak', '-Bak', $env:MIX_BASE_BAK) } else { @('-Corpus', $Base) }
+pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 @baseArgs -Name $db -Track ddl -Purpose "S1 wave 1, case ${Case}: pristine БСП; the case is staged by the native partial import, then a COPY_ONLY backup for the twins" | Select-Object -Last 1
 Log "import the files of the case"
 $files = (Get-Content "$lab\tree_s2\$Case\files.txt" | Where-Object { $_ }) -join ','
 pwsh -NoProfile -File "$tools\import_files.ps1" -Database $db -BaseDir "$lab\tree_s2\$Case\stage" -Files $files | Select-Object -Last 3
+# a failed import stages nothing (the platform wants the files an object refers to -- its forms, templates -- in the base dir too, listed or not)
+$staged = [int](sqlcmd -S localhost -E -C -h -1 -W -d $db -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM ConfigSave")
+if ($staged -eq 0) { throw "the native import staged nothing (see $lab\logs\native-import-files-$db.err)" }
 Log "snapshot the staged state"
 Push-Location $tools
 python snapshot.py $db "${Case}_staged" | Select-Object -Last 1
