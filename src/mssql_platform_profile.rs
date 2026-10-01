@@ -106,6 +106,54 @@ impl MssqlNativePlatformProfile {
         self.require_capability(CAPABILITY_CONFIG_APPLY_DYNAMIC)
     }
 
+    /// Native 8.5.1.1150 re-stamps only the final block of its signed `root`
+    /// payload even on a body-only import. This does not admit another root,
+    /// unsigned/signed conversion, or a different payload layout. Callers must
+    /// still bind both complete physical rows and judge the staged metadata.
+    pub fn accepts_dynamic_root_restamp(self, stored: &[u8], staged: &[u8]) -> bool {
+        if self != Self::Platform8_5_1_1150 {
+            return false;
+        }
+        fn parts(bytes: &[u8]) -> Option<(Uuid, Vec<u8>)> {
+            let text = std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+                .ok()?
+                .trim();
+            let inner = text.strip_prefix('{')?.strip_suffix('}')?;
+            let mut fields = inner.splitn(3, ',');
+            if fields.next()? != "2" {
+                return None;
+            }
+            let identity = fields.next()?;
+            let uuid = Uuid::parse_str(identity).ok()?;
+            if uuid.hyphenated().to_string() != identity {
+                return None;
+            }
+            let encoded = fields.next()?;
+            // Bound before decoding: the measured 128-byte payload is 172
+            // base64 characters; native CR/LF wrapping is the only extra data.
+            if encoded.len() > 256
+                || encoded.chars().any(|c| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\r' | '\n'))
+                })
+            {
+                return None;
+            }
+            let payload = crate::module_blob::decode_base64_mime(encoded)?;
+            let canonical: String = encoded
+                .chars()
+                .filter(|c| !matches!(c, '\r' | '\n'))
+                .collect();
+            (payload.len() == 128 && crate::module_blob::encode_base64(&payload) == canonical)
+                .then_some((uuid, payload))
+        }
+        match (parts(stored), parts(staged)) {
+            (Some((old_id, old)), Some((new_id, new))) => {
+                old_id == new_id && old[..112] == new[..112]
+            }
+            _ => false,
+        }
+    }
+
     /// Extension mutation requires an evidenced CAS/registry protocol.
     pub fn require_extension_write_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_EXTENSION_WRITE)
@@ -938,6 +986,47 @@ pub fn verify_mssql_storage_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_85_root_restamp_uses_native_bounded_rows_and_refuses_other_layouts() {
+        let profile = MssqlNativePlatformProfile::Platform8_5_1_1150;
+        let old = include_bytes!("../tests/fixtures/platform85-dynamic/root-active.native.bin");
+        let new = include_bytes!("../tests/fixtures/platform85-dynamic/root-staged.native.bin");
+        assert_ne!(old, new);
+        assert!(profile.accepts_dynamic_root_restamp(old, new));
+        assert!(
+            !MssqlNativePlatformProfile::Platform8_3_27_2214.accepts_dynamic_root_restamp(old, new)
+        );
+        assert!(
+            !MssqlNativePlatformProfile::Platform8_3_27_1989.accepts_dynamic_root_restamp(old, new)
+        );
+        let new = std::str::from_utf8(new).unwrap();
+        for invalid in [
+            new.replacen("{2,", "{3,", 1),
+            new.replacen("66193438", "76193438", 1),
+            new.replacen("66193438-abc5", "66193438-ABC5", 1),
+            new.replacen("PiyN", "QiyN", 1),
+            format!(
+                "{{2,66193438-abc5-410b-a1f1-a204102d1a62,{}}}",
+                crate::module_blob::encode_base64(&[0; 112])
+            ),
+            format!(
+                "{{2,66193438-abc5-410b-a1f1-a204102d1a62,{}}}",
+                crate::module_blob::encode_base64(&[0; 144])
+            ),
+            format!(
+                "{{2,66193438-abc5-410b-a1f1-a204102d1a62,{}}}",
+                "A".repeat(1024)
+            ),
+            "{2,66193438-abc5-410b-a1f1-a204102d1a62,}".to_owned(),
+        ] {
+            assert!(
+                !profile.accepts_dynamic_root_restamp(old, invalid.as_bytes()),
+                "{invalid}"
+            );
+        }
+        assert!(!profile.accepts_dynamic_root_restamp(b"invalid", new.as_bytes()));
+    }
 
     // What `rac` printed on the lab cluster (8.3.27.2214) for the clone that
     // the tool's own verification had opened: one RAS connection, two worker

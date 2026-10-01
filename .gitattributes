@@ -6,3 +6,4 @@ crates/ibcmd-schema/data/** text eol=lf
 tests/fixtures/mssql_extension_list_snapshot.json text eol=lf
 *.sh text eol=lf
 tests/fixtures/external/** -text
+tests/fixtures/platform85-dynamic/*.bin binary
