@@ -15,7 +15,11 @@ hash, without command text. An unresolved direct child also sets the sticky
 `Test-LiveUncertainChild` predicate. A later successful command does not clear it.
 
 Case4 optionally sets `IBCMD_RS_LIVE_CHILD_RECEIPT_ROOT` to the exact fresh
-`F:\ibcmd\lab\05\wave3\load\private4-child-receipts` directory. Other roots,
+`F:\ibcmd\lab\05\wave3\load\private4-child-receipts` directory. The separate metadata split controller may use only the exact fresh
+`F:\ibcmd\lab\05\wave3\metadata\body2-child-receipts` directory. It must
+pin its own dependency hashes and retain native/worker leases on any receipt
+before and after cleanup, including immediately before release. This mapping
+does not authorize a metadata lifecycle. Other roots,
 relative paths and reparse ancestry refuse before launching a child. Immutable
 bounded receipts propagate unresolved state across nested script processes.
 Any receipt keeps the lifecycle pending; ordinary empty RAS/SQL inventories do

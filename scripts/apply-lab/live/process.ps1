@@ -8,7 +8,7 @@ function Get-LiveChildReceiptRoot {
     if (!$root) { return $null }
     if (![IO.Path]::IsPathFullyQualified($root)) { throw 'fully qualified child receipt root required' }
     $root=[IO.Path]::GetFullPath($root).TrimEnd('\')
-    if ($root -cne 'F:\ibcmd\lab\05\wave3\load\private4-child-receipts') { throw 'unknown child receipt context' }
+    if ($root -cnotin @('F:\ibcmd\lab\05\wave3\load\private4-child-receipts','F:\ibcmd\lab\05\wave3\metadata\body2-child-receipts')) { throw 'unknown child receipt context' }
     for($probe=$root;$probe;$probe=[IO.Path]::GetDirectoryName($probe)) {
         if ((Test-Path -LiteralPath $probe) -and ((Get-Item -LiteralPath $probe -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'child receipt reparse ancestry' }
     }
