@@ -106,6 +106,18 @@ not transferred into five successful LIVE cases.
 The shipped read-only analyzer reran successfully. Copied negative fixtures with
 a wrong UUID, unposted physical row or duplicate receipt all refused. Scripts/docs
 fmt and physical-policy checks passed; no new Rust build/test result is claimed.
+Review found an unconditional summary overwrite and substring report-status
+classification in the first analyzer checkpoint. The repair publishes only new
+or byte-identical output, with a fresh `--output` option, and parses exact status
+fields. False report values and duplicate known receipt fields refuse; negative publication
+and identical-retry checks preserve the original summary bytes. The actual raw
+400 report receipts contain exact report_ok=1 values; historical validator
+defects do not count as successful malformed-input handling.
+Historical text-mode output used CRLF; the new byte publication uses LF. A
+default rerun therefore refuses that different historical summary and preserves
+it. Use a fresh `--output` to reproduce its JSON content; identical retries of
+that new byte output succeed. Startup and transport-error descriptions remain
+free-form evidence rather than structured report receipts.
 
 ## Raw evidence and ownership
 

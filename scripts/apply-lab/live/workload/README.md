@@ -32,3 +32,7 @@ response, and counts completions against actual native-child bookends. Its
 point-in-time SQL UUID mapping depends on the earlier W2 COM reconciliation.
 See `docs/apply/evidence/live-gate/load-wave3-private83-2026-10-01.md` for the
 separate current3ff DEBUG provenance, setup/harness failures and readiness limits.
+Its summary publication creates a new file or accepts byte-identical content;
+it refuses a different existing summary. Use `--output <fresh F 0.5 path>` for
+a separate review result. Receipt fields are exact semicolon-delimited values;
+duplicate fields and malformed committed/report status values refuse analysis.

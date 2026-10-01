@@ -3,19 +3,38 @@
 The SQL UUID layout was independently matched to all1434 earlier W2 COM
 receipts on the same BSP schema. These samples do not prove warm admission.
 """
+import argparse
 import datetime as dt
 import hashlib
 import json
 import re
-import sys
 from pathlib import Path
 
-lab = Path(sys.argv[1]).resolve()
-if not lab.is_relative_to(Path('F:/ibcmd/lab/05').resolve()):
+arguments = argparse.ArgumentParser(description=__doc__)
+arguments.add_argument('lab_root')
+arguments.add_argument('--output', help='fresh or byte-identical F 0.5 summary path')
+options = arguments.parse_args()
+lab = Path(options.lab_root).resolve()
+boundary = Path('F:/ibcmd/lab/05').resolve()
+dest = Path(options.output).resolve() if options.output else lab/'isolated-proof-summary.json'
+if not lab.is_relative_to(boundary) or not dest.is_relative_to(boundary):
     raise ValueError('analysis output must stay in the F 0.5 lab')
 def read(p): return p.read_text(encoding='utf-8-sig')
 def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
 def iso(ms): return (dt.datetime(1, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(milliseconds=int(ms))).isoformat()
+def fields(detail):
+    result = {}
+    known = {'attempt', 'client_ms', 'committed', 'doc_uuid', 'doc_ms', 'report_ok', 'report_rows', 'report_ms'}
+    for match in re.finditer(r'(?:^|;)([A-Za-z_][A-Za-z0-9_-]*)=([^;]*)', detail):
+        key, value = match.groups()
+        if key not in known: continue
+        if key in result: raise ValueError(f'duplicate receipt field {key}')
+        result[key] = value
+    if 'committed' in result and result['committed'] not in ('0', '1', 'unknown'):
+        raise ValueError('invalid committed value')
+    if 'report_ok' in result and result['report_ok'] not in ('0', '1'):
+        raise ValueError('invalid report_ok value')
+    return result
 physical = {}
 for line in read(lab/'snapshots/isolated-physical-documents.txt').splitlines():
     cells = line.strip().split('|')
@@ -39,29 +58,39 @@ for path in sorted((lab/'obs').glob('isolated-*.log')):
         cells = line.split('|', 6)
         if len(cells) != 7: raise ValueError(f'malformed journal {path}:{line}')
         stamp, label, event, sid, client, server, detail = cells
-        attempt = re.search(r'(?:^|;)attempt=(\d+)(?:;|$)', detail)
+        # Only returned operation receipts have the structured outcome fields.
+        # Startup and transport-error descriptions remain free-form evidence.
+        values = fields(detail) if event == 'operation' else {}
+        if event in ('operation-start', 'call-error'):
+            prefix = re.match(r'^attempt=(\d+);', detail)
+            if prefix: values['attempt'] = prefix[1]
+        if event == 'call-error' and re.match(r'^attempt=\d+;committed=unknown;', detail):
+            values['committed'] = 'unknown'
+        attempt = values.get('attempt')
         if label != path.stem: raise ValueError(f'journal label differs {path}')
-        if event in ('operation-start', 'operation', 'call-error') and not attempt:
+        if event in ('operation-start', 'operation', 'call-error') and (not attempt or not re.fullmatch(r'\d+', attempt)):
             raise ValueError('operation has no attempt')
         if event == 'operation-start':
-            if int(attempt[1]) in starts: raise ValueError('duplicate operation start')
-            starts[int(attempt[1])] = line
+            if int(attempt) in starts: raise ValueError('duplicate operation start')
+            starts[int(attempt)] = line
         if event in ('operation', 'call-error'):
-            if int(attempt[1]) not in starts: raise ValueError('operation receipt without start')
-            if int(attempt[1]) in ends: raise ValueError('duplicate operation receipt')
-            ends[int(attempt[1])] = line
+            if int(attempt) not in starts: raise ValueError('operation receipt without start')
+            if int(attempt) in ends: raise ValueError('duplicate operation receipt')
+            ends[int(attempt)] = line
         if event == 'operation':
-            if re.search(r'(?:^|;)committed=1(?:;|$)', detail):
-                uid = re.search(r'(?:^|;)doc_uuid=([0-9a-f-]{36})(?:;|$)', detail)
-                if not uid: raise ValueError('committed receipt has no UUID')
-                comment = f'ibcmd-rs-load:{label}:{attempt[1]}'
+            if 'committed' not in values: raise ValueError('operation receipt has no committed value')
+            if values['committed'] == '1':
+                uid = values.get('doc_uuid', '')
+                if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', uid): raise ValueError('committed receipt has no UUID')
+                if 'report_ok' not in values: raise ValueError('committed receipt has no report outcome')
+                comment = f'ibcmd-rs-load:{label}:{attempt}'
                 expected = physical.get(comment)
-                if expected != {'uuid':uid[1], 'posted':'01'}: raise ValueError(f'persisted receipt differs {comment} {expected}')
-                if comment in receipts or uid[1] in receipts.values(): raise ValueError('duplicate committed receipt')
-                receipts[comment] = uid[1]
-                operations.append({'utc':iso(stamp),'attempt':int(attempt[1]),'client':client,'server':server,'uuid':uid[1], 'report_ok':'report_ok=1' in detail})
+                if expected != {'uuid':uid, 'posted':'01'}: raise ValueError(f'persisted receipt differs {comment} {expected}')
+                if comment in receipts or uid in receipts.values(): raise ValueError('duplicate committed receipt')
+                receipts[comment] = uid
+                operations.append({'utc':iso(stamp),'attempt':int(attempt),'client':client,'server':server,'uuid':uid, 'report_ok':values['report_ok'] == '1'})
                 markers.add((client,server))
-        if 'error' in event or 'error=' in detail or 'report_ok=0' in detail or 'committed=unknown' in detail:
+        if 'error' in event or 'error=' in detail or values.get('report_ok') == '0' or values.get('committed') == 'unknown':
             emitted_errors.append(line)
     pending = []
     for number in sorted(set(starts)-set(ends)):
@@ -98,6 +127,11 @@ result={'scope':'isolated native disabled-dynamic and current3ff loaded checkpoi
  'own_phase1_return_utc':phase1_end,'own_old_completed_after_phase1_return':own_after,
  'cohorts':cohorts,'raw_sha256':{str(p.relative_to(lab)):digest(p) for p in [lab/'snapshots/isolated-physical-documents.txt',lab/'isolated-chain-3-r1.trn',*(lab/'obs').glob('isolated-*.log')]},
  'limits':['SQL UUID byte mapping inherited and independently established against all1434 W2 COM receipts on same schema; no additional COM readback here', 'physical unknown-commit reconciliation is final point-in-time readback only', 'DEBUG timing is not release performance','no generation is inferred from RAS activity/counters or idle SQL handles','script keyword/setup failures retained; first exit0 is not acceptance']}
-dest=lab/'isolated-proof-summary.json';dest.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+encoded = json.dumps(result,ensure_ascii=False,indent=2).encode('utf-8')
+try:
+    with dest.open('xb') as output: output.write(encoded)
+except FileExistsError:
+    if dest.stat().st_size != len(encoded) or dest.read_bytes() != encoded:
+        raise ValueError('existing summary differs; retained output preserved, choose a fresh --output')
 print(json.dumps({k:result[k] for k in ('physical_rows','confirmed_commits','confirmed_reports','unreturned_operations','physical_commits_without_receipt')},ensure_ascii=False,indent=2))
 print(f'native actual child overlap={len(native_during)} postreturnold={len(native_after)}; own postreturnold={len(own_after)}; emittederrors={len(emitted_errors)}')
