@@ -11,11 +11,16 @@ Files: `src/dropin/{apply,help,mod,parse}.rs`,
 `src/mssql_config_apply/{dynamic,mod,sqlgen,errors,recovery}.rs`, related
 profile/CLI seams and `docs/apply/dropin-dynamic*.md`.
 
-- [ ] D1 Recover the old dynamic commits without reverting v0.4 fixes.
-- [ ] D2 Verify explicit force, profile/size/body gates, no-op, reporting,
+- [x] D1 Recover the old dynamic commits without reverting v0.4 fixes.
+- [x] D2 Verify explicit force, profile/size/body gates, no-op, reporting,
   and overlay-deletion refusal with meaningful focused tests.
-- [ ] D3 Run quick gates and document remaining native/session evidence.
-- [ ] D4 Independent review; repair findings before integration.
+- [x] D3 Run quick gates and document remaining native/session evidence.
+- [x] D4 Independent review; repair findings before integration.
+
+Checkpoint `d807ec00`: root independent review PASS; 3624 root library tests,
+focused dynamic/drop-in/activation/profile suites and two CLI integration
+targets pass. See [current evidence](../../apply/evidence/dropin-dynamic/recovery-20261001.md).
+Fresh native/session acceptance and the pending-overlay import loop remain open.
 
 ## Live track: #409 F-5
 
