@@ -115,9 +115,13 @@ impl MssqlNativePlatformProfile {
             return false;
         }
         fn parts(bytes: &[u8]) -> Option<(Uuid, Vec<u8>)> {
-            let text = std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
-                .ok()?
-                .trim();
+            // Bound the complete inflated row before parsing; measured native
+            // rows are 222 bytes and have no whitespace outside the braces.
+            if bytes.len() > 300 {
+                return None;
+            }
+            let text =
+                std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)).ok()?;
             let inner = text.strip_prefix('{')?.strip_suffix('}')?;
             let mut fields = inner.splitn(3, ',');
             if fields.next()? != "2" {
@@ -1019,6 +1023,10 @@ mod tests {
                 "A".repeat(1024)
             ),
             "{2,66193438-abc5-410b-a1f1-a204102d1a62,}".to_owned(),
+            format!("\u{2003}{new}"),
+            format!("{new}\u{2003}"),
+            format!("{}{new}", " ".repeat(4096)),
+            format!("{new}{}", "\r\n".repeat(2048)),
         ] {
             assert!(
                 !profile.accepts_dynamic_root_restamp(old, invalid.as_bytes()),
