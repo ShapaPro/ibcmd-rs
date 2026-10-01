@@ -173,13 +173,17 @@ fn unsupported_options_and_malformed_lines_are_refused() {
     let out = TempDir::new("options");
     for (option, code, needle) in [
         (
-            "--sync",
+            "--archive",
             UNSUPPORTED,
-            "Параметр `--sync` команды `infobase config export`",
+            "Параметр `--archive` команды `infobase config export`",
         ),
-        ("--archive", UNSUPPORTED, "Параметр `--archive`"),
-        ("--base=info.xml", UNSUPPORTED, "Параметр `--base`"),
         ("--file=a.cf", UNSUPPORTED, "Параметр `--file`"),
+        ("--sync=1", MALFORMED, "Ошибка разбора параметра: sync"),
+        (
+            "--base=",
+            MALFORMED,
+            "Недопустимое значение параметра --base: ",
+        ),
         ("--remote=http://h:1545", UNSUPPORTED, "Параметр `--remote`"),
         ("--pid=1", UNSUPPORTED, "Параметр `--pid`"),
         ("--bogus", MALFORMED, "Ошибка разбора параметра: --bogus"),
@@ -224,6 +228,25 @@ fn unsupported_options_and_malformed_lines_are_refused() {
                 out.arg(),
             ],
             needle,
+        );
+    }
+    // `--base` and `--sync` update the export of the configuration; an
+    // extension is exported in full only
+    for option in ["--base=i.xml", "--sync"] {
+        let name = option.split('=').next().unwrap();
+        assert_refused(
+            &[
+                "infobase",
+                "config",
+                "export",
+                "--dbms=MSSQLServer",
+                "--db-name=b",
+                "-e",
+                "E",
+                option,
+                out.arg(),
+            ],
+            &format!("Параметр `{name}` команды `infobase config export --extension`"),
         );
     }
     for dbms in ["PostgreSQL", "IBMDB2", "OracleDatabase"] {

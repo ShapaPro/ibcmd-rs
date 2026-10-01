@@ -751,6 +751,12 @@ pub struct InfobaseConfigExportArgs {
     pub count_files: bool,
     /// Output directory for hierarchical XML sources.
     pub output_dir: PathBuf,
+    /// `--base`: the ConfigDumpInfo.xml of an earlier export; only what
+    /// changed since is written (`mssql_dump::incremental`).
+    pub base: Option<PathBuf>,
+    /// `--sync`: the output directory is brought in line with the
+    /// configuration, what a fresh export would not hold is removed.
+    pub sync: bool,
 }
 
 /// `infobase config import`: what the drop-in command line (`crate::dropin`)
@@ -1791,6 +1797,45 @@ pub struct MssqlDumpConfigArgs {
     /// Write manifest.json with row-level dump details.
     #[arg(long, default_value_t = true, hide = true)]
     pub write_manifest: bool,
+    /// Export only what changed since the export whose ConfigDumpInfo.xml
+    /// this is (`--base` of the platform's `config export`): a row the file
+    /// lists with the same configVersion is not converted and none of its
+    /// files is written (every row is, when an object or a part was renamed);
+    /// ConfigDumpInfo.xml is written for the whole configuration. The output
+    /// directory may hold an earlier export.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "overwrite",
+            "file_names",
+            "file_name_lists",
+            "include_config_save",
+            "require_complete_root_metadata",
+            "require_complete_source_assets",
+            "collect_all_source_asset_diagnostics",
+        ]
+    )]
+    pub base: Option<PathBuf>,
+    /// Bring the output directory in line with the configuration (`--sync`
+    /// of the platform's `config export`): after the export, remove the files
+    /// a fresh full export would not hold (objects removed or renamed, files a
+    /// changed object no longer has). Only Configuration.xml,
+    /// ConfigDumpInfo.xml, Ext/ and the collection folders are touched, never
+    /// a dot directory.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "overwrite",
+            "file_names",
+            "file_name_lists",
+            "include_config_save",
+            "require_complete_root_metadata",
+            "require_complete_source_assets",
+            "collect_all_source_asset_diagnostics",
+        ]
+    )]
+    pub sync: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

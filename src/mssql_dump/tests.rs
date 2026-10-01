@@ -880,6 +880,7 @@ fn dump_timing_summary_extracts_batch_followup_fields() {
             source_asset_form_properties_cpu_ms: 10,
             ..MssqlDumpTimingReport::default()
         },
+        incremental: None,
     };
     let json = serde_json::to_string(&report).unwrap();
 

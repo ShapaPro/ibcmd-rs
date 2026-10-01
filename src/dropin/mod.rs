@@ -316,6 +316,8 @@ pub fn export_args(request: &ExportRequest) -> InfobaseConfigExportArgs {
         overwrite: false,
         count_files: common.report.is_some(),
         output_dir: PathBuf::from(&request.path),
+        base: request.base.clone(),
+        sync: request.sync,
     }
 }
 
@@ -651,10 +653,14 @@ mod tests {
             },
             threads: Some(4),
             extension: Some("Расширение".to_string()),
+            base: Some(PathBuf::from("ConfigDumpInfo.xml")),
+            sync: true,
             path: OsString::from("out"),
         };
         let args = export_args(&export);
         assert_eq!(args.extension.as_deref(), Some("Расширение"));
+        assert_eq!(args.base, Some(PathBuf::from("ConfigDumpInfo.xml")));
+        assert!(args.sync);
         assert_eq!(args.db_server.as_deref(), Some("sql01"));
         assert_eq!(sql_server_name("sql01/inst"), r"sql01\inst");
         assert_eq!(sql_server_name(r"lpc:sql01\inst"), r"lpc:sql01\inst");

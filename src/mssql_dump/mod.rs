@@ -991,6 +991,7 @@ pub(crate) use refs::constant_row_always_used;
 pub(crate) use source_assets::declare_palette_namespace_beside_style;
 mod forms;
 pub mod help_audit;
+pub mod incremental;
 pub mod interface_audit;
 mod metadata;
 #[cfg(test)]
@@ -1425,6 +1426,9 @@ pub struct MssqlDumpConfigReport {
     #[serde(default)]
     pub source_assets: SourceAssetCompletenessReport,
     pub timings: MssqlDumpTimingReport,
+    /// What `--base` and `--sync` did (absent without them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<incremental::IncrementalExportSummary>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2142,7 +2146,28 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         args.no_binary_rows,
         &selected_file_names,
     )?;
-    prepare_output_dir(&args.output_dir, args.overwrite)?;
+    let write_binary_rows = args.write_binary_rows && !args.no_binary_rows;
+    // `--base`/`--sync` (#362), read before anything is written: the base may
+    // be the folder's own ConfigDumpInfo.xml.
+    let incremental = incremental::IncrementalExport::load(args.base.as_deref(), args.sync)?;
+    if incremental.is_some() {
+        if !selected_file_names.is_empty()
+            || !args.extract_metadata_xml
+            || !args.extract_module_text
+            || write_binary_rows
+            || args.include_config_save
+            || args.overwrite
+        {
+            bail!(
+                "--base and --sync update a source export of the whole configuration: give \
+                 --extract-metadata-xml --extract-module-text --no-binary-rows, and no \
+                 --file-name, --file-name-list, --include-config-save or --overwrite"
+            );
+        }
+        incremental::prepare_output_dir(&args.output_dir)?;
+    } else {
+        prepare_output_dir(&args.output_dir, args.overwrite)?;
+    }
     // Each run resolves the dynamic generation of the database it was given and
     // its view ends with it: the reads that follow in this process (the
     // activation's) see the rows as they are stored (#409 F-2).
@@ -2176,7 +2201,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
     let mut reports = Vec::new();
     let mut manifest_tables = Vec::new();
     let mut total_timings = MssqlDumpTimingReport::default();
-    let write_binary_rows = args.write_binary_rows && !args.no_binary_rows;
+    let mut incremental_summary = None;
     for role in table_roles {
         let inventory_plan = MssqlExportInventoryPlan::new(
             role,
@@ -2202,7 +2227,14 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
             model_export::requested(args.model_export, args.legacy_export),
             None,
             args.main_configuration && !args.include_config_save,
+            incremental
+                .as_ref()
+                .filter(|_| role == MssqlConfigurationTableRole::Current),
         )?;
+        let mut dumped = dumped;
+        if dumped.incremental.is_some() {
+            incremental_summary = dumped.incremental.take();
+        }
         if inventory_plan.is_strict_current_identity()
             && args.require_complete_root_metadata
             && !args.collect_all_source_asset_diagnostics
@@ -2291,6 +2323,7 @@ fn dump_config_inner(args: &MssqlDumpConfigArgs) -> Result<MssqlDumpConfigReport
         source_assets,
         timings: total_timings,
         tables: reports,
+        incremental: incremental_summary,
     })
 }
 
@@ -2461,6 +2494,7 @@ pub(crate) fn export_staged_state(
             Some(sink),
             // The state is the rows of the memory, not a database's tables.
             false,
+            None,
         )
     };
     dumped?;
@@ -3143,6 +3177,8 @@ struct DumpedTable {
     source_assets: SourceAssetCompletenessReport,
     metadata_root_inventory: RootMetadataInventoryReport,
     timings: MssqlDumpTimingReport,
+    /// What `--base`/`--sync` did, when the export was given them.
+    incremental: Option<incremental::IncrementalExportSummary>,
 }
 
 struct FailedDumpRow {
@@ -4182,6 +4218,7 @@ fn dump_table_rows_with_options_mode(
         source_assets: source_asset_completeness,
         metadata_root_inventory,
         timings: MssqlDumpTimingReport::default(),
+        incremental: None,
     })
 }
 
@@ -4200,9 +4237,16 @@ fn dump_table_rows_streamed(
     model_export: bool,
     sink: Option<Arc<dyn FileSink>>,
     main_configuration: bool,
+    incremental: Option<&incremental::IncrementalExport>,
 ) -> Result<DumpedTable> {
     let table = inventory_plan.role().sql_name();
     let generate_config_dump_info = inventory_plan.config_dump_info_eligible();
+    if incremental.is_some() && (!generate_config_dump_info || sink.is_some()) {
+        bail!(
+            "--base and --sync need the export of the whole configuration that writes \
+             ConfigDumpInfo.xml"
+        );
+    }
     let (inventory_scope, source_asset_scope) = inventory_scopes(inventory_plan);
     let table_dir = output_dir.join(table);
     if write_binary_rows {
@@ -5360,8 +5404,73 @@ fn dump_table_rows_streamed(
             source_assets: SourceAssetCompletenessReport::default(),
             metadata_root_inventory: RootMetadataInventoryReport::default(),
             timings,
+            incremental: None,
         });
     }
+
+    // `--base`/`--sync` (#362): the rows of the entries the base lists with
+    // their version and name are not converted. The `versions` row is read
+    // first to tell them; the batches below then leave it out.
+    let mut early_versions_blob = None;
+    let selection = match incremental {
+        Some(plan) => {
+            let started = PartClock::start();
+            let blob = fetch_binary_rows(
+                sql,
+                database,
+                table,
+                &BTreeSet::from(["versions".to_owned()]),
+                false,
+            )?
+            .into_iter()
+            .find(|row| row.file_name == "versions" && row.part_no == 0)
+            .map(|row| row.binary)
+            .ok_or_else(|| anyhow!("full Config export has no versions row"))?;
+            let current =
+                current_config_versions(&blob, VersionsBlobOrigin::MssqlConfigTable, &file_names)?;
+            let no_emitted_paths = BTreeMap::new();
+            let inventory = ConfigDumpInfoInventory {
+                file_names: &file_names,
+                metadata_texts: &index_metadata_texts,
+                object_refs: &object_refs,
+                form_refs: &form_refs,
+                template_refs: &template_refs,
+                subsystem_refs: &subsystem_refs,
+                module_text_paths: &module_text_paths,
+                source_assets: &source_assets,
+                emitted_source_asset_paths: &no_emitted_paths,
+                configuration_module_groups: &configuration_module_groups,
+            };
+            // The names ConfigDumpInfo.xml will give the rows and their
+            // parts; unreadable, every row is converted.
+            let names = canonical_reference_names(&inventory).ok().and_then(|rows| {
+                let version_ids = current.keys().map(String::as_str).collect();
+                let parts = child_reference_names(&inventory, &rows, &version_ids)
+                    .ok()
+                    .flatten()?;
+                Some(incremental::ConfigurationNames { rows, parts })
+            });
+            let selection = plan.select(&current, names.as_ref(), source_version);
+            early_versions_blob = Some(blob);
+            detail_ms(&mut timings, "incremental_selection", started);
+            Some(selection)
+        }
+        None => None,
+    };
+    // A skipped row is left out of the batches, which then read their rows
+    // by name: a range of names would read the skipped rows between them.
+    let convert_file_names = match &selection {
+        Some(selection) => file_names
+            .iter()
+            .filter(|name| name.as_str() != "versions" && !selection.unchanged.contains(*name))
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        None => file_names.clone(),
+    };
+    let use_range_filter = selected_file_names.is_empty()
+        && selection
+            .as_ref()
+            .is_none_or(|selection| selection.unchanged.is_empty());
 
     // The files go to writer threads of their own, so a worker converting a
     // row does not wait on the disk (`IBCMD_RS_OUTPUT_WRITERS`). With a sink
@@ -5369,6 +5478,11 @@ fn dump_table_rows_streamed(
     let output = match sink {
         Some(sink) => OutputWriter::from_env_to_sink(sink),
         None => OutputWriter::from_env().with_existing_folder(output_dir),
+    };
+    let output = if incremental.is_some() {
+        output.recording_written()
+    } else {
+        output
     };
     let context = DumpRowContext {
         output: &output,
@@ -5434,8 +5548,8 @@ fn dump_table_rows_streamed(
     let mut source_asset_rows = 0;
     let mut source_asset_completeness = SourceAssetCompletenessReport::default();
     let mut metadata_extraction_diagnostics = BTreeMap::new();
-    let mut versions_blob = None;
-    let file_name_batches = build_dump_file_name_batches(&headers, &file_names);
+    let mut versions_blob = early_versions_blob;
+    let file_name_batches = build_dump_file_name_batches(&headers, &convert_file_names);
     // Each batch is read while the one before it is being converted: the
     // read waits on SQL Server, the conversion keeps the worker pool busy, and
     // the journal of requests stays on this thread.
@@ -5445,18 +5559,16 @@ fn dump_table_rows_streamed(
         let selected = chunk.iter().cloned().collect::<BTreeSet<_>>();
         let fetch_started = Instant::now();
         let fetch_cpu = process_cpu_ms();
-        let rows = fetch_binary_rows(
-            sql,
-            database,
-            table,
-            &selected,
-            selected_file_names.is_empty(),
-        )
-        .with_context(|| {
-            let first = chunk.first().map(String::as_str).unwrap_or("<empty>");
-            let last = chunk.last().map(String::as_str).unwrap_or("<empty>");
-            format!("failed to fetch {table} rows batch {first}..{last}")
-        })?;
+        let mut rows = fetch_binary_rows(sql, database, table, &selected, use_range_filter)
+            .with_context(|| {
+                let first = chunk.first().map(String::as_str).unwrap_or("<empty>");
+                let last = chunk.last().map(String::as_str).unwrap_or("<empty>");
+                format!("failed to fetch {table} rows batch {first}..{last}")
+            })?;
+        // A range of names spans the `versions` row read already.
+        if selection.is_some() {
+            rows.retain(|row| selected.contains(&row.file_name));
+        }
         let elapsed = elapsed_ms(fetch_started);
         timings.fetch_rows_ms += elapsed;
         cpu_add(timings, "fetch_rows", fetch_cpu);
@@ -5587,6 +5699,15 @@ fn dump_table_rows_streamed(
                 );
             }
         }
+        // A row left out names itself by its role in the base, which its
+        // conversion would have written (`RowSelection::role_hints`).
+        if let Some(selection) = &selection {
+            for (id, role) in &selection.role_hints {
+                emitted_source_asset_paths
+                    .entry(id.clone())
+                    .or_insert_with(|| PathBuf::from(format!("{role}.xml")));
+            }
+        }
         write_config_dump_info(
             &output,
             output_dir,
@@ -5635,8 +5756,14 @@ fn dump_table_rows_streamed(
     // Every queued file lands before the table is reported; a failed write
     // fails the export here.
     drop(context);
-    let written = output.finish()?;
+    let (written, written_paths) = output.finish_with_written()?;
     timings.add_output_write(&written);
+    let incremental = match (incremental, &selection) {
+        (Some(plan), Some(selection)) => {
+            Some(plan.finish(output_dir, &written_paths, selection)?)
+        }
+        _ => None,
+    };
     Ok(DumpedTable {
         rows: manifests,
         failed_rows: Vec::new(),
@@ -5648,6 +5775,7 @@ fn dump_table_rows_streamed(
         source_assets: source_asset_completeness,
         metadata_root_inventory,
         timings,
+        incremental,
     })
 }
 

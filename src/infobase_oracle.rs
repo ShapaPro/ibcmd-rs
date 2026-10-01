@@ -201,6 +201,8 @@ pub fn roundtrip_config(
             overwrite: args.overwrite,
             count_files: true,
             output_dir: baseline_dir.clone(),
+            base: None,
+            sync: false,
         })?)
     };
 
@@ -304,6 +306,8 @@ pub fn roundtrip_config(
         args.overwrite,
         true,
         selected_after_apply_file_names,
+        None,
+        false,
     )?;
 
     let diff = crate::plan::diff_source_trees(&baseline_dir, &after_apply_dir, &args.path_prefix)?;
@@ -381,6 +385,8 @@ pub fn sweep_config(args: &InfobaseConfigSweepArgs) -> Result<InfobaseConfigSwee
             overwrite: args.overwrite,
             count_files: true,
             output_dir: baseline_dir.clone(),
+            base: None,
+            sync: false,
         })?;
     }
 

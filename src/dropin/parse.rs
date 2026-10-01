@@ -444,6 +444,11 @@ pub struct ExportRequest {
     /// The extension to export (`--extension`, `-e`); the configuration
     /// itself without it.
     pub extension: Option<String>,
+    /// `--base`, `-b`: the ConfigDumpInfo.xml of an earlier export; only
+    /// what changed since is written.
+    pub base: Option<PathBuf>,
+    /// `--sync`: the directory is brought in line with the configuration.
+    pub sync: bool,
     /// The directory as given.
     pub path: OsString,
 }
@@ -728,7 +733,7 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
         }
     }
     let unsupported_options: &[Opt] = match node.kind {
-        NodeKind::Export => &[Opt::Base, Opt::File, Opt::Sync, Opt::Archive],
+        NodeKind::Export => &[Opt::File, Opt::Archive],
         _ => &[Opt::Out, Opt::Extension],
     };
     for opt in unsupported_options {
@@ -753,6 +758,18 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
         [path] => path.clone(),
         [_, extra, ..] => return Err(Refusal::Parse(extra.to_string_lossy().into_owned())),
     };
+    // `--base` and `--sync` update an export of the configuration; the
+    // export of an extension is written in full only.
+    if scan.has(Opt::Extension) {
+        for opt in [Opt::Base, Opt::Sync] {
+            if let Some(spelled) = scan.spelled(opt) {
+                return Err(Refusal::UnsupportedOption {
+                    option: spelled.to_string(),
+                    command: format!("{} --extension", scan.command()),
+                });
+            }
+        }
+    }
     Ok(match node.kind {
         NodeKind::Export => Invocation::Export(ExportRequest {
             common,
@@ -766,6 +783,17 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
                 }
                 Some(value) => Some(value.to_string()),
             },
+            base: match scan.value(Opt::Base) {
+                None => None,
+                Some(value) if value.trim().is_empty() => {
+                    return Err(Refusal::InvalidValue {
+                        option: "--base".to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                Some(value) => Some(PathBuf::from(value)),
+            },
+            sync: scan.has(Opt::Sync),
             threads: match scan.value(Opt::Threads) {
                 None => None,
                 Some(value) => Some(
@@ -1407,18 +1435,56 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_options_of_served_commands_are_named() {
-        for option in [
-            "--base=dump.xml",
-            "-b",
-            "--file=a.cf",
-            "--sync",
-            "--archive",
-            "-A",
+    fn an_incremental_export_names_its_base_and_sync() {
+        for spelled in [
+            vec!["--base=dump\\ConfigDumpInfo.xml"],
+            vec!["--base", "dump\\ConfigDumpInfo.xml"],
+            vec!["-b", "dump\\ConfigDumpInfo.xml"],
         ] {
             let mut list = vec!["config", "export", "--db-name=b"];
+            list.extend(spelled);
+            list.push("out");
+            let request = export(&list);
+            assert_eq!(
+                request.base,
+                Some(PathBuf::from("dump\\ConfigDumpInfo.xml")),
+                "{list:?}"
+            );
+            assert!(!request.sync);
+        }
+        let request = export(&["config", "export", "--db-name=b", "--sync", "out"]);
+        assert!(request.sync && request.base.is_none());
+        let request = export(&["config", "export", "--db-name=b", "out"]);
+        assert!(!request.sync && request.base.is_none());
+        assert_eq!(
+            parse(&["config", "export", "--db-name=b", "--base=", "out"]),
+            Err(Refusal::InvalidValue {
+                option: "--base".to_string(),
+                value: String::new(),
+            })
+        );
+        // a flag given a value, as the platform words it
+        assert_eq!(
+            parse(&["config", "export", "--db-name=b", "--sync=1", "out"]),
+            Err(Refusal::Parse("sync".to_string()))
+        );
+        // an extension is exported in full only
+        for option in ["--base=i.xml", "--sync"] {
+            match parse(&["config", "export", "--db-name=b", "-e", "E", option, "out"]) {
+                Err(Refusal::UnsupportedOption { command, .. }) => {
+                    assert_eq!(command, "infobase config export --extension")
+                }
+                other => panic!("{option}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_options_of_served_commands_are_named() {
+        for option in ["--file=a.cf", "-f", "--archive", "-A"] {
+            let mut list = vec!["config", "export", "--db-name=b"];
             list.push(option);
-            if option == "-b" {
+            if option == "-f" {
                 list.push("value");
             }
             list.push("out");

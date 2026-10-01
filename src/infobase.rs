@@ -53,6 +53,9 @@ pub struct InfobaseConfigExportReport {
     pub module_text_rows: usize,
     pub source_asset_rows: usize,
     pub dump_timings: crate::mssql_dump::MssqlDumpTimingReport,
+    /// What `--base` and `--sync` did (absent without them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<crate::mssql_dump::incremental::IncrementalExportSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +120,8 @@ pub(crate) enum PlatformNeed<'a> {
         sqlcmd: Option<&'a Path>,
         output_dir: &'a Path,
         overwrite: bool,
+        /// `--base`/`--sync`: the directory may hold an earlier export.
+        incremental: bool,
     },
     /// An import of `source_dir`: the settings, then the tree's own
     /// `Configuration.xml`; a platform named for the database must be the
@@ -188,6 +193,7 @@ impl InfobaseConfigExportArgs {
                 sqlcmd: self.sqlcmd.as_deref(),
                 output_dir: &self.output_dir,
                 overwrite: self.overwrite,
+                incremental: self.base.is_some() || self.sync,
             },
         }
     }
@@ -298,6 +304,9 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
     let config = resolve_connection(args.connection())?;
     ensure_mssql(&config.dbms)?;
     if let Some(extension) = args.extension.as_deref() {
+        if args.base.is_some() || args.sync {
+            bail!("--base and --sync export the configuration; an extension is exported in full");
+        }
         return export_extension_report(
             &config,
             args.sqlcmd.as_deref(),
@@ -314,9 +323,15 @@ pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigEx
         args.overwrite,
         args.count_files,
         Vec::new(),
+        args.base.as_deref(),
+        args.sync,
     )
 }
 
+/// The export of the configuration into `output_dir_arg`. With `base` or
+/// `sync` (`--base`, `--sync`, `mssql_dump::incremental`) the directory may
+/// hold an earlier export, which the export updates instead of refusing it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn export_config_report(
     config: &ConnectionConfig,
     sqlcmd: Option<&Path>,
@@ -325,11 +340,17 @@ pub(crate) fn export_config_report(
     overwrite: bool,
     count_exported_files: bool,
     file_names: Vec<String>,
+    base: Option<&Path>,
+    sync: bool,
 ) -> Result<InfobaseConfigExportReport> {
     let source_version = config.legacy_source_version()?;
     let output_dir = absolute_path(output_dir_arg)?;
-    prepare_output_dir(&output_dir, overwrite)?;
-    let dump_args = dump_args(
+    if base.is_some() || sync {
+        crate::mssql_dump::incremental::prepare_output_dir(&output_dir)?;
+    } else {
+        prepare_output_dir(&output_dir, overwrite)?;
+    }
+    let mut dump_args = dump_args(
         config,
         sqlcmd,
         db_pwd_env,
@@ -337,6 +358,8 @@ pub(crate) fn export_config_report(
         file_names,
         source_version,
     );
+    dump_args.base = base.map(Path::to_path_buf);
+    dump_args.sync = sync;
     let dump = crate::mssql_dump::dump_config(&dump_args)?;
 
     let exported_files = if count_exported_files {
@@ -364,6 +387,7 @@ pub(crate) fn export_config_report(
         module_text_rows: dump.total_module_text_rows,
         source_asset_rows: dump.total_source_asset_rows,
         dump_timings: dump.timings,
+        incremental: dump.incremental,
     })
 }
 
@@ -428,6 +452,7 @@ pub(crate) fn export_extension_report(
         module_text_rows: 0,
         source_asset_rows: 0,
         dump_timings: Default::default(),
+        incremental: None,
     })
 }
 
@@ -499,6 +524,8 @@ fn dump_args(
         write_manifest: false,
         platform: None,
         source_version,
+        base: None,
+        sync: false,
     }
 }
 
@@ -742,6 +769,7 @@ fn settle_platform(
             sqlcmd,
             output_dir,
             overwrite,
+            incremental,
         } => {
             if config.xml_version_given {
                 return Ok(());
@@ -751,8 +779,10 @@ fn settle_platform(
                 let probe = || {
                     // The probe reads the database: a directory that holds
                     // files is refused first, as the export always did
-                    // before reading it.
-                    prepare_output_dir(&absolute_path(output_dir)?, overwrite)?;
+                    // before reading it (`--base`/`--sync` update one).
+                    if !incremental {
+                        prepare_output_dir(&absolute_path(output_dir)?, overwrite)?;
+                    }
                     crate::mssql_dump::model_export::configuration_compatibility_8_5_or_later(
                         &dump_args(
                             known,
@@ -1295,6 +1325,8 @@ mod tests {
             overwrite: false,
             count_files: false,
             output_dir: PathBuf::from("out"),
+            base: None,
+            sync: false,
         }
     }
 

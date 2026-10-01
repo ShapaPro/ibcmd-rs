@@ -200,6 +200,8 @@ pub fn apply_source_change(
             no_binary_rows: true,
             write_binary_rows: false,
             write_manifest: false,
+            base: None,
+            sync: false,
         })?;
         ensure_bounded_export_complete(
             &active_root,
