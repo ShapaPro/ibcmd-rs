@@ -1126,7 +1126,7 @@ pub(crate) use form_body::{extract_form_body_xml, unpack_form_body_module_text};
 /// writer's chart codec checks every value it builds against.
 pub(crate) use form_body::{
     render_form_chart_settings_value, render_form_flowchart_settings_value,
-    render_form_gantt_chart_settings_value,
+    render_form_gantt_chart_settings_value, render_form_planner_settings_value,
 };
 
 pub(crate) fn extract_standalone_metadata_source_xml(

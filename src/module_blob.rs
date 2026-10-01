@@ -699,6 +699,9 @@ struct FormXmlTablePeriod {
 struct FormXmlExtendedTooltip {
     id: String,
     name: String,
+    /// The `DisplayImportance` attribute, the one thing an otherwise empty
+    /// tooltip element can still carry.
+    display_importance: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -4147,6 +4150,7 @@ fn format_native_child_item(
                     main_attribute_class,
                     source,
                     items_root,
+                    None,
                 )?);
             }
             if records.len() != 1 {
@@ -4509,6 +4513,7 @@ fn format_native_child_item(
             main_attribute_class,
             source,
             items_root,
+            None,
         )?;
         let kind_uuid =
             native::child_kind_uuid(5).ok_or_else(|| anyhow!("no kind uuid for <{}>", item.tag))?;
@@ -4824,6 +4829,7 @@ fn format_native_table_record(
             main_attribute_class,
             source,
             items_root,
+            nested_in_gantt_chart.then_some(item.id.as_str()),
         )?);
     }
 
@@ -5225,6 +5231,7 @@ fn native_table_addition(
     main_attribute_class: &str,
     source: Option<&MetadataSourceContext>,
     items_root: Option<&Path>,
+    served_table_id: Option<&str>,
 ) -> Result<String> {
     use crate::compiler::bodies::form_native as native;
 
@@ -5273,6 +5280,15 @@ fn native_table_addition(
             .ok_or_else(|| anyhow!("an addition with no extended tooltip is not measured"))?;
     // Member 19 names the item the addition serves, which is not always the
     // table it sits in: 392 of the corpus's additions live elsewhere.
+    //
+    // The three additions of the table a Gantt chart field nests spell no
+    // `<AdditionSource>` at all: that table keeps `id="0"` in the platform's
+    // own dump, and the exporter names an addition's source only through a
+    // table it can index by id (`parse_form_search_addition_source_item`), so
+    // nothing is written for it. The platform numbers the nested table's
+    // service items on dump (`renumber_form_zero_item_ids`); the table itself
+    // stays `0`, and an addition with no source serves the table it sits in
+    // -- Документооборот 3.0 `Catalogs/ПроектныеЗадачи/Forms/ФормаПланаПроекта`.
     let source_item = match item.addition_source_item.as_deref() {
         Some(name) => match items.get(name) {
             Some(target) => target.id.clone(),
@@ -5282,11 +5298,14 @@ fn native_table_addition(
                 ));
             }
         },
-        None => {
-            return Err(anyhow!(
-                "an addition with no <AdditionSource> is not measured"
-            ));
-        }
+        None => match served_table_id {
+            Some(table_id) => table_id.to_string(),
+            None => {
+                return Err(anyhow!(
+                    "an addition with no <AdditionSource> is not measured"
+                ));
+            }
+        },
     };
 
     let auto_max_width = item.auto_max_width.unwrap_or(true);
@@ -6490,14 +6509,18 @@ fn native_field_payload(
             .ok_or_else(|| anyhow!("<CheckBoxField> names a spelling the writer cannot place"))
         }
         "GraphicalSchemaField" => {
+            // The exporter reads the kind's own tuple for its extent,
+            // `<Output>`, `<Edit>` and `<AutoMaxWidth>` only
+            // (`FORM_DOCUMENT_FIELD_GEOMETRY`): the other geometry flags and
+            // the border colour have no slot it reads, so a form that spells
+            // one would not come back and is refused. The excluded commands
+            // are the shared member 48, as on every field.
             if item.max_width.is_some()
                 || item.max_height.is_some()
-                || item.auto_max_width.is_some()
                 || item.auto_max_height.is_some()
                 || item.horizontal_stretch.is_some()
                 || item.vertical_stretch.is_some()
                 || item.scalars.contains_key("BorderColor")
-                || !item.excluded_commands.is_empty()
             {
                 return Err(anyhow!(
                     "a <GraphicalSchemaField> names a property whose slot is not measured"
@@ -6508,6 +6531,7 @@ fn native_field_payload(
                 item.height.as_deref().unwrap_or("10"),
                 item.scalars.get("Output").map(|value| value.trim()),
                 native_scalar_flag(item, "Edit", true),
+                item.auto_max_width.unwrap_or(true),
                 &events,
             )
             .ok_or_else(|| {
@@ -7809,9 +7833,16 @@ fn native_item_extended_tooltip(
         return Ok(None);
     };
     let Some(tip) = item.extended_tooltip_item.as_deref() else {
+        let display_importance = native::native_display_importance(
+            tooltip.display_importance.as_deref(),
+        )
+        .ok_or_else(|| {
+            anyhow!("an extended tooltip names a DisplayImportance the writer has not measured")
+        })?;
         return Ok(Some(native::format_extended_tooltip(
             &tooltip.id,
             &tooltip.name,
+            display_importance,
         )));
     };
     let text_color = native_scalar_color(tip, "TextColor", source)?;
@@ -8072,6 +8103,15 @@ fn native_embedded_flowchart(attribute: &FormXmlAttribute) -> bool {
     matches!(
         attribute.types.as_slice(),
         [single] if single.trim().rsplit_once(':').map(|(_, local)| local) == Some("FlowchartContextType")
+    )
+}
+
+/// Whether the attribute is a planner (`pl:Planner`), whose `<Settings>` the
+/// planner codec writes into member 14 as the chart and flowchart codecs do.
+fn native_embedded_planner(attribute: &FormXmlAttribute) -> bool {
+    matches!(
+        attribute.types.as_slice(),
+        [single] if single.trim().rsplit_once(':').map(|(_, local)| local) == Some("Planner")
     )
 }
 
@@ -8977,6 +9017,16 @@ fn format_native_form_body(
             let text =
                 form_text.ok_or_else(|| anyhow!("an embedded chart needs the Form.xml text"))?;
             Some(native_embedded_chart(text, &attribute.name, gantt)?)
+        } else if attribute.settings.is_some() && native_embedded_planner(attribute) {
+            let text =
+                form_text.ok_or_else(|| anyhow!("an embedded planner needs the Form.xml text"))?;
+            Some(native_embedded_settings(
+                text,
+                &attribute.name,
+                |settings| {
+                    crate::compiler::bodies::form_planner::format_form_embedded_planner(settings)
+                },
+            )?)
         } else {
             None
         };
@@ -15329,7 +15379,12 @@ fn parse_form_extended_tooltip_xml(
     let Some(id) = xml_attribute_value(event, "id")? else {
         return Ok(None);
     };
-    Ok(Some(FormXmlExtendedTooltip { id, name }))
+    let display_importance = xml_attribute_value(event, "DisplayImportance")?;
+    Ok(Some(FormXmlExtendedTooltip {
+        id,
+        name,
+        display_importance,
+    }))
 }
 
 fn parse_nested_command_uuid_from_xml(xml: &[u8], command_name: &str) -> Result<String> {

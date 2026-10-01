@@ -293,6 +293,10 @@ pub(crate) const WEB_COLOR_CODES: &[(&str, &str)] = &[
     ("RosyBrown", "120"),
     ("RoyalBlue", "121"),
     ("SaddleBrown", "122"),
+    // 1C:Документооборот `Documents/Отсутствие/Forms/ФормаДокумента`
+    // `ЗаместителиТекст` holds `{3,2,{125}}` and the platform writes
+    // `web:Seagreen` (the exporter's `form_control_web_color_name`).
+    ("Seagreen", "125"),
     ("Salmon", "123"),
     ("Sienna", "127"),
     ("Silver", "128"),
@@ -317,6 +321,10 @@ pub(crate) const WINDOWS_COLOR_CODES: &[(&str, &str)] = &[
     ("DisabledText", "17"),
     ("MenuBar", "4"),
     ("ScrollBar", "0"),
+    // 1C:Документооборот `CommonForms/РедактированиеТабличногоДокумента`
+    // `ИмяОбласти` holds `{3,1,{5}}` and the platform writes
+    // `win:WindowBackground` (the exporter's `form_control_window_color_name`).
+    ("WindowBackground", "5"),
 ];
 
 /// One `<Event>` of an item, as the source names it.
@@ -1568,11 +1576,21 @@ pub(crate) const PLATFORM_STYLE_FONT_CODES: &[(&str, &str)] = &[
 /// `Catalogs/ШаблонЦепочкиПлатежей/Forms/ПомощникСозданияШаблонов` and
 /// `BusinessProcesses/Задание/Forms/ДействиеВыполнить` normalise to it, with
 /// only the id and the name differing.
-pub(crate) fn format_extended_tooltip(id: &str, name: &str) -> String {
+///
+/// The one member besides those that the XML can set is the `DisplayImportance`
+/// attribute, at reverse offset two of the 34-member record -- the slot the
+/// exporter reads it from (`FormChildItemDisplayImportanceSchema`, wrapper 12,
+/// 34 members: the tail `…,3,3,2,0` on the one `High` tooltip of the stand).
+/// It takes the same codes every other item record stores
+/// ([`native_display_importance`]); the empty tooltip writes `0`. Монитор's
+/// `Catalogs/Запросы/Forms/ФормаАнализа` carries a `VeryHigh` on a tooltip
+/// with nothing else, which the constant used to drop.
+pub(crate) fn format_extended_tooltip(id: &str, name: &str, display_importance: &str) -> String {
     format!(
         "{{12,{{{id},{ns}}},0,0,0,0,{name},{{1,0}},{{1,0}},1,0,0,2,2,{{3,4,{{0}}}},\
          {{7,3,0,1,100}},{{0,0,0}},1,{{5,0,0,3,0,{{0,1,0}},{{3,4,{{0}}}},{{3,4,{{0}}}},\
-         {{3,0,{{0}},0,1,0,{appearance}}}}},0,1,2,{{1,{{1,0}},0}},0,0,1,0,0,1,0,3,3,0,0}}",
+         {{3,0,{{0}},0,1,0,{appearance}}}}},0,1,2,{{1,{{1,0}},0}},0,0,1,0,0,1,0,3,3,\
+         {display_importance},0}}",
         ns = FORM_ITEM_NAMESPACE_UUID,
         name = quoted(name),
         appearance = DEFAULT_APPEARANCE_UUID,
@@ -2095,12 +2113,15 @@ pub(crate) fn format_input_drop_list_settings(
 
 /// The `{3,…}` payload of a `<GraphicalSchemaField>` (rt-fields2.md §2, 11 of
 /// 11): width and height default 50 and 10, `<Output>` absent 0 and `Enable`
-/// 1, `<Edit>` 1 unless `false`, then the events and constants.
+/// 1, `<Edit>` 1 unless `false`, then the events, `<AutoMaxWidth>` (slot 7 of
+/// the exporter's `FORM_DOCUMENT_FIELD_GEOMETRY` row for the kind: `1`
+/// unless the field says `false`) and the constants.
 pub(crate) fn format_graphical_schema_payload(
     width: &str,
     height: &str,
     output: Option<&str>,
     edit: bool,
+    auto_max_width: bool,
     events: &str,
 ) -> Option<String> {
     let output = match output {
@@ -2109,8 +2130,9 @@ pub(crate) fn format_graphical_schema_payload(
         Some(_) => return None,
     };
     Some(format!(
-        "{{3,{width},{height},{output},{edit},{{3,4,{{0}}}},{events},1,0,0,1,0,1,1}}",
+        "{{3,{width},{height},{output},{edit},{{3,4,{{0}}}},{events},{auto_max_width},0,0,1,0,1,1}}",
         edit = u8::from(edit),
+        auto_max_width = u8::from(auto_max_width),
     ))
 }
 
@@ -3139,6 +3161,184 @@ const ITEM_STANDARD_COMMAND_UUIDS: &[(&str, bool, &str, &str)] = &[
         false,
         "Print",
         "e2d6f793-b786-4640-a91b-8d77f73860f1",
+    ),
+    // The rest of the graphical scheme's own commands, the uuids the exporter
+    // names them by (`FORM_GRAPHICAL_SCHEME_COMMANDS`, each named by a seed
+    // against 8.3.27.2214); Документооборот КОРП excludes `InsertItemStart`
+    // and its siblings on its scheme fields.
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignBottom",
+        "ea0bafc6-647c-46eb-bb8b-6417593546cc",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignCenter",
+        "1c7ec5be-53a6-43cc-8bc8-9a73ca72a44e",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignLeft",
+        "c4ac110c-99d4-4c75-882e-f2a5b9c199ad",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignMiddle",
+        "e22c2307-5585-4491-a106-3fca57a987ac",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignRight",
+        "767690d6-cf3b-4f04-a28c-f91fb83a6a0a",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "AlignTop",
+        "3ddfe26e-81bc-453f-bd88-5185aca5b2f0",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "BringToBack",
+        "a5a41937-c459-438d-b2f5-81b561dc67c5",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "BringToFront",
+        "bfd14d15-932b-4f08-8090-395e4816e174",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "DistributeHorizontally",
+        "23176829-e3f7-46dc-af32-6af1f6d67643",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "DistributeVertically",
+        "56f9684a-d741-44c0-bf84-652b987507dd",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "EqualHeight",
+        "356928f8-1b7d-4579-9813-d19699de6b76",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "EqualSize",
+        "89a42f51-7f8b-4efe-a257-94a623242a0a",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "EqualWidth",
+        "3667f2a8-3912-4b56-a3b5-d69a1b7eec5d",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "Group",
+        "87ddfbaa-b8e9-4f2b-884a-88c203115854",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemActivity",
+        "df450081-a8c6-46bb-9370-0ee8e4687e2d",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemCompletion",
+        "c54de1e2-eadf-4ad7-ba5e-f165ed302c29",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemCondition",
+        "d80a7ec0-3dc2-4777-9752-8fec196eb655",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemDecoration",
+        "494c5e0a-f4f0-4184-9d10-2b57e780e428",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemDecorativeLine",
+        "5eee88e8-c2c7-45b1-8303-049edb58170d",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemJoin",
+        "d80be1de-253f-4a06-8c1a-b3920137e0ac",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemProcessing",
+        "c58155b0-29dc-4905-a0c0-1ed2d6f88c4c",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemSplit",
+        "e915596d-e318-452b-9ba9-95cf99432b2c",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemStart",
+        "abaddb09-44e1-4d85-b473-cd3db79f5fa3",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemSubBusinessProcess",
+        "fdc8da8c-430b-4ea3-b0a3-f8a5d91a0a59",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "InsertItemSwitch",
+        "8b35d4bf-46b1-4a46-9e89-e69ccd6cacdc",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "PrintImmediately",
+        "7b53bef7-3811-4375-810a-672bf817ace4",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "SendBackward",
+        "b4a65823-eb91-4b2c-9be6-a349566d9a63",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "SendForward",
+        "5f8efacc-cd77-4bc9-8ae8-74af39dc5535",
+    ),
+    (
+        "GraphicalSchemaField",
+        false,
+        "Ungroup",
+        "f27f75fc-027d-4c8e-9f7d-337f985f0ee9",
     ),
     (
         "PDFDocumentField",
@@ -5341,7 +5541,7 @@ pub(crate) fn format_standard_command_button(
          {{\"U\"}},1,0,0,1,0,0,0,3,3,3,0,0,0,0,0,0,1,0}}",
         ns = FORM_ITEM_NAMESPACE_UUID,
         name = quoted(name),
-        tooltip = format_extended_tooltip(extended_tooltip_id, extended_tooltip_name),
+        tooltip = format_extended_tooltip(extended_tooltip_id, extended_tooltip_name, "0"),
     )
 }
 
@@ -5416,7 +5616,8 @@ pub(crate) fn format_label_decoration(decoration: &NativeLabelDecoration<'_>) ->
         ),
         tooltip = format_extended_tooltip(
             decoration.extended_tooltip_id,
-            decoration.extended_tooltip_name
+            decoration.extended_tooltip_name,
+            "0"
         ),
     )
 }
@@ -9584,7 +9785,11 @@ mod tests {
                 None,
                 &[],
             ),
-            extended_tooltip: &format_extended_tooltip("22", "ПериодЗакупокРасширеннаяПодсказка"),
+            extended_tooltip: &format_extended_tooltip(
+                "22",
+                "ПериодЗакупокРасширеннаяПодсказка",
+                "0",
+            ),
             ..NativeFieldItem::default()
         })
         .expect("a field record");
@@ -9609,6 +9814,7 @@ mod tests {
             extended_tooltip: &format_extended_tooltip(
                 "48",
                 "АнкетаПоставщикаРасширеннаяПодсказка",
+                "0",
             ),
             ..NativeFieldItem::default()
         })
@@ -9633,7 +9839,7 @@ mod tests {
             data_path: "{1,{3}}",
             payload: "{13,100,10,1,1,0,0,1,1,0,0,1,0,0,1,{3,4,{0}},1,1,{0,1,0},0,1,0,0,1,0,0,0,0,1,1,1,2}",
             context_menu: &format_field_context_menu("10", "РезультатКонтекстноеМеню", None, &[]),
-            extended_tooltip: &format_extended_tooltip("12", "РезультатРасширеннаяПодсказка"),
+            extended_tooltip: &format_extended_tooltip("12", "РезультатРасширеннаяПодсказка", "0"),
             ..NativeFieldItem::default()
         })
         .expect("a field record");
@@ -9648,7 +9854,7 @@ mod tests {
     #[test]
     fn writes_the_default_children_the_platform_stores() {
         assert_eq!(
-            format_extended_tooltip("19", "ЛотРасширеннаяПодсказка"),
+            format_extended_tooltip("19", "ЛотРасширеннаяПодсказка", "0"),
             "{12,{19,02023637-7868-4a5f-8576-835a76e0c9ba},0,0,0,0,\"ЛотРасширеннаяПодсказка\",{1,0},{1,0},1,0,0,2,2,{3,4,{0}},{7,3,0,1,100},{0,0,0},1,{5,0,0,3,0,{0,1,0},{3,4,{0}},{3,4,{0}},{3,0,{0},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e}},0,1,2,{1,{1,0},0},0,0,1,0,0,1,0,3,3,0,0}"
         );
         assert_eq!(
@@ -9789,7 +9995,7 @@ mod tests {
         ];
 
         for (kind, id, name, title, payload, tooltip_id, tooltip_name, expected_head) in cases {
-            let tooltip = format_extended_tooltip(tooltip_id, tooltip_name);
+            let tooltip = format_extended_tooltip(tooltip_id, tooltip_name, "0");
             let record = format_group_item(&NativeGroupItem {
                 id,
                 kind,
@@ -9938,7 +10144,7 @@ mod tests {
                 ..NativeDecorationItem::default()
             })
             .as_deref(),
-            Some(format_extended_tooltip("22", "ПериодЗакупокРасширеннаяПодсказка").as_str())
+            Some(format_extended_tooltip("22", "ПериодЗакупокРасширеннаяПодсказка", "0").as_str())
         );
 
         // The functional-options block goes inline after the flag, and the
@@ -10192,7 +10398,7 @@ mod tests {
         // The shape the narrow writer produces for a standard-command button
         // is what the full one produces from the same facts, member for
         // member -- which is the sharpest check available on the defaults.
-        let tooltip = format_extended_tooltip("27", "ФормаНайтиРасширеннаяПодсказка");
+        let tooltip = format_extended_tooltip("27", "ФормаНайтиРасширеннаяПодсказка", "0");
         assert_eq!(
             format_button_item(&NativeButtonItem {
                 id: "26",
@@ -10428,7 +10634,7 @@ mod tests {
     /// `Documents/Лот/Forms/ВыигранныеЛоты` stores.
     #[test]
     fn writes_a_group_with_its_children() {
-        let tooltip = format_extended_tooltip("9", "ГруппаРасширеннаяПодсказка");
+        let tooltip = format_extended_tooltip("9", "ГруппаРасширеннаяПодсказка", "0");
         let child = format_standard_command_button(
             "26",
             "ФормаНайти",
@@ -10623,7 +10829,7 @@ mod tests {
     fn writes_a_table_record_with_its_children_where_the_platform_keeps_them() {
         let context_menu = format_field_context_menu("57", "ОтборКонтекстноеМеню", None, &[]);
         let command_bar = format_empty_auto_command_bar("58", "ОтборКоманднаяПанель");
-        let tooltip = format_extended_tooltip("59", "ОтборРасширеннаяПодсказка");
+        let tooltip = format_extended_tooltip("59", "ОтборРасширеннаяПодсказка", "0");
         let record = format_table_item(&NativeTableItem {
             head: "55,{56,02023637-7868-4a5f-8576-835a76e0c9ba},0,2,0,\"Отбор\",{0}",
             context_menu: &context_menu,
@@ -10699,7 +10905,7 @@ mod tests {
             "ОтборСтрокаПоиска",
             "{1,0,2,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,1,0},1,0,0}",
             &format_field_context_menu("61", "ОтборСтрокаПоискаКонтекстноеМеню", None, &[]),
-            &format_extended_tooltip("62", "ОтборСтрокаПоискаРасширеннаяПодсказка"),
+            &format_extended_tooltip("62", "ОтборСтрокаПоискаРасширеннаяПодсказка", "0"),
             "56",
         );
         assert_eq!(
@@ -10713,7 +10919,7 @@ mod tests {
             "ОтборУправлениеПоиском",
             "{1,0,{3,4,{0}},{3,4,{0}},{3,4,{0}},{7,3,0,1,100},{0,1,0},1,0,0,2}",
             &format_field_context_menu("67", "ОтборУправлениеПоискомКонтекстноеМеню", None, &[]),
-            &format_extended_tooltip("68", "ОтборУправлениеПоискомРасширеннаяПодсказка"),
+            &format_extended_tooltip("68", "ОтборУправлениеПоискомРасширеннаяПодсказка", "0"),
             "56",
         );
         assert!(search_control.starts_with(
@@ -10809,7 +11015,7 @@ mod tests {
             data_path: "{1,{2}}",
             payload: &format_plain_field_payload(true),
             context_menu: &format_field_context_menu("2", "AM", None, &[]),
-            extended_tooltip: &format_extended_tooltip("3", "AT"),
+            extended_tooltip: &format_extended_tooltip("3", "AT", "0"),
             ..NativeFieldItem::default()
         })
         .expect("a field record");
@@ -11659,7 +11865,19 @@ mod tests {
     /// a body is, rather than being written raw.
     #[test]
     fn escapes_a_quoted_name() {
-        assert!(format_extended_tooltip("1", "a\"b").contains("\"a\"\"b\""));
+        assert!(format_extended_tooltip("1", "a\"b", "0").contains("\"a\"\"b\""));
+    }
+
+    /// The `DisplayImportance` attribute of a tooltip with nothing else is
+    /// member 33 of 34, the slot the exporter reads it from.
+    #[test]
+    fn empty_tooltip_keeps_its_display_importance() {
+        let plain = format_extended_tooltip("5", "Подсказка", "0");
+        let very_high = format_extended_tooltip("5", "Подсказка", "1");
+        assert!(plain.ends_with(",3,3,0,0}"));
+        assert!(very_high.ends_with(",3,3,1,0}"));
+        assert_eq!(plain.matches(',').count(), very_high.matches(',').count());
+        assert_eq!(native_display_importance(Some("VeryHigh")), Some("1"));
     }
 
     // -----------------------------------------------------------------------

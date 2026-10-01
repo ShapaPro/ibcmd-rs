@@ -65,13 +65,13 @@ const CHART_VALUE_TYPE_UUID: &str = "3543ef08-3316-4f7e-9447-0cd0a1cbf1d5";
 const GANTT_CHART_VALUE_TYPE_UUID: &str = "3a6e63bf-16aa-42eb-b48c-2fff9670ad2f";
 /// The style uuid a border record carries, and the nil uuid a non-empty chart
 /// border stores instead.
-const BORDER_UUID: &str = "48312c09-257f-4b29-b280-284dd89efc1e";
-const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
+pub(super) const BORDER_UUID: &str = "48312c09-257f-4b29-b280-284dd89efc1e";
+pub(super) const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 /// The style uuid every chart line record carries.
-const LINE_UUID: &str = "e5cabe59-d992-4d31-8086-3116931aff81";
+pub(super) const LINE_UUID: &str = "e5cabe59-d992-4d31-8086-3116931aff81";
 /// `auto`, and a font that names nothing.
 const AUTO_COLOR: &str = "{3,4,{0}}";
-const AUTO_FONT: &str = "{7,3,0,1,100}";
+pub(super) const AUTO_FONT: &str = "{7,3,0,1,100}";
 /// The bounds the exporters' decoders read under: the form exporter stops at
 /// 64 series and refuses a longer chart through the round-trip check, the
 /// template exporter reads ERP УХ's 75-series `ФинансовыйАнализ` charts.
@@ -196,7 +196,11 @@ pub(crate) fn gantt_chart_value(settings_xml: &str, host: ChartHost) -> Result<S
 /// `<Attribute>`; the source is the element as the file spells it. Both are
 /// compared line by line with the indentation set aside, so the check does
 /// not depend on where the caller cut the element out.
-fn verify_round_trip(source: &str, value: &str, render: fn(&str) -> Option<String>) -> Result<()> {
+pub(super) fn verify_round_trip(
+    source: &str,
+    value: &str,
+    render: fn(&str) -> Option<String>,
+) -> Result<()> {
     let rendered = render(value)
         .ok_or_else(|| anyhow!("the exporter cannot read back the chart the writer built"))?;
     let expected = significant_lines(source);
@@ -1435,7 +1439,7 @@ fn gantt_date(node: &XmlNode) -> Result<String> {
 // Scalar members.
 // ---------------------------------------------------------------------------
 
-fn boolean(node: &XmlNode) -> Result<&'static str> {
+pub(super) fn boolean(node: &XmlNode) -> Result<&'static str> {
     match leaf(node)?.trim() {
         "true" => Ok("1"),
         "false" => Ok("0"),
@@ -1443,7 +1447,7 @@ fn boolean(node: &XmlNode) -> Result<&'static str> {
     }
 }
 
-fn integer(node: &XmlNode) -> Result<String> {
+pub(super) fn integer(node: &XmlNode) -> Result<String> {
     let text = leaf(node)?.trim();
     let digits = text.strip_prefix('-').unwrap_or(text);
     ensure!(
@@ -1538,7 +1542,7 @@ fn platform_double(value: f64) -> String {
     }
 }
 
-fn code(node: &XmlNode, table: &[(&str, &'static str)]) -> Result<&'static str> {
+pub(super) fn code(node: &XmlNode, table: &[(&str, &'static str)]) -> Result<&'static str> {
     let text = leaf(node)?.trim();
     table
         .iter()
@@ -1571,18 +1575,18 @@ fn empty(node: &XmlNode) -> Result<()> {
 }
 
 /// A 1C string literal of an element's text, its own line breaks included.
-fn string(node: &XmlNode) -> Result<String> {
+pub(super) fn string(node: &XmlNode) -> Result<String> {
     Ok(quote(leaf(node)?))
 }
 
-fn quote(text: &str) -> String {
+pub(super) fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
 /// A colour: `auto` is the chart's unset colour, `<kind>:<uuid>` a style item
 /// the configuration no longer has (published verbatim by the decoder), and
 /// every other spelling the form items' own colour table.
-fn color(node: &XmlNode) -> Result<String> {
+pub(super) fn color(node: &XmlNode) -> Result<String> {
     let text = leaf(node)?.trim();
     if text == "auto" {
         return Ok(AUTO_COLOR.to_string());
@@ -1615,7 +1619,7 @@ fn is_uuid(value: &str) -> bool {
 }
 
 /// A font element: its attributes are the whole value.
-fn font(node: &XmlNode) -> Result<String> {
+pub(super) fn font(node: &XmlNode) -> Result<String> {
     ensure!(
         node.children.is_empty() && node.text.trim().is_empty() && !node.attributes.is_empty(),
         "<{}> carries markup the chart writer does not place",
@@ -1681,7 +1685,7 @@ fn border(node: &XmlNode, chart_border: bool) -> Result<String> {
     ))
 }
 
-fn width_of(node: &XmlNode) -> Result<&str> {
+pub(super) fn width_of(node: &XmlNode) -> Result<&str> {
     let width = node
         .attribute("width")
         .ok_or_else(|| anyhow!("<{}> names no width", node.name))?;
@@ -1695,7 +1699,7 @@ fn width_of(node: &XmlNode) -> Result<&str> {
 
 /// The text of the single `<v8ui:style xsi:type="…">` a line or a border
 /// holds.
-fn style_of<'a>(node: &'a XmlNode, style_type: &str) -> Result<&'a str> {
+pub(super) fn style_of<'a>(node: &'a XmlNode, style_type: &str) -> Result<&'a str> {
     ensure!(
         node.text.trim().is_empty() && node.children.len() == 1,
         "<{}> carries markup the chart writer does not place",
@@ -1714,7 +1718,7 @@ fn style_of<'a>(node: &'a XmlNode, style_type: &str) -> Result<&'a str> {
 
 /// `<v8:item><v8:lang>…</v8:lang><v8:content>…</v8:content></v8:item>…` to
 /// `{1,<count>,{"<lang>","<content>"}…}`, and no item to `{1,0}`.
-fn localized(node: &XmlNode) -> Result<String> {
+pub(super) fn localized(node: &XmlNode) -> Result<String> {
     ensure!(
         node.attributes.is_empty() && node.text.trim().is_empty(),
         "<{}> carries markup the chart writer does not place",
@@ -1758,23 +1762,23 @@ fn localized(node: &XmlNode) -> Result<String> {
 
 /// One element: its qualified name, its attributes in document order, its
 /// character data, its child elements.
-#[derive(Debug, Default)]
-struct XmlNode {
-    name: String,
-    attributes: Vec<(String, String)>,
-    text: String,
-    children: Vec<XmlNode>,
+#[derive(Clone, Debug, Default)]
+pub(super) struct XmlNode {
+    pub(super) name: String,
+    pub(super) attributes: Vec<(String, String)>,
+    pub(super) text: String,
+    pub(super) children: Vec<XmlNode>,
 }
 
 impl XmlNode {
-    fn attribute(&self, key: &str) -> Option<&str> {
+    pub(super) fn attribute(&self, key: &str) -> Option<&str> {
         self.attributes
             .iter()
             .find_map(|(name, value)| (name == key).then_some(value.as_str()))
     }
 }
 
-fn attributes_are(node: &XmlNode, expected: &[(&str, &str)]) -> bool {
+pub(super) fn attributes_are(node: &XmlNode, expected: &[(&str, &str)]) -> bool {
     node.attributes.len() == expected.len()
         && expected
             .iter()
@@ -1782,7 +1786,7 @@ fn attributes_are(node: &XmlNode, expected: &[(&str, &str)]) -> bool {
 }
 
 /// A leaf element's text: no attributes, no children.
-fn leaf(node: &XmlNode) -> Result<&str> {
+pub(super) fn leaf(node: &XmlNode) -> Result<&str> {
     ensure!(
         node.children.is_empty() && node.attributes.is_empty(),
         "<{}> carries markup the chart writer does not place",
@@ -1870,7 +1874,7 @@ fn parse_settings(xml: &str, expected_type: &str) -> Result<XmlNode> {
 const MAX_XML_DEPTH: usize = 32;
 const MAX_XML_NODES: usize = 200_000;
 
-fn parse_xml(xml: &str) -> Result<XmlNode> {
+pub(super) fn parse_xml(xml: &str) -> Result<XmlNode> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut stack: Vec<XmlNode> = Vec::new();

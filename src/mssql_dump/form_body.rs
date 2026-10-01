@@ -38654,6 +38654,14 @@ pub(super) fn parse_and_render_form_flowchart_settings_for_test(text: &str) -> O
     parse_form_flowchart_settings_xml(text, &value_types, &object_refs, 3)
 }
 
+/// The planner counterpart of `render_form_chart_settings_value`.
+pub(crate) fn render_form_planner_settings_value(field: &str) -> Option<String> {
+    let value_types = [ConstantValueType::Reference {
+        reference: FORM_PLANNER_TYPE_REFERENCE.to_string(),
+    }];
+    parse_form_planner_settings_xml(field, &value_types, &BTreeMap::new(), 3)
+}
+
 /// The graphical-scheme counterpart of `render_form_chart_settings_value`.
 pub(crate) fn render_form_flowchart_settings_value(field: &str) -> Option<String> {
     let value_types = [ConstantValueType::Reference {
