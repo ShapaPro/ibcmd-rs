@@ -49,7 +49,7 @@ Files: `src/mssql_dump/extension/form.rs`, the form compiler event-handler
 adapter identified by tracing, `docs/extensions/parity.md`, focused fixtures.
 
 - [ ] E1 Confirm native After/Override storage and exported XML shapes.
-- [ ] E2 Decode interceptor type from the additional-handler list.
+- [ ] E2 Decode interceptor type from primary and additional-handler codes.
 - [ ] E3 Encode the evidenced no-BaseForm shape; keep unsupported forms refused.
 - [ ] E4 Test Before/After/Override and native-twin export-back equality;
   record fixture Version changes when applicable.

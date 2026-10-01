@@ -20,10 +20,11 @@ authoritative: `direct-mssql-online-activation`, `add-mssql-live-generation-swit
    The first checkpoint completes automatically only on a verified infobase
    without user sessions; active sessions leave continuation explicitly
    required. Adaptive warm-session readiness/load proof remains open.
-3. Correct extension form interceptor read/write handling (#348): native
-   evidence stores After/Override in an additional-handler list when an
-   adopted form has no BaseForm. Require exact export-back equality and
-   native twins; preserve fail-closed handling of unsupported shapes.
+3. Correct extension form interceptor read/write handling (#348): decode
+   both primary and additional handler codes when an adopted form has no
+   BaseForm. The measured After event uses an additional handler; Override
+   uses the primary handler with code 2. Require exact export-back equality
+   and native twins; preserve refusal of unsupported shapes.
 
 Each direction has its own branch and worktree. Implementers commit only
 their direction; the coordinator integrates after an independent combined
