@@ -79,8 +79,14 @@ Worktree `F:\ibcmd\src\ibcmd-rs-05-integration`, branch `feat/0.5-integration`.
 
 - [x] C1 Inventory preserved branches and define isolated ownership/acceptance.
 - [x] C2 Resolve shared-file conflicts after independent review.
-- [ ] C3 Run appropriate integrated gates and record exact verified scope.
+- [x] C3 Run appropriate integrated gates and record exact verified scope.
 - [ ] C4 Publish a reviewable first-wave PR and attach it to this chat.
+
+Integrated source `e8e88586` passes fmt, physical-adapter policy, all-targets
+check, 2358 SQL-domain unit tests (2 ignored), and 13 drop-in/standalone-boundary
+CLI tests. The three required strict OpenSpec validations also pass. Full
+Windows/Linux CI is tracked at the PR; these local results do not replace
+the required merge checks. See [validation](validation.md).
 
 Follow-on ownership: dynamic track owns #345/#346 after #347; live track owns
 #349 and remaining #409 readiness/load evidence; extension track owns the
