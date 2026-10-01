@@ -22,11 +22,18 @@ PID, UTC creation ticks, exact executable and exact command. Ports only identify
 conflicts. A fresh empty registry may receive one explicit `rac cluster insert`
 after bounded successful RAS inventory and exact version verification; unknown
 inventory refuses this bootstrap. Failed startup retains ownership state.
-The listener guard samples listeners first and then uses one process census
-for both ancestry admission and unknown-process refusal. A child born during
-listener sampling still needs exact executable, birthday and proven ancestry;
-the port/root argument never supplies that proof. This closes the measured
-false refusal caused by comparing two different process censuses at startup.
+During fresh startup only, listener acquisition uses a full process census,
+then listeners, then a second full process census within the original startup
+deadline. Each positive listener must have the same PID, UTC birthday,
+executable, command and parent in both censuses, with proven owned ancestry in
+both. Missing or vanished observations are sampled again without starting or
+signalling anything; foreign, non-whitelisted or changed identities refuse
+immediately. The measured C1 listener PID absent from the historical census
+remains unproved; the new acquisition never retroactively admits that PID.
+Outside startup, including stop, the immediate listeners-first/single-census
+refusal guard remains unchanged. Failed listeners retain a bounded sanitized
+receipt from the already captured censuses, including an observed listener
+executable outside the server whitelist. Ports and counters are not ownership.
 
 Use `private-register.ps1 -Action register -Database <owned-new-clone>` and
 `-Action unregister` for these contexts. The wrapper binds the current cluster

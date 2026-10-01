@@ -10,8 +10,8 @@ $agent=Fake 700001 1 'ragent.exe';$agent.CommandLine='"'+$script:Bin+'\ragent.ex
 $ras=Fake 700002 1 'ras.exe';$ras.CommandLine='"'+$script:Bin+'\ras.exe" cluster --port=5545 localhost:5540'
 $child=Fake 700003 700001 'rphost.exe' 1;$foreign=Fake 700004 9 'rphost.exe' 1
 $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@();$global:Private83FakeJson=$null;$global:Private83FakeLease='track=load since=2026-10-01T00:00:00';$global:Private83Reparse='';$global:Private83SignalCount=0;$global:Private83StartCount=0;$global:Private83DeleteCount=0;$global:Private83MoveCount=0;$global:Private83DataExists=$false;$global:Private83Registration=''
-$global:Private83CensusCount=0;$global:Private83SpawnAtListen=$null
-function Get-CimInstance{param($ClassName,$Filter);if($Filter -match '^ProcessId=(\d+)$'){@($global:Private83FakeProcesses|Where-Object{$_.ProcessId -eq [int]$Matches[1]})}else{$global:Private83CensusCount++;$global:Private83FakeProcesses}}
+$global:Private83CensusCount=0;$global:Private83SpawnAtListen=$null;$global:Private83CensusQueue=[Collections.Generic.Queue[object]]::new();$global:Private83CensusDelay=0
+function Get-CimInstance{param($ClassName,$Filter);if($Filter -match '^ProcessId=(\d+)$'){@($global:Private83FakeProcesses|Where-Object{$_.ProcessId -eq [int]$Matches[1]})}else{$global:Private83CensusCount++;if($global:Private83CensusDelay){Start-Sleep -Milliseconds $global:Private83CensusDelay};if($global:Private83CensusQueue.Count){$global:Private83CensusQueue.Dequeue()}else{$global:Private83FakeProcesses}}}
 function Get-NetTCPConnection{param($State,$LocalPort,$ErrorAction);if($global:Private83SpawnAtListen){$global:Private83FakeProcesses+=@($global:Private83SpawnAtListen);$global:Private83SpawnAtListen=$null};$global:Private83FakeListeners}
 function Test-Path{param($LiteralPath);if($LiteralPath -eq $script:StateFile){return [bool]$global:Private83FakeJson};if($LiteralPath -eq $script:Srvinfo){return $global:Private83DataExists};if($LiteralPath -eq $global:Private83Reparse){return $true};if($LiteralPath -like 'F:\ibcmd\lab\04\locks\worker\*' -or $LiteralPath -like "$script:Bin\*.exe"){return $true};return $false}
 function Get-Item{param($LiteralPath,[switch]$Force);[pscustomobject]@{Attributes=$(if($LiteralPath -eq $global:Private83Reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Directory})}}
@@ -58,6 +58,58 @@ $global:Private83FakeProcesses=@($agent,$ras,$child);$global:Private83FakeListen
 Refuse {Private-RequireListeners $state} 'foreign/unproved'
 if($global:Private83CensusCount -ne 1 -or !$global:Private83LastRefusal -or $global:Private83LastRefusal.failed_listener.pid -ne 700099 -or $global:Private83LastRefusal.failed_listener.port -ne 5561 -or $global:Private83LastRefusal.process_census.Count -ne 3 -or 700099 -in $global:Private83LastRefusal.owned_ids -or $global:Private83LastRefusal.admission -cne 'refused' -or $global:Private83LastRefusal.additional_admission_censuses -ne 0 -or $global:Private83LastRefusal.state_sha256 -cne (Private-StateDigest)){throw 'transient listener census/refusal receipt incorrect'}
 foreach($entry in $global:Private83LastRefusal.process_census){if($entry.Contains('command') -or $entry.command_sha256 -cnotmatch '^[A-F0-9]{64}$' -or !$entry.born -or !$entry.executable){throw 'receipt command/identity sanitization incorrect'}}
+# Startup uses full C1 -> listeners -> full C2. A missing listener process
+# cannot be admitted until a later complete, identical ancestry pair exists.
+$global:Private83FakeProcesses=@($agent,$ras,$child)
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700003;LocalAddress='127.0.0.1'})
+$global:Private83CensusCount=0
+$stable=@(Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2)))
+if($stable.Count -ne 1 -or $global:Private83CensusCount -ne 2){throw 'startup did not use exact C1/listener/C2 pair'}
+$global:Private83CensusQueue.Enqueue([object[]]@($agent,$ras))
+$global:Private83CensusQueue.Enqueue([object[]]@($agent,$ras,$child))
+$global:Private83CensusCount=0
+$stable=@(Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2)))
+if($stable.Count -ne 1 -or $global:Private83CensusCount -ne 4){throw 'missing startup observation admitted without a complete later pair'}
+# An unknown/vanished listener is bounded and never positive; stop retains its
+# immediate one-census refusal regardless of startup sampling support.
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700099;LocalAddress='127.0.0.1'})
+$global:Private83CensusCount=0
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(180))} 'foreign/unproved'
+if($global:Private83CensusCount -lt 2 -or $global:Private83LastRefusal.failed_listener.pid -ne 700099){throw 'unstable deadline did not retain exact refusal'}
+$global:Private83CensusCount=0;Refuse {Private-RequireListeners $state} 'foreign/unproved'
+if($global:Private83CensusCount -ne 1){throw 'stop guard acquired a startup resampling loop'}
+# Full census captures a non-whitelisted listener even when the server-only
+# inventory would have hidden it. No retry of foreign identities is allowed.
+$unknown=Fake 700005 700001 'not-a-server.exe' 2
+$global:Private83FakeProcesses=@($agent,$ras,$child,$unknown)
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700005;LocalAddress='127.0.0.1'})
+$global:Private83CensusCount=0
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2))} 'foreign/unproved'
+if($global:Private83CensusCount -ne 2 -or !($global:Private83LastRefusal.process_census|Where-Object{$_.pid -eq 700005 -and $_.name -ceq 'not-a-server.exe'})){throw 'full census concealed non-whitelist listener'}
+$global:Private83FakeProcesses=@($agent,$ras,$child,$foreign)
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700004})
+$global:Private83CensusCount=0
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2))} 'foreign/unproved'
+if($global:Private83CensusCount -ne 2){throw 'foreign listener was resampled'}
+$global:Private83FakeProcesses=@($agent,$ras,$child)
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700003})
+foreach($field in @('CreationDate','CommandLine','ParentProcessId')){
+ $changed=Fake 700003 700001 'rphost.exe' 1
+ switch($field){'CreationDate'{$changed.CreationDate=$when.AddSeconds(2)} 'CommandLine'{$changed.CommandLine='changed'} 'ParentProcessId'{$changed.ParentProcessId=700002}}
+ $global:Private83CensusQueue.Enqueue([object[]]@($agent,$ras,$child))
+ $global:Private83CensusQueue.Enqueue([object[]]@($agent,$ras,$changed))
+ $global:Private83CensusCount=0
+ Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2))} 'foreign/unproved'
+ if($global:Private83LastRefusal.reason -cne 'listener_identity_or_ancestry_drift'){throw 'identity drift receipt missing'}
+ if($global:Private83CensusCount -ne 2){throw 'changed PID identity was resampled'}
+}
+$unknown.CommandLine='unknown '+$script:Root
+$global:Private83FakeProcesses=@($agent,$ras,$child,$unknown);$global:Private83FakeListeners=@()
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2))} 'unknown private-looking'
+$global:Private83FakeProcesses=@($agent,$ras,$child)
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700003});$global:Private83CensusDelay=80
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(100))} 'foreign/unproved'
+$global:Private83CensusDelay=0
 $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@()
 Private-RequireNames @('ibcmd_rs_05_load_w3_mock')
 foreach($origin in @('from F:..\..\lab\05\wave3\load\own.bak','from \ibcmd\lab\05\wave3\load\own.bak')){$global:Private83FakeOrigin=$origin;Refuse {Private-RequireNames @('ibcmd_rs_05_load_w3_mock')} 'foreign/unmanifested'};$global:Private83FakeOrigin='from F:\ibcmd\lab\05\wave3\load\own.bak'
@@ -82,5 +134,5 @@ if($script:PrivateContext.track -cne 'meta' -or $script:PrivateContext.prefix -c
 $env:IBCMD_RS_WORKER_LAB_ROOT='F:\ibcmd\lab\05\wave3\other\cluster';Refuse {. "$PSScriptRoot\lib.ps1"} 'override is limited'
 $env:IBCMD_RS_WORKER_LAB_ROOT='';. "$PSScriptRoot\lib.ps1";if($script:PrivateContext -or $script:Root -ne 'F:\ibcmd\lab\05\cluster'){throw 'legacy default changed'}
 $env:IBCMD_RS_WORKER_LAB_ROOT='F:\ibcmd\lab\05\wave1\live\cluster';. "$PSScriptRoot\lib.ps1";if($script:PrivateContext -or $script:Root -ne $env:IBCMD_RS_WORKER_LAB_ROOT){throw 'legacy wave1 changed'}
-'PASS retained ancestry/UTC/orphan/foreign/PID/executable/command/lease/registry/path/reparse/refusal/context mocks; starts=signals=deletes=archives=0'
+'PASS bounded full-C1/listeners/full-C2 startup, immediate stop, non-whitelist/missing/deadline/PID-drift; retained ancestry/UTC/orphan/foreign/PID/executable/command/lease/registry/path/reparse/refusal/context mocks; starts=signals=deletes=archives=0'
 }finally{$env:IBCMD_RS_WORKER_LAB_ROOT=$savedOverride}
