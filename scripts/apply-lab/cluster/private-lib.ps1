@@ -68,8 +68,8 @@ function Read-State {
  return $state
 }
 function Write-State($State){[void](Require-PrivatePath $script:StateFile);$State|ConvertTo-Json -Depth 9|Set-Content -LiteralPath $script:StateFile -Encoding utf8}
-function Private-Owned($State){
- if(!$State){return @()};$all=Get-ServerProcesses;$owned=@{}
+function Private-Owned($State,[object[]]$Processes){
+ if(!$State){return @()};$all=if($PSBoundParameters.ContainsKey('Processes')){@($Processes)}else{Get-ServerProcesses};$owned=@{}
  foreach($identity in (@($State.anchors)+@($State.known))){
   if(!$identity){continue};$process=@($all|Where-Object{$_.ProcessId -eq $identity.pid})
   if($process.Count -gt 1){throw 'duplicate private PID'}
@@ -97,9 +97,14 @@ function Private-Remember($State){
  $State.known=@($identities.Values);Write-State $State
 }
 function Private-RequireListeners($State){
- $live=@(Private-Owned $State);$ids=@($live.ProcessId)
- foreach($listener in Get-ClusterListeners){if($listener.OwningProcess -notin $ids){throw 'private port has foreign/unproved listener; no signal permitted'}}
- foreach($process in Get-ServerProcesses){
+ # Take listeners first, then use ONE process census for both ancestry proof
+ # and unknown-process refusal. A child born between independent process
+ # censuses must not be labelled foreign merely because the earlier census
+ # did not contain it. Every admitted PID still needs exact ancestry/identity.
+ $listeners=@(Get-ClusterListeners);$processes=@(Get-ServerProcesses)
+ $live=@(Private-Owned $State -Processes $processes);$ids=@($live.ProcessId)
+ foreach($listener in $listeners){if($listener.OwningProcess -notin $ids){throw 'private port has foreign/unproved listener; no signal permitted'}}
+ foreach($process in $processes){
   $marked=$process.CommandLine -and ($process.CommandLine.IndexOf($script:Root,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $process.CommandLine -match '(?i)(?:^|\s)(?:-port[= ]5540|-regport[= ]5541|--port=5545|-range[= ]5560:5591)(?:\s|$)')
   if($marked -and $process.ProcessId -notin $ids){throw 'unknown private-looking process; ports/root are not ownership'}
  }

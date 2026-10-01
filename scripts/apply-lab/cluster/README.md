@@ -22,6 +22,11 @@ PID, UTC creation ticks, exact executable and exact command. Ports only identify
 conflicts. A fresh empty registry may receive one explicit `rac cluster insert`
 after bounded successful RAS inventory and exact version verification; unknown
 inventory refuses this bootstrap. Failed startup retains ownership state.
+The listener guard samples listeners first and then uses one process census
+for both ancestry admission and unknown-process refusal. A child born during
+listener sampling still needs exact executable, birthday and proven ancestry;
+the port/root argument never supplies that proof. This closes the measured
+false refusal caused by comparing two different process censuses at startup.
 
 Use `private-register.ps1 -Action register -Database <owned-new-clone>` and
 `-Action unregister` for these contexts. The wrapper binds the current cluster

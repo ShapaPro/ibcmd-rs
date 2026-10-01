@@ -10,8 +10,9 @@ $agent=Fake 700001 1 'ragent.exe';$agent.CommandLine='"'+$script:Bin+'\ragent.ex
 $ras=Fake 700002 1 'ras.exe';$ras.CommandLine='"'+$script:Bin+'\ras.exe" cluster --port=5545 localhost:5540'
 $child=Fake 700003 700001 'rphost.exe' 1;$foreign=Fake 700004 9 'rphost.exe' 1
 $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@();$global:Private83FakeJson=$null;$global:Private83FakeLease='track=load since=2026-10-01T00:00:00';$global:Private83Reparse='';$global:Private83SignalCount=0;$global:Private83StartCount=0;$global:Private83DeleteCount=0;$global:Private83MoveCount=0;$global:Private83DataExists=$false;$global:Private83Registration=''
-function Get-CimInstance{param($ClassName,$Filter);if($Filter -match '^ProcessId=(\d+)$'){@($global:Private83FakeProcesses|Where-Object{$_.ProcessId -eq [int]$Matches[1]})}else{$global:Private83FakeProcesses}}
-function Get-NetTCPConnection{param($State,$LocalPort,$ErrorAction);$global:Private83FakeListeners}
+$global:Private83CensusCount=0;$global:Private83SpawnAtListen=$null
+function Get-CimInstance{param($ClassName,$Filter);if($Filter -match '^ProcessId=(\d+)$'){@($global:Private83FakeProcesses|Where-Object{$_.ProcessId -eq [int]$Matches[1]})}else{$global:Private83CensusCount++;$global:Private83FakeProcesses}}
+function Get-NetTCPConnection{param($State,$LocalPort,$ErrorAction);if($global:Private83SpawnAtListen){$global:Private83FakeProcesses+=@($global:Private83SpawnAtListen);$global:Private83SpawnAtListen=$null};$global:Private83FakeListeners}
 function Test-Path{param($LiteralPath);if($LiteralPath -eq $script:StateFile){return [bool]$global:Private83FakeJson};if($LiteralPath -eq $script:Srvinfo){return $global:Private83DataExists};if($LiteralPath -eq $global:Private83Reparse){return $true};if($LiteralPath -like 'F:\ibcmd\lab\04\locks\worker\*' -or $LiteralPath -like "$script:Bin\*.exe"){return $true};return $false}
 function Get-Item{param($LiteralPath,[switch]$Force);[pscustomobject]@{Attributes=$(if($LiteralPath -eq $global:Private83Reparse){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Directory})}}
 function Get-Content{param($LiteralPath,[switch]$Raw);if($LiteralPath -eq $script:StateFile){return $global:Private83FakeJson};if($LiteralPath -like 'F:\ibcmd\lab\04\locks\worker\*'){return $global:Private83FakeLease};throw 'unexpected mock read'}
@@ -39,6 +40,17 @@ $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$child.ExecutableP
 $invalid=$retained|ConvertTo-Json -Depth 9|ConvertFrom-Json;$invalid.known=@(Private-Identity $foreign);Write-State $invalid;Refuse {Read-State} 'retained ancestry';Write-State $retained
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5540;OwningProcess=700004});Refuse {Private-RequireListeners $retained} 'foreign/unproved';$global:Private83FakeListeners=@()
 $foreign.CommandLine='foreign -regport 5541';Refuse {Private-RequireListeners $retained} 'unknown private-looking';$foreign.CommandLine='private rphost.exe'
+# A proven child can appear during listener sampling. The old guard sampled
+# ownership before listeners and falsely refused this child as foreign.
+$global:Private83FakeProcesses=@($agent,$ras,$foreign);$global:Private83SpawnAtListen=$child
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5560;OwningProcess=700003});$global:Private83CensusCount=0
+Private-RequireListeners $state
+if($global:Private83CensusCount -ne 1){throw 'listener guard used inconsistent process censuses'}
+# An unrelated process born at the same boundary must still be refused.
+$global:Private83FakeProcesses=@($agent,$ras,$child);$global:Private83SpawnAtListen=$foreign
+$global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5560;OwningProcess=700004})
+Refuse {Private-RequireListeners $state} 'foreign/unproved'
+$global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@()
 Private-RequireNames @('ibcmd_rs_05_load_w3_mock')
 foreach($origin in @('from F:..\..\lab\05\wave3\load\own.bak','from \ibcmd\lab\05\wave3\load\own.bak')){$global:Private83FakeOrigin=$origin;Refuse {Private-RequireNames @('ibcmd_rs_05_load_w3_mock')} 'foreign/unmanifested'};$global:Private83FakeOrigin='from F:\ibcmd\lab\05\wave3\load\own.bak'
 foreach($name in @('bsp','ibcmd_rs_05_load_w3_absent','ibcmd_rs_05_meta_w3_mock')){Refuse {Private-RequireNames @($name)} 'foreign/unmanifested'}
