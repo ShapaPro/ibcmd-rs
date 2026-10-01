@@ -81,6 +81,7 @@ pub struct DynamicPlan {
     registration: registrations::RegistrationPlan,
     reset_change_registrations: bool,
     params_rewrites: Vec<sqlgen::ParamsRewrite>,
+    params_preimages: Vec<recovery::BoundParamsPreimage>,
     appended_existing_rows: Vec<recovery::AppendedExistingRow>,
 }
 
@@ -541,6 +542,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
             registration: registrations::RegistrationPlan::default(),
             reset_change_registrations: false,
             params_rewrites: Vec::new(),
+            params_preimages: Vec::new(),
             appended_existing_rows: Vec::new(),
         });
     }
@@ -884,6 +886,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     precondition.push_str(&unfinished_guard());
     let mut parity_sql = sqlgen::render_parity_writes(&parity);
     let mut params_rewrites = Vec::new();
+    let mut params_preimages = Vec::new();
     if let Some(collection) = &collection {
         precondition.push_str(&collection.guard_sql);
         parity_sql.push_str(&collection.render(activation.new_generation()));
@@ -892,6 +895,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         ));
         if !unchanged {
             params_rewrites = collection.rewrites.clone();
+            params_preimages = collection.preimages.clone();
         }
     }
     let activation = activation
@@ -1019,6 +1023,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         registration,
         reset_change_registrations: has_change_registrations && !unchanged,
         params_rewrites,
+        params_preimages,
         appended_existing_rows: if unchanged { Vec::new() } else { appends.rows },
     })
 }
@@ -1082,6 +1087,7 @@ pub fn apply_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Conf
             removals: &super::removals::Removals::default(),
             registration: &plan.registration,
             params_rewrites: &plan.params_rewrites,
+            bound_params_preimages: Some(&plan.params_preimages),
             backup: None,
             dynamic_generation: generation.as_deref(),
             appended_existing_rows: &plan.appended_existing_rows,

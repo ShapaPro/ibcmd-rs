@@ -1834,6 +1834,7 @@ pub fn apply_with_gate(
                 .inputs
                 .as_ref()
                 .map_or(&[][..], |inputs| inputs.params_rewrites.as_slice()),
+            bound_params_preimages: None,
             backup: plan.report.backup.as_ref(),
             dynamic_generation: None,
             appended_existing_rows: &[],

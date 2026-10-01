@@ -75,6 +75,19 @@ require inspecting the outcome. This is not automatic resume or online undo.
 The append recipe is created/truncated even when empty, so reusing an explicit
 artifact directory cannot retain old append triples beside a new zero-addition manifest.
 
+The first immutable review (`9e89f731`) found a recovery-only ABA gap: collection
+judged siVersions A, generic artifact capture could reread transient B, and the
+locked publication guard could subsequently admit restored A. Repair cycle one
+now carries the bound original raw bytes and complete RowMeta from collection
+into dynamic recovery, using an immutable object with private fields. Recovery
+checks exact rewrite coverage/size/digest before replacing artifact files and
+does not reread siVersions. The legacy/exclusive capture route is unchanged.
+Fake-client cases preserve A's exact bytes and Attributes/Creation/Modified even
+when current storage exposes B, no row, multiple parts or header-only drift;
+invalid constructor metadata and missing/duplicate/stale rewrite coverage refuse
+before SQL or artifact writes. This is not an executed recovery replay or a new
+native matrix; the positive two-generation measurement still uses its named earlier build.
+
 ## Validation status
 
 Native survey completed. Intermediate owned refusal probes cover stale stage,
@@ -139,7 +152,8 @@ alias guard: settle collected generations with native exclusive apply, not an
 unproven direct-exclusive fold. A fresh exclusive-fold twin is not part of this proof.
 
 After the actual DB matrix, report text for the help/search gap, recovery artifact
-reuse hardening and the stricter dynamic-only stage header/flag preconditions changed.
+reuse hardening, immutable bound siVersions recovery and the stricter dynamic-only
+stage header/flag preconditions changed.
 The publication algorithm remained identical. The final source/binary has separate
 focused stage-flag, full-header/no-op ordering and recovery-reuse regressions plus
 matching quick gates; the two actual DB publications used the explicitly named earlier build.

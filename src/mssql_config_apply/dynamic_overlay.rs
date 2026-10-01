@@ -254,6 +254,7 @@ pub(super) fn bound_blob(meta: &RowMeta, bytes: &[u8]) -> Result<()> {
 pub(super) struct Collection {
     pub guard_sql: String,
     pub rewrites: Vec<ParamsRewrite>,
+    pub preimages: Vec<super::recovery::BoundParamsPreimage>,
     ordinary: Vec<RowMeta>,
 }
 
@@ -306,6 +307,7 @@ pub(super) fn collect(client: &dyn SqlClient, db: &str, history: &[String]) -> R
         .get("siversions")
         .ok_or_else(|| anyhow!("Params lacks siVersions"))?;
     let bytes = read_bound_blob(client, db, "Params", version)?;
+    let preimage = super::recovery::BoundParamsPreimage::new((*version).clone(), bytes.clone())?;
     // siVersions is RAW BOM brace text, unlike ordinary `.si` payloads. Preserve that storage
     // encoding; wrapped/deflated variants are unmeasured and fail the flat-map validator.
     let mut plain = bytes;
@@ -322,6 +324,7 @@ pub(super) fn collect(client: &dyn SqlClient, db: &str, history: &[String]) -> R
             set_creation: false,
         }],
         ordinary,
+        preimages: vec![preimage],
     })
 }
 
@@ -1028,6 +1031,7 @@ mod tests {
             ordinary,
             guard_sql: String::new(),
             rewrites: Vec::new(),
+            preimages: Vec::new(),
         };
         let sql = collection.render(Uuid::new_v4());
         assert_eq!(sql.matches("INSERT dbo.Params").count(), 16);
