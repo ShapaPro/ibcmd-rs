@@ -827,6 +827,7 @@ mod tests {
             gate: None,
             new_objects: None,
             removals: None,
+            synonym_records: 0,
             structure: None,
             backup: None,
             registrations: None,

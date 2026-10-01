@@ -1,10 +1,11 @@
 //! The main search-information row of `Params` (`<uuid>.si`).
 //!
 //! A native apply rewrites every `<uuid>.si` row and gives each a new version
-//! in `siVersions`. The contents only change with the set of metadata objects;
-//! the main row lists them all -- every owner, then the forms, templates,
-//! attributes and commands that belong to it -- and gains one record for each
-//! new form or template:
+//! in `siVersions`. The contents only change with the set of metadata objects
+//! and with the synonyms of the ones that stay (an object whose synonym is
+//! changed gets the new text in its record: `set_synonyms`); the main row lists
+//! them all -- every owner, then the forms, templates, attributes and commands
+//! that belong to it -- and gains one record for each new form or template:
 //!
 //! ```text
 //! {4,
@@ -38,6 +39,8 @@ pub struct SiRecord {
     pub parent: String,
     pub kind: usize,
     pub name: String,
+    /// The span of the synonym block (`{1,<n>,{"ru","text"},...}`).
+    pub synonyms: (usize, usize),
 }
 
 /// The parsed main row.
@@ -252,6 +255,7 @@ pub fn parse(text: &[u8]) -> Result<SiMain> {
             parent,
             kind,
             name: unquote(text, group[3])?,
+            synonyms: group[4],
         });
     }
     // Depth-first order: a record's descendants follow it.
@@ -443,6 +447,23 @@ impl SiMain {
     }
 }
 
+/// The synonym block of a record as the platform writes it: `{1,0}` for none, otherwise `{1,<n>,` and the
+/// `{"language","text"}` pairs sorted by language, one to a line, and `}`. The texts are as they stand between
+/// the quotes (quotes doubled).
+fn synonym_block(synonyms: &[(String, String)], eol: &str) -> String {
+    let mut synonyms = synonyms.to_vec();
+    synonyms.sort();
+    if synonyms.is_empty() {
+        return "{1,0}".to_owned();
+    }
+    let pairs = synonyms
+        .iter()
+        .map(|(language, text)| format!("{{\"{language}\",\"{text}\"}}"))
+        .collect::<Vec<_>>()
+        .join(&format!(",{eol}"));
+    format!("{{1,{},{eol}{pairs}{eol}}}", synonyms.len())
+}
+
 /// The text of one new record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRecord {
@@ -459,18 +480,7 @@ pub struct NewRecord {
 impl NewRecord {
     /// The record as the platform writes it, with the row's line break.
     pub fn render(&self, eol: &str) -> String {
-        let mut synonyms = self.synonyms.clone();
-        synonyms.sort();
-        let block = if synonyms.is_empty() {
-            "{1,0}".to_owned()
-        } else {
-            let pairs = synonyms
-                .iter()
-                .map(|(language, text)| format!("{{\"{language}\",\"{text}\"}}"))
-                .collect::<Vec<_>>()
-                .join(&format!(",{eol}"));
-            format!("{{1,{},{eol}{pairs}{eol}}}", synonyms.len())
-        };
+        let block = synonym_block(&self.synonyms, eol);
         format!(
             "{},{},{},\"{}\",{eol}{block},{},{}",
             self.uuid, self.parent, self.kind, self.name, self.flags.0, self.flags.1
@@ -489,6 +499,40 @@ pub struct Insertion {
 /// else changes.
 pub fn insert_records(text: &[u8], main: &SiMain, insertions: &[Insertion]) -> Result<Vec<u8>> {
     edit_records(text, main, insertions, &[])
+}
+
+/// The row's text with the synonym block of the records `changes` names (by their index in
+/// [`SiMain::records`], the texts as they stand between the quotes, quotes doubled) written anew; a record
+/// whose block is already what would be written stays as it is, and nothing else changes. Returns the text
+/// and how many records were rewritten.
+pub fn set_synonyms(
+    text: &[u8],
+    main: &SiMain,
+    changes: &[(usize, Vec<(String, String)>)],
+) -> Result<(Vec<u8>, usize)> {
+    let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    for (index, synonyms) in changes {
+        let record = main
+            .records
+            .get(*index)
+            .ok_or_else(|| anyhow!("a synonym change beyond the record list"))?;
+        let block = synonym_block(synonyms, main.eol).into_bytes();
+        if text[record.synonyms.0..record.synonyms.1] != block[..] {
+            edits.push((record.synonyms.0, record.synonyms.1, block));
+        }
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
+    let mut out = Vec::with_capacity(text.len() + 64 * edits.len());
+    let mut copied = 0usize;
+    let count = edits.len();
+    for (start, end, replacement) in edits {
+        ensure!(start >= copied, "overlapping synonym edits");
+        out.extend_from_slice(&text[copied..start]);
+        out.extend_from_slice(&replacement);
+        copied = end;
+    }
+    out.extend_from_slice(&text[copied..]);
+    Ok((out, count))
 }
 
 /// The runs of consecutive removed items of a list, each as the span of text that goes. An

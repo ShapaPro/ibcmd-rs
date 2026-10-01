@@ -268,9 +268,12 @@ One serializable transaction, data moves inside the server only:
 7. new forms and templates: registered in `_ConfigChngR` for every ordinary node
    (ids continue the table's sequence: the greatest `_IDRRef` plus one), their files listed in
    `_ConfigChngR_ExtProps`; a body row an existing object gains is appended to its list;
-8. `Params`: the main search-information row gets a record per new object and its
-   `siVersions` entry a new version (both guarded by the digest the plan saw); `Creation`
-   and `Modified` in the platform's form;
+8. `Params`: the main search-information row gets a record per new object and updates the
+   localized synonyms of existing records whose descriptor headers changed, for both the
+   nonstructural gate and S1. These edits compose with the stage's other cache edits; its
+   `siVersions` entry gets a new version (both rows guarded by the digest the plan saw).
+   `Creation` and `Modified` use the platform's form. Twin and session evidence:
+   [`evidence/dropin-apply/synonyms.md`](evidence/dropin-apply/synonyms.md);
 9. `Files.MobileVersions.dat` gets a fresh random GUID at the head (list capped at
    1 000), timestamps in the platform's form (local time plus the year offset);
 10. postconditions inside the transaction: every staged row is in `Config`
@@ -301,7 +304,7 @@ listed in the report as `not_written`):
 | What | Why it is safe to skip |
 |---|---|
 | `Params.<uuid>.ui` (two rows) | The platform's configuration-licensing records (track ui, #340), re-encrypted by every native apply. This apply never creates or alters licensing data. See [known differences](#known-differences-from-the-native-apply). |
-| `Params.*.si`, `siVersions` (except for new objects) | Service-information caches. Their content is a function of the object set and names (same text before and after S2/S3; only a new object, a rename or a synonym change alters it). The native apply rewrites all 16 rows with unchanged content and new version guids; this one rewrites the main row (and its `siVersions` entry) only when a new form or template adds records. |
+| Unchanged `Params.*.si` rows and their `siVersions` entries | Service-information caches. Their content is a function of the object set and names (same text before and after S2/S3; only a new object, a rename or a synonym change alters it). The native apply rewrites all 16 rows with unchanged content and new version guids; this one rewrites only caches whose content changes (new or removed objects, forms and templates, restructuring, or changed synonyms), with their `siVersions` entries. |
 | Help index (`Files.userDocs_ru*` ...) | Rebuilt by the native apply from help pages; a body-only change leaves the pages, so the old index stays valid. |
 | ConfigCAS garbage collection and its bookkeeping | Housekeeping of extension content, independent of the main configuration. |
 | `_ExtensionsRestructNGS`, `_IDRRef` renewal in `_ConfigChngR` | Scratch of the restructuring framework (three constant rows in every native apply that takes the long path, none on the short one); the registrations keep their ids, so `_ConfigChngR_ExtProps` stays consistent. |

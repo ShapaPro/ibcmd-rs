@@ -143,6 +143,17 @@ objects, 2299 records each: the records the descriptor explains are the registry
 An object that lists forms, templates, commands or any collection beyond its attributes and tabular sections has
 more records than the descriptor's attributes explain: such a new object is refused.
 
+A changed synonym of an existing metadata header is also written into this registry, for both the
+nonstructural gate and S1. `mssql_config_apply::synonyms` compares active and staged descriptor headers by
+UUID; `registry::set_synonyms` changes just the matching record's localized block, on top of any edits from
+new objects, members, forms, templates or removals. The guarded rewrite preserves the stored-row digest
+and bumps the registry's `siVersions` entry. Empty synonyms, multiple languages and doubled quotes are
+covered by unit tests. Headers absent from the registry require no record edit.
+
+The plain `syn2` and structural `mix2` twin measurements, including the older build's stale registry and
+fresh-session metadata presentations, are recorded in
+[evidence/dropin-apply/synonyms.md](evidence/dropin-apply/synonyms.md).
+
 ## 6. The attribute lines in the XDTO model
 
 The property line of an attribute is made of its type pattern (`caches::xdto_types::attribute_property`):

@@ -2,6 +2,8 @@
 //! configuration), the records of a new catalog or document, of a new tabular section, and of new
 //! attributes.
 //!
+//! (A changed synonym of an existing object is written by [`set_synonyms`].)
+//!
 //! The row lists every metadata object in pre-order: `uuid, owner uuid, kind, "name", {synonyms},
 //! flag, flag`, the *kind* being the index of the object's class id in the row's own class list (the
 //! editing of the text is [`crate::mssql_config_apply::si`], measured there for forms and templates).
@@ -215,6 +217,23 @@ pub fn add_attributes(
     flush(previous, None, &mut pending)?;
     ensure!(!insertions.is_empty(), "no attribute to add");
     si::insert_records(text, &main, &insertions)
+}
+
+/// The registry text with the synonyms of existing records written anew: an object whose synonym changed
+/// takes the new text in its record (the native apply does this for a synonym-only stage; nothing else of the
+/// record moves). `changes` are `(uuid, synonyms)` with the texts as the descriptor gives them (quotes not
+/// doubled); a uuid the registry does not list is left out (not every object with a header has a record).
+/// Returns the text and how many records were rewritten.
+pub fn set_synonyms(
+    text: &[u8],
+    changes: &[(String, Vec<(String, String)>)],
+) -> Result<(Vec<u8>, usize)> {
+    let main = si::parse(text).context("the object registry does not parse")?;
+    let indexed: Vec<(usize, Vec<(String, String)>)> = changes
+        .iter()
+        .filter_map(|(uuid, pairs)| main.index_of(uuid).map(|index| (index, synonyms(pairs))))
+        .collect();
+    si::set_synonyms(text, &main, &indexed)
 }
 
 /// The names the registry knows, by uuid (lower case).

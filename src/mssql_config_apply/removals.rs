@@ -41,7 +41,7 @@ use super::versions::{deflate_row, inflate_row, parse_versions, strip_bom};
 const DESCRIPTOR_PATTERN: &str = "________-____-____-____-____________";
 /// The row of the properties the platform looks up by uuid (help references and the like).
 pub const PROPERTIES_ROW: &str = "c4629235-4823-4320-b8b5-1d08f4c6d612.si";
-const SI_VERSIONS: &str = "siVersions";
+pub(super) const SI_VERSIONS: &str = "siVersions";
 
 /// A form or a template the stage removes.
 #[derive(Debug, Clone, Serialize)]
@@ -709,14 +709,14 @@ pub struct SearchInfoRemoval {
 }
 
 /// A `Params` row as stored, with the digest the plan saw.
-struct StoredRow {
-    name: String,
-    data_size: i64,
-    sha256: String,
-    bytes: Vec<u8>,
+pub(super) struct StoredRow {
+    pub(super) name: String,
+    pub(super) data_size: i64,
+    pub(super) sha256: String,
+    pub(super) bytes: Vec<u8>,
 }
 
-fn si_rows(client: &dyn SqlClient, db: &str) -> Result<Vec<StoredRow>> {
+pub(super) fn si_rows(client: &dyn SqlClient, db: &str) -> Result<Vec<StoredRow>> {
     let mut rows = Vec::new();
     client.read_rows(
         &format!(
@@ -740,6 +740,67 @@ fn si_rows(client: &dyn SqlClient, db: &str) -> Result<Vec<StoredRow>> {
     Ok(rows)
 }
 
+/// The bytes and the digest a `Params` row starts from: the text `rewrites` produced for it, when one of them
+/// rewrites it (with the digest of the stored row the plan saw), else the stored row.
+/// (`siVersions` is stored as plain text, the `.si` rows deflated.)
+pub(super) fn base_of(
+    stored: &[StoredRow],
+    name: &str,
+    rewrites: &[ParamsRewrite],
+) -> Result<(i64, String, Vec<u8>, bool)> {
+    let raw = name == SI_VERSIONS;
+    if let Some(rewrite) = rewrites.iter().find(|rewrite| rewrite.file_name == name) {
+        let bytes = if raw {
+            rewrite.new_bytes.clone()
+        } else {
+            inflate_row(&rewrite.new_bytes)?
+        };
+        return Ok((
+            rewrite.old_data_size,
+            rewrite.old_sha256_hex.clone(),
+            bytes,
+            rewrite.set_creation,
+        ));
+    }
+    let row = stored
+        .iter()
+        .find(|row| row.name == name)
+        .ok_or_else(|| anyhow!("Params holds no row {name}"))?;
+    let bytes = if raw {
+        row.bytes.clone()
+    } else {
+        inflate_row(&row.bytes)?
+    };
+    Ok((row.data_size, row.sha256.clone(), bytes, true))
+}
+
+/// Puts a rewrite of `name` (from the plain text) in the list, in place of one that is there.
+pub(super) fn put(
+    rewrites: &mut Vec<ParamsRewrite>,
+    name: &str,
+    size: i64,
+    sha: String,
+    plain: &[u8],
+    set_creation: bool,
+) -> Result<()> {
+    let rewrite = ParamsRewrite {
+        file_name: name.to_owned(),
+        old_data_size: size,
+        old_sha256_hex: sha,
+        new_bytes: if name == SI_VERSIONS {
+            plain.to_vec()
+        } else {
+            deflate_row(plain)?
+        },
+        set_creation,
+    };
+    match rewrites.iter_mut().find(|known| known.file_name == name) {
+        Some(known) => *known = rewrite,
+        None => rewrites.push(rewrite),
+    }
+    Ok(())
+}
+
 /// The rewrites of the search information for the removals, on top of `existing` (what the new objects
 /// and a restructuring of the same stage rewrite already): the record of each object leaves the main
 /// row, its entry leaves the properties row, and each edited row gets a new version in `siVersions`.
@@ -755,59 +816,7 @@ pub fn plan_search_info(
     let stored = si_rows(client, &db)?;
     let mut rewrites = existing;
 
-    // the bytes and the digest a row starts from
-    // (`siVersions` is stored as plain text, the `.si` rows deflated)
-    let base_of =
-        |name: &str, rewrites: &[ParamsRewrite]| -> Result<(i64, String, Vec<u8>, bool)> {
-            let raw = name == SI_VERSIONS;
-            if let Some(rewrite) = rewrites.iter().find(|rewrite| rewrite.file_name == name) {
-                let bytes = if raw {
-                    rewrite.new_bytes.clone()
-                } else {
-                    inflate_row(&rewrite.new_bytes)?
-                };
-                return Ok((
-                    rewrite.old_data_size,
-                    rewrite.old_sha256_hex.clone(),
-                    bytes,
-                    rewrite.set_creation,
-                ));
-            }
-            let row = stored
-                .iter()
-                .find(|row| row.name == name)
-                .ok_or_else(|| anyhow!("Params holds no row {name}"))?;
-            let bytes = if raw {
-                row.bytes.clone()
-            } else {
-                inflate_row(&row.bytes)?
-            };
-            Ok((row.data_size, row.sha256.clone(), bytes, true))
-        };
-    let put = |rewrites: &mut Vec<ParamsRewrite>,
-               name: &str,
-               size: i64,
-               sha: String,
-               plain: &[u8],
-               set_creation: bool|
-     -> Result<()> {
-        let rewrite = ParamsRewrite {
-            file_name: name.to_owned(),
-            old_data_size: size,
-            old_sha256_hex: sha,
-            new_bytes: if name == SI_VERSIONS {
-                plain.to_vec()
-            } else {
-                deflate_row(plain)?
-            },
-            set_creation,
-        };
-        match rewrites.iter_mut().find(|known| known.file_name == name) {
-            Some(known) => *known = rewrite,
-            None => rewrites.push(rewrite),
-        }
-        Ok(())
-    };
+    let base_of = |name: &str, rewrites: &[ParamsRewrite]| base_of(&stored, name, rewrites);
     let mut summary = SearchInfoRemoval::default();
     let mut edited: Vec<String> = Vec::new();
 
