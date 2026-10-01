@@ -60,3 +60,5 @@ pub mod templates;
 pub mod trace;
 pub mod update;
 pub(crate) mod v8_container;
+
+pub mod mssql_live_continue;

@@ -27,8 +27,9 @@ pub enum MainActivationMode {
     /// Publish while sessions remain connected. Existing sessions retain their
     /// loaded generation; sessions opened afterwards use the new generation.
     Online,
-    /// Publish ordinary rows, then force a lossless SQL recovery cycle so the
-    /// already-connected 1C session reloads the new generation.
+    /// Default: legacy two-cycle SQL reconnection readiness. The explicit live
+    /// checkpoint renderer splits cycle 1/continue and accepts idle RAS sessions only.
+    /// Warm client-side code still needs restart; neither route promises zero errors.
     Live,
     /// Publish ordinary rows while sessions are connected. The caller must
     /// hand the dedicated 1C worker process off after the SQL commit.
@@ -616,6 +617,14 @@ pub fn render_main_activation_sql(
     render_main_activation_sql_with(database, plan, tail_log_output, false)
 }
 
+/// A no-op still clears ConfigSave: it shares the pending-cycle guard with default LIVE.
+/// The non-noop checkpoint instead receives the identity-pinned phase-1 wrapper.
+pub fn protect_live_script(database: &str, checkpoint: bool, script: &mut MainActivationScript) {
+    if script.report.mode == MainActivationMode::Live && (!checkpoint || script.report.no_op) {
+        script.sql = crate::mssql_live_continue::guard_pending_live(database, &script.sql);
+    }
+}
+
 /// The script of a mode. `interrupt_sessions` is the operator's acceptance that the live switch rolls back the open work of the
 /// sessions of the database (`--interrupt-sessions`, live only; #409 F-10): without it the script refuses to start, and rolls the
 /// promotion back if such work appears before its `COMMIT`.
@@ -624,6 +633,38 @@ pub fn render_main_activation_sql_with(
     plan: &MainActivationPlan,
     tail_log_output: Option<&str>,
     interrupt_sessions: bool,
+) -> Result<MainActivationScript, MainActivationError> {
+    render_main_activation_sql_internal(database, plan, tail_log_output, interrupt_sessions, false)
+}
+
+pub fn render_main_activation_checkpoint(
+    database: &str,
+    plan: &MainActivationPlan,
+    tail_log_output: Option<&str>,
+    interrupt_sessions: bool,
+) -> Result<MainActivationScript, MainActivationError> {
+    if plan.mode != MainActivationMode::Live {
+        return Err(MainActivationError::SafetyGate(
+            "live checkpoint requires live mode".to_owned(),
+        ));
+    }
+    let mut script = render_main_activation_sql_internal(
+        database,
+        plan,
+        tail_log_output,
+        interrupt_sessions,
+        true,
+    )?;
+    script.report.live_session_switch_expected = false;
+    Ok(script)
+}
+
+fn render_main_activation_sql_internal(
+    database: &str,
+    plan: &MainActivationPlan,
+    tail_log_output: Option<&str>,
+    interrupt_sessions: bool,
+    checkpoint: bool,
 ) -> Result<MainActivationScript, MainActivationError> {
     if plan.is_carried_out_by_config_apply() {
         return Err(MainActivationError::SafetyGate(
@@ -754,7 +795,17 @@ pub fn render_main_activation_sql_with(
     writeln!(sql, "COMMIT TRANSACTION;").unwrap();
     render_catch(&mut sql, None);
     if let Some(tail) = live_tail.as_deref() {
-        render_live_recovery(&mut sql, &database, &database_literal, tail);
+        if checkpoint {
+            render_live_recovery(
+                &mut sql,
+                &database,
+                &database_literal,
+                tail,
+                &plan.dry_run_report().recovery_token,
+            );
+        } else {
+            render_legacy_live_recovery(&mut sql, &database, &database_literal, tail);
+        }
     }
 
     if sql.len() > MAX_PLAN_BYTES {
@@ -984,6 +1035,36 @@ fn render_catch(sql: &mut String, live_database: Option<(&str, &str)>) {
 }
 
 fn render_live_recovery(
+    sql: &mut String,
+    database: &str,
+    database_literal: &str,
+    tail_log_output: &str,
+    recovery_token: &str,
+) {
+    let tail = quote_string(tail_log_output);
+    let backup_name = format!("ibcmd-rs:live:{recovery_token}:1");
+    writeln!(sql, "CHECKPOINT;").unwrap();
+    writeln!(sql, "USE [master];").unwrap();
+    writeln!(sql, "BEGIN TRY").unwrap();
+    writeln!(sql, "DECLARE @LiveFirstAccessChanged bit=0;").unwrap();
+    // Promotion and cycle 1 commit independently. The guarded continuation owns cycle 2.
+    writeln!(sql, "ALTER DATABASE {database} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; SET @LiveFirstAccessChanged=1;").unwrap();
+    writeln!(sql, "BACKUP LOG {database} TO DISK=N'{tail}' WITH NORECOVERY, INIT, COMPRESSION, CHECKSUM, NAME=N'{backup_name}';").unwrap();
+    writeln!(sql, "RESTORE DATABASE {database} WITH RECOVERY;").unwrap();
+    writeln!(
+        sql,
+        "ALTER DATABASE {database} SET MULTI_USER; SET @LiveFirstAccessChanged=0;"
+    )
+    .unwrap();
+    writeln!(sql, "END TRY").unwrap();
+    writeln!(sql, "BEGIN CATCH").unwrap();
+    writeln!(sql, "IF @LiveFirstAccessChanged=1 AND DB_ID(N'{database_literal}') IS NOT NULL AND DATABASEPROPERTYEX(N'{database_literal}','Status') <> N'RESTORING' ALTER DATABASE {database} SET MULTI_USER;").unwrap();
+    writeln!(sql, "IF DB_ID(N'{database_literal}') IS NOT NULL AND DATABASEPROPERTYEX(N'{database_literal}','Status') = N'RESTORING' BEGIN DECLARE @LiveRecoveryMessage nvarchar(2048)=N'live activation left database restoring; run RESTORE DATABASE {database} WITH RECOVERY; original error: '+ERROR_MESSAGE(); THROW 57250,@LiveRecoveryMessage,1; END;").unwrap();
+    writeln!(sql, "THROW;").unwrap();
+    writeln!(sql, "END CATCH;").unwrap();
+}
+
+fn render_legacy_live_recovery(
     sql: &mut String,
     database: &str,
     database_literal: &str,
@@ -1645,11 +1726,55 @@ mod tests {
     }
 
     #[test]
+    fn live_noop_stage_cleanup_is_inside_the_master_pending_guard() {
+        let base = fixture(MainActivationMode::Live);
+        let noop = prepare_main_activation(
+            MainActivationMode::Live,
+            base.active_rows.clone(),
+            MainActivationSnapshot {
+                config_rows: base.active_rows.clone(),
+                config_dynamically_updated: None,
+                params_dynamically_updated: None,
+            },
+            &[BODY.to_owned(), format!("{BODY}.0")],
+            true,
+        )
+        .unwrap();
+        assert!(noop.is_no_op());
+        for checkpoint in [false, true] {
+            let mut script = render_main_activation_sql("lab", &noop, None).unwrap();
+            protect_live_script("lab", checkpoint, &mut script);
+            let delete = script.sql.find("DELETE FROM dbo.ConfigSave").unwrap();
+            assert!(script.sql.find("sp_getapplock").unwrap() < delete);
+            assert!(script.sql.find("THROW 57269").unwrap() < delete);
+            assert!(delete < script.sql.find("sp_releaseapplock").unwrap());
+            assert!(!script.sql.contains("BACKUP LOG"));
+        }
+    }
+
+    #[test]
+    fn default_live_keeps_the_legacy_two_cycle_sql_readiness_contract() {
+        let sql = render_main_activation_sql(
+            "lab",
+            &fixture(MainActivationMode::Live),
+            Some(r"F:\tail.trn"),
+        )
+        .unwrap()
+        .sql;
+        assert_eq!(sql.matches("BACKUP LOG [lab]").count(), 2);
+        assert!(sql.contains("THROW 57234"));
+        assert!(sql.contains("@LiveExpected1cConnections"));
+        assert!(sql.contains("NORECOVERY, NOINIT"));
+        assert!(!sql.contains("ibcmd-rs:live:"));
+    }
+
+    #[test]
     fn live_promotes_ordinary_rows_then_runs_guarded_tail_recovery() {
-        let script = render_main_activation_sql(
+        let script = render_main_activation_checkpoint(
             "lab]db",
             &fixture(MainActivationMode::Live),
             Some(r"C:\tail's\generation.trn"),
+            false,
         )
         .unwrap();
         let promotion = script
@@ -1671,34 +1796,21 @@ mod tests {
             .match_indices("RESTORE DATABASE [lab]]db] WITH RECOVERY")
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        assert_eq!(single_users.len(), 2);
-        assert_eq!(backups.len(), 2);
-        assert_eq!(recoveries.len(), 3);
+        assert_eq!(single_users.len(), 1);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(recoveries.len(), 2);
         assert!(promotion < single_users[0]);
         assert!(single_users[0] < backups[0] && backups[0] < recoveries[0]);
-        assert!(recoveries[0] < single_users[1]);
-        assert!(single_users[1] < backups[1] && backups[1] < recoveries[1]);
-        assert!(script.sql.contains("program_name=N'1CV83 Server'"));
-        assert!(script.sql.contains("DATEADD(millisecond,4000"));
-        assert!(script.sql.contains("WAITFOR DELAY '00:00:00.100'"));
-        assert!(
-            script
-                .sql
-                .contains("did not recover before the live activation deadline")
-        );
-        assert!(!script.sql.contains("WAITFOR DELAY '00:00:05'"));
+        assert!(!script.sql.contains("@LiveExpected1cConnections"));
+        assert!(!script.sql.contains("57234"));
+        assert!(!script.sql.contains("NOINIT"));
         assert!(script.sql.contains("sys.dm_os_file_exists"));
         assert!(script.sql.contains("file_is_a_directory=1"));
         assert!(script.sql.contains("C:\\tail''s\\generation.trn"));
         assert!(
             script
                 .sql
-                .contains("WITH NORECOVERY, INIT, COMPRESSION, CHECKSUM")
-        );
-        assert!(
-            script
-                .sql
-                .contains("WITH NORECOVERY, NOINIT, COMPRESSION, CHECKSUM")
+                .contains("WITH NORECOVERY, INIT, COMPRESSION, CHECKSUM, NAME=")
         );
         for (index, _) in script.sql.match_indices("BACKUP LOG") {
             let statement = &script.sql[index..index + script.sql[index..].find(';').unwrap()];
@@ -1713,7 +1825,7 @@ mod tests {
                 .sql
                 .contains("live activation left database restoring")
         );
-        assert!(script.report.live_session_switch_expected);
+        assert!(!script.report.live_session_switch_expected);
         assert!(script.report.requires_tail_log_artifact);
         assert!(!script.report.existing_sessions_retain_generation);
         assert_eq!(

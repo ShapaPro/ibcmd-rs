@@ -15,6 +15,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::adapters::mssql_legacy::LEGACY_MSSQL_STORAGE_PROFILE_ID;
 use crate::cli::{
@@ -354,6 +355,8 @@ pub struct MssqlActivateStagedMainReport {
     pub recovery: PathBuf,
     pub tail_log_output: Option<PathBuf>,
     pub live_recovery_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_continuation: Option<crate::mssql_live_continue::LiveContinueReport>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
     /// What the live gate found before the promotion (#409 F-9, F-10): the log backup chain, the tail directory, the sessions whose
     /// work the switch interrupts. Only for the `live` mode on the built-in SQL client.
@@ -951,9 +954,20 @@ pub fn diff_activation_snapshots(
 pub fn activate_staged_main(
     args: &MssqlActivateStagedMainArgs,
 ) -> Result<MssqlActivateStagedMainReport> {
+    if args.live_checkpoint && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
+        bail!("--live-checkpoint requires --mode live");
+    }
+
     // The declared policy is checked before any external process starts, so an
     // unsupported build never reaches rac, sqlcmd, or the source tree.
     args.platform_profile.require_main_write_supported()?;
+    if args.live_checkpoint
+        && args.platform_profile
+            != crate::mssql_platform_profile::MssqlNativePlatformProfile::Platform8_3_27_2214
+    {
+        bail!("live continuation checkpoint is measured on platform-8.3.27.2214 only");
+    }
+
     if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
         bail!("--interrupt-sessions is only valid for live activation");
     }
@@ -992,6 +1006,9 @@ pub fn activate_staged_main(
         password.as_deref(),
         &args.sql_pwd_env,
     )?;
+    if args.live_checkpoint {
+        crate::mssql_live_continue::preflight_backend(&sql, &args.database)?;
+    }
     let inputs = read_activation_inputs(&sql, &args.database)?;
     if inputs.staged.is_empty() {
         bail!("ConfigSave is empty; there is no staged main-configuration change");
@@ -1080,13 +1097,23 @@ pub fn activate_staged_main(
         )?,
         _ => None,
     };
-    let rendered = render_main_activation_sql_with(
+    let renderer = if args.live_checkpoint {
+        crate::mssql_main_activation::render_main_activation_checkpoint
+    } else {
+        render_main_activation_sql_with
+    };
+    let mut rendered = renderer(
         &args.database,
         &plan,
         tail_log_output,
         args.interrupt_sessions,
     )
     .map_err(anyhow::Error::new)?;
+    crate::mssql_main_activation::protect_live_script(
+        &args.database,
+        args.live_checkpoint,
+        &mut rendered,
+    );
     let worker_options =
         if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !plan.is_no_op() {
             Some(crate::mssql_worker_switch::WorkerSwitchOptions {
@@ -1118,17 +1145,90 @@ pub fn activate_staged_main(
             token
         ))
     });
-    write_new_or_identical(&script, rendered.sql.as_bytes())?;
     let recovery_json = serde_json::to_vec_pretty(&rendered.recovery)?;
     write_new_or_identical(&recovery, &recovery_json)?;
 
+    let live_artifact_path = recovery.with_extension("live.json");
+    let live_artifact = if args.live_checkpoint && !plan.is_no_op() {
+        let SqlBackend::Client(client) = sql.backend() else {
+            bail!("live phase splitting requires the built-in SQL client; --sqlcmd is refused");
+        };
+        let identity = crate::mssql_live_continue::identity(client, &args.database)?;
+        let artifact = crate::mssql_live_continue::LiveArtifact {
+            format: 1,
+            sql_engine_version: crate::mssql_live_continue::LIVE_SQL_VERSION.to_owned(),
+            verified_platform_profile: profile_verification.verified_platform_profile.clone(),
+            storage_schema_sha256: profile_verification.storage_schema_sha256.clone(),
+            operation: uuid::Uuid::from_slice(
+                &sha2::Sha256::digest(rendered.report.recovery_token.as_bytes())[..16],
+            )?
+            .to_string(),
+            identity,
+            tail: tail_log_output.unwrap().to_owned(),
+            recovery_token: rendered.report.recovery_token.clone(),
+            cluster_id: profile_verification.verified_cluster_id.to_string(),
+            infobase_id: profile_verification.verified_infobase_id.to_string(),
+            recovery: rendered.recovery.clone(),
+        };
+        artifact.validate()?;
+        let artifact_bytes = crate::mssql_live_continue::serialize_artifact(&artifact)?;
+        write_new_or_identical(&live_artifact_path, &artifact_bytes)?;
+        let resource = format!(
+            "ibcmd-rs:live:{}",
+            uuid::Uuid::parse_str(&artifact.identity.database_guid)?
+        );
+        rendered.sql = format!(
+            "USE [master]; IF CONVERT(nvarchar(128),SERVERPROPERTY('ProductVersion'))<>N'17.0.1135.8' THROW 57261,'live continuation is measured on SQL Server 17.0.1135.8 only',1; DECLARE @LivePhaseLock int; EXEC @LivePhaseLock=sys.sp_getapplock @Resource=N'{resource}',@LockMode='Exclusive',@LockOwner='Session',@LockTimeout=0; IF @LivePhaseLock<0 THROW 57260,'live switch is already running',1; BEGIN TRY\n{}\nUSE [master]; EXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session'; END TRY BEGIN CATCH USE [master]; EXEC sys.sp_releaseapplock @Resource=N'{resource}',@LockOwner='Session'; THROW; END CATCH;",
+            rendered.sql
+        );
+        let pending = crate::mssql_live_continue::pending_operation_query(&args.database);
+        let guarded = format!(
+            "IF NOT EXISTS(SELECT 1 FROM sys.databases d JOIN sys.database_recovery_status r ON r.database_id=d.database_id WHERE d.name=N'{}' AND d.state_desc=N'ONLINE' AND d.user_access_desc=N'MULTI_USER' AND r.database_guid='{}' AND r.family_guid='{}' AND r.recovery_fork_guid='{}') THROW 57262,'live phase 1 database identity changed',1; IF EXISTS({pending}) THROW 57269,'an earlier live cycle 1 is unfinished; continue it before another activation',1;",
+            args.database.replace('\'', "''"),
+            artifact.identity.database_guid,
+            artifact.identity.family_guid,
+            artifact.identity.recovery_fork
+        );
+        rendered.sql = rendered
+            .sql
+            .replacen("BEGIN TRY\n", &format!("BEGIN TRY\n{guarded}\n"), 1);
+        // The retained script is the one actually run, including the operation lock.
+
+        Some(artifact)
+    } else {
+        None
+    };
+    write_new_or_identical(&script, rendered.sql.as_bytes())?;
+    let mut live_continuation = None;
     let mut worker_switch = None;
     if !args.dry_run {
         let worker_plan = worker_options
             .as_ref()
             .map(crate::mssql_worker_switch::prepare_dedicated_worker)
             .transpose()?;
-        run_sql_file(&sql, &script)?;
+        run_sql_file(&sql, &script).with_context(|| if live_artifact.is_some() { format!("promotion/cycle 1 may have committed; retained recovery {} and live continuation {} must be inspected before retry",recovery.display(),live_artifact_path.display()) } else {format!("activation outcome must be inspected using retained recovery {} before retry",recovery.display())})?;
+        if let Some(artifact) = &live_artifact {
+            let SqlBackend::Client(client) = sql.backend() else {
+                unreachable!()
+            };
+            live_continuation = Some(
+                match crate::mssql_live_continue::finish(
+                    client,
+                    artifact,
+                    &live_artifact_path,
+                    &args.rac,
+                    &args.ras_endpoint,
+                    args.infobase_user.as_deref(),
+                    args.infobase_pwd.as_deref(),
+                    args.interrupt_sessions,
+                ) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        crate::mssql_live_continue::unresolved(&live_artifact_path, &error)
+                    }
+                },
+            );
+        }
         if let (Some(options), Some(plan)) = (worker_options.as_ref(), worker_plan.as_ref()) {
             worker_switch = Some(crate::mssql_worker_switch::switch_dedicated_worker(
                 options, plan,
@@ -1164,6 +1264,7 @@ pub fn activate_staged_main(
         } else {
             None
         },
+        live_continuation,
         worker_switch,
         config_apply: None,
         live_gate,
@@ -1281,6 +1382,7 @@ fn activate_by_config_apply(
         recovery,
         tail_log_output: None,
         live_recovery_command: None,
+        live_continuation: None,
         worker_switch: None,
         config_apply: Some(applied),
         live_gate: None,
@@ -9058,7 +9160,7 @@ fn build_stage_source_objects_sql(
         expected_total_rows = expected_total_rows,
     ));
 
-    sql
+    crate::mssql_live_continue::guard_pending_live(database, &sql)
 }
 
 /// One staged row on the bulk path: its Config file name, whether the target
@@ -9226,7 +9328,7 @@ fn build_bulk_stage_apply_sql(
     expected_total_rows: usize,
 ) -> String {
     let stage = format!("tempdb.dbo.{}", quote_ident(table));
-    format!(
+    let sql = format!(
         "SET NOCOUNT ON;\n\
          SET XACT_ABORT ON;\n\
          USE {db};\n\
@@ -9253,7 +9355,8 @@ fn build_bulk_stage_apply_sql(
          COMMIT;\n\
          DROP TABLE {stage};\n",
         db = quote_ident(database),
-    )
+    );
+    crate::mssql_live_continue::guard_pending_live(database, &sql)
 }
 
 fn bulk_stage_paths(base: Option<&PathBuf>, database: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -10138,6 +10241,7 @@ mod tests {
     #[test]
     fn runtime_profile_verification_fails_before_main_stage_read() {
         let args = MssqlActivateStagedMainArgs {
+            live_checkpoint: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
             sqlcmd_trust_cert: false,
             sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
@@ -11236,10 +11340,12 @@ mod tests {
         assert!(sql.contains("ISNULL(c.Attributes, 0)"));
         assert!(sql.contains("s.Kind = 1 AND NOT EXISTS"));
         assert!(sql.contains("FROM dbo.ConfigSave) <> 12"));
-        assert!(
-            sql.trim_end()
-                .ends_with("DROP TABLE tempdb.dbo.[ibcmd_rs_stage_Db_1];")
-        );
+        let drop = sql
+            .find("DROP TABLE tempdb.dbo.[ibcmd_rs_stage_Db_1];")
+            .unwrap();
+        assert!(sql.find("COMMIT;").unwrap() < drop);
+        assert!(drop < sql.find("sp_releaseapplock").unwrap());
+        assert!(sql.find("THROW 57269").unwrap() < sql.find("DELETE FROM dbo.ConfigSave").unwrap());
     }
 
     #[test]

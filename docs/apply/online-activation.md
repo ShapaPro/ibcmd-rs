@@ -661,6 +661,28 @@ probe hint), `mssql_main_activation` (the gate before the transaction, the check
 
 **Not fixed here (F-5, next).** On the worker lab cluster the switch ends at the readiness gate (`57234`) even with no user session and no load, in the old tool and in the new one (the `clean` case of both logs; also `sessions` and `accepted`): the gate expects back the `1CV83 Server` connections it counted before cycle 1, that includes the idle ones the working process holds for the infobase (opened by the tool's own RAS verification, F-3), and an idle process does not reconnect without a call. Section 4.3 measured the same abort under load; F-5 gets its own section.
 
+### 6.8 Experimental 0.5 checkpoint (#409 F-5): explicit staged activation and continuation
+
+The existing `--mode live` default keeps its legacy two-cycle SQL reconnection wait, including error `57234`. The new split route is **opt-in**: `mssql-activate-staged-main --mode live --live-checkpoint`. It requires the built-in SQL client, SQL Server build `17.0.1135.8` (the locally measured 59-column `RESTORE HEADERONLY` layout), and verified platform `8.3.27.2214`. These restrictions are checked before promotion/cycle 1. `mssql-apply-source-change` and its watch route refuse `--live-checkpoint` before processes, export, compilation or staging; a pinned source-to-promotion executor has not been implemented.
+
+The serialized manifest must fit the same 64 MiB bound used by standalone continuation; an oversized pretty-JSON snapshot refuses before promotion/cycle 1. The opt-in route saves its ordinary recovery snapshot plus `<recovery-stem>.live.json` **before** SQL execution. The manifest binds the SQL server, database GUID, family and recovery fork, exact SQL engine build, original verified RAS cluster/infobase, supported platform profile and storage fingerprint, tail-log path, staged row hashes, generation snapshot and SHA-256 recovery token. Promotion and cycle 1 run under a session-owned exclusive application lock in `master`, shared with continuation. Both log sets carry token-bound cycle names. The ordinary F-9/F-10 and marker/alias refusals still apply.
+
+Readiness currently accepts only an **empty RAS user-session inventory**. The current RAS agent build must still be exactly `8.3.27.2214`, the storage profile must match the saved fingerprint, and the original MSSQL registration is rechecked against the recorded SQL database before inventory and twice before attempting cycle 2; each RAS call has a five-second deadline. Idle SQL handles of the cluster are not users and do not drive this decision. Any user session, ambiguous output, wrong binding or timeout leaves cycle 1 retained and reports `continuation_required`. The SQL active-work check repeats under the master lock immediately before the second interruption; refusal correctly says the committed promotion/cycle 1 is retained. Active/warm cohort readiness remains unimplemented: this is not an acceptance of F-5 under load.
+
+After ending the owned user sessions, resume with the saved manifest:
+
+```powershell
+ibcmd-rs mssql-live-continue --artifact F:\lab\recovery.live.json `
+  --server localhost --database <same-database> --allow-non-lab `
+  --rac '<same-build-rac>' --ras-endpoint <verified-endpoint>
+```
+
+Continuation validates identity, clean `ConfigSave`, unchanged published staged bytes and marker-free storage. Under the same lock, `RESTORE HEADERONLY ... WITH CHECKSUM` must show exactly one owned cycle-1 log set, with valid checksums, GUIDs, fork, completion and LSNs, before an append. An intervening log backup refuses append. Exactly two sets are accepted only when both token-bound names and their contiguous backup chain match; this is a validated `already_complete` result and executes no third cycle. Missing, foreign, malformed, unsupported or ambiguous state refuses. A preflight refusal does not change database access mode; cleanup changes it only after this command's own transition. After append the final header/state validation repeats. A transport or verification failure reports completion as uncertain (`cycle_2_executed: null`), never falsely as `false`; inspect the retained files before retry.
+
+A named unfinished checkpoint also blocks default LIVE activation and the source-tree bulk/per-row mutation scripts **under that lock, before target writes**. The pending-history guard looks for the matching named cycle 2, so an unrelated later log backup does not hide cycle 1. This protects these wrapped paths, not every storage-import, standalone stage or administrative command. Preserve SQL backup history and the retained manifest/tail; arbitrary writes, restore, backup-history deletion or other tools invalidate the checkpoint's assumptions. The application lock coordinates this tool's covered paths and cannot prevent an administrator from acting outside them.
+
+The restored research kit is in `scripts/apply-lab/live`; new output defaults to `F:\ibcmd\lab\05\wave1\live`. Read [checkpoint evidence and remaining work](evidence/live-gate/checkpoint-2026-10-01.md) and [historical F-5 measurements](evidence/live-gate/f5-findings-2026-09-30.md). The historical measurements establish **client=old/server=new** after cycle 2 until client restart; neither route promises client-code refresh or zero database dialogs. L2 is partial, L5 remains unmeasured, and #409 remains open.
+
 ## 7. Recovery
 
 **ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from
@@ -676,9 +698,7 @@ Run `mssql-activate-staged-main` with the same mode (for exclusive see F-3), or 
 staging replaces `ConfigSave`).
 
 **LIVE after `57234`** (database `ONLINE`, promotion committed, tail file holds cycle 1): the sessions are in a mixed
-state until every old session ends, or until the second cycle is run by hand, from `master`, the statements of
-`live/manual-second-cycle.sql` (same tail file, `NOINIT`); it can fail with `924` (repeat) and shows the sessions a
-DB error dialog. **After `57250`** (database `RESTORING`): `RESTORE DATABASE [<db>] WITH RECOVERY;`. The `.trn` is part of the
+state until every old session ends. The historical manual second-cycle experiment can show a database dialog; blindly repeating it caused an unknown cluster/COM hang. Legacy artifacts lack the new token-bound manifest and are not automatically resumable by section 6.8. Inspect the retained state before any manual recovery. **After `57250`** (database `RESTORING`): `RESTORE DATABASE [<db>] WITH RECOVERY;`. The `.trn` is part of the
 log chain: keep it (62 MB for the first cycle after a full backup in the measured runs, 3-6 MB for later ones).
 
 **Split or stale generations after any aborted live/worker:** end all sessions of the infobase (a fresh session then sees

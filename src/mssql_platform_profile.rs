@@ -195,7 +195,7 @@ fn read_rac_agent_build(rac: &Path, ras_endpoint: &str) -> Result<String> {
     parse_rac_agent_build(&output.stdout)
 }
 
-fn parse_rac_agent_build(output: &str) -> Result<String> {
+pub(crate) fn parse_rac_agent_build(output: &str) -> Result<String> {
     let builds = output
         .split(|character: char| !(character.is_ascii_digit() || character == '.'))
         .filter(|token| {
@@ -697,7 +697,20 @@ fn bounded_output(command: &mut Command) -> Result<BoundedOutput> {
     let stderr = child.stderr.take().expect("piped stderr is present");
     let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
     let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
-    let status = child.wait()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            bail!("native profile/RAS probe exceeded its 20-second deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     let stdout = stdout_reader
         .join()
         .map_err(|_| anyhow!("stdout reader panicked"))??;

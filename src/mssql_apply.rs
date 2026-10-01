@@ -61,6 +61,12 @@ pub struct MssqlApplySourceChangeTimings {
 pub fn apply_source_change(
     args: &MssqlApplySourceChangeArgs,
 ) -> Result<MssqlApplySourceChangeReport> {
+    if args.live_checkpoint {
+        bail!(
+            "--live-checkpoint is only supported by mssql-activate-staged-main; concurrent source staging is not established, so source apply refused before staging"
+        );
+    }
+
     let total_started = Instant::now();
     // Declared policy first: an unsupported build must not reach rac, sqlcmd or
     // the source tree.
@@ -75,6 +81,12 @@ pub fn apply_source_change(
             args.interrupt_sessions,
         )
         .map_err(anyhow::Error::new)?;
+    }
+    if args.live_checkpoint
+        && args.platform_profile
+            != crate::mssql_platform_profile::MssqlNativePlatformProfile::Platform8_3_27_2214
+    {
+        bail!("live continuation checkpoint is measured on platform-8.3.27.2214 only");
     }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
@@ -437,6 +449,7 @@ pub fn apply_source_change(
     } else {
         Some(serde_json::to_value(crate::mssql::activate_staged_main(
             &MssqlActivateStagedMainArgs {
+                live_checkpoint: false,
                 platform_profile: args.platform_profile,
                 sqlcmd_trust_cert: args.sqlcmd_trust_cert,
                 sqlcmd: args.sqlcmd.clone(),
@@ -545,6 +558,12 @@ pub fn apply_source_change(
 }
 
 pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
+    if args.live_checkpoint {
+        bail!(
+            "--live-checkpoint is only supported by mssql-activate-staged-main; source watch refused before staging"
+        );
+    }
+
     args.platform_profile.require_main_write_supported()?;
     require_supported_main_source_cohort(args)?;
     crate::mssql_platform_profile::verify_mssql_native_profile(
@@ -1449,6 +1468,7 @@ mod tests {
     #[test]
     fn runtime_profile_verification_fails_before_active_export() {
         let args = MssqlApplySourceChangeArgs {
+            live_checkpoint: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
             sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
             bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
@@ -1484,7 +1504,26 @@ mod tests {
         // the source tree are touched.
         assert!(error.to_string().contains("explicitly unsupported"));
 
+        let checkpoint = MssqlApplySourceChangeArgs {
+            live_checkpoint: true,
+            mode: MssqlMainActivationModeArg::Live,
+            ..args.clone()
+        };
+        assert!(
+            apply_source_change(&checkpoint)
+                .unwrap_err()
+                .to_string()
+                .contains("refused before staging")
+        );
+        assert!(
+            watch_source_changes(&checkpoint)
+                .unwrap_err()
+                .to_string()
+                .contains("refused before staging")
+        );
+
         let evidenced = MssqlApplySourceChangeArgs {
+            live_checkpoint: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_3_27_2214,
             ..args
         };
@@ -1496,6 +1535,7 @@ mod tests {
     #[test]
     fn runtime_profile_verification_fails_before_watch_reads_missing_source() {
         let args = MssqlApplySourceChangeArgs {
+            live_checkpoint: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
             sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),
             bcp_executable: Some(PathBuf::from("must-not-run-bcp")),
@@ -1530,6 +1570,7 @@ mod tests {
         assert!(error.to_string().contains("explicitly unsupported"));
 
         let evidenced = MssqlApplySourceChangeArgs {
+            live_checkpoint: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_3_27_2214,
             ..args
         };
