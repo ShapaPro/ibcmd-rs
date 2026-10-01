@@ -24,7 +24,10 @@ param(
     [string]$Cases = 'F:\ibcmd\lab\04\restructure-check\dn',
     [string]$Tag = '',
     # The twins of an earlier run (the platform's applied, ours staged and not applied): only our apply and the checks run.
-    [switch]$ReuseTwins
+    [switch]$ReuseTwins,
+    # An applied native twin of an earlier run of the same case, and its export folder: only our twin is made.
+    [string]$NativeTwin = '',
+    [string]$NativeExport = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -33,7 +36,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\native.ps1"
 $lab = $script:Lab
 if (-not $Tag) { $Tag = "dn$Case" }
-$nat = "ibcmd_rs_04_import_${Tag}_nat"
+$nat = if ($NativeTwin) { $NativeTwin } else { "ibcmd_rs_04_import_${Tag}_nat" }
 $own = "ibcmd_rs_04_import_${Tag}_own"
 Assert-LabDb $nat; Assert-LabDb $own
 $outDir = "$lab\out\s1"
@@ -72,10 +75,11 @@ if ($notBase.Count) { Log "WARNING: the case's `before` differs from the lab bas
 
 # 2. the native twin
 if (-not $ReuseTwins) {
-foreach ($db in $nat, $own) {
+foreach ($db in $(if ($NativeTwin) { @($own) } else { @($nat, $own) })) {
     Log "restore $db"
     pwsh -NoProfile -File F:\ibcmd\lab\04\tools\restore-clone.ps1 -Corpus bsp8327 -Name $db -Track import -Purpose "S1 case ${Case}: $(if ($db -eq $nat) { 'the platform twin' } else { 'our import and the drop-in apply' })" | Select-Object -Last 1
 }
+if (-not $NativeTwin) {
 Log 'native import files --partial'
 $ni = Invoke-NativeImportFiles -Db $nat -BaseDir $stageDir -Files $files -Tag "$Tag-nat"
 $report.native_import = $ni
@@ -86,6 +90,7 @@ $na = Invoke-NativeApply -Db $nat -Dynamic disable -Tag "$Tag-nat"
 $report.native_apply = $na
 "native apply: exit=$($na.Exit) $($na.Seconds)s"
 if ($na.Exit -ne 0) { Save; exit 2 }
+}
 }
 
 # 3. the own twin
@@ -129,14 +134,16 @@ $noop = Get-Content "$lab\logs\native-apply-$Tag-own-noop.out.txt", "$lab\logs\n
 $report.check7 = [ordered]@{ exit = $n7.Exit; seconds = $n7.Seconds; not_required = [bool]($noop | Select-String 'не требуется'); tail = $n7.Tail }
 "check 7: exit=$($n7.Exit) not required: $($report.check7.not_required)"
 Log 'check 8: native exports and source-diff'
+$natExport = if ($NativeExport) { $NativeExport } else { "$lab\out\export\${Tag}_nat" }
 foreach ($side in 'nat', 'own') {
+    if ($side -eq 'nat' -and $NativeExport) { continue }
     $out = "$lab\out\export\${Tag}_$side"
     if (Test-Path $out) { throw "$out exists" }
     $e = Invoke-NativeExport -Db $(if ($side -eq 'nat') { $nat } else { $own }) -OutDir $out -Tag "$Tag-$side"
     $report["export_$side"] = $e
     "export $side`: exit=$($e.Exit) $($e.Seconds)s"
 }
-foreach ($pair in @(@('nat_vs_own', "$lab\out\export\${Tag}_nat", "$lab\out\export\${Tag}_own"), @('tree_vs_own', $tree, "$lab\out\export\${Tag}_own"))) {
+foreach ($pair in @(@('nat_vs_own', $natExport, "$lab\out\export\${Tag}_own"), @('tree_vs_own', $tree, "$lab\out\export\${Tag}_own"))) {
     $diff = "$lab\out\export\${Tag}_$($pair[0]).diff.json"
     & $Exe source-diff -o $diff $pair[1] $pair[2] 2>&1 | Out-Null
     $d = Get-Content $diff -Raw | ConvertFrom-Json

@@ -81,7 +81,7 @@ use crate::module_blob::{HtmlPageOwner, html_page_storage_bytes};
 use crate::mssql_main_activation::{
     MainActivationDryRunReport, MainActivationExecutor, MainActivationMode, MainActivationPlan,
     MainActivationSnapshot as MainPublicationSnapshot, MainStorageRow, prepare_main_activation_for,
-    render_main_activation_sql,
+    render_main_activation_sql_with,
 };
 use crate::parallel;
 use crate::source::{scan_sources, scan_sources_with_prefixes};
@@ -91,6 +91,7 @@ use crate::source_audit::{
 use crate::source_listing;
 use crate::sql::{ScriptVariables, SqlBackend, SqlExec, SqlOptions, SqlParam, SqlTools};
 
+mod delta_stage;
 mod empty_stage;
 mod offline_compile;
 mod override_stage;
@@ -354,6 +355,10 @@ pub struct MssqlActivateStagedMainReport {
     pub tail_log_output: Option<PathBuf>,
     pub live_recovery_command: Option<String>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
+    /// What the live gate found before the promotion (#409 F-9, F-10): the log backup chain, the tail directory, the sessions whose
+    /// work the switch interrupts. Only for the `live` mode on the built-in SQL client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<crate::mssql_live_gate::LiveGateReport>,
     /// The report of the own apply (`mssql_config_apply`) that carried the promotion out: the `exclusive` mode of
     /// the built-in SQL client (#408 step 2). Absent when the transaction of this module did.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -629,11 +634,19 @@ impl PreparedCommonModuleObjectStage {
     /// The Config rows this module stages: its metadata row, and its body row
     /// when it has one.
     fn row_count(&self) -> usize {
-        1 + usize::from(self.has_module_body)
+        usize::from(self.stages_metadata_row()) + usize::from(self.has_module_body)
+    }
+
+    /// False when the target's own metadata row stays (#395): the blob is empty.
+    fn stages_metadata_row(&self) -> bool {
+        !self.metadata_blob.is_empty()
     }
 
     fn row_ids(&self) -> Vec<String> {
-        let mut ids = vec![self.module_id.clone()];
+        let mut ids = Vec::new();
+        if self.stages_metadata_row() {
+            ids.push(self.module_id.clone());
+        }
         if self.has_module_body {
             ids.push(self.module_body_id.clone());
         }
@@ -941,6 +954,9 @@ pub fn activate_staged_main(
     // The declared policy is checked before any external process starts, so an
     // unsupported build never reaches rac, sqlcmd, or the source tree.
     args.platform_profile.require_main_write_supported()?;
+    if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
+        bail!("--interrupt-sessions is only valid for live activation");
+    }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
@@ -1072,8 +1088,30 @@ pub fn activate_staged_main(
                 .ok_or_else(|| anyhow!("--tail-log-output is not valid Unicode"))
         })
         .transpose()?;
-    let rendered = render_main_activation_sql(&args.database, &plan, tail_log_output)
-        .map_err(anyhow::Error::new)?;
+    // The gate of the live switch (#409 F-9, F-10) asked here as well, so that a refusal names the sessions and the reason; the
+    // script has the same gate at its head, and that one is the last word (also on the `--sqlcmd` route, which cannot ask). The
+    // probe backup is left to the script's own gate.
+    let live_gate = match (
+        matches!(args.mode, MssqlMainActivationModeArg::Live),
+        plan.is_no_op(),
+        tail_log_output,
+    ) {
+        (true, false, Some(tail)) => crate::mssql_live_gate::preflight_live(
+            &sql,
+            &args.database,
+            tail,
+            args.interrupt_sessions,
+            false,
+        )?,
+        _ => None,
+    };
+    let rendered = render_main_activation_sql_with(
+        &args.database,
+        &plan,
+        tail_log_output,
+        args.interrupt_sessions,
+    )
+    .map_err(anyhow::Error::new)?;
     let worker_options =
         if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !plan.is_no_op() {
             Some(crate::mssql_worker_switch::WorkerSwitchOptions {
@@ -1153,6 +1191,7 @@ pub fn activate_staged_main(
         },
         worker_switch,
         config_apply: None,
+        live_gate,
     })
 }
 
@@ -1216,6 +1255,7 @@ fn activate_by_config_apply(
         live_recovery_command: None,
         worker_switch: None,
         config_apply: Some(applied),
+        live_gate: None,
     })
 }
 
@@ -3543,7 +3583,9 @@ pub fn stage_source_objects(
     }
     stage_timing::reset_from_env();
 
-    let manifest = scan_sources_with_prefixes(&args.source_root, &args.path_prefix)?;
+    let manifest = timed_stage_step("scan the tree", || {
+        scan_sources_with_prefixes(&args.source_root, &args.path_prefix)
+    })?;
     let metadata_xmls = filter_source_paths_by_prefix(
         source_metadata_xmls(&manifest, &args.source_root),
         &args.source_root,
@@ -3627,180 +3669,298 @@ pub fn stage_source_objects(
             .collect();
         let _ = PREFETCHED_BASE_ROWS.set((args.database.clone(), shared));
     }
-    // Every object that cannot be built is collected, so that one refusal
-    // names them all (see `patch_refusal`).
-    let mut failures = Vec::new();
-    let mut metadata_objects = parallel::install(|| {
-        metadata_xmls
-            .par_iter()
-            .map(|xml| {
-                prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
-                    .map_err(|error| patch_refusal::ObjectFailure {
-                        xml: xml.clone(),
-                        error,
-                    })
-            })
-            .collect::<Vec<_>>()
-    })?
-    .into_iter()
-    .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
-    .collect::<Vec<_>>();
-    let mut common_modules = parallel::install(|| {
-        common_module_xmls
-            .par_iter()
-            .map(|xml| {
-                prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None).map_err(
-                    |error| patch_refusal::ObjectFailure {
-                        xml: xml.clone(),
-                        error,
-                    },
-                )
-            })
-            .collect::<Vec<_>>()
-    })?
-    .into_iter()
-    .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
-    .collect::<Vec<_>>();
-    // A failure a build from the tree fixes (predefined items the target's row
-    // does not hold) is not a refusal: the object is built whole instead.
-    let (fixable, mut failures): (Vec<_>, Vec<_>) = failures
-        .into_iter()
-        .partition(|failure| overriding && override_stage::is_buildable(&failure.error));
-    let rebuild = fixable
-        .into_iter()
-        .map(|failure| failure.xml)
-        .collect::<Vec<_>>();
-    let built = if overriding && !(plan.is_empty() && rebuild.is_empty()) {
-        let patched = |id: &str| {
-            metadata_objects
-                .iter()
-                .find(|object| object.object_id == id)
-                .map(|object| object.metadata_blob.clone())
-                .or_else(|| {
-                    common_modules
-                        .iter()
-                        .find(|module| module.module_id == id)
-                        .map(|module| module.metadata_blob.clone())
+    // Only the rows that change are staged (#395): the target's own export says
+    // which files of the tree it already reproduces, and the objects and rows
+    // they come from stay the target's (`delta_stage`).
+    let mut delta = None;
+    let mut all_rows_because = None;
+    if overriding {
+        let aliases = BASE_ROW_ALIASES
+            .get()
+            .filter(|(aliased_database, _)| aliased_database == &args.database)
+            .map(|(_, aliases)| aliases.clone())
+            .unwrap_or_default();
+        let prepared = metadata_xmls
+            .iter()
+            .chain(&common_module_xmls)
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        match timed_stage_step("compare the tree with the target's export", || {
+            delta_stage::plan(args, &sql, &manifest, &prepared, &plan, &aliases)
+        })? {
+            delta_stage::Outcome::Active(found) => delta = Some(found),
+            delta_stage::Outcome::Off(reason) => all_rows_because = Some(reason),
+        }
+    }
+    let all_metadata_xmls = metadata_xmls;
+    let all_common_module_xmls = common_module_xmls;
+    let (
+        metadata_objects,
+        common_modules,
+        metadata_object_count,
+        common_module_count,
+        patched_versions,
+        additions,
+        overrides,
+        verification,
+    ) = loop {
+        let (metadata_xmls, common_module_xmls) = match delta.as_mut() {
+            Some(delta) => {
+                delta.reset_left_out();
+                let prepares = |xml: &PathBuf| delta.prepares(&args.source_root, xml);
+                let before = all_metadata_xmls.len() + all_common_module_xmls.len();
+                let metadata_xmls = all_metadata_xmls
+                    .iter()
+                    .filter(|xml| prepares(xml))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let common_module_xmls = all_common_module_xmls
+                    .iter()
+                    .filter(|xml| prepares(xml))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                delta.count_left_out(before - metadata_xmls.len() - common_module_xmls.len());
+                (metadata_xmls, common_module_xmls)
+            }
+            None => (all_metadata_xmls.clone(), all_common_module_xmls.clone()),
+        };
+        // Every object that cannot be built is collected, so that one refusal
+        // names them all (see `patch_refusal`).
+        let mut failures = Vec::new();
+        let prepare_started = std::time::Instant::now();
+        let mut metadata_objects = parallel::install(|| {
+            metadata_xmls
+                .par_iter()
+                .map(|xml| {
+                    prepare_metadata_object_stage(&sql, &args.database, xml.clone(), Some(&source))
+                        .map_err(|error| patch_refusal::ObjectFailure {
+                            xml: xml.clone(),
+                            error,
+                        })
                 })
-        };
-        timed_stage_step("build what the target's rows cannot carry", || {
-            override_stage::build(
-                &override_stage::Tree {
-                    root: &args.source_root,
-                    version: args.source_version.map(|version| version.as_str()),
-                    database: &args.database,
-                },
-                &sql,
-                &plan,
-                &rebuild,
-                &patched,
-            )
+                .collect::<Vec<_>>()
         })?
-    } else {
-        override_stage::Built::default()
-    };
-    failures.extend(built.failures);
-    if !failures.is_empty() {
-        return Err(patch_refusal::refusal(&args.source_root, failures));
-    }
-    for object in &mut metadata_objects {
-        if let Some(row) = built.descriptors.get(&object.object_id) {
-            object.metadata_blob = row.blob.clone();
-            object.metadata_blob_sha256 = row.sha256.clone();
-            object.metadata_plain_bytes = row.plain_bytes;
+        .into_iter()
+        .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+        .collect::<Vec<_>>();
+        let mut common_modules = parallel::install(|| {
+            common_module_xmls
+                .par_iter()
+                .map(|xml| {
+                    prepare_common_module_object_stage(&sql, &args.database, xml.clone(), None)
+                        .map_err(|error| patch_refusal::ObjectFailure {
+                            xml: xml.clone(),
+                            error,
+                        })
+                })
+                .collect::<Vec<_>>()
+        })?
+        .into_iter()
+        .filter_map(|prepared| prepared.map_err(|failure| failures.push(failure)).ok())
+        .collect::<Vec<_>>();
+        if stage_timing::enabled() {
+            eprintln!(
+                "stage timing: prepare {} objects in {:.1} s",
+                metadata_xmls.len() + common_module_xmls.len(),
+                prepare_started.elapsed().as_secs_f64()
+            );
         }
-    }
-    for module in &mut common_modules {
-        if let Some(row) = built.descriptors.get(&module.module_id) {
-            module.metadata_blob = row.blob.clone();
-            module.metadata_blob_sha256 = row.sha256.clone();
-            module.metadata_plain_bytes = row.plain_bytes;
-        }
-    }
-    let compiled_descriptors = built.descriptors.len();
-    let built_objects = built.objects.len();
-    let new_objects = built.new_ids.len();
-    let mut built_files = built.built_files;
-    built_files.truncate(60);
-    let mut compiled_files = built.compiled_files;
-    compiled_files.truncate(60);
-    metadata_objects.extend(built.objects);
-    let metadata_object_count = metadata_objects.len();
-    let common_module_count = common_modules.len();
-    ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
-
-    let changes = source_stage_change_ids(&metadata_objects, &common_modules);
-    let versions_blob = fetch_classified_versions_blob(
-        &sql,
-        &args.database,
-        &legacy_non_xml_compile_axes(),
-        changes.len(),
-    )?;
-    let mut patched_versions =
-        patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
-
-    // What leaves the configuration: the rows of the removed objects, and the
-    // rows an online update of the target left pending, are listed in the
-    // `deleted` row as the platform's own import lists them; the removed
-    // names go from `versions`.
-    let removal = if overriding {
-        let names = override_stage::versions_names(&versions_blob)?;
-        // A partial import (`--path-prefix`) is not a whole configuration: it
-        // does not clear the pending online update.
-        let dynamic = if args.path_prefix.is_empty() {
-            override_stage::dynamic_update_rows(&sql, &args.database)?
+        // A failure a build from the tree fixes (predefined items the target's row
+        // does not hold) is not a refusal: the object is built whole instead.
+        let (fixable, mut failures): (Vec<_>, Vec<_>) = failures
+            .into_iter()
+            .partition(|failure| overriding && override_stage::is_buildable(&failure.error));
+        let rebuild = fixable
+            .into_iter()
+            .map(|failure| failure.xml)
+            .collect::<Vec<_>>();
+        let built = if overriding && !(plan.is_empty() && rebuild.is_empty()) {
+            let patched = |id: &str| {
+                metadata_objects
+                    .iter()
+                    .find(|object| object.object_id == id)
+                    .map(|object| object.metadata_blob.clone())
+                    .or_else(|| {
+                        common_modules
+                            .iter()
+                            .find(|module| module.module_id == id)
+                            .map(|module| module.metadata_blob.clone())
+                    })
+            };
+            timed_stage_step("build what the target's rows cannot carry", || {
+                override_stage::build(
+                    &override_stage::Tree {
+                        root: &args.source_root,
+                        version: args.source_version.map(|version| version.as_str()),
+                        database: &args.database,
+                    },
+                    &sql,
+                    &plan,
+                    &rebuild,
+                    &patched,
+                )
+            })?
         } else {
-            Vec::new()
+            override_stage::Built::default()
         };
-        override_stage::removal(&names, &plan, dynamic)
-    } else {
-        override_stage::removal(&[], &plan, Vec::new())
-    };
-    if !removal.object_rows.is_empty() {
-        patched_versions.blob =
-            override_stage::drop_versions_entries(&patched_versions.blob, &removal.object_rows)?;
-        patched_versions.output_sha256 = hex_sha256(&patched_versions.blob);
-    }
-    let additions = StageAdditions {
-        new_ids: built.new_ids,
-        deleted_row: if removal.deleted.is_empty() {
-            None
-        } else {
-            Some(override_stage::deleted_row(&removal.deleted)?)
-        },
-        deleted_names: removal.deleted,
-    };
-    let overrides = overriding.then(|| StageOverrides {
-        built_objects,
-        new_objects,
-        compiled_descriptors,
-        removed_rows: removal.object_rows.len(),
-        deleted_names: additions.deleted_names.len(),
-        built_files,
-        compiled_files,
-    });
+        failures.extend(built.failures);
+        if !failures.is_empty() {
+            return Err(patch_refusal::refusal(&args.source_root, failures));
+        }
+        for object in &mut metadata_objects {
+            if let Some(row) = built.descriptors.get(&object.object_id) {
+                object.metadata_blob = row.blob.clone();
+                object.metadata_blob_sha256 = row.sha256.clone();
+                object.metadata_plain_bytes = row.plain_bytes;
+            }
+        }
+        for module in &mut common_modules {
+            if let Some(row) = built.descriptors.get(&module.module_id) {
+                module.metadata_blob = row.blob.clone();
+                module.metadata_blob_sha256 = row.sha256.clone();
+                module.metadata_plain_bytes = row.plain_bytes;
+            }
+        }
+        if let Some(delta) = delta.as_mut() {
+            // What the target's own rows already hold as the tree has it is not staged;
+            // the descriptors the build compiled are.
+            let compiled = built
+                .descriptors
+                .keys()
+                .map(|id| id.to_lowercase())
+                .collect::<std::collections::HashSet<_>>();
+            let pending = |name: &str| pending_update_row(&args.database, name);
+            metadata_objects.retain_mut(|object| {
+                delta.trim_object(&args.source_root, object, &compiled, &pending)
+            });
+            common_modules.retain_mut(|module| {
+                delta.trim_module(&args.source_root, module, &compiled, &pending)
+            });
+        }
+        let compiled_descriptors = built.descriptors.len();
+        let built_objects = built.objects.len();
+        let new_objects = built.new_ids.len();
+        let mut built_files = built.built_files;
+        built_files.truncate(60);
+        let mut compiled_files = built.compiled_files;
+        compiled_files.truncate(60);
+        metadata_objects.extend(built.objects);
+        let metadata_object_count = metadata_objects.len();
+        let common_module_count = common_modules.len();
+        ensure_unique_source_stage_ids(&metadata_objects, &common_modules)?;
 
-    // The guard: the state this stage would leave, exported with the model and
-    // compared with the tree, before anything is written.
-    let verification = if stage_guard::wanted(args.verify) {
-        let staged = bulk_stage_rows(
-            &metadata_objects,
-            &common_modules,
-            &patched_versions.blob,
-            &additions,
-            false,
+        let changes = source_stage_change_ids(&metadata_objects, &common_modules);
+        let versions_blob = fetch_classified_versions_blob(
+            &sql,
+            &args.database,
+            &legacy_non_xml_compile_axes(),
+            changes.len(),
+        )?;
+        let mut patched_versions =
+            patch_versions_blob_bytes_allowing_additions(&versions_blob, &changes, true)?;
+
+        // What leaves the configuration: the rows of the removed objects, and the
+        // rows an online update of the target left pending, are listed in the
+        // `deleted` row as the platform's own import lists them; the removed
+        // names go from `versions`.
+        let removal = if overriding {
+            let names = override_stage::versions_names(&versions_blob)?;
+            // A partial import (`--path-prefix`) is not a whole configuration: it
+            // does not clear the pending online update.
+            let dynamic = if args.path_prefix.is_empty() {
+                override_stage::dynamic_update_rows(&sql, &args.database)?
+            } else {
+                Vec::new()
+            };
+            override_stage::removal(&names, &plan, dynamic)
+        } else {
+            override_stage::removal(&[], &plan, Vec::new())
+        };
+        if !removal.object_rows.is_empty() {
+            patched_versions.blob = override_stage::drop_versions_entries(
+                &patched_versions.blob,
+                &removal.object_rows,
+            )?;
+            patched_versions.output_sha256 = hex_sha256(&patched_versions.blob);
+        }
+        let additions = StageAdditions {
+            new_ids: built.new_ids,
+            deleted_row: if removal.deleted.is_empty() {
+                None
+            } else {
+                Some(override_stage::deleted_row(&removal.deleted)?)
+            },
+            deleted_names: removal.deleted,
+        };
+        let overrides = overriding.then(|| StageOverrides {
+            built_objects,
+            new_objects,
+            compiled_descriptors,
+            removed_rows: removal.object_rows.len(),
+            deleted_names: additions.deleted_names.len(),
+            built_files,
+            compiled_files,
+            differing_files: delta.as_ref().map_or(0, |delta| delta.stats.differing),
+            objects_left_out: delta
+                .as_ref()
+                .map_or(0, |delta| delta.stats.objects_left_out),
+            rows_left_out: delta.as_ref().map_or(0, |delta| delta.stats.rows_left_out),
+            compare_seconds: delta.as_ref().map_or(0.0, |delta| delta.stats.seconds),
+            all_rows_because: all_rows_because.clone(),
+        });
+
+        // The guard: the state this stage would leave, exported with the model and
+        // compared with the tree, before anything is written.
+        let verification = if stage_guard::wanted(args.verify) {
+            let staged = bulk_stage_rows(
+                &metadata_objects,
+                &common_modules,
+                &patched_versions.blob,
+                &additions,
+                false,
+            );
+            let verified = timed_stage_step("verify the staged state", || {
+                stage_guard::verify_patch_stage(
+                    args,
+                    &sql,
+                    &manifest,
+                    &staged,
+                    &additions.deleted_names,
+                )
+            });
+            match verified {
+                Ok(verification) => Some(verification),
+                Err(error) => {
+                    // A row the target keeps that the tree says otherwise about (a link
+                    // in a help page to an object the tree removed, say): the tree wins,
+                    // and the rows of the objects that own the differing files are
+                    // staged from it, once.
+                    let widened = match (
+                        delta.as_mut(),
+                        error.downcast_ref::<stage_guard::StageRefused>(),
+                    ) {
+                        (Some(delta), Some(refused)) => delta.widen(refused.differences()),
+                        _ => false,
+                    };
+                    if widened {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        break (
+            metadata_objects,
+            common_modules,
+            metadata_object_count,
+            common_module_count,
+            patched_versions,
+            additions,
+            overrides,
+            verification,
         );
-        Some(timed_stage_step("verify the staged state", || {
-            stage_guard::verify_patch_stage(
-                args,
-                &sql,
-                &manifest,
-                &staged,
-                &additions.deleted_names,
-            )
-        })?)
-    } else {
-        None
     };
 
     let batch_size = args.batch_size.unwrap_or(500).max(1);
@@ -7833,6 +7993,39 @@ fn prefetched_base_rows(
         .map(|(_, rows)| rows)
 }
 
+/// What the online update a target has pending publishes for a row, against the
+/// plain row that stays in the table (`delta_stage`): the bytes of the alias row,
+/// or that the two are the same. A row kept in parts is not judged (only its
+/// first part is read).
+fn pending_update_row(database: &str, name: &str) -> delta_stage::Pending {
+    let (Some((aliased, aliases)), Some((prefetched, rows))) =
+        (BASE_ROW_ALIASES.get(), PREFETCHED_BASE_ROWS.get())
+    else {
+        return delta_stage::Pending::No;
+    };
+    if aliased != database || prefetched != database {
+        return delta_stage::Pending::No;
+    }
+    let Some((plain_name, alias)) = aliases
+        .iter()
+        .find(|(published, _)| published.eq_ignore_ascii_case(name))
+    else {
+        return delta_stage::Pending::No;
+    };
+    let (Some(plain), Some(published)) = (rows.get(plain_name.as_str()), rows.get(alias.as_str()))
+    else {
+        return delta_stage::Pending::No;
+    };
+    if plain.len() >= CONFIG_ROW_PART_BYTES || published.len() >= CONFIG_ROW_PART_BYTES {
+        return delta_stage::Pending::No;
+    }
+    if plain == published {
+        delta_stage::Pending::Same
+    } else {
+        delta_stage::Pending::Replaces(published.as_ref().clone())
+    }
+}
+
 /// Published name -> alias row, for the rows of `PREFETCHED_BASE_ROWS`' database
 /// that an active dynamic generation publishes under another name.
 static BASE_ROW_ALIASES: std::sync::OnceLock<(String, std::collections::BTreeMap<String, String>)> =
@@ -8905,11 +9098,14 @@ fn bulk_stage_rows<'a>(
 ) -> Vec<BulkStageRow<'a>> {
     let mut rows = Vec::new();
     for object in metadata_objects {
-        rows.push(BulkStageRow {
-            file_name: &object.object_id,
-            requires_config_row: !additions.new_ids.contains(&object.object_id),
-            blob: &object.metadata_blob,
-        });
+        // An empty descriptor blob: the target's own row stays (#395).
+        if !object.metadata_blob.is_empty() {
+            rows.push(BulkStageRow {
+                file_name: &object.object_id,
+                requires_config_row: !additions.new_ids.contains(&object.object_id),
+                blob: &object.metadata_blob,
+            });
+        }
         for body in &object.body_rows {
             rows.push(BulkStageRow {
                 file_name: &body.body_id,
@@ -8919,11 +9115,13 @@ fn bulk_stage_rows<'a>(
         }
     }
     for module in common_modules {
-        rows.push(BulkStageRow {
-            file_name: &module.module_id,
-            requires_config_row: true,
-            blob: &module.metadata_blob,
-        });
+        if module.stages_metadata_row() {
+            rows.push(BulkStageRow {
+                file_name: &module.module_id,
+                requires_config_row: true,
+                blob: &module.metadata_blob,
+            });
+        }
         if module.has_module_body {
             rows.push(BulkStageRow {
                 file_name: &module.module_body_id,
@@ -9367,7 +9565,9 @@ fn source_stage_change_ids(
     metadata_objects
         .iter()
         .flat_map(|object| {
-            std::iter::once(object.object_id.clone())
+            (!object.metadata_blob.is_empty())
+                .then(|| object.object_id.clone())
+                .into_iter()
                 .chain(object.body_rows.iter().map(|body| body.body_id.clone()))
         })
         .chain(common_modules.iter().flat_map(|module| module.row_ids()))
@@ -9968,6 +10168,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,
@@ -10461,6 +10662,115 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_delta_stage_stages_only_the_rows_whose_source_differs() {
+        use super::{StageAdditions, bulk_stage_rows, delta_stage, source_stage_change_ids};
+        use std::collections::HashSet;
+        let root = Path::new("R");
+        let object = || {
+            test_metadata_stage_object(
+                "Catalog",
+                "u1",
+                "X",
+                "R/Catalogs/X.xml",
+                &[
+                    "R/Catalogs/X/Ext/ObjectModule.bsl",
+                    "R/Catalogs/Y/Ext/Other.bsl",
+                    "R/Catalogs/X/Ext/Predefined.xml",
+                ],
+            )
+        };
+        let none = |_: &str| delta_stage::Pending::No;
+        let no_ids = HashSet::new();
+
+        // Only the descriptor file differs: its row is staged and no body is.
+        let mut delta = delta_stage::Delta::for_test(&["catalogs/x.xml"], &[], &[]);
+        let mut only_descriptor = object();
+        assert!(delta.trim_object(root, &mut only_descriptor, &no_ids, &none));
+        assert!(!only_descriptor.metadata_blob.is_empty());
+        assert!(only_descriptor.body_rows.is_empty());
+
+        // Only a module differs: the bodies of that Ext folder are staged, the descriptor is not.
+        let mut delta =
+            delta_stage::Delta::for_test(&["catalogs/x/ext/objectmodule.bsl"], &[], &[]);
+        let mut only_module = object();
+        assert!(delta.trim_object(root, &mut only_module, &no_ids, &none));
+        assert!(only_module.metadata_blob.is_empty());
+        assert_eq!(
+            only_module
+                .body_rows
+                .iter()
+                .map(|body| body.body_id.as_str())
+                .collect::<Vec<_>>(),
+            ["u1.0", "u1.2"]
+        );
+        // The rows a stage writes leave the emptied descriptor out.
+        let additions = StageAdditions::default();
+        let staged = only_module.clone();
+        let rows = bulk_stage_rows(
+            std::slice::from_ref(&staged),
+            &[],
+            b"versions",
+            &additions,
+            false,
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.file_name).collect::<Vec<_>>(),
+            ["u1.0", "u1.2", "versions"]
+        );
+        assert_eq!(
+            source_stage_change_ids(std::slice::from_ref(&staged), &[]),
+            ["u1.0", "u1.2"]
+        );
+
+        // Nothing differs: nothing is left.
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]);
+        let mut unchanged = object();
+        assert!(!delta.trim_object(root, &mut unchanged, &no_ids, &none));
+        assert_eq!(delta.stats.rows_left_out, 4);
+
+        // The guard said a file of the object differs from the tree: every row is staged.
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]).with_units(&["catalogs/x.xml"]);
+        assert!(delta.widen(&[super::stage_guard::FileDifference {
+            path: "Catalogs/X/Ext/Help/ru.html".to_string(),
+            difference: super::stage_guard::Difference::OnlyInTree,
+        }]));
+        let mut widened = object();
+        assert!(delta.trim_object(root, &mut widened, &no_ids, &none));
+        assert!(!widened.metadata_blob.is_empty());
+        assert_eq!(widened.body_rows.len(), 3);
+    }
+
+    #[test]
+    fn a_delta_stage_takes_a_common_module_row_by_row() {
+        use super::delta_stage;
+        use std::collections::HashSet;
+        let root = Path::new("R");
+        let module = || {
+            test_common_module_stage_object(
+                "m1",
+                "M",
+                "R/CommonModules/M.xml",
+                "R/CommonModules/M/Ext/Module.bsl",
+            )
+        };
+        let none = |_: &str| delta_stage::Pending::No;
+        let mut delta = delta_stage::Delta::for_test(&["commonmodules/m/ext/module.bsl"], &[], &[]);
+        let mut edited = module();
+        assert!(delta.trim_module(root, &mut edited, &HashSet::new(), &none));
+        assert_eq!(edited.row_ids(), ["m1.0"]);
+        assert_eq!(edited.row_count(), 1);
+
+        let mut delta = delta_stage::Delta::for_test(&["commonmodules/m.xml"], &[], &[]);
+        let mut renamed = module();
+        assert!(delta.trim_module(root, &mut renamed, &HashSet::new(), &none));
+        assert_eq!(renamed.row_ids(), ["m1"]);
+
+        let mut delta = delta_stage::Delta::for_test(&[], &[], &[]);
+        let mut unchanged = module();
+        assert!(!delta.trim_module(root, &mut unchanged, &HashSet::new(), &none));
     }
 
     fn test_common_module_stage_object(

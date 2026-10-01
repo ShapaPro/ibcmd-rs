@@ -2092,6 +2092,10 @@ pub struct MssqlActivateStagedMainArgs {
     /// SQL Server-local tail-log backup retained by live activation.
     #[arg(long)]
     pub tail_log_output: Option<PathBuf>,
+    /// live only (#409 F-10): accept that the live switch rolls back the open transactions and running requests of the sessions
+    /// of the database. Without it the switch is refused while such sessions exist.
+    #[arg(long)]
+    pub interrupt_sessions: bool,
     /// rac executable used by worker activation.
     #[arg(long, default_value = "rac")]
     pub rac: PathBuf,
@@ -2286,6 +2290,10 @@ pub struct MssqlApplySourceChangeArgs {
     /// SQL Server-local tail-log backup retained by live activation.
     #[arg(long)]
     pub tail_log_output: Option<PathBuf>,
+    /// live only (#409 F-10): accept that the live switch rolls back the open transactions and running requests of the sessions
+    /// of the database. Without it the switch is refused while such sessions exist.
+    #[arg(long)]
+    pub interrupt_sessions: bool,
     #[arg(long, default_value = "rac")]
     pub rac: PathBuf,
     #[arg(long, default_value = "localhost:1545")]
@@ -6403,6 +6411,39 @@ mod tests {
             args.tail_log_output,
             Some(PathBuf::from(r"C:\sql-backups\main-live.trn"))
         );
+        // the interruption of open work is the operator's word (#409 F-10): off unless given
+        assert!(!args.interrupt_sessions);
+    }
+
+    #[test]
+    fn parses_the_acceptance_that_the_live_switch_interrupts_sessions() {
+        let common = [
+            "ibcmd-rs",
+            "mssql-activate-staged-main",
+            "--platform-profile",
+            "platform-8.3.27.2214",
+            "--cluster-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--infobase-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--database",
+            "main_lab",
+            "--mode",
+            "live",
+            "--tail-log-output",
+            r"C:\sql-backups\main-live.trn",
+            "--allow-non-lab",
+        ];
+        let plain = Cli::parse_from(common);
+        let Commands::MssqlActivateStagedMain(args) = plain.command else {
+            panic!("unexpected command");
+        };
+        assert!(!args.interrupt_sessions);
+        let accepted = Cli::parse_from(common.iter().copied().chain(["--interrupt-sessions"]));
+        let Commands::MssqlActivateStagedMain(args) = accepted.command else {
+            panic!("unexpected command");
+        };
+        assert!(args.interrupt_sessions);
     }
 
     #[test]

@@ -35,6 +35,12 @@ use super::model::{RowMeta, RowName, classify_name, quote_ident};
 use super::sqlgen::ParamsRewrite;
 use super::versions::{inflate_row, strip_bom};
 
+/// The conservative rule's reason for a descriptor of an existing object whose text differs from the active one: it
+/// cannot tell a synonym from a column, so it refuses them all. The S1 gate withdraws this blocker for a row that the
+/// restructuring check has read and finds harmless.
+pub const DESCRIPTOR_DIFFERS: &str =
+    "the descriptor's text differs from the active one: a metadata change, possibly structural";
+
 /// One reason the staged configuration is not for the own apply.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateBlocker {
@@ -205,10 +211,14 @@ pub trait StructuralGate {
 }
 
 /// Two gates in a row: what the first passes goes through as it is; what it refuses is handed to the
-/// second, which may refuse it again (with its own words) or let it through with a structure phase. The
-/// second gate is asked only when the first refuses, so a gate that can do more (the S1 gate) never
-/// makes a stage that the first passes harder to pass: the conservative rule under the S1 gate refuses
-/// every descriptor whose text differs, harmless or not, and the restructure check does not.
+/// second, which may refuse it again or let it through with a structure phase. The second gate is asked
+/// only when the first refuses, so a gate that can do more (the S1 gate) never makes a stage that the
+/// first passes harder to pass: the conservative rule under the S1 gate refuses every descriptor whose
+/// text differs, harmless or not, and the restructure check does not.
+///
+/// What both refuse is refused for the reasons of both, the first gate's first: its refusals name every
+/// row it will not pass, the second gate's own reasons say what of that it cannot do either. The decision
+/// is the second gate's, as before; only the list of reasons is the two lists.
 pub struct FirstThen<'a> {
     first: Box<dyn StructuralGate + 'a>,
     then: Box<dyn StructuralGate + 'a>,
@@ -231,7 +241,23 @@ impl StructuralGate for FirstThen<'_> {
         if !first.restructuring_required {
             return Ok(first);
         }
-        self.then.check(input)
+        let mut then = self.then.check(input)?;
+        if then.restructuring_required {
+            let own = std::mem::take(&mut then.blockers);
+            then.blockers_omitted += first.blockers_omitted;
+            then.blockers = first.blockers;
+            for blocker in own {
+                if then.blockers.len() < MAX_LISTED_BLOCKERS {
+                    then.blockers.push(blocker);
+                } else {
+                    then.blockers_omitted += 1;
+                }
+            }
+            if then.stats.restructure_check.is_none() {
+                then.stats.restructure_check = first.stats.restructure_check;
+            }
+        }
+        Ok(then)
     }
 
     fn take_structure(&self) -> Option<StructurePhase> {
@@ -401,10 +427,7 @@ fn compare_descriptors(input: &GateInput<'_>, verdict: &mut GateVerdict) -> Resu
             (Ok(staged), Ok(active)) if staged == active => {
                 verdict.stats.descriptors_layout_only += 1;
             }
-            (Ok(_), Ok(_)) => verdict.block(
-                &name,
-                "the descriptor's text differs from the active one: a metadata change, possibly structural",
-            ),
+            (Ok(_), Ok(_)) => verdict.block(&name, DESCRIPTOR_DIFFERS),
             _ => verdict.block(&name, "a descriptor row that does not inflate"),
         }
         Ok(())
