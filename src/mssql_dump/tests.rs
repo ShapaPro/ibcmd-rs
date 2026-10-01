@@ -8282,6 +8282,7 @@ fn parses_platform_before_load_user_settings_event_identifier() {
         Some(FormBodyEvent {
             name: "BeforeLoadUserSettingsAtServer".to_string(),
             handler: "HandlerA".to_string(),
+            call_type: None,
         })
     );
 }
@@ -8299,6 +8300,7 @@ fn parses_platform_update_user_settings_event_for_root_and_table_records() {
         Some(FormBodyEvent {
             name: "OnUpdateUserSettingSetAtServer".to_string(),
             handler: "RootHandler".to_string(),
+            call_type: None,
         })
     );
     assert_eq!(
@@ -8306,6 +8308,7 @@ fn parses_platform_update_user_settings_event_for_root_and_table_records() {
         Some(FormBodyEvent {
             name: EVENT_ID.to_string(),
             handler: "RootHandler".to_string(),
+            call_type: None,
         })
     );
     let table_raw = format!(r#"{{1,{EVENT_ID},"TableHandler"}}"#);
@@ -8316,6 +8319,7 @@ fn parses_platform_update_user_settings_event_for_root_and_table_records() {
         vec![FormBodyEvent {
             name: "OnUpdateUserSettingSetAtServer".to_string(),
             handler: "TableHandler".to_string(),
+            call_type: None,
         }]
     );
     assert_eq!(
@@ -8323,6 +8327,7 @@ fn parses_platform_update_user_settings_event_for_root_and_table_records() {
         vec![FormBodyEvent {
             name: "OnUpdateUserSettingSetAtServer".to_string(),
             handler: "TableHandler".to_string(),
+            call_type: None,
         }]
     );
     assert!(parse_form_body_event_pair(EVENT_ID, r#"""#, Some("ReportObject")).is_none());
@@ -13681,9 +13686,75 @@ fn extracts_form_body_xml_uses_type_index_for_parameters_without_breaking_object
 }
 
 #[test]
+fn formatter_spells_the_call_type_the_model_carries() {
+    // An adopted form's handlers carry their call type in the model
+    // (`form_extension::FormAdoption::mark`): every command handler `Before`
+    // (six commands of an extension's common form in the БСП 8.3.27
+    // ServiceDesk), every event handler its interceptor's (fixture
+    // `adopted/form_events`); a handler without one is written as before.
+    let command = FormCommand {
+        use_rights: None,
+        call_type: Some("Before"),
+        id: "1".to_string(),
+        reference_uuid: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".to_string(),
+        name: "Команда".to_string(),
+        title: Vec::new(),
+        tooltip: Vec::new(),
+        picture_ref: None,
+        picture_load_transparent: false,
+        picture_transparent_pixel: None,
+        shortcut: None,
+        action: "КомандаВыполнить".to_string(),
+        representation: None,
+        functional_options: Vec::new(),
+        modifies_saved_data: None,
+        current_row_use: None,
+    };
+    let events = [
+        FormBodyEvent {
+            name: "BeforeClose".to_string(),
+            handler: "Расш_ПередЗакрытиемВместо".to_string(),
+            call_type: Some("Override"),
+        },
+        FormBodyEvent {
+            name: "OnOpen".to_string(),
+            handler: "ПриОткрытии".to_string(),
+            call_type: None,
+        },
+    ];
+    let form_xml = format_form_body_xml(
+        &FormBodyProperties::default(),
+        None,
+        &events,
+        &[],
+        &[],
+        &FormAttributesSection::default(),
+        &[],
+        &[command],
+        &None,
+    )
+    .unwrap();
+    assert!(
+        form_xml.contains(
+            "\t<Events>\r\n\
+             \t\t<Event name=\"BeforeClose\" callType=\"Override\">Расш_ПередЗакрытиемВместо</Event>\r\n\
+             \t\t<Event name=\"OnOpen\">ПриОткрытии</Event>\r\n\
+             \t</Events>\r\n"
+        ),
+        "{form_xml}"
+    );
+    assert!(
+        form_xml.contains("\t\t\t<Action callType=\"Before\">КомандаВыполнить</Action>\r\n"),
+        "{form_xml}"
+    );
+    assert!(form_xml.ends_with("\t</Commands>\r\n</Form>"), "{form_xml}");
+}
+
+#[test]
 fn formatter_emits_form_command_children_in_native_order() {
     let commands = [FormCommand {
         use_rights: None,
+        call_type: None,
         id: "1".to_string(),
         reference_uuid: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".to_string(),
         name: "ЗаписатьИЗакрыть".to_string(),
@@ -15289,14 +15360,17 @@ fn extracts_input_field_input_hint_from_extended_options_bag36() {
             FormBodyEvent {
                 name: "OnChange".to_string(),
                 handler: "ОтборСрокВыполненияПриИзменении".to_string(),
+                call_type: None,
             },
             FormBodyEvent {
                 name: "Clearing".to_string(),
                 handler: "ОтборСрокВыполненияОчистка".to_string(),
+                call_type: None,
             },
             FormBodyEvent {
                 name: "ChoiceProcessing".to_string(),
                 handler: "ОтборСрокВыполненияОбработкаВыбора".to_string(),
+                call_type: None,
             },
         ]
     );
@@ -15855,6 +15929,7 @@ fn keeps_nested_auto_command_bar_controls_and_table_order() {
     table.events.push(FormBodyEvent {
         name: "Selection".to_string(),
         handler: "RowsSelection".to_string(),
+        call_type: None,
     });
 
     let xml = format_form_child_items_xml(&[table], 1);
@@ -21379,10 +21454,12 @@ fn parses_multiple_form_child_item_events_from_single_record() {
             FormBodyEvent {
                 name: "OnChange".to_string(),
                 handler: "Changed".to_string(),
+                call_type: None,
             },
             FormBodyEvent {
                 name: "ChoiceProcessing".to_string(),
                 handler: "Picked".to_string(),
+                call_type: None,
             },
         ]
     );
@@ -21403,10 +21480,12 @@ fn collects_nested_form_child_item_events_from_extended_options() {
                 FormBodyEvent {
                     name: "OnChange".to_string(),
                     handler: "Changed".to_string(),
+                    call_type: None,
                 },
                 FormBodyEvent {
                     name: "ChoiceProcessing".to_string(),
                     handler: "Picked".to_string(),
+                    call_type: None,
                 },
             ]
         );
@@ -21427,10 +21506,12 @@ fn parses_uuid_clearing_and_choice_processing_events() {
             FormBodyEvent {
                 name: "Clearing".to_string(),
                 handler: "ClearHandler".to_string(),
+                call_type: None,
             },
             FormBodyEvent {
                 name: "ChoiceProcessing".to_string(),
                 handler: "ChoiceHandler".to_string(),
+                call_type: None,
             },
         ]
     );
@@ -21449,6 +21530,7 @@ fn parses_uuid_before_row_change_event() {
         vec![FormBodyEvent {
             name: "BeforeRowChange".to_string(),
             handler: "BeforeChangeHandler".to_string(),
+            call_type: None,
         }]
     );
 }
@@ -22080,6 +22162,7 @@ fn extracts_table_service_child_items_from_layout_fields() {
     let command_uuid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
     let commands = vec![FormCommand {
         use_rights: None,
+        call_type: None,
         id: "15".to_string(),
         reference_uuid: command_uuid.to_string(),
         name: "Run".to_string(),
@@ -26673,7 +26756,8 @@ fn detailed_form_extraction_preserves_malformed_link_rejection_diagnostics() {
         None,
     );
 
-    let extraction = extract_form_body_xml_from_body_detailed_timed(&body, &context, None).unwrap();
+    let extraction =
+        extract_form_body_xml_from_body_detailed_timed(&body, &context, None, None).unwrap();
     let DetailedFormBodyExtraction::Rejected { diagnostics, error } = extraction else {
         panic!("malformed mirrored links must reject detailed extraction");
     };

@@ -390,7 +390,7 @@ pub(super) fn extract_form_body_xml_from_body_timed(
     context: &FormParseContext<'_>,
     timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<String> {
-    match extract_form_body_xml_from_body_detailed_timed(body, context, timings)? {
+    match extract_form_body_xml_from_body_detailed_timed(body, context, None, timings)? {
         DetailedFormBodyExtraction::Emitted { xml, .. } => Some(xml),
         DetailedFormBodyExtraction::OpaqueNotEmitted { .. }
         | DetailedFormBodyExtraction::Rejected { .. } => None,
@@ -425,19 +425,22 @@ pub(super) enum DetailedFormBodyExtraction {
     },
 }
 
+/// `adoption` is what the writer spells for an adopted form beyond its body:
+/// the call types of its handlers, and its base form after its own tree
+/// (`form_extension::form_adoption`), for every source of forms.
 pub(super) fn extract_form_body_xml_from_body_detailed_timed(
     body: &ParsedFormBodyBlob,
     context: &FormParseContext<'_>,
+    adoption: Option<&super::form_extension::FormAdoption>,
     timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
-    // The base form an adopted form carries is written after its own tree by
-    // `form_extension::with_adopted_form_parts`, for every source of forms.
-    extract_form_body_xml_from_body_detailed_single(body, context, timings)
+    extract_form_body_xml_from_body_detailed_single(body, context, adoption, timings)
 }
 
 fn extract_form_body_xml_from_body_detailed_single(
     body: &ParsedFormBodyBlob,
     context: &FormParseContext<'_>,
+    adoption: Option<&super::form_extension::FormAdoption>,
     mut timings: Option<&mut MssqlDumpTimingReport>,
 ) -> Option<DetailedFormBodyExtraction> {
     // Every reader below splits the values it meets, each once per value that
@@ -513,7 +516,7 @@ fn extract_form_body_xml_from_body_detailed_single(
     });
 
     let started = Instant::now();
-    let events = extract_form_body_events(
+    let mut events = extract_form_body_events(
         &form_fields,
         form_root_write_extension(&attributes).as_deref(),
     );
@@ -569,7 +572,7 @@ fn extract_form_body_xml_from_body_detailed_single(
     let child_item_indexes_cpu_ms = elapsed_ms(started);
 
     let started = Instant::now();
-    let commands = extract_form_body_commands(
+    let mut commands = extract_form_body_commands(
         &body.trailing,
         context.object_refs,
         &child_item_indexes.item_name_by_id,
@@ -870,8 +873,16 @@ fn extract_form_body_xml_from_body_detailed_single(
     ) {
         without_usual_group_behavior(&mut child_items);
     }
+    if let Some(adoption) = adoption {
+        adoption.mark(
+            &mut events,
+            auto_command_bar.as_mut(),
+            &mut child_items,
+            &mut commands,
+        );
+    }
     let started = Instant::now();
-    let xml = match format_form_body_xml_with_dcs_profiles(
+    let xml = match format_form_body_open_xml_with_dcs_profiles(
         &properties,
         auto_command_bar.as_ref(),
         &events,
@@ -900,11 +911,17 @@ fn extract_form_body_xml_from_body_detailed_single(
     };
     let xml = with_excluded_help_command_unresolved(xml, &properties.command_set_excluded_commands);
     let xml = renumber_form_zero_item_ids(xml);
-    let xml = if context.dcs_target_profile.as_str() == "xml-2.20" {
+    let mut xml = if context.dcs_target_profile.as_str() == "xml-2.20" {
         with_v85_only_events_by_identifier(xml)
     } else {
         xml
     };
+    // The passes above read the form's own tree. The base form of an adopted
+    // form is a document of its own, written and passed before
+    // (`form_extension::form_adoption`): it closes the document untouched.
+    xml.push_str(&format_form_body_close_xml(
+        adoption.and_then(|adoption| adoption.base_form.as_ref()),
+    ));
     if let Some(timings) = timings.as_deref_mut() {
         timings.source_asset_form_format_cpu_ms += elapsed_ms(started);
     }
@@ -1377,6 +1394,10 @@ pub(super) const FORM_COMMAND_CUSTOMIZE_FORM_UUID: &str = "198ea630-fda2-4cda-8a
 pub(super) struct FormBodyEvent {
     pub(super) name: String,
     pub(super) handler: String,
+    /// The call type of the handler on an adopted form (`Before`, `After` or
+    /// `Override`), `None` where the writer spells no `callType`
+    /// (`form_extension::FormAdoption::mark`).
+    pub(super) call_type: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1703,6 +1724,9 @@ pub(super) struct FormCommand {
     pub(super) functional_options: Vec<String>,
     pub(super) modifies_saved_data: Option<bool>,
     pub(super) current_row_use: Option<FormCommandCurrentRowProperties>,
+    /// The call type of the handler on an adopted form, `None` where the
+    /// writer spells no `callType` (`form_extension::FormAdoption::mark`).
+    pub(super) call_type: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1813,7 +1837,7 @@ pub(super) enum FormChildItemDataPathProvenance {
     InferredFallback,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(super) struct FormChildItem {
     pub(super) tag: &'static str,
     pub(super) id: String,
@@ -4015,6 +4039,7 @@ pub(super) fn collect_form_body_events(
                     events.push(FormBodyEvent {
                         name,
                         handler: binding.handler,
+                        call_type: None,
                     });
                 }
             }
@@ -4079,6 +4104,7 @@ pub(super) fn parse_form_body_event_pair(
     Some(FormBodyEvent {
         name: event,
         handler: handler.to_string(),
+        call_type: None,
     })
 }
 
@@ -10494,6 +10520,7 @@ fn parse_form_command_with_items(
             .and_then(|field| parse_form_rights_setting(field, object_refs))
             .flatten(),
         action,
+        call_type: None,
         representation: parse_form_command_representation(fields.get(9).copied()),
         functional_options: fields
             .get(12)
@@ -23483,12 +23510,14 @@ fn parse_form_schema_backed_event_record(
             events.push(FormBodyEvent {
                 name: name.to_string(),
                 handler: handler.to_string(),
+                call_type: None,
             });
         }
         for extra in extra_handlers {
             events.push(FormBodyEvent {
                 name: name.to_string(),
                 handler: extra,
+                call_type: None,
             });
         }
     }
@@ -23722,6 +23751,7 @@ pub(super) fn parse_form_child_item_event_pair(
     Some(FormBodyEvent {
         name: event,
         handler: handler.to_string(),
+        call_type: None,
     })
 }
 
@@ -31153,7 +31183,7 @@ pub(super) fn format_form_body_xml(
     let source_profile =
         ProfileId::parse("provider:mssql-legacy").expect("static MSSQL provider profile is valid");
     let target_profile = ProfileId::parse("xml-2.20").expect("static XML profile is valid");
-    format_form_body_xml_with_dcs_profiles(
+    let mut xml = format_form_body_open_xml_with_dcs_profiles(
         properties,
         auto_command_bar,
         events,
@@ -31165,11 +31195,55 @@ pub(super) fn format_form_body_xml(
         command_interface,
         &source_profile,
         &target_profile,
-    )
+    )?;
+    xml.push_str(&format_form_body_close_xml(None));
+    Ok(xml)
 }
 
+/// ` callType="…"` of an adopted form's handler, nothing for any other
+/// handler (fixture `adopted/form_events`: after `name` on every `<Event>` of
+/// the adopted form and of its base form; `form_extension::FormAdoption`).
+fn format_form_call_type_attribute(call_type: Option<&str>) -> String {
+    call_type.map_or_else(String::new, |call_type| {
+        format!(" callType=\"{}\"", escape_xml_text(call_type))
+    })
+}
+
+/// The closing of the form's document: the base form of an adopted form and
+/// the root's closing tag. `<BaseForm version="…">` holds the base form's own
+/// document one level deeper, after every section of the form's own tree
+/// (fixture `adopted/form_events`; `v85_extension/adopted_form_events` for
+/// `2.21`); a base form without children is an empty element.
+pub(super) fn format_form_body_close_xml(
+    base_form: Option<&super::form_extension::FormBaseForm>,
+) -> String {
+    let mut xml = String::new();
+    if let Some(base_form) = base_form {
+        if base_form.children.is_empty() {
+            xml.push_str(&format!(
+                "\t<BaseForm version=\"{}\"/>\r\n",
+                escape_xml_text(base_form.version)
+            ));
+        } else {
+            xml.push_str(&format!(
+                "\t<BaseForm version=\"{}\">\r\n",
+                escape_xml_text(base_form.version)
+            ));
+            for line in base_form.children.split_inclusive("\r\n") {
+                xml.push('\t');
+                xml.push_str(line);
+            }
+            xml.push_str("\t</BaseForm>\r\n");
+        }
+    }
+    xml.push_str("</Form>");
+    xml
+}
+
+/// The form's document from its declaration through the last child of its
+/// own tree, without the closing [`format_form_body_close_xml`] writes.
 #[allow(clippy::too_many_arguments)]
-fn format_form_body_xml_with_dcs_profiles(
+fn format_form_body_open_xml_with_dcs_profiles(
     properties: &FormBodyProperties,
     auto_command_bar: Option<&FormAutoCommandBar>,
     events: &[FormBodyEvent],
@@ -31564,8 +31638,9 @@ fn format_form_body_xml_with_dcs_profiles(
         xml.push_str("\t<Events>\r\n");
         for event in events {
             xml.push_str(&format!(
-                "\t\t<Event name=\"{}\">{}</Event>\r\n",
+                "\t\t<Event name=\"{}\"{}>{}</Event>\r\n",
                 escape_xml_text(&event.name),
+                format_form_call_type_attribute(event.call_type),
                 escape_xml_text(&event.handler)
             ));
         }
@@ -31639,7 +31714,8 @@ fn format_form_body_xml_with_dcs_profiles(
             }
             if !command.action.is_empty() {
                 xml.push_str(&format!(
-                    "\t\t\t<Action>{}</Action>\r\n",
+                    "\t\t\t<Action{}>{}</Action>\r\n",
+                    format_form_call_type_attribute(command.call_type),
                     escape_xml_text(&command.action)
                 ));
             }
@@ -31698,7 +31774,6 @@ fn format_form_body_xml_with_dcs_profiles(
     if let Some(command_interface) = command_interface {
         xml.push_str(&format_form_command_interface_xml(command_interface));
     }
-    xml.push_str("</Form>");
     Ok(xml)
 }
 
@@ -35600,8 +35675,9 @@ pub(super) fn format_form_child_item_xml(
         xml.push_str(&format!("{tab}\t<Events>\r\n"));
         for event in &item.events {
             xml.push_str(&format!(
-                "{tab}\t\t<Event name=\"{}\">{}</Event>\r\n",
+                "{tab}\t\t<Event name=\"{}\"{}>{}</Event>\r\n",
                 escape_xml_text(&event.name),
+                format_form_call_type_attribute(event.call_type),
                 escape_xml_text(&event.handler)
             ));
         }
@@ -35671,8 +35747,9 @@ pub(super) fn format_form_child_item_xml(
             xml.push_str(&format!("{tab}\t<Events>\r\n"));
             for event in &item.events {
                 xml.push_str(&format!(
-                    "{tab}\t\t<Event name=\"{}\">{}</Event>\r\n",
+                    "{tab}\t\t<Event name=\"{}\"{}>{}</Event>\r\n",
                     escape_xml_text(&event.name),
+                    format_form_call_type_attribute(event.call_type),
                     escape_xml_text(&event.handler)
                 ));
             }
@@ -36745,8 +36822,9 @@ fn format_form_extended_tooltip_events_xml(events: &[FormBodyEvent], indent: usi
     let mut xml = format!("{tab}<Events>\r\n");
     for event in events {
         xml.push_str(&format!(
-            "{tab}\t<Event name=\"{}\">{}</Event>\r\n",
+            "{tab}\t<Event name=\"{}\"{}>{}</Event>\r\n",
             escape_xml_text(&event.name),
+            format_form_call_type_attribute(event.call_type),
             escape_xml_text(&event.handler)
         ));
     }
