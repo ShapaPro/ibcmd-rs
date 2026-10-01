@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 
 spec=importlib.util.spec_from_file_location('case4',Path(__file__).with_name('analyze_private4.py'))

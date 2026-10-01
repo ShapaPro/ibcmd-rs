@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import re
+import sys
+sys.dont_write_bytecode = True  # Frozen input readers must not create lab cache files.
 from pathlib import Path
 
 def read(p): return p.read_text(encoding='utf-8-sig')
