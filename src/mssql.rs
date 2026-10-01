@@ -10847,7 +10847,7 @@ mod tests {
         assert!(!only_descriptor.metadata_blob.is_empty());
         assert!(only_descriptor.body_rows.is_empty());
 
-        // Only a module differs: the bodies of that Ext folder are staged, the descriptor is not.
+        // Only an independent module differs: unchanged sibling bodies and descriptor stay.
         let mut delta =
             delta_stage::Delta::for_test(&["catalogs/x/ext/objectmodule.bsl"], &[], &[]);
         let mut only_module = object();
@@ -10859,7 +10859,7 @@ mod tests {
                 .iter()
                 .map(|body| body.body_id.as_str())
                 .collect::<Vec<_>>(),
-            ["u1.0", "u1.2"]
+            ["u1.0"]
         );
         // The rows a stage writes leave the emptied descriptor out.
         let additions = StageAdditions::default();
@@ -10873,11 +10873,11 @@ mod tests {
         );
         assert_eq!(
             rows.iter().map(|row| row.file_name).collect::<Vec<_>>(),
-            ["u1.0", "u1.2", "versions"]
+            ["u1.0", "versions"]
         );
         assert_eq!(
             source_stage_change_ids(std::slice::from_ref(&staged), &[]),
-            ["u1.0", "u1.2"]
+            ["u1.0"]
         );
 
         // Nothing differs: nothing is left.

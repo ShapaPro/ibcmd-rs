@@ -23,6 +23,7 @@
 
 pub mod check_gate;
 pub mod dynamic;
+mod dynamic_metadata;
 mod dynamic_overlay;
 pub mod dynamic_platform85;
 pub mod errors;

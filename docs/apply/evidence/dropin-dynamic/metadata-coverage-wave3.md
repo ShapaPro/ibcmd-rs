@@ -1,0 +1,115 @@
+# Existing module and template bodies: bounded coverage survey (#345)
+
+This checkpoint expands classification of existing 8.3.27.2214 ObjectModule and
+ManagerModule bodies and three existing template types. It does not admit new
+objects, removal, descriptor/property edits, unknown collections, schema changes,
+or nested managed-form families without functional native-client proof. The
+released CommonModule/CommonForm routes remain subject to the same strict storage
+checks. The separate initial 8.5 cohort retains its narrower guard.
+
+## Native roles measured
+
+The native matrix uses one existing owner per kind, with an exported marker in
+each listed module. Suffixes come from the compiler's source-asset registry;
+canonical owned collection classes come from the existing typed metadata model.
+Neither lookup alone grants admission.
+
+| Owner kind | ObjectModule suffix | ManagerModule suffix |
+|---|---|---|
+| Catalog | .0 | .3 |
+| Document | .0 | .2 |
+| Report | .0 | .2 |
+| DataProcessor | .0 | .2 |
+| ExchangePlan | .2 | .3 |
+| Task | .6 | .7 |
+| BusinessProcess | .6 | .8 |
+| ChartOfAccounts | .14 | .15 |
+| ChartOfCalculationTypes | .0 | .3 |
+| ChartOfCharacteristicTypes | .15 | .16 |
+| Enum | — | .0 |
+| Constant | — | .1 |
+| SettingsStorage | — | .8 |
+| DocumentJournal | — | .1 |
+| InformationRegister | — | .2 |
+| AccumulationRegister | — | .2 |
+
+The template cohort is SpreadsheetDocument under Report, HTMLDocument under
+DataProcessor, and TextDocument under ExchangePlan, each an existing nested
+Template descriptor with a .0 body. RecordSet, ValueManager and other template
+types remain outside this cohort.
+
+## Binding and storage checks
+
+Root and child descriptors have bounded native parsing, canonical UUIDs, exact
+recognized collection counts and unambiguous ownership. Duplicate classes,
+duplicate or reparented IDs, unknown child collections, invalid counts and
+malformed recognized root bindings fail closed. Child bindings publish only
+after the entire descriptor validates.
+
+Every staged and effective-active body must use its measured codec. Module
+containers contain exactly one `info` and one `text` element; the measured info
+record is preserved and text is UTF-8 with a BOM. Compressed bodies require a
+complete DEFLATE stream with all input consumed, at most 8 MiB decoded per row.
+The metadata graph and retained-alias collection each have independent row and
+32 MiB byte bounds. The overall publication limit remains 128 staged rows.
+
+Retaining a prior generation also requires admission. Every non-service pending
+alias is checked against exactly one ordinary row, using its bound full physical
+header and bytes. Pending descriptors must be semantically unchanged; pending
+bodies must use their admitted owner/role and codec. Help companions may be kept
+only when their decoded bytes are unchanged. Changed Help is not enabled.
+
+The existing locked inventory/history/registration/alias/marker checks remain in
+place. Additional ordinary descriptor/body preimages join the physical CAS.
+Attributes, Creation and Modified are checked from judgment to image, and again
+by the locked SQL CAS together with keys, sizes and SHA256. Reading an ordinary
+row once for several generations does not remove the independent checks of each
+alias.
+
+## Evidence and current acceptance boundary
+
+Raw evidence is preserved under `F:/ibcmd/lab/05/wave3/metadata`:
+
+- `evidence/native-session-B3.json`, `logs/control_B3-{old,new}.jsonl`: native
+  26-module old/new controls, old A/A and new B/B, no module errors.
+- `evidence/native-template-session-C1.json`,
+  `logs/control_template_C1-{old,new}.jsonl`: three native template controls,
+  old B/B and new C/C, no template errors; the 26 modules remain B.
+- `tests/fixtures/dynamic-metadata-native` contains bounded exact native raw
+  descriptor/body fixtures for ownership and codec regressions. Sixteen managed
+  form fixture decodes establish storage shape only. The nested Form admission
+  list is empty: observer/startup timeouts and private-listener refusals are not
+  functional form proof.
+- `evidence/modules-templates-B-source.json`: 12,198 files copied from the
+  native-established A export, exactly 26 module and three template source edits,
+  no form or descriptor edits. `evidence/bsl-fixed-B.json` records completed
+  ParseError/CodeBlockBeforeSub checks with zero errors.
+- `logs/own_modules_templates_import_B.json`: matching candidate import stages
+  48 rows, creates/removes no objects, compiles no descriptors, and verifies all
+  12,197 exported source files. This is import proof, not activation acceptance.
+- `evidence/own-body-companions-full-diff.json`: the same import unnecessarily
+  restages 16 unchanged sibling assets. Twelve have identical decoded bytes;
+  three module containers regenerate headers despite identical info/text payloads,
+  and ExchangePlan .1 changes an internal UUID. Exported-source equality does not
+  admit those physical changes. The classifier refuses them.
+- The stage now treats an exact ObjectModule/ManagerModule-only edit separately
+  when the owner descriptor is unchanged and no override, built/widened owner or
+  descriptor alias applies. Unchanged sibling rows follow the existing pending-row
+  preimage logic. Mixed descriptor/assets/nested-form/template edits keep the
+  previous Ext grouping. No new codec is admitted by this import optimization.
+- `logs/delta-module-only-RED.log` reproduces both sibling-restaging and pending
+  preimage errors before the repair; `logs/delta-module-only-GREEN.log` passes all
+  12 focused stage tests, including mixed and forced routes. Frozen-source
+  `gates-broad-v5/summary.txt` passes all four mandatory quick gates with
+  3,704 root tests passed, zero failed and ten ignored. The earlier v4 quick
+  attempt failed at shell startup and is not counted as a gate pass.
+
+The fresh native/own activation twins and their real old/new session controls
+are required before claiming the expanded cohort accepted. Source comparisons
+must cover every exported file and normalize only ConfigDumpInfo `configVersion`
+attribute values. Help/search caches and physical dates are reported separately;
+source equality does not establish complete physical storage parity.
+
+The prepared >128-row control remains a native-fallback case. No larger dynamic
+budget is enabled by this checkpoint, and no all-object or high-load acceptance
+is inferred from this survey.

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::mssql_main_activation::{MAX_PLAN_BYTES, MAX_ROW_BYTES, MAX_ROWS};
 use crate::sql::SqlClient;
 
+use super::dynamic_metadata::Owners;
 use super::model::{RowMeta, RowName, classify_name, hex_lower, hex_upper, quote_string};
 use super::sqlgen::{self, ParamsRewrite};
 use super::{ROW_COLUMNS, read_row_metas, si, versions};
@@ -94,6 +95,10 @@ fn alias(name: &str, history: &[String]) -> Result<(String, String)> {
     Ok((format!("{head}{}", &tail[36..]), generation.to_owned()))
 }
 
+pub(super) fn ordinary_alias_name(name: &str, history: &[String]) -> Result<String> {
+    alias(name, history).map(|(ordinary, _)| ordinary)
+}
+
 pub(super) fn inventory(client: &dyn SqlClient, db: &str) -> Result<Vec<RowMeta>> {
     read_inventory(client, db, "Config", CONFIG_FILTER)
 }
@@ -161,7 +166,7 @@ pub(super) fn judge_deleted(
     plain: &[u8],
     rows: &[RowMeta],
     history: &[String],
-    kinds: &HashMap<String, &'static str>,
+    kinds: &Owners,
 ) -> Result<Vec<String>> {
     let entries = super::parse_removals(plain).ok_or_else(|| anyhow!("unreadable deleted list"))?;
     ensure!(
@@ -202,12 +207,12 @@ pub(super) fn judge_deleted(
                 if ordinary == "versions" || ordinary == "deleted" => {}
             RowName::Descriptor(owner) | RowName::Body { owner, .. } => {
                 ensure!(
-                    matches!(kinds.get(owner), Some(&"CommonModule" | &"CommonForm")),
+                    kinds.admits(owner),
                     "deleted: unmeasured alias owner {name}"
                 );
                 if let RowName::Body { suffix, .. } = classify_name(&ordinary) {
                     ensure!(
-                        suffix == "0" || (suffix == "1" && kinds.get(owner) == Some(&"CommonForm")),
+                        kinds.role(owner, suffix).is_some(),
                         "deleted: unmeasured alias body {name}"
                     );
                 }
@@ -981,7 +986,7 @@ mod tests {
         let g0 = Uuid::new_v4().to_string();
         let g1 = Uuid::new_v4().to_string();
         let history = vec![g0.clone(), g1.clone()];
-        let kinds = HashMap::from([(id.to_owned(), "CommonForm")]);
+        let kinds = Owners::from(HashMap::from([(id.to_owned(), "CommonForm")]));
         let names = [
             format!("{id}_dynupdate_{g0}.0"),
             format!("versions_dynupdate_{g0}"),
@@ -1015,7 +1020,9 @@ mod tests {
         let bad_flag = list(&names).replacen(",0", ",1", 1);
         assert!(judge_deleted(bad_flag.as_bytes(), &rows, &history, &kinds).is_err());
         assert!(judge_deleted(list(&names).as_bytes(), &rows, &[g1, g0], &kinds).is_err());
-        assert!(judge_deleted(list(&names).as_bytes(), &rows, &history, &HashMap::new()).is_err());
+        assert!(
+            judge_deleted(list(&names).as_bytes(), &rows, &history, &Owners::default()).is_err()
+        );
     }
 
     #[test]

@@ -38,8 +38,6 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::metadata_model::brace::parse_row;
-use crate::metadata_model::export::names::root_kinds;
 use crate::mssql_main_activation::{
     MAX_PLAN_BYTES, MAX_ROW_BYTES, MAX_ROWS, MainActivationError, MainActivationMode,
     MainActivationSnapshot, MainStorageRow, prepare_main_activation, render_main_activation_sql,
@@ -48,6 +46,7 @@ use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::sql::{ScriptVariables, SqlClient, SqlExec};
 
 use super::check_gate::ApplyCheckGate;
+use super::dynamic_metadata::{self, BodyRole, Owners};
 use super::dynamic_overlay;
 use super::errors::{self, DynamicUnsupported, NeedsNativeApply};
 use super::gate::{GateInput, GateVerdict, StructuralGate};
@@ -66,7 +65,6 @@ pub const WARN_GENERATIONS: usize = 50;
 
 /// The kinds of object whose bodies are published dynamically: the two a session was measured with
 /// (`docs/apply/online-activation.md`).
-const DYNAMIC_KINDS: [&str; 2] = ["CommonModule", "CommonForm"];
 
 /// The reasons listed in a refusal before "и ещё N".
 const REASONS_SHOWN: usize = 8;
@@ -134,7 +132,7 @@ pub fn refusal_reason(reasons: &[String]) -> String {
 fn judge_rows(
     staged: &[RowMeta],
     active: &HashMap<(String, i32), RowMeta>,
-    kinds: &HashMap<String, &'static str>,
+    owners: &Owners,
     same_text: &mut dyn FnMut(&str) -> Result<bool>,
 ) -> Result<Vec<String>> {
     let mut reasons = Vec::new();
@@ -159,6 +157,20 @@ fn judge_rows(
             continue;
         }
         let known = active.get(&row.key());
+        if row.data_size != row.byte_len || row.byte_len < 0 || row.byte_len > MAX_ROW_BYTES as i64
+        {
+            reasons.push(format!("{name}: unmeasured staged size metadata"));
+            continue;
+        }
+        if known.is_some_and(|stored| {
+            stored.attributes != 0
+                || stored.data_size != stored.byte_len
+                || stored.byte_len < 0
+                || stored.byte_len > MAX_ROW_BYTES as i64
+        }) {
+            reasons.push(format!("{name}: unmeasured active row metadata"));
+            continue;
+        }
         match classify_name(name) {
             RowName::Service(service) => {
                 services.insert(service);
@@ -187,12 +199,13 @@ fn judge_rows(
                     continue;
                 }
                 // one reason for an object, however many of its rows are staged
-                match kinds.get(&owner.to_ascii_lowercase()) {
-                    Some(kind) if DYNAMIC_KINDS.contains(kind) => {}
+                let owner = owner.to_ascii_lowercase();
+                match owners.kinds.get(&owner) {
+                    Some(_) if owners.admits(&owner) => {}
                     Some(kind) => {
                         if refused_owners.insert(owner.to_ascii_lowercase()) {
                             reasons.push(format!(
-                                "{owner}: the object is a {kind}; only common modules and common forms are published dynamically (other kinds are not measured with sessions connected yet)"
+                            "{owner}: the object is a {kind} outside the measured dynamic owner/body cohort"
                             ));
                         }
                         continue;
@@ -200,20 +213,30 @@ fn judge_rows(
                     None => {
                         if refused_owners.insert(owner.to_ascii_lowercase()) {
                             reasons.push(format!(
-                                "{owner}: not a top-level object of the active configuration; only common modules and common forms are published dynamically"
+                                "{owner}: no proven existing owner in the active configuration"
                             ));
                         }
                         continue;
                     }
                 }
                 match body_suffix {
-                    Some("0") => {}
+                    Some(suffix)
+                        if matches!(
+                            owners.role(&owner, suffix),
+                            Some(
+                                BodyRole::CommonModule
+                                    | BodyRole::Module
+                                    | BodyRole::Form
+                                    | BodyRole::Template(_)
+                            )
+                        ) => {}
                     // Native repeated imports re-encode the existing common form help companion.
                     // Its inflated text must stay identical; changing help is not measured.
-                    Some("1") if kinds.get(&owner.to_ascii_lowercase()) == Some(&"CommonForm")
-                        && same_text(name)? => {}
+                    Some(suffix)
+                        if owners.role(&owner, suffix) == Some(BodyRole::UnchangedHelp)
+                            && same_text(name)? => {}
                     Some(suffix) => reasons.push(format!(
-                        "{name}: a body with the suffix .{suffix}; only the .0 body of a common module or common form is published dynamically"
+                        "{name}: unmeasured or structural body suffix .{suffix} for this owner"
                     )),
                     // a descriptor is published beside its body only when it is the same text
                     None => {
@@ -406,19 +429,30 @@ fn judge_deleted_list(
 fn object_kinds(
     client: &dyn SqlClient,
     database: &str,
-) -> Result<(HashMap<String, &'static str>, Vec<RowMeta>)> {
+    requested: &HashSet<String>,
+    overlay: &[RowMeta],
+    history: &[String],
+) -> Result<(Owners, Vec<RowMeta>)> {
     let db = quote_ident(database)?;
     let mut metas = read_row_metas(
         client,
-        &format!("SELECT {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'root'"),
+        &format!("SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'root'"),
     )?;
     let root_meta = metas
         .first()
-        .filter(|row| metas.len() == 1 && row.part == 0 && row.byte_len <= MAX_ROW_BYTES as i64)
+        .filter(|row| {
+            metas.len() == 1
+                && row.part == 0
+                && row.attributes == 0
+                && row.data_size == row.byte_len
+                && row.byte_len >= 0
+                && row.byte_len <= MAX_ROW_BYTES as i64
+        })
         .ok_or_else(|| anyhow!("Config.root has unmeasured metadata"))?;
     let root = dynamic_overlay::read_bound_blob(client, &db, "Config", root_meta)?;
-    let plain = versions::inflate_row(&root).context("the root row does not inflate")?;
-    let text = String::from_utf8_lossy(versions::strip_bom(&plain)).into_owned();
+    let plain = dynamic_metadata::inflate(&root).context("the root row does not inflate")?;
+    let text =
+        std::str::from_utf8(versions::strip_bom(&plain)).context("Config.root is not UTF-8")?;
     let configuration = text
         .trim()
         .strip_prefix("{2,")
@@ -428,19 +462,230 @@ fn object_kinds(
     uuid::Uuid::parse_str(&configuration)?;
     let descriptor = read_row_metas(
         client,
-        &format!("SELECT {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{configuration}'"),
+        &format!(
+            "SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{configuration}'"
+        ),
     )?;
     let descriptor_meta = descriptor
         .first()
         .filter(|row| {
-            descriptor.len() == 1 && row.part == 0 && row.byte_len <= MAX_ROW_BYTES as i64
+            descriptor.len() == 1
+                && row.part == 0
+                && row.attributes == 0
+                && row.data_size == row.byte_len
+                && row.byte_len >= 0
+                && row.byte_len <= MAX_ROW_BYTES as i64
         })
         .ok_or_else(|| anyhow!("Config configuration descriptor has unmeasured metadata"))?;
     let row = dynamic_overlay::read_bound_blob(client, &db, "Config", descriptor_meta)?;
-    let tree = parse_row(&versions::inflate_row(&row)?)
+    let (tree, mut decoded_bytes) = dynamic_metadata::descriptor(&row)
         .with_context(|| format!("the configuration row {configuration} does not parse"))?;
     metas.extend(descriptor);
-    Ok((root_kinds(&tree), metas))
+    let mut owners = dynamic_metadata::root_owners(&tree)?;
+    for id in owners.kinds.keys() {
+        if uuid::Uuid::parse_str(id)?.hyphenated().to_string() != *id {
+            bail!("noncanonical root owner UUID");
+        }
+    }
+    let nested: HashSet<_> = requested
+        .iter()
+        .filter(|id| !owners.kinds.contains_key(*id))
+        .cloned()
+        .collect();
+    if nested.is_empty() {
+        return Ok((owners, metas));
+    }
+    let mut parents: Vec<_> = owners
+        .kinds
+        .iter()
+        .filter(|(_, kind)| Owners::may_own_bodies(kind))
+        .map(|(id, kind)| (id.clone(), *kind))
+        .collect();
+    parents.sort();
+    ensure_graph_size(parents.len(), 0)?;
+    let filter = parents
+        .iter()
+        .map(|(id, _)| format!("N'{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if filter.is_empty() {
+        return Ok((owners, metas));
+    }
+    let parent_metas = read_row_metas(
+        client,
+        &format!(
+            "SELECT TOP ({}) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName IN ({filter}) ORDER BY FileName, PartNo",
+            dynamic_metadata::MAX_GRAPH_ROWS + 1
+        ),
+    )?;
+    let mut graph_bytes = 0usize;
+    let parent_kinds: HashMap<_, _> = parents.into_iter().collect();
+    if parent_metas.len() != parent_kinds.len() {
+        bail!("the bounded owner graph has missing or multipart descriptors");
+    }
+    let mut seen = HashSet::new();
+    for meta in &parent_metas {
+        let id = meta.name.to_ascii_lowercase();
+        if meta.part != 0
+            || meta.attributes != 0
+            || meta.data_size != meta.byte_len
+            || meta.byte_len > MAX_ROW_BYTES as i64
+            || !seen.insert(id.clone())
+        {
+            bail!("unmeasured owner descriptor metadata");
+        }
+        let size = usize::try_from(meta.byte_len).context("negative graph row length")?;
+        graph_bytes = graph_bytes
+            .checked_add(size)
+            .ok_or_else(|| anyhow!("graph size overflow"))?;
+        ensure_graph_size(parent_metas.len(), graph_bytes)?;
+        let bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", meta)?;
+        let (tree, decoded) = dynamic_metadata::descriptor(&bytes)?;
+        decoded_bytes = decoded_bytes
+            .checked_add(decoded)
+            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
+        ensure_graph_size(parent_metas.len(), decoded_bytes)?;
+        // This route changes bodies only. A prior native generation with changed ownership
+        // must not make the ordinary descriptor graph classify an orphaned/new child.
+        for alias in overlay.iter().filter(|row| {
+            row.name
+                .to_ascii_lowercase()
+                .starts_with(&format!("{id}_dynupdate_"))
+        }) {
+            if dynamic_overlay::ordinary_alias_name(&alias.name, history)? != id {
+                continue;
+            }
+            let alias_bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", alias)?;
+            if dynamic_metadata::inflate(&alias_bytes)? != dynamic_metadata::inflate(&bytes)? {
+                bail!("pending ownership/property change is outside the body-only cohort");
+            }
+        }
+        owners.bind_children(&id, parent_kinds[&id], &tree)?;
+    }
+    metas.extend(parent_metas);
+    for id in nested {
+        if !owners.kinds.contains_key(&id) {
+            continue;
+        }
+        let child = read_row_metas(
+            client,
+            &format!("SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{id}'"),
+        )?;
+        let meta = child
+            .first()
+            .filter(|row| {
+                child.len() == 1
+                    && row.part == 0
+                    && row.attributes == 0
+                    && row.data_size == row.byte_len
+                    && row.byte_len <= MAX_ROW_BYTES as i64
+            })
+            .ok_or_else(|| anyhow!("unmeasured owned descriptor metadata"))?;
+        let bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", meta)?;
+        let (tree, decoded) = dynamic_metadata::descriptor(&bytes)?;
+        decoded_bytes = decoded_bytes
+            .checked_add(decoded)
+            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
+        ensure_graph_size(metas.len() + child.len(), decoded_bytes)?;
+        for alias in overlay.iter().filter(|row| {
+            row.name
+                .to_ascii_lowercase()
+                .starts_with(&format!("{id}_dynupdate_"))
+        }) {
+            if dynamic_overlay::ordinary_alias_name(&alias.name, history)? != id {
+                continue;
+            }
+            let alias_bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", alias)?;
+            if dynamic_metadata::inflate(&alias_bytes)? != dynamic_metadata::inflate(&bytes)? {
+                bail!("pending owned descriptor/property change is outside the body-only cohort");
+            }
+        }
+        owners.bind_descriptor(&id, &tree)?;
+        metas.extend(child);
+    }
+    Ok((owners, metas))
+}
+
+fn ensure_graph_size(rows: usize, bytes: usize) -> Result<()> {
+    if rows > dynamic_metadata::MAX_GRAPH_ROWS || bytes > dynamic_metadata::MAX_GRAPH_BYTES {
+        bail!("dynamic owner graph exceeds its independent row/byte budget");
+    }
+    Ok(())
+}
+
+fn validate_pending_metadata(
+    client: &dyn SqlClient,
+    db: &str,
+    overlay: &[RowMeta],
+    history: &[String],
+    owners: &Owners,
+    metas: &mut Vec<RowMeta>,
+) -> Result<()> {
+    let mut ordinary_rows: HashMap<String, (RowMeta, Vec<u8>)> = HashMap::new();
+    let mut compressed = 0usize;
+    let mut decoded = 0usize;
+    for alias in overlay {
+        if alias.name.eq_ignore_ascii_case("DynamicallyUpdated") {
+            continue;
+        }
+        let ordinary = dynamic_overlay::ordinary_alias_name(&alias.name, history)?;
+        if ordinary == "versions" || ordinary == "deleted" {
+            continue;
+        }
+        if !ordinary_rows.contains_key(&ordinary) {
+            let rows = read_row_metas(
+                client,
+                &format!(
+                    "SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{}'",
+                    super::model::quote_string(&ordinary)
+                ),
+            )?;
+            let row = rows
+                .first()
+                .filter(|row| {
+                    rows.len() == 1
+                        && row.part == 0
+                        && row.attributes == 0
+                        && row.data_size == row.byte_len
+                        && row.byte_len >= 0
+                        && row.byte_len <= MAX_ROW_BYTES as i64
+                })
+                .ok_or_else(|| anyhow!("unmeasured retained ordinary row {ordinary}"))?;
+            compressed = compressed
+                .checked_add(usize::try_from(row.byte_len)?)
+                .ok_or_else(|| anyhow!("retained metadata size overflow"))?;
+            ensure_graph_size(ordinary_rows.len() + 1, compressed)?;
+            let blob = dynamic_overlay::read_bound_blob(client, db, "Config", row)?;
+            decoded = decoded
+                .checked_add(dynamic_metadata::inflate(&blob)?.len())
+                .ok_or_else(|| anyhow!("retained decoded size overflow"))?;
+            ensure_graph_size(ordinary_rows.len() + 1, decoded)?;
+            if let Some(previous) = metas.iter().find(|meta| meta.key() == row.key()) {
+                if previous != row {
+                    bail!("retained ordinary metadata drifted during graph judgment");
+                }
+            } else {
+                metas.push(row.clone());
+            }
+            ordinary_rows.insert(ordinary.clone(), (row.clone(), blob));
+        }
+        compressed = compressed
+            .checked_add(usize::try_from(alias.byte_len)?)
+            .ok_or_else(|| anyhow!("retained alias size overflow"))?;
+        ensure_graph_size(overlay.len(), compressed)?;
+        let bytes = dynamic_overlay::read_bound_blob(client, db, "Config", alias)?;
+        decoded = decoded
+            .checked_add(dynamic_metadata::inflate(&bytes)?.len())
+            .ok_or_else(|| anyhow!("retained alias decoded size overflow"))?;
+        ensure_graph_size(overlay.len(), decoded)?;
+        dynamic_metadata::validate_retained_alias(
+            &ordinary,
+            owners,
+            &ordinary_rows[&ordinary].1,
+            &bytes,
+        )?;
+    }
+    Ok(())
 }
 
 /// The bytes of the row `name` the configuration is read from: its newest alias of a generation the
@@ -702,18 +947,42 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
 
     // The rows: kinds, and the text of what must not change.
     let started = Instant::now();
-    let needs_kinds = staged.iter().any(|row| {
-        matches!(
-            classify_name(&row.name),
-            RowName::Descriptor(_) | RowName::Body { .. }
-        )
-    });
-    let (kinds, kind_metas) = if needs_kinds {
-        object_kinds(client, database)?
+    let mut requested: HashSet<String> = staged
+        .iter()
+        .filter_map(|row| match classify_name(&row.name) {
+            RowName::Descriptor(owner) | RowName::Body { owner, .. } => {
+                Some(owner.to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect();
+    for row in &overlay {
+        if row.name.eq_ignore_ascii_case("DynamicallyUpdated") {
+            continue;
+        }
+        let ordinary = dynamic_overlay::ordinary_alias_name(&row.name, &history_names)?;
+        if let RowName::Descriptor(owner) | RowName::Body { owner, .. } = classify_name(&ordinary) {
+            requested.insert(owner.to_ascii_lowercase());
+        }
+    }
+    let (kinds, mut kind_metas) = if !requested.is_empty() {
+        object_kinds(client, database, &requested, &overlay, &history_names)
+            .map_err(|error| NeedsNativeApply::apply(format!("dynamic owner graph: {error:#}")))?
     } else {
-        (HashMap::new(), Vec::new())
+        (Owners::default(), Vec::new())
     };
     let initial_85 = options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150;
+    if !initial_85 {
+        validate_pending_metadata(
+            client,
+            &db,
+            &overlay,
+            &history_names,
+            &kinds,
+            &mut kind_metas,
+        )
+        .map_err(|error| NeedsNativeApply::apply(format!("retained metadata: {error:#}")))?;
+    }
     let mut same_text = |name: &str| -> Result<bool> {
         let staged_bytes = read_stage_semantic(client, &db, &staged, name)?;
         if !judged_stage_digest(&staged, name, &staged_bytes) {
@@ -762,7 +1031,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         reasons.extend(judge_initial_85_cohort(
             &staged,
             &active,
-            &kinds,
+            &kinds.kinds,
             &history_names,
             &overlay,
             config_marker.is_some() || params_marker.is_some(),
@@ -807,6 +1076,33 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
                     }
                 }
                 _ => reasons.push("8.5 initial body kind is unmeasured".to_owned()),
+            }
+        }
+    }
+    if !initial_85 && reasons.is_empty() {
+        for row in &staged {
+            let RowName::Body { owner, suffix } = classify_name(&row.name) else {
+                continue;
+            };
+            let Some(role) = kinds.role(&owner.to_ascii_lowercase(), suffix) else {
+                continue;
+            };
+            if role == BodyRole::UnchangedHelp {
+                continue;
+            }
+            let stage_bytes = read_stage_semantic(client, &db, &staged, &row.name)?;
+            let active_bytes = effective_blob(
+                client,
+                database,
+                &row.name,
+                &history_names,
+                &judged_effective,
+            )?
+            .ok_or_else(|| anyhow!("effective body disappeared"))?;
+            for bytes in [&stage_bytes, &active_bytes] {
+                if let Err(error) = dynamic_metadata::validate_body(role, bytes) {
+                    reasons.push(format!("{}: unsupported body layout: {error:#}", row.name));
+                }
             }
         }
     }
@@ -1417,6 +1713,180 @@ fn owners_of(staged: &[RowMeta]) -> std::collections::BTreeMap<String, Vec<Strin
 mod tests {
     use super::*;
 
+    struct PendingRows {
+        ordinary: Vec<RowMeta>,
+        ordinary_blob: Vec<u8>,
+        aliases: HashMap<String, Vec<u8>>,
+    }
+
+    impl SqlClient for PendingRows {
+        fn dbms(&self) -> crate::sql::Dbms {
+            crate::sql::Dbms::SqlServer
+        }
+        fn max_connections(&self) -> usize {
+            1
+        }
+        fn run_script(&self, _: &str, _: ScriptVariables) -> Result<()> {
+            panic!("judgment is read-only")
+        }
+        fn execute(&self, _: &str, _: &[crate::sql::SqlParam<'_>]) -> Result<u64> {
+            panic!("judgment is read-only")
+        }
+        fn query_json(&self, _: &str) -> Result<Option<String>> {
+            panic!("judgment is read-only")
+        }
+        fn write_rows(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: &[Vec<crate::sql::SqlParam<'_>>],
+        ) -> Result<u64> {
+            panic!("judgment is read-only")
+        }
+        fn read_rows(
+            &self,
+            query: &str,
+            _: &[crate::sql::SqlParam<'_>],
+            each: &mut dyn FnMut(crate::sql::SqlRow) -> Result<()>,
+        ) -> Result<()> {
+            use crate::sql::{SqlRow, SqlValue};
+            assert!(query.starts_with("SELECT TOP (2)"));
+            if query.starts_with("SELECT TOP (2) BinaryData") {
+                let blob = self
+                    .aliases
+                    .iter()
+                    .find_map(|(name, blob)| {
+                        query
+                            .contains(&format!("FileName = N'{name}'"))
+                            .then_some(blob)
+                    })
+                    .unwrap_or(&self.ordinary_blob);
+                return each(SqlRow {
+                    result_set: 0,
+                    values: vec![SqlValue::Binary(blob.clone())],
+                });
+            }
+            for meta in &self.ordinary {
+                each(SqlRow {
+                    result_set: 0,
+                    values: vec![
+                        SqlValue::Text(meta.name.clone()),
+                        SqlValue::Int(meta.part.into()),
+                        SqlValue::Int(meta.data_size),
+                        SqlValue::Int(meta.byte_len),
+                        SqlValue::Int(meta.attributes.into()),
+                        SqlValue::Text(meta.creation.clone()),
+                        SqlValue::Text(meta.modified.clone()),
+                        SqlValue::Text(meta.sha256.clone()),
+                    ],
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn retained_metadata_reads_are_bounded_and_bind_full_ordinary_headers_before_sql() {
+        use std::io::Write;
+        let deflate = |text: &[u8]| {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(text).unwrap();
+            encoder.finish().unwrap()
+        };
+        let id = "313d9858-3995-4a4c-b2b0-15d2350417b4";
+        let ordinary = format!("{id}.0");
+        let blob = deflate(b"\xef\xbb\xbfFunction Marker() Export\nReturn \"A\";\nEndFunction");
+        let next = deflate(b"\xef\xbb\xbfFunction Marker() Export\nReturn \"B\";\nEndFunction");
+        let history = vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ];
+        let mut baseline = meta(&ordinary, &hex_lower(&Sha256::digest(&blob)));
+        baseline.byte_len = blob.len() as i64;
+        baseline.data_size = baseline.byte_len;
+        baseline.creation = "2026-10-01 12:00:00.000".to_owned();
+        baseline.modified = "2026-10-01 13:00:00.000".to_owned();
+        let aliases: Vec<_> = history
+            .iter()
+            .map(|generation| {
+                let mut row = baseline.clone();
+                row.name = format!("{id}_dynupdate_{generation}.0");
+                row.byte_len = next.len() as i64;
+                row.data_size = row.byte_len;
+                row.sha256 = hex_lower(&Sha256::digest(&next));
+                row
+            })
+            .collect();
+        let mut client = PendingRows {
+            ordinary: vec![baseline.clone()],
+            ordinary_blob: blob,
+            aliases: aliases
+                .iter()
+                .map(|row| (row.name.clone(), next.clone()))
+                .collect(),
+        };
+        let owners: Owners = HashMap::from([(id.to_owned(), "CommonModule")]).into();
+        let mut metas = Vec::new();
+        validate_pending_metadata(
+            &client,
+            "[fixture]",
+            &aliases,
+            &history,
+            &owners,
+            &mut metas,
+        )
+        .unwrap();
+        assert_eq!(
+            metas,
+            vec![baseline.clone()],
+            "one ordinary preimage covers multiple generations"
+        );
+        let guard = dynamic_overlay::guard("Config", &format!("FileName = N'{ordinary}'"), &metas);
+        assert!(
+            guard.contains("Attributes = 0")
+                && guard.contains(&baseline.creation)
+                && guard.contains(&baseline.modified)
+                && guard.contains(&baseline.sha256)
+        );
+        let mut changed_header = metas.clone();
+        changed_header[0].modified = "drift".to_owned();
+        assert!(
+            validate_pending_metadata(
+                &client,
+                "[fixture]",
+                &aliases,
+                &history,
+                &owners,
+                &mut changed_header
+            )
+            .is_err()
+        );
+        for variant in 0..5 {
+            client.ordinary = vec![baseline.clone()];
+            match variant {
+                0 => client.ordinary.clear(),
+                1 => client.ordinary.push(baseline.clone()),
+                2 => client.ordinary[0].attributes = 1,
+                3 => client.ordinary[0].part = 1,
+                4 => client.ordinary[0].data_size += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_pending_metadata(
+                    &client,
+                    "[fixture]",
+                    &aliases,
+                    &history,
+                    &owners,
+                    &mut Vec::new()
+                )
+                .is_err(),
+                "variant {variant}"
+            );
+        }
+    }
+
     #[test]
     fn manually_staged_ordinary_noop_cannot_discard_pending_alias_revert_without_deleted() {
         let name = "313d9858-3995-4a4c-b2b0-15d2350417b4.0";
@@ -1476,12 +1946,13 @@ mod tests {
         }
     }
 
-    fn kinds() -> HashMap<String, &'static str> {
+    fn kinds() -> Owners {
         HashMap::from([
             (MODULE.to_owned(), "CommonModule"),
             (FORM.to_owned(), "CommonForm"),
             (CATALOG.to_owned(), "Catalog"),
         ])
+        .into()
     }
 
     /// The active rows of the names, with the digest "aa".
@@ -1545,18 +2016,18 @@ mod tests {
         let check = |rows: &[RowMeta], kinds: &HashMap<String, &'static str>| {
             judge_initial_85_cohort(rows, &active, kinds, &[], &[], false)
         };
-        assert!(check(&stage, &kinds()).is_empty());
+        assert!(check(&stage, &kinds().kinds).is_empty());
         let mut form = kinds();
-        form.insert(MODULE.to_owned(), "CommonForm");
-        assert!(check(&stage, &form).is_empty());
+        form.kinds.insert(MODULE.to_owned(), "CommonForm");
+        assert!(check(&stage, &form.kinds).is_empty());
         for kind in ["Form", "Catalog", "Template", "HTTPService"] {
             let mut owners = kinds();
-            owners.insert(MODULE.to_owned(), kind);
-            assert!(!check(&stage, &owners).is_empty(), "{kind}");
+            owners.kinds.insert(MODULE.to_owned(), kind);
+            assert!(!check(&stage, &owners.kinds).is_empty(), "{kind}");
         }
         let mut unknown = kinds();
-        unknown.remove(MODULE);
-        assert!(!check(&stage, &unknown).is_empty());
+        unknown.kinds.remove(MODULE);
+        assert!(!check(&stage, &unknown.kinds).is_empty());
         for replacement in [
             format!("{MODULE}.1"),
             format!("{FORM}.0"),
@@ -1564,32 +2035,36 @@ mod tests {
         ] {
             let mut changed = stage.clone();
             changed[1].name = replacement;
-            assert!(!check(&changed, &kinds()).is_empty());
+            assert!(!check(&changed, &kinds().kinds).is_empty());
         }
         let mut no_change = stage.clone();
         no_change[1].sha256 = active.get(&no_change[1].key()).unwrap().sha256.clone();
-        assert!(!check(&no_change, &kinds()).is_empty());
+        assert!(!check(&no_change, &kinds().kinds).is_empty());
         let mut duplicate = stage.clone();
         duplicate[0] = duplicate[2].clone();
-        assert!(!check(&duplicate, &kinds()).is_empty());
+        assert!(!check(&duplicate, &kinds().kinds).is_empty());
         let mut extra = stage.clone();
         extra.push(meta("deleted", "bb"));
-        assert!(!check(&extra, &kinds()).is_empty());
+        assert!(!check(&extra, &kinds().kinds).is_empty());
         let mut missing = active.clone();
         missing.remove(&(MODULE.to_owned(), 0));
-        assert!(!judge_initial_85_cohort(&stage, &missing, &kinds(), &[], &[], false).is_empty());
+        assert!(
+            !judge_initial_85_cohort(&stage, &missing, &kinds().kinds, &[], &[], false).is_empty()
+        );
     }
 
     #[test]
     fn initial_85_cohort_refuses_history_overlays_and_unmeasured_headers() {
         let stage = delta();
         let active = all_active();
-        assert!(!judge_initial_85_cohort(&stage, &active, &kinds(), &[], &[], true).is_empty());
+        assert!(
+            !judge_initial_85_cohort(&stage, &active, &kinds().kinds, &[], &[], true).is_empty()
+        );
         assert!(
             !judge_initial_85_cohort(
                 &stage,
                 &active,
-                &kinds(),
+                &kinds().kinds,
                 &["generation".to_owned()],
                 &[],
                 false
@@ -1600,7 +2075,7 @@ mod tests {
             !judge_initial_85_cohort(
                 &stage,
                 &active,
-                &kinds(),
+                &kinds().kinds,
                 &[],
                 &[meta("alias", "aa")],
                 false
@@ -1620,7 +2095,8 @@ mod tests {
                 bad[index].data_size = size;
                 bad[index].byte_len = bytes;
                 assert!(
-                    !judge_initial_85_cohort(&bad, &active, &kinds(), &[], &[], false).is_empty()
+                    !judge_initial_85_cohort(&bad, &active, &kinds().kinds, &[], &[], false)
+                        .is_empty()
                 );
             }
         }
@@ -1823,11 +2299,14 @@ mod tests {
             meta("version", "aa"),
             meta("versions", "cc"),
         ];
-        let reasons = judged(&catalog, true);
+        assert!(judged(&catalog, true).is_empty());
+        let mut unsupported = kinds();
+        unsupported.kinds.insert(CATALOG.to_owned(), "HTTPService");
+        let reasons = judge_rows(&catalog, &all_active(), &unsupported, &mut |_| Ok(true)).unwrap();
         // one reason for the object, though its descriptor and its body are staged
         assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert!(
-            reasons[0].starts_with(&format!("{CATALOG}: the object is a Catalog")),
+            reasons[0].starts_with(&format!("{CATALOG}: the object is a HTTPService")),
             "{reasons:?}"
         );
         // a new object: no row in Config
@@ -1853,7 +2332,10 @@ mod tests {
             meta("versions", "cc"),
         ];
         let reasons = judge_rows(&stage, &nested, &kinds(), &mut |_| Ok(true)).unwrap();
-        assert!(reasons[0].contains("not a top-level object"), "{reasons:?}");
+        assert!(
+            reasons[0].contains("no proven existing owner"),
+            "{reasons:?}"
+        );
         // a body that is not the .0
         let mut other_suffix = delta();
         other_suffix[1] = meta(&format!("{MODULE}.1"), "bb");
@@ -1861,7 +2343,10 @@ mod tests {
         let row = meta(&format!("{MODULE}.1"), "aa");
         active.insert(row.key(), row);
         let reasons = judge_rows(&other_suffix, &active, &kinds(), &mut |_| Ok(true)).unwrap();
-        assert!(reasons[0].contains("only the .0 body"), "{reasons:?}");
+        assert!(
+            reasons[0].contains("unmeasured or structural body suffix"),
+            "{reasons:?}"
+        );
         // a name that is nothing an apply knows; the list of removals is judged apart
         let mut odd = delta();
         odd.push(meta("something-else", "ee"));
