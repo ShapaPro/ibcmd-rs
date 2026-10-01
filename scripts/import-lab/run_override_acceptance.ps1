@@ -20,7 +20,9 @@ param(
     [string]$Dynamic = 'disable',
     [ValidateSet('8.3.27', '8.5')][string]$Platform = '8.3.27',
     [ValidateSet('native', 'ours')][string]$ApplyWith = 'native',
-    [string[]]$ApplyArgs = @()
+    [string[]]$ApplyArgs = @(),
+    # An edited fixture may retain its old dump-info. Supply the independent native export's file.
+    [string]$DumpInfoReference = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -32,6 +34,9 @@ Assert-LabDb $Database
 $lab = $script:Lab
 $outDir = "$lab\out\override-acceptance"
 New-Item -ItemType Directory -Force $outDir | Out-Null
+foreach ($artifact in @("$outDir\$Tag.json", "$lab\out\import-$Tag-import.json", "$lab\out\export\$Tag", "$lab\out\export\$Tag.diff.json")) {
+    if (Test-Path -LiteralPath $artifact) { throw "acceptance artifact already exists: $artifact" }
+}
 $free = (Get-PSDrive F).Free / 1GB
 if ($free -lt 25) { throw "F: has $([math]::Round($free,1)) GB free; not starting" }
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -54,6 +59,7 @@ if ($r.Exit -ne 0) {
     $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8
     exit 1
 }
+if (-not $stage.verification -or $stage.verification.checked_files -le 0 -or $stage.verification.checked_files -ne $stage.verification.identical_files) { throw 'stage guard did not pass' }
 $summary = (python "$here\configsave_summary.py" $Database) -join "`n" | ConvertFrom-Json
 $report.configsave = $summary
 "configsave: rows=$($summary.rows) names=$($summary.names) years=$($summary.creation_years | ConvertTo-Json -Compress) parts>1=$(@($summary.parts_over_one).Count)"
@@ -77,6 +83,7 @@ $report.export = $e
 if ($e.Exit -ne 0) { $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8; exit 3 }
 $diff = "$lab\out\export\$Tag.diff.json"
 & $Exe source-diff -o $diff $Tree $exportDir 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'source-diff failed' }
 $d = Get-Content $diff -Raw | ConvertFrom-Json
 $report.diff_summary = $d.summary
 "source-diff tree vs native export: $($d.summary | ConvertTo-Json -Compress)"
@@ -84,6 +91,13 @@ $others = @($d.differences | Where-Object { $_.status -ne 'unchanged' -and $_.pa
 $report.differing_files = @($others | ForEach-Object { "{0} {1}" -f $_.status, $_.path })
 $others | Select-Object -First 30 | ForEach-Object { "  {0,-10} {1}" -f $_.status, $_.path }
 $report.equal_but_dump_info = ($others.Count -eq 0)
+if (-not $DumpInfoReference) { $DumpInfoReference = "$Tree\ConfigDumpInfo.xml" }
+$report.dump_info_reference = $DumpInfoReference
+$dumpInfo = python "$here\compare_dump_info.py" $DumpInfoReference "$exportDir\ConfigDumpInfo.xml" | ConvertFrom-Json
+if ($LASTEXITCODE -notin @(0, 1) -or -not $dumpInfo) { throw 'dump-info comparison failed' }
+$report.dump_info = $dumpInfo
+$report.equal_except_config_version = ($others.Count -eq 0 -and $dumpInfo.equal_except_config_version)
 $report.total_seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 $report | ConvertTo-Json -Depth 6 | Set-Content "$outDir\$Tag.json" -Encoding UTF8
 "export equals the tree (ConfigDumpInfo.xml aside): $($others.Count -eq 0)"
+if (-not $report.equal_except_config_version) { throw 'native export differs from the source tree' }

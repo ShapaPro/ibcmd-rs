@@ -22,6 +22,15 @@ try {
         $expected = if ($heavy) { @('acquire heavy import', 'acquire native import', 'release native import', 'release heavy import') }
                     else { @('acquire native import', 'release native import') }
         if (($calls -join '|') -ne ($expected -join '|')) { throw "wrong lock order: $calls" }
+        Remove-Item -LiteralPath $env:IMPORT_LOCK_TEST_LOG
+        $caught = $false
+        try { Invoke-WithNativeLock { throw 'expected body failure' } }
+        catch {
+            if ($_.Exception.Message -ne 'expected body failure') { throw }
+            $caught = $true
+        }
+        $calls = @(Get-Content -LiteralPath $env:IMPORT_LOCK_TEST_LOG)
+        if (-not $caught -or ($calls -join '|') -ne ($expected -join '|')) { throw 'failure did not release both locks' }
     }
     'native lock harness: both paths passed'
 } finally {

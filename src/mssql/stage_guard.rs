@@ -1477,6 +1477,8 @@ mod tests {
             ("PaletteColors/ВниманиеБИПЦветФона.xml", b"<p1/>"),
             ("PaletteColors/НеверноеЗначениеЦветФона.xml", b"<p2/>"),
             ("ExternalDataSources/Source.xml", b"<s/>"),
+            ("Bots/Bot.xml", b"<b/>"),
+            ("IntegrationServices/Service.xml", b"<i/>"),
         ];
         let (_, root) = comparer(files, &[]);
         let walked = source_listing::walk(&root);
@@ -1485,10 +1487,54 @@ mod tests {
             produce(&comparer, relative, bytes);
         }
         let result = comparer.finish().unwrap();
-        assert_eq!(result.compared, 4);
-        assert_eq!(result.identical, 4);
+        assert_eq!(result.compared, 6);
+        assert_eq!(result.identical, 6);
         assert!(result.differences.is_empty(), "{:?}", result.differences);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn new_root_kinds_cannot_bypass_the_guard_when_missing_or_changed() {
+        for folder in [
+            "PaletteColors",
+            "Bots",
+            "IntegrationServices",
+            "ExternalDataSources",
+        ] {
+            let changed = format!("{folder}/Changed.xml");
+            let missing = format!("{folder}/Missing.xml");
+            let extra = format!("{folder}/Extra.xml");
+            let (_, root) = comparer(&[(&changed, b"<old/>"), (&missing, b"<missing/>")], &[]);
+            let walked = source_listing::walk(&root);
+            let comparer = TreeComparer::hashing(&root.join("virtual"), &root, walked.files, &[]);
+            produce(&comparer, &changed, b"<new/>");
+            produce(&comparer, &extra, b"<extra/>");
+            let result = comparer.finish().unwrap();
+            assert_eq!(result.compared, 2, "{folder}");
+            assert_eq!(result.identical, 0, "{folder}");
+            assert_eq!(result.differences.len(), 3, "{folder}");
+            assert!(
+                result.differences.iter().any(
+                    |d| d.path == changed && matches!(d.difference, Difference::Changed { .. })
+                ),
+                "{folder}"
+            );
+            assert!(
+                result
+                    .differences
+                    .iter()
+                    .any(|d| d.path == missing && matches!(d.difference, Difference::OnlyInTree)),
+                "{folder}"
+            );
+            assert!(
+                result
+                    .differences
+                    .iter()
+                    .any(|d| d.path == extra && matches!(d.difference, Difference::OnlyInState)),
+                "{folder}"
+            );
+            fs::remove_dir_all(root).ok();
+        }
     }
 
     #[test]
