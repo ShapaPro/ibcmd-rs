@@ -15,8 +15,13 @@ $script:Ragent = Join-Path $script:Bin 'ragent.exe'
 $script:RasExe = Join-Path $script:Bin 'ras.exe'
 $script:Rac = Join-Path $script:Bin 'rac.exe'
 $script:Root = 'F:\ibcmd\lab\05\cluster'
+$script:PrivateContext = $null
 if ($env:IBCMD_RS_WORKER_LAB_ROOT) {
     $overrideRoot = [IO.Path]::GetFullPath($env:IBCMD_RS_WORKER_LAB_ROOT)
+    if ($overrideRoot -in @('F:\ibcmd\lab\05\wave3\load\cluster','F:\ibcmd\lab\05\wave3\metadata\cluster')) {
+        . "$PSScriptRoot\private-lib.ps1"
+        return
+    }
     if ($overrideRoot -ne 'F:\ibcmd\lab\05\wave1\live\cluster') { throw 'worker root override is limited to the owned LIVE wave1 cluster' }
     $script:Root = $overrideRoot
 }
