@@ -33,7 +33,6 @@
 //! not applied under a lock they did not ask for.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -306,16 +305,31 @@ fn judge_initial_85_cohort(
 fn initial_85_module_text(blob: &[u8]) -> Result<Vec<u8>> {
     const MAX_PLAIN: usize = 8 * 1024 * 1024;
     let mut plain = Vec::new();
-    let mut decoder = flate2::read::DeflateDecoder::new(blob);
-    decoder
-        .by_ref()
-        .take((MAX_PLAIN + 1) as u64)
-        .read_to_end(&mut plain)?;
-    if plain.len() > MAX_PLAIN {
-        bail!("8.5 module decoded size exceeds {MAX_PLAIN}");
-    }
-    if decoder.total_in() != blob.len() as u64 {
-        bail!("8.5 module has trailing compressed data");
+    let mut decoder = flate2::Decompress::new(false);
+    let mut chunk = [0u8; 8192];
+    loop {
+        let before_in = decoder.total_in();
+        let before_out = decoder.total_out();
+        let capacity = chunk.len().min(MAX_PLAIN + 1 - plain.len());
+        let status = decoder.decompress(
+            &blob[before_in as usize..],
+            &mut chunk[..capacity],
+            flate2::FlushDecompress::None,
+        )?;
+        let produced = (decoder.total_out() - before_out) as usize;
+        plain.extend_from_slice(&chunk[..produced]);
+        if plain.len() > MAX_PLAIN {
+            bail!("8.5 module decoded size exceeds {MAX_PLAIN}");
+        }
+        if status == flate2::Status::StreamEnd {
+            if decoder.total_in() != blob.len() as u64 {
+                bail!("8.5 module has trailing compressed data");
+            }
+            break;
+        }
+        if decoder.total_in() == before_in && produced == 0 {
+            bail!("8.5 module has an incomplete DEFLATE stream");
+        }
     }
     let elements = crate::v8_container::parse_v8_container(&plain)?;
     if elements.len() != 2
@@ -1642,6 +1656,43 @@ mod tests {
         trailing.extend_from_slice(b"unmeasured trailing data");
         assert!(initial_85_module_text(&trailing).is_err());
         assert!(initial_85_module_text(&deflate(&vec![0; 8 * 1024 * 1024 + 1])).is_err());
+    }
+
+    #[test]
+    fn initial_85_module_requires_a_final_deflate_block() {
+        use crate::v8_container::{V8Element, build_v8_container, make_v8_element_header};
+        use std::io::{Read, Write};
+        let element = |name: &str, data: &[u8]| V8Element {
+            name: name.to_owned(),
+            header: make_v8_element_header(name),
+            data: data.to_vec(),
+        };
+        let container = build_v8_container(&[
+            element("info", b"\xef\xbb\xbf{3,1,0,\"\",0}"),
+            element("text", b"\xef\xbb\xbfProcedure Marker()\nEndProcedure"),
+        ])
+        .unwrap();
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&container).unwrap();
+        encoder.flush().unwrap();
+        let incomplete = encoder.get_ref().clone();
+        // A complete uncompressed v8 container is already present. A reader's
+        // EOF success is insufficient: the DEFLATE stream has no final block.
+        let mut legacy_plain = Vec::new();
+        flate2::read::DeflateDecoder::new(incomplete.as_slice())
+            .read_to_end(&mut legacy_plain)
+            .unwrap();
+        assert_eq!(legacy_plain, container);
+        assert!(initial_85_module_text(&incomplete).is_err());
+        let complete = encoder.finish().unwrap();
+        assert!(initial_85_module_text(&complete).is_ok());
+        for length in 0..complete.len() {
+            assert!(
+                initial_85_module_text(&complete[..length]).is_err(),
+                "prefix {length}"
+            );
+        }
     }
 
     #[test]

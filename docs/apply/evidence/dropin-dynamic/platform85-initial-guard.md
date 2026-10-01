@@ -16,7 +16,9 @@ The independent structural checker still runs without filtering root reasons.
 The module is a raw-deflate v8 container containing exactly one `info` and one
 `text` element. The measured info bytes are UTF-8 BOM plus `{3,1,0,"",0}`;
 the UTF-8 BOM text changes from the old marker to the new one. Inflation is
-bounded to 8 MiB before parsing. Unknown records, missing/duplicate elements,
+bounded to 8 MiB before parsing and must reach DEFLATE `StreamEnd` with every
+compressed input byte consumed. EOF alone is not a completed stream. Unknown
+records, missing/duplicate elements,
 invalid UTF-8, a missing BOM, oversized expansion and unchanged text refuse.
 
 This initial cohort requires absent Config/Params history markers, no Config
@@ -41,7 +43,9 @@ existing parity helper, subject to the platform track's own/native measurement.
 The three native runtime `.ui` row differences are retained as a known gap;
 there is no licensing decoder/writer and no complete Params parity claim.
 
-Three focused tests cover cohort refusals and bounded module decoding. The
+Four focused tests cover cohort refusals and bounded module decoding, including
+a sync-flushed complete v8 container without its final DEFLATE block and every
+truncated prefix of the corresponding completed stream. The
 mandatory quick checks are formatting, physical adapter policy, CI's standalone
 workspace clippy command, and the root library suite. The deliberately broader
 root-inclusive clippy attempt reports inherited errors and is retained in the
