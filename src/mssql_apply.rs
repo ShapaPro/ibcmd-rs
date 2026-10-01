@@ -74,6 +74,8 @@ pub fn apply_source_change(
         args.platform_profile.require_extension_write_supported()?;
     } else {
         args.platform_profile.require_main_write_supported()?;
+    }
+    if args.extension.is_none() {
         require_supported_main_source_cohort(args)?;
         preflight_tail_log(args)?;
         crate::mssql_main_activation::preflight_interrupt_sessions(
@@ -121,17 +123,6 @@ pub fn apply_source_change(
         )
     {
         bail!("live/worker activation is not supported for extensions; use online or exclusive");
-    }
-    if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !args.dry_run {
-        crate::mssql_worker_switch::prepare_dedicated_worker(
-            &crate::mssql_worker_switch::WorkerSwitchOptions {
-                rac: args.rac.clone(),
-                ras_endpoint: args.ras_endpoint.clone(),
-                cluster_id: profile_verification.verified_cluster_id,
-                infobase_id: profile_verification.verified_infobase_id,
-                timeout: Duration::from_secs(10),
-            },
-        )?;
     }
 
     let source_root = fs::canonicalize(&args.source_root)
@@ -292,6 +283,7 @@ pub fn apply_source_change(
             },
         });
     }
+    preflight_classified_worker_source(args.mode, args.dry_run, &classified)?;
     if args.extension.is_none() {
         preflight_main_publication(args)?;
     }
@@ -565,6 +557,11 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
     }
 
     args.platform_profile.require_main_write_supported()?;
+    crate::mssql_worker_switch::preflight_worker_execution(
+        activation_mode(args.mode),
+        args.dry_run,
+        false,
+    )?;
     require_supported_main_source_cohort(args)?;
     crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
@@ -1241,6 +1238,18 @@ fn main_read_sql(args: &MssqlApplySourceChangeArgs) -> Result<SqlExec> {
     })
 }
 
+fn preflight_classified_worker_source(
+    mode: MssqlMainActivationModeArg,
+    dry_run: bool,
+    classified: &crate::mssql_source_change::SourceActivationInput,
+) -> Result<()> {
+    crate::mssql_worker_switch::preflight_worker_execution(
+        activation_mode(mode),
+        dry_run,
+        classified.is_no_op(),
+    )
+}
+
 fn activation_mode(
     mode: MssqlMainActivationModeArg,
 ) -> crate::mssql_main_activation::MainActivationMode {
@@ -1597,6 +1606,49 @@ mod tests {
     }
 
     #[test]
+    fn classified_worker_source_preserves_real_no_op_and_refuses_changed_body() {
+        let inventory = |body: &[u8]| {
+            SourceInventory::from_files(vec![
+                SourceFileDigest::for_bytes("CommonModules/Work.xml", b"metadata").unwrap(),
+                SourceFileDigest::for_bytes("CommonModules/Work/Ext/Module.bsl", body).unwrap(),
+            ])
+            .unwrap()
+        };
+        let active = inventory(b"Function Value() Export\nReturn 1;\nEndFunction");
+        let same = inventory(b"Function Value() Export\nReturn 1;\nEndFunction");
+        let changed = inventory(b"Function Value() Export\nReturn 2;\nEndFunction");
+        for (proposed, expected_no_op) in [(&same, true), (&changed, false)] {
+            let plan = classify_source_change(
+                &active,
+                proposed,
+                "CommonModules/Work/Ext/Module.bsl",
+                ActivationTarget::Main,
+                ActivationMode::Exclusive,
+            )
+            .unwrap();
+            assert_eq!(plan.is_no_op(), expected_no_op);
+            assert_eq!(plan.changed_paths().is_empty(), expected_no_op);
+            let result = preflight_classified_worker_source(
+                MssqlMainActivationModeArg::Worker,
+                false,
+                &plan,
+            );
+            if expected_no_op {
+                result.unwrap();
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("complete loaded-infobase")
+                );
+            }
+            preflight_classified_worker_source(MssqlMainActivationModeArg::Worker, true, &plan)
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn runtime_profile_verification_fails_before_watch_reads_missing_source() {
         let args = MssqlApplySourceChangeArgs {
             live_checkpoint: false,
@@ -1638,9 +1690,13 @@ mod tests {
             platform_profile: MssqlNativePlatformProfile::Platform8_3_27_2214,
             ..args
         };
-        let runtime_error =
-            watch_source_changes(&evidenced).expect_err("runtime verification must still run");
-        assert!(runtime_error.to_string().contains("failed to launch rac"));
+        let runtime_error = watch_source_changes(&evidenced)
+            .expect_err("unproved worker ownership must refuse before any external process");
+        assert!(
+            runtime_error
+                .to_string()
+                .contains("complete loaded-infobase")
+        );
     }
 
     const OLD: &str = "719baa18-69ed-439a-8962-1de53d98e05e";

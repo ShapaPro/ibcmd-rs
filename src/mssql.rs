@@ -1046,6 +1046,7 @@ pub fn activate_staged_main(
         args.allow_non_lab,
     )
     .map_err(anyhow::Error::new)?;
+    crate::mssql_worker_switch::preflight_worker_execution(mode, args.dry_run, plan.is_no_op())?;
     // The tool's own RAS verification made the cluster open idle SQL sessions on
     // this database; the session gate of an exclusive activation must not count
     // them (#409 F-3), and an infobase that has clients is refused before any
