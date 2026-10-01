@@ -53,6 +53,14 @@ complete DEFLATE stream with all input consumed, at most 8 MiB decoded per row.
 The metadata graph and retained-alias collection each have independent row and
 32 MiB byte bounds. The overall publication limit remains 128 staged rows.
 
+The graph budget includes the root row, configuration descriptor, every read
+parent/child descriptor and descriptor aliases inspected for ownership changes.
+Complete header batches reserve their compressed bytes and row count before any
+blob of that batch is requested. Each decode also uses the remaining aggregate
+budget, capped at 8 MiB per row. Descriptor/body/help semantic comparisons and
+the pending-deletion check use complete, bounded DEFLATE decoding. The historical
+global Versions parser and its 64 MiB contract are unchanged.
+
 Retaining a prior generation also requires admission. Every non-service pending
 alias is checked against exactly one ordinary row, using its bound full physical
 header and bytes. Pending descriptors must be semantically unchanged; pending
@@ -103,6 +111,18 @@ Raw evidence is preserved under `F:/ibcmd/lab/05/wave3/metadata`:
   `gates-broad-v5/summary.txt` passes all four mandatory quick gates with
   3,704 root tests passed, zero failed and ten ignored. The earlier v4 quick
   attempt failed at shell startup and is not counted as a gate pass.
+- Independent review found two budget gaps in that initial checkpoint. The
+  repaired graph-header probe refuses before requesting either mocked 16 MiB
+  parent blob; the initial code requested one despite the root/configuration
+  bytes exceeding the aggregate budget. Semantic comparison also now refuses a
+  full decoded payload without a DEFLATE stream end and an 8 MiB + 1-byte row.
+  `logs/graph-budget-RED-v3.log` and `logs/semantic-bound-RED-v2.log` retain those
+  failures. `logs/budget-repair-GREEN.log` passes 44 focused tests, including
+  exact/over-limit compressed, decoded and row-count budgets, valid compression
+  variants and the measured native 8.5 root restamp.
+- `gates-budget-repair/summary.txt` passes all four mandatory gates with 3,709
+  tests passed, zero failed and ten ignored. The earlier import and executable
+  remain historical pre-repair evidence and are not activation authority.
 
 The fresh native/own activation twins and their real old/new session controls
 are required before claiming the expanded cohort accepted. Source comparisons

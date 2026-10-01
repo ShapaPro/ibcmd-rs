@@ -434,6 +434,7 @@ fn object_kinds(
     history: &[String],
 ) -> Result<(Owners, Vec<RowMeta>)> {
     let db = quote_ident(database)?;
+    let mut budget = GraphBudget::default();
     let mut metas = read_row_metas(
         client,
         &format!("SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'root'"),
@@ -449,8 +450,11 @@ fn object_kinds(
                 && row.byte_len <= MAX_ROW_BYTES as i64
         })
         .ok_or_else(|| anyhow!("Config.root has unmeasured metadata"))?;
+    budget.reserve(&metas)?;
     let root = dynamic_overlay::read_bound_blob(client, &db, "Config", root_meta)?;
-    let plain = dynamic_metadata::inflate(&root).context("the root row does not inflate")?;
+    let plain = budget
+        .inflate(&root)
+        .context("the root row does not inflate")?;
     let text =
         std::str::from_utf8(versions::strip_bom(&plain)).context("Config.root is not UTF-8")?;
     let configuration = text
@@ -477,8 +481,10 @@ fn object_kinds(
                 && row.byte_len <= MAX_ROW_BYTES as i64
         })
         .ok_or_else(|| anyhow!("Config configuration descriptor has unmeasured metadata"))?;
+    budget.reserve(&descriptor)?;
     let row = dynamic_overlay::read_bound_blob(client, &db, "Config", descriptor_meta)?;
-    let (tree, mut decoded_bytes) = dynamic_metadata::descriptor(&row)
+    let plain = budget.inflate(&row)?;
+    let tree = dynamic_metadata::descriptor_plain(&plain)
         .with_context(|| format!("the configuration row {configuration} does not parse"))?;
     metas.extend(descriptor);
     let mut owners = dynamic_metadata::root_owners(&tree)?;
@@ -502,7 +508,7 @@ fn object_kinds(
         .map(|(id, kind)| (id.clone(), *kind))
         .collect();
     parents.sort();
-    ensure_graph_size(parents.len(), 0)?;
+    ensure_graph_size(metas.len() + parents.len(), budget.compressed)?;
     let filter = parents
         .iter()
         .map(|(id, _)| format!("N'{id}'"))
@@ -518,7 +524,6 @@ fn object_kinds(
             dynamic_metadata::MAX_GRAPH_ROWS + 1
         ),
     )?;
-    let mut graph_bytes = 0usize;
     let parent_kinds: HashMap<_, _> = parents.into_iter().collect();
     if parent_metas.len() != parent_kinds.len() {
         bail!("the bounded owner graph has missing or multipart descriptors");
@@ -534,17 +539,14 @@ fn object_kinds(
         {
             bail!("unmeasured owner descriptor metadata");
         }
-        let size = usize::try_from(meta.byte_len).context("negative graph row length")?;
-        graph_bytes = graph_bytes
-            .checked_add(size)
-            .ok_or_else(|| anyhow!("graph size overflow"))?;
-        ensure_graph_size(parent_metas.len(), graph_bytes)?;
+    }
+    // Reserve the complete header batch before requesting even its first blob.
+    budget.reserve(&parent_metas)?;
+    for meta in &parent_metas {
+        let id = meta.name.to_ascii_lowercase();
         let bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", meta)?;
-        let (tree, decoded) = dynamic_metadata::descriptor(&bytes)?;
-        decoded_bytes = decoded_bytes
-            .checked_add(decoded)
-            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
-        ensure_graph_size(parent_metas.len(), decoded_bytes)?;
+        let plain = budget.inflate(&bytes)?;
+        let tree = dynamic_metadata::descriptor_plain(&plain)?;
         // This route changes bodies only. A prior native generation with changed ownership
         // must not make the ordinary descriptor graph classify an orphaned/new child.
         for alias in overlay.iter().filter(|row| {
@@ -555,14 +557,16 @@ fn object_kinds(
             if dynamic_overlay::ordinary_alias_name(&alias.name, history)? != id {
                 continue;
             }
+            budget.reserve(std::slice::from_ref(alias))?;
             let alias_bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", alias)?;
-            if dynamic_metadata::inflate(&alias_bytes)? != dynamic_metadata::inflate(&bytes)? {
+            if budget.inflate(&alias_bytes)? != plain {
                 bail!("pending ownership/property change is outside the body-only cohort");
             }
         }
         owners.bind_children(&id, parent_kinds[&id], &tree)?;
     }
     metas.extend(parent_metas);
+    let mut children = Vec::new();
     for id in nested {
         if !owners.kinds.contains_key(&id) {
             continue;
@@ -571,7 +575,7 @@ fn object_kinds(
             client,
             &format!("SELECT TOP (2) {ROW_COLUMNS} FROM {db}.dbo.Config WHERE FileName = N'{id}'"),
         )?;
-        let meta = child
+        child
             .first()
             .filter(|row| {
                 child.len() == 1
@@ -581,12 +585,14 @@ fn object_kinds(
                     && row.byte_len <= MAX_ROW_BYTES as i64
             })
             .ok_or_else(|| anyhow!("unmeasured owned descriptor metadata"))?;
+        children.extend(child);
+    }
+    budget.reserve(&children)?;
+    for meta in &children {
+        let id = meta.name.to_ascii_lowercase();
         let bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", meta)?;
-        let (tree, decoded) = dynamic_metadata::descriptor(&bytes)?;
-        decoded_bytes = decoded_bytes
-            .checked_add(decoded)
-            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
-        ensure_graph_size(metas.len() + child.len(), decoded_bytes)?;
+        let plain = budget.inflate(&bytes)?;
+        let tree = dynamic_metadata::descriptor_plain(&plain)?;
         for alias in overlay.iter().filter(|row| {
             row.name
                 .to_ascii_lowercase()
@@ -595,15 +601,56 @@ fn object_kinds(
             if dynamic_overlay::ordinary_alias_name(&alias.name, history)? != id {
                 continue;
             }
+            budget.reserve(std::slice::from_ref(alias))?;
             let alias_bytes = dynamic_overlay::read_bound_blob(client, &db, "Config", alias)?;
-            if dynamic_metadata::inflate(&alias_bytes)? != dynamic_metadata::inflate(&bytes)? {
+            if budget.inflate(&alias_bytes)? != plain {
                 bail!("pending owned descriptor/property change is outside the body-only cohort");
             }
         }
         owners.bind_descriptor(&id, &tree)?;
-        metas.extend(child);
     }
+    metas.extend(children);
     Ok((owners, metas))
+}
+
+#[derive(Default)]
+struct GraphBudget {
+    rows: usize,
+    compressed: usize,
+    decoded: usize,
+}
+
+impl GraphBudget {
+    fn reserve(&mut self, metas: &[RowMeta]) -> Result<()> {
+        let rows = self
+            .rows
+            .checked_add(metas.len())
+            .ok_or_else(|| anyhow!("graph row count overflow"))?;
+        let mut compressed = self.compressed;
+        for meta in metas {
+            let size = usize::try_from(meta.byte_len).context("negative graph row length")?;
+            compressed = compressed
+                .checked_add(size)
+                .ok_or_else(|| anyhow!("graph size overflow"))?;
+        }
+        ensure_graph_size(rows, compressed)?;
+        self.rows = rows;
+        self.compressed = compressed;
+        Ok(())
+    }
+
+    fn inflate(&mut self, blob: &[u8]) -> Result<Vec<u8>> {
+        let remaining = dynamic_metadata::MAX_GRAPH_BYTES
+            .checked_sub(self.decoded)
+            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
+        let plain = dynamic_metadata::inflate_limit(blob, remaining)?;
+        self.decoded = self
+            .decoded
+            .checked_add(plain.len())
+            .ok_or_else(|| anyhow!("decoded graph size overflow"))?;
+        ensure_graph_size(self.rows, self.decoded)?;
+        Ok(plain)
+    }
 }
 
 fn ensure_graph_size(rows: usize, bytes: usize) -> Result<()> {
@@ -611,6 +658,21 @@ fn ensure_graph_size(rows: usize, bytes: usize) -> Result<()> {
         bail!("dynamic owner graph exceeds its independent row/byte budget");
     }
     Ok(())
+}
+
+fn same_semantic_text(
+    name: &str,
+    active_bytes: &[u8],
+    staged_bytes: &[u8],
+    profile: MssqlNativePlatformProfile,
+) -> Result<bool> {
+    if staged_bytes == active_bytes {
+        return Ok(true);
+    }
+    let staged_plain = dynamic_metadata::inflate(staged_bytes)?;
+    let active_plain = dynamic_metadata::inflate(active_bytes)?;
+    Ok(staged_plain == active_plain
+        || (name == "root" && profile.accepts_dynamic_root_restamp(&active_plain, &staged_plain)))
 }
 
 fn validate_pending_metadata(
@@ -1009,22 +1071,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
                 "Config.{name} changed while its service row was judged; no publication was attempted"
             );
         }
-        if staged_bytes == active_bytes {
-            return Ok(true);
-        }
-        let staged_plain = versions::inflate_row(&staged_bytes)?;
-        let active_plain = versions::inflate_row(&active_bytes)?;
-        if staged_plain == active_plain {
-            return Ok(true);
-        }
-        if name == "root"
-            && options
-                .platform_profile
-                .accepts_dynamic_root_restamp(&active_plain, &staged_plain)
-        {
-            return Ok(true);
-        }
-        Ok(false)
+        same_semantic_text(name, &active_bytes, &staged_bytes, options.platform_profile)
     };
     let mut reasons = judge_rows(&staged, &active, &kinds, &mut same_text)?;
     if initial_85 {
@@ -1159,7 +1206,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
                 "ConfigSave.deleted changed while its removal list was judged; no publication was attempted"
             );
         }
-        let plain = bytes.and_then(|bytes| versions::inflate_row(&bytes).ok());
+        let plain = bytes.and_then(|bytes| dynamic_metadata::inflate(&bytes).ok());
         match plain {
             None => reasons.push("deleted: a list of removals this apply cannot read".to_owned()),
             Some(plain) => {
@@ -1717,6 +1764,272 @@ mod tests {
         ordinary: Vec<RowMeta>,
         ordinary_blob: Vec<u8>,
         aliases: HashMap<String, Vec<u8>>,
+    }
+
+    struct GraphHeaderProbe {
+        blobs: HashMap<String, Vec<u8>>,
+        parents: Vec<RowMeta>,
+        large_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SqlClient for GraphHeaderProbe {
+        fn dbms(&self) -> crate::sql::Dbms {
+            crate::sql::Dbms::SqlServer
+        }
+        fn max_connections(&self) -> usize {
+            1
+        }
+        fn run_script(&self, _: &str, _: ScriptVariables) -> Result<()> {
+            panic!("read-only probe")
+        }
+        fn execute(&self, _: &str, _: &[crate::sql::SqlParam<'_>]) -> Result<u64> {
+            panic!("read-only probe")
+        }
+        fn query_json(&self, _: &str) -> Result<Option<String>> {
+            panic!("read-only probe")
+        }
+        fn write_rows(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: &[Vec<crate::sql::SqlParam<'_>>],
+        ) -> Result<u64> {
+            panic!("read-only probe")
+        }
+        fn read_rows(
+            &self,
+            query: &str,
+            _: &[crate::sql::SqlParam<'_>],
+            each: &mut dyn FnMut(crate::sql::SqlRow) -> Result<()>,
+        ) -> Result<()> {
+            use crate::sql::{SqlRow, SqlValue};
+            let found = self
+                .blobs
+                .iter()
+                .find(|(name, _)| query.contains(&format!("FileName = N'{name}'")));
+            if query.starts_with("SELECT TOP (2) BinaryData") {
+                if let Some((_, bytes)) = found {
+                    return each(SqlRow {
+                        result_set: 0,
+                        values: vec![SqlValue::Binary(bytes.clone())],
+                    });
+                }
+                self.large_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                bail!("large graph blob requested before header budget refusal");
+            }
+            let rows = if let Some((name, bytes)) = found {
+                let mut row = meta(name, &hex_lower(&Sha256::digest(bytes)));
+                row.byte_len = bytes.len() as i64;
+                row.data_size = row.byte_len;
+                vec![row]
+            } else {
+                assert!(query.contains("FileName IN ("));
+                self.parents.clone()
+            };
+            for row in rows {
+                each(SqlRow {
+                    result_set: 0,
+                    values: vec![
+                        SqlValue::Text(row.name),
+                        SqlValue::Int(row.part.into()),
+                        SqlValue::Int(row.data_size),
+                        SqlValue::Int(row.byte_len),
+                        SqlValue::Int(row.attributes.into()),
+                        SqlValue::Text(row.creation),
+                        SqlValue::Text(row.modified),
+                        SqlValue::Text(row.sha256),
+                    ],
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn whole_graph_headers_refuse_before_any_large_parent_blob_read() {
+        let config = "00000000-0000-4000-8000-000000000001";
+        let ids = [
+            "00000000-0000-4000-8000-000000000002",
+            "00000000-0000-4000-8000-000000000003",
+        ];
+        let class = crate::metadata_model::export::names::root_class_kinds()
+            .iter()
+            .find(|(_, kind)| *kind == "Catalog")
+            .unwrap()
+            .0;
+        let deflate = versions::deflate_row;
+        let client = GraphHeaderProbe {
+            blobs: HashMap::from([
+                (
+                    "root".into(),
+                    deflate(format!("{{2,{config},0}}").as_bytes()).unwrap(),
+                ),
+                (
+                    config.into(),
+                    deflate(format!("{{{class},2,{},{}}}", ids[0], ids[1]).as_bytes()).unwrap(),
+                ),
+            ]),
+            parents: ids
+                .iter()
+                .map(|id| {
+                    let mut row = meta(id, "unused");
+                    row.byte_len = MAX_ROW_BYTES as i64;
+                    row.data_size = row.byte_len;
+                    row
+                })
+                .collect(),
+            large_reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let requested = HashSet::from(["00000000-0000-4000-8000-000000000004".into()]);
+        let err = object_kinds(&client, "fixture", &requested, &[], &[])
+            .err()
+            .expect("over-budget graph must refuse");
+        assert!(err.to_string().contains("row/byte budget"), "{err:#}");
+        assert_eq!(
+            client
+                .large_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "headers must refuse before any oversized graph body is read"
+        );
+    }
+
+    #[test]
+    fn semantic_comparison_refuses_full_plaintext_without_stream_end() {
+        use std::io::Write;
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        let plain = b"\xef\xbb\xbf{1,0}";
+        let valid = versions::deflate_row(plain).unwrap();
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(plain).unwrap();
+        encoder.flush().unwrap();
+        let unfinished = encoder.get_ref().clone();
+        assert_eq!(
+            versions::inflate_row(&unfinished).unwrap(),
+            plain,
+            "meaningful legacy full-plaintext reproduction"
+        );
+        for name in ["descriptor", "common-form.1", "root"] {
+            assert!(
+                same_semantic_text(name, &valid, &unfinished, profile).is_err(),
+                "{name}: full plaintext alone must not accept incomplete stream"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_comparison_refuses_row_overflow() {
+        use std::io::Write;
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        let oversized = vec![b'x'; dynamic_metadata::MAX_PLAIN_ROW + 1];
+        let valid_large = versions::deflate_row(&oversized).unwrap();
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&oversized).unwrap();
+        let other_large = encoder.finish().unwrap();
+        assert_ne!(valid_large, other_large);
+        assert!(same_semantic_text("common-form.1", &valid_large, &other_large, profile).is_err());
+    }
+
+    #[test]
+    fn graph_budget_counts_every_header_and_decoded_byte_at_exact_boundaries() {
+        let mut budget = GraphBudget::default();
+        // Root, configuration descriptor, parent, then child: no giant allocation.
+        for (name, size) in [
+            ("root", 1),
+            ("configuration", 2),
+            ("parent", MAX_ROW_BYTES),
+            (
+                "child",
+                dynamic_metadata::MAX_GRAPH_BYTES - MAX_ROW_BYTES - 3,
+            ),
+        ] {
+            let mut header = meta(name, "unused");
+            header.byte_len = size as i64;
+            budget.reserve(&[header]).unwrap();
+        }
+        assert_eq!(
+            (budget.rows, budget.compressed),
+            (4, dynamic_metadata::MAX_GRAPH_BYTES)
+        );
+        let mut extra = meta("child-over-limit", "unused");
+        extra.byte_len = 1;
+        assert!(budget.reserve(&[extra]).is_err());
+        assert_eq!(
+            (budget.rows, budget.compressed),
+            (4, dynamic_metadata::MAX_GRAPH_BYTES),
+            "failed reservation is atomic"
+        );
+        let mut row_budget = GraphBudget::default();
+        let mut zero = meta("header", "unused");
+        zero.byte_len = 0;
+        row_budget
+            .reserve(&vec![zero.clone(); dynamic_metadata::MAX_GRAPH_ROWS])
+            .unwrap();
+        assert!(row_budget.reserve(&[zero]).is_err());
+        let mut negative = meta("negative", "unused");
+        negative.byte_len = -1;
+        assert!(GraphBudget::default().reserve(&[negative]).is_err());
+        let payload = b"decoded-budget-boundary";
+        budget.decoded = dynamic_metadata::MAX_GRAPH_BYTES - payload.len();
+        let compressed = versions::deflate_row(payload).unwrap();
+        assert_eq!(budget.inflate(&compressed).unwrap(), payload);
+        assert_eq!(budget.decoded, dynamic_metadata::MAX_GRAPH_BYTES);
+        assert!(
+            budget
+                .inflate(&versions::deflate_row(b"x").unwrap())
+                .is_err()
+        );
+        assert_eq!(budget.decoded, dynamic_metadata::MAX_GRAPH_BYTES);
+    }
+
+    #[test]
+    fn semantic_comparison_keeps_valid_compression_variants_and_exact_85_root_restamp() {
+        use std::io::Write;
+        let profile = MssqlNativePlatformProfile::Platform8_3_27_2214;
+        let plain = b"\xef\xbb\xbf{1,0}";
+        let valid = versions::deflate_row(plain).unwrap();
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::none());
+        encoder.write_all(plain).unwrap();
+        let different = encoder.finish().unwrap();
+        assert_ne!(valid, different);
+        for name in ["descriptor", "common-form.1", "root"] {
+            assert!(same_semantic_text(name, &valid, &different, profile).unwrap());
+            assert!(
+                !same_semantic_text(
+                    name,
+                    &valid,
+                    &versions::deflate_row(b"changed").unwrap(),
+                    profile
+                )
+                .unwrap()
+            );
+            let mut trailing = valid.clone();
+            trailing.push(0);
+            assert!(same_semantic_text(name, &valid, &trailing, profile).is_err());
+            for end in 0..valid.len() {
+                assert!(same_semantic_text(name, &different, &valid[..end], profile).is_err());
+            }
+        }
+        let active =
+            include_bytes!("../../tests/fixtures/platform85-dynamic/root-active.native.bin");
+        let staged =
+            include_bytes!("../../tests/fixtures/platform85-dynamic/root-staged.native.bin");
+        let active = versions::deflate_row(active).unwrap();
+        let staged = versions::deflate_row(staged).unwrap();
+        assert!(
+            same_semantic_text(
+                "root",
+                &active,
+                &staged,
+                MssqlNativePlatformProfile::Platform8_5_1_1150
+            )
+            .unwrap()
+        );
+        assert!(!same_semantic_text("root", &active, &staged, profile).unwrap());
     }
 
     impl SqlClient for PendingRows {

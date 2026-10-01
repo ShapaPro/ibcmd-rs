@@ -384,13 +384,19 @@ fn exact_list(row: &Brace, size: usize) -> Result<&[Brace]> {
 }
 
 pub(super) fn inflate(blob: &[u8]) -> Result<Vec<u8>> {
+    inflate_limit(blob, MAX_PLAIN_ROW)
+}
+
+/// A graph caller may have less than one row's budget remaining.
+pub(super) fn inflate_limit(blob: &[u8], limit: usize) -> Result<Vec<u8>> {
+    let limit = limit.min(MAX_PLAIN_ROW);
     let mut plain = Vec::new();
     let mut decoder = flate2::Decompress::new(false);
     let mut chunk = [0u8; 8192];
     loop {
         let before_in = decoder.total_in();
         let before_out = decoder.total_out();
-        let capacity = chunk.len().min(MAX_PLAIN_ROW + 1 - plain.len());
+        let capacity = chunk.len().min(limit + 1 - plain.len());
         let status = decoder.decompress(
             &blob[before_in as usize..],
             &mut chunk[..capacity],
@@ -399,8 +405,8 @@ pub(super) fn inflate(blob: &[u8]) -> Result<Vec<u8>> {
         let produced = (decoder.total_out() - before_out) as usize;
         plain.extend_from_slice(&chunk[..produced]);
         ensure!(
-            plain.len() <= MAX_PLAIN_ROW,
-            "dynamic decoded row exceeds {MAX_PLAIN_ROW} bytes"
+            plain.len() <= limit,
+            "dynamic decoded row exceeds {limit} bytes"
         );
         if status == flate2::Status::StreamEnd {
             ensure!(
@@ -419,6 +425,11 @@ pub(super) fn inflate(blob: &[u8]) -> Result<Vec<u8>> {
 
 /// The bounded native parser validates depth/UTF-8 before ownership traversal recurses.
 pub(super) fn descriptor(blob: &[u8]) -> Result<(Brace, usize)> {
+    let plain = inflate(blob)?;
+    Ok((descriptor_plain(&plain)?, plain.len()))
+}
+
+pub(super) fn descriptor_plain(plain: &[u8]) -> Result<Brace> {
     fn brace(value: NativeValue) -> Brace {
         match value {
             NativeValue::Token(value) => Brace::Atom(value),
@@ -428,9 +439,7 @@ pub(super) fn descriptor(blob: &[u8]) -> Result<(Brace, usize)> {
             }
         }
     }
-    let plain = inflate(blob)?;
-    let size = plain.len();
-    Ok((brace(parse_optional_bom(&plain)?), size))
+    Ok(brace(parse_optional_bom(plain)?))
 }
 
 pub(super) fn validate_body(role: BodyRole, blob: &[u8]) -> Result<()> {
