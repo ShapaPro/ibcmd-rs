@@ -687,12 +687,22 @@ The restored research kit is in `scripts/apply-lab/live`; new output defaults to
 
 ## 7. Recovery
 
-**ONLINE** (nothing is deleted by the tool). To go back to the state before generation N: in one transaction delete from
-`Config` the rows `<uuid>_dynupdate_<gN>` and `<uuid>_dynupdate_<gN>.0` of the module named in the run's `recovery.json`
-(`staged_rows`, the two GUID rows) and `versions_dynupdate_<gN>`, then set the two markers back to the previous payload
-(`prior_config_dynamically_updated`, `prior_params_dynamically_updated` in the artifact; delete them when the artifact says
-`null`). New sessions then load the previous generation; open ones keep whatever they loaded. There is no script for it
-(F-8); the transaction has to be written by hand and has not been run.
+The standalone recovery output now uses a format-2 JSON manifest and its adjacent
+`ibcmd-recovery-<sha256>.pack`. Preserve both files. The manifest names every row,
+its full header, offset, length and digest; the pack retains the original bytes.
+It is published and checked before SQL can run. Historical files are retained;
+the separate `.live.json` checkpoint and its token encoding remain unchanged.
+See [compact recovery evidence and limits](evidence/live-gate/compact-recovery-2026-10-01.md).
+
+**ONLINE** recovery must account for new aliases, the overwritten ordinary
+`root`/`version` rows, and both history markers. Only `overwritten_config_rows`
+are replacement preimages; `retained_config_rows` describe ordinary rows that
+publication preserved. Never restore those retained rows over a later
+configuration. A safe undo must first verify the exact published generation,
+headers and bytes, then remove only its aliases and restore replacement
+preimages and prior markers in one transaction. Checksums alone do not establish
+database ownership or authorize this operation. A generic guarded undo remains
+open (F-8); this manual recovery has not been run.
 
 **A refused apply leaves `ConfigSave` staged** (F-3, any failure after staging; the refusals that need no staged row
 - a marker base with an ordinary mode, disagreeing markers, the tail-log argument - come before the stage since 0.5, F-2).

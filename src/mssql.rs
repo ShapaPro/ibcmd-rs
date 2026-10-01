@@ -1145,8 +1145,13 @@ pub fn activate_staged_main(
             token
         ))
     });
-    let recovery_json = serde_json::to_vec_pretty(&rendered.recovery)?;
-    write_new_or_identical(&recovery, &recovery_json)?;
+    crate::mssql_recovery_artifact::write(
+        &recovery,
+        &args.database,
+        mode,
+        &rendered.recovery,
+        &rendered.report.recovery_token,
+    )?;
 
     let live_artifact_path = recovery.with_extension("live.json");
     let live_artifact = if args.live_checkpoint && !plan.is_no_op() {
@@ -1359,8 +1364,13 @@ fn activate_by_config_apply(
     });
     // The snapshot of the rows the stage replaces, as before: written ahead of the run, so it is there when the
     // run stops half way (the apply's own artifact, under `config_apply.recovery_dir`, is written by the apply).
-    let recovery_json = serde_json::to_vec_pretty(plan.recovery())?;
-    write_new_or_identical(&recovery, &recovery_json)?;
+    crate::mssql_recovery_artifact::write(
+        &recovery,
+        &args.database,
+        plan.mode(),
+        plan.recovery(),
+        &report.recovery_token,
+    )?;
 
     let options = config_apply_options(
         &args.database,

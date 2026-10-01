@@ -37,6 +37,7 @@ pub mod mssql_extensions;
 pub mod mssql_live_gate;
 pub mod mssql_main_activation;
 pub mod mssql_platform_profile;
+mod mssql_recovery_artifact;
 pub mod mssql_source_change;
 pub mod mssql_worker_switch;
 pub mod mxl_line_provenance;
