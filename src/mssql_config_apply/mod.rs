@@ -1337,9 +1337,10 @@ pub fn plan_with_gate(
         params_rewrites = rewrites;
         search_info_removal = summary;
     }
-    // A synonym the stage changes goes into the object's record of the registry, on top of the edits above:
-    // the native apply does it for a stage that changes nothing else, and this apply did not.
-    let changed_descriptors: Vec<String> = staged
+    // Every staged descriptor's synonyms must agree with the registry, on top of the edits above. Never
+    // filter by the physical Config digest: an effective dynamic alias can differ while the stage reverts to
+    // the physical base's exact bytes, and that reversion still needs the registry's synonym changed.
+    let staged_descriptors: Vec<String> = staged
         .iter()
         .filter(|row| {
             row.part == 0
@@ -1348,22 +1349,19 @@ pub fn plan_with_gate(
                     model::RowName::Descriptor(_)
                 )
                 && !consumed.contains(&row.name.to_ascii_lowercase())
-                && active
-                    .get(&row.key())
-                    .is_some_and(|active_row| active_row.sha256 != row.sha256)
         })
         .map(|row| row.name.clone())
         .collect();
     let mut synonym_records = 0usize;
     let synonyms_started = Instant::now();
-    if !changed_descriptors.is_empty() {
+    if !staged_descriptors.is_empty() {
         let synonym_error = |error: anyhow::Error| {
             anyhow::Error::from(NeedsNativeApply::apply(format!(
                 "the object registry cannot be edited for the changed synonyms: {error:#}; run the native `ibcmd infobase config apply`"
             )))
         };
-        let changes = synonyms::read_changes(client, database, &changed_descriptors)
-            .map_err(synonym_error)?;
+        let changes =
+            synonyms::read_changes(client, database, &staged_descriptors).map_err(synonym_error)?;
         if !changes.is_empty() {
             let (rewrites, records) =
                 synonyms::plan_search_info(client, database, &changes, params_rewrites)
