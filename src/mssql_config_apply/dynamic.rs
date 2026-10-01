@@ -33,6 +33,7 @@
 //! not applied under a lock they did not ask for.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -44,6 +45,7 @@ use crate::mssql_main_activation::{
     MAX_PLAN_BYTES, MAX_ROW_BYTES, MAX_ROWS, MainActivationError, MainActivationMode,
     MainActivationSnapshot, MainStorageRow, prepare_main_activation, render_main_activation_sql,
 };
+use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 use crate::sql::{ScriptVariables, SqlClient, SqlExec};
 
 use super::check_gate::ApplyCheckGate;
@@ -239,6 +241,99 @@ fn judge_rows(
         }
     }
     Ok(reasons)
+}
+
+/// The first 8.5 oracle measured exactly one existing common-module body and no
+/// previous generation or SI collection. Keep that profile independent of later
+/// 8.3 owner/body coverage. Ordinary semantic and physical checks still run.
+fn judge_initial_85_cohort(
+    staged: &[RowMeta],
+    active: &HashMap<(String, i32), RowMeta>,
+    kinds: &HashMap<String, &'static str>,
+    history: &[String],
+    overlay: &[RowMeta],
+    has_marker: bool,
+) -> Vec<String> {
+    let refusal = || {
+        vec!["platform-8.5.1.1150: only an initial five-row delta of one existing CommonModule .0 with its unchanged descriptor and root/version/versions is measured; history, overlays, removals and other owners/bodies require native apply".to_owned()]
+    };
+    if has_marker || !history.is_empty() || !overlay.is_empty() || staged.len() != 5 {
+        return refusal();
+    }
+    let bodies: Vec<_> = staged
+        .iter()
+        .filter_map(|row| match classify_name(&row.name) {
+            RowName::Body { owner, suffix: "0" } => Some((owner, row)),
+            _ => None,
+        })
+        .collect();
+    let [(owner, body)] = bodies.as_slice() else {
+        return refusal();
+    };
+    if kinds.get(&owner.to_ascii_lowercase()) != Some(&"CommonModule") {
+        return refusal();
+    }
+    let names: HashSet<_> = staged
+        .iter()
+        .map(|row| row.name.to_ascii_lowercase())
+        .collect();
+    let expected = HashSet::from([
+        owner.to_ascii_lowercase(),
+        format!("{}.0", owner.to_ascii_lowercase()),
+        "root".to_owned(),
+        "version".to_owned(),
+        "versions".to_owned(),
+    ]);
+    if names != expected
+        || staged.iter().any(|row| {
+            row.part != 0
+                || row.attributes != 0
+                || row.byte_len < 0
+                || row.data_size != row.byte_len
+                || !active.contains_key(&row.key())
+        })
+        || active
+            .get(&body.key())
+            .is_none_or(|old| old.sha256 == body.sha256)
+    {
+        return refusal();
+    }
+    Vec::new()
+}
+
+/// The 8.5 native module oracle has two container elements and an unchanged,
+/// measured info record. Bound inflation before the container parser allocates.
+fn initial_85_module_text(blob: &[u8]) -> Result<Vec<u8>> {
+    const MAX_PLAIN: usize = 8 * 1024 * 1024;
+    let mut plain = Vec::new();
+    let mut decoder = flate2::read::DeflateDecoder::new(blob);
+    decoder
+        .by_ref()
+        .take((MAX_PLAIN + 1) as u64)
+        .read_to_end(&mut plain)?;
+    if plain.len() > MAX_PLAIN {
+        bail!("8.5 module decoded size exceeds {MAX_PLAIN}");
+    }
+    if decoder.total_in() != blob.len() as u64 {
+        bail!("8.5 module has trailing compressed data");
+    }
+    let elements = crate::v8_container::parse_v8_container(&plain)?;
+    if elements.len() != 2
+        || elements.iter().filter(|e| e.name == "text").count() != 1
+        || elements.iter().filter(|e| e.name == "info").count() != 1
+    {
+        bail!("unmeasured 8.5 module container");
+    }
+    let info = &elements.iter().find(|e| e.name == "info").unwrap().data;
+    if info != b"\xef\xbb\xbf{3,1,0,\"\",0}" {
+        bail!("unmeasured 8.5 module info record");
+    }
+    let text = &elements.iter().find(|e| e.name == "text").unwrap().data;
+    let body = text
+        .strip_prefix(b"\xef\xbb\xbf")
+        .ok_or_else(|| anyhow!("8.5 module text has no UTF-8 BOM"))?;
+    std::str::from_utf8(body)?;
+    Ok(text.clone())
 }
 
 /// Judges a stage's `deleted` row, the list of removals: `Ok(what it says)` when a dynamic apply may
@@ -598,6 +693,7 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     } else {
         (HashMap::new(), Vec::new())
     };
+    let initial_85 = options.platform_profile == MssqlNativePlatformProfile::Platform8_5_1_1150;
     let mut same_text = |name: &str| -> Result<bool> {
         let staged_bytes = read_stage_semantic(client, &db, &staged, name)?;
         if !judged_stage_digest(&staged, name, &staged_bytes) {
@@ -627,9 +723,57 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         if staged_bytes == active_bytes {
             return Ok(true);
         }
-        Ok(versions::inflate_row(&staged_bytes)? == versions::inflate_row(&active_bytes)?)
+        let staged_plain = versions::inflate_row(&staged_bytes)?;
+        let active_plain = versions::inflate_row(&active_bytes)?;
+        if staged_plain == active_plain {
+            return Ok(true);
+        }
+        if name == "root"
+            && options
+                .platform_profile
+                .accepts_dynamic_root_restamp(&active_plain, &staged_plain)
+        {
+            return Ok(true);
+        }
+        Ok(false)
     };
     let mut reasons = judge_rows(&staged, &active, &kinds, &mut same_text)?;
+    if initial_85 {
+        reasons.extend(judge_initial_85_cohort(
+            &staged,
+            &active,
+            &kinds,
+            &history_names,
+            &overlay,
+            config_marker.is_some() || params_marker.is_some(),
+        ));
+        if reasons.is_empty() {
+            let body = staged
+                .iter()
+                .find(|row| matches!(classify_name(&row.name), RowName::Body { .. }))
+                .unwrap();
+            let staged_bytes = read_stage_semantic(client, &db, &staged, &body.name)?;
+            let active_bytes = effective_blob(
+                client,
+                database,
+                &body.name,
+                &history_names,
+                &judged_effective,
+            )?
+            .ok_or_else(|| anyhow!("8.5 module active body vanished"))?;
+            match (
+                initial_85_module_text(&active_bytes),
+                initial_85_module_text(&staged_bytes),
+            ) {
+                (Ok(old), Ok(new)) if old != new => {}
+                (Ok(_), Ok(_)) => reasons.push(
+                    "8.5 module text is unchanged; only a real initial body change is measured"
+                        .to_owned(),
+                ),
+                _ => reasons.push("8.5 module has an unmeasured body/info layout".to_owned()),
+            }
+        }
+    }
     // Bind the semantic inventory to the exact bytes the transaction will assert. The structural
     // checker reads independently, so its safe verdict must not permit an ABA replacement of
     // `versions` with an inventory that removes or silently changes unstaged metadata.
@@ -711,7 +855,12 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         }
     }
     // A service overlay is accepted only together with the exact nonempty removal inventory.
-    let collection = if pending_deleted.is_empty() {
+    let collection = if initial_85 {
+        // The measured initial 8.5 generation creates no SI aliases and does not
+        // update siVersions. Refuse existing aliases; never run the 8.3 collector.
+        require_settled_storage(client, &db)?;
+        None
+    } else if pending_deleted.is_empty() {
         require_settled_storage(client, &db)?;
         None
     } else {
@@ -818,16 +967,73 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
     } else {
         registrations::RegistrationPlan::default()
     };
+    let mut initial_85_registration_guard = String::new();
+    let guarded_files = if initial_85 {
+        if !has_change_registrations
+            || !registration.is_empty()
+            || !registration.missing.is_empty()
+            || registration.added_rows != 0
+            || registration.added_file_rows != 0
+            || registration.changed_objects != 1
+            || registration.nodes.len() != 3
+        {
+            return Err(NeedsNativeApply::apply(
+                "8.5 registration state is outside the measured unchanged three-node cohort"
+                    .to_owned(),
+            )
+            .into());
+        }
+        let body = staged
+            .iter()
+            .find(|row| matches!(classify_name(&row.name), RowName::Body { .. }))
+            .unwrap();
+        let object_hex = registrations::object_of(&body.name).unwrap();
+        let touched = sqlgen::staged_objects_predicate(&format!("{db}.dbo."));
+        let count = scalar_i64(
+            client,
+            &format!("SELECT COUNT_BIG(*) FROM {db}.dbo._ConfigChngR r WHERE {touched}"),
+        )?;
+        let non_null = scalar_i64(
+            client,
+            &format!(
+                "SELECT COUNT_BIG(*) FROM {db}.dbo._ConfigChngR r WHERE r._MessageNo IS NOT NULL AND {touched}"
+            ),
+        )?;
+        let unmeasured_lists = scalar_i64(
+            client,
+            &format!(
+                "SELECT COUNT_BIG(*) FROM {db}.dbo._ConfigChngR_ExtProps e JOIN {db}.dbo._ConfigChngR r ON r._IDRRef=e._ConfigChngR_IDRRef WHERE r._MDObjID=0x{object_hex} AND (e._KeyField<>0x00000000 OR e._FileName<>N'{}')",
+                super::model::quote_string(&body.name)
+            ),
+        )?;
+        if count != 3 || non_null != 0 || unmeasured_lists != 0 {
+            return Err(NeedsNativeApply::apply("8.5 requires exactly three unchanged NULL-message registrations with existing .0 file lists".to_owned()).into());
+        }
+        let locked_touched = sqlgen::staged_objects_predicate("dbo.");
+        initial_85_registration_guard = format!(
+            "IF (SELECT COUNT_BIG(*) FROM dbo._ConfigChngR r WITH (UPDLOCK,HOLDLOCK) WHERE {locked_touched}) <> 3 OR EXISTS (SELECT 1 FROM dbo._ConfigChngR r WITH (UPDLOCK,HOLDLOCK) WHERE r._MessageNo IS NOT NULL AND {locked_touched}) THROW 57318, '8.5 unchanged registration cohort drifted', 1;\n"
+        );
+        // Reuse the exact full-row/list preimage guard. These existing files must
+        // produce no additions; the synthetic input is never sent to parity SQL.
+        vec![sqlgen::AppendedFile {
+            object_hex,
+            file_name: body.name.clone(),
+        }]
+    } else {
+        registration.dropped_files.clone()
+    };
     let unchanged = activation.is_no_op();
-    let appends = dynamic_overlay::plan_appends(
-        client,
-        &db,
-        &registration.dropped_files,
-        &registration.nodes,
-    )
-    .map_err(|error| {
+    let appends = dynamic_overlay::plan_appends(client, &db, &guarded_files, &registration.nodes)
+        .map_err(|error| {
         NeedsNativeApply::apply(format!("pending registration file lists: {error:#}"))
     })?;
+    if initial_85 && (!appends.rows.is_empty() || appends.registration_ids.len() != 3) {
+        return Err(NeedsNativeApply::apply(
+            "8.5 existing registration file lists are outside the unchanged native cohort"
+                .to_owned(),
+        )
+        .into());
+    }
     // The reused parity helper also asserts all distinct registered node pairs before appending.
     // This count includes stale/own-node registrations; it is not the eligible-node count.
     let nodes_seen = if registration.dropped_files.is_empty() {
@@ -862,8 +1068,12 @@ pub fn plan_dynamic(sql: &SqlExec, options: &ConfigApplyOptions) -> Result<Dynam
         dynamic_overlay::CONFIG_FILTER,
         &overlay,
     ));
+    if initial_85 {
+        precondition.push_str("IF EXISTS (SELECT 1 FROM dbo.Params WITH (UPDLOCK, HOLDLOCK) WHERE FileName LIKE N'%[_]dynupdate[_]%') THROW 57316, 'Unmeasured 8.5 Params overlay appeared', 1;\n");
+    }
     precondition.push_str(&appends.guard_sql);
-    if !registration.dropped_files.is_empty() {
+    precondition.push_str(&initial_85_registration_guard);
+    if initial_85 || !registration.dropped_files.is_empty() {
         precondition.push_str(
             &dynamic_overlay::node_guard(client, &db, &registration.nodes).map_err(|error| {
                 NeedsNativeApply::apply(format!("pending registration node eligibility: {error:#}"))
@@ -1290,6 +1500,148 @@ mod tests {
         ];
         assert_eq!(judged(&form, true), Vec::<String>::new());
         assert_eq!(owners_of(&form).len(), 1);
+    }
+
+    #[test]
+    fn initial_85_cohort_accepts_only_one_existing_common_module_body() {
+        let stage = delta();
+        let active = all_active();
+        let check = |rows: &[RowMeta], kinds: &HashMap<String, &'static str>| {
+            judge_initial_85_cohort(rows, &active, kinds, &[], &[], false)
+        };
+        assert!(check(&stage, &kinds()).is_empty());
+        for kind in ["CommonForm", "Catalog", "Template", "HTTPService"] {
+            let mut owners = kinds();
+            owners.insert(MODULE.to_owned(), kind);
+            assert!(!check(&stage, &owners).is_empty(), "{kind}");
+        }
+        let mut unknown = kinds();
+        unknown.remove(MODULE);
+        assert!(!check(&stage, &unknown).is_empty());
+        for replacement in [
+            format!("{MODULE}.1"),
+            format!("{FORM}.0"),
+            "deleted".to_owned(),
+        ] {
+            let mut changed = stage.clone();
+            changed[1].name = replacement;
+            assert!(!check(&changed, &kinds()).is_empty());
+        }
+        let mut no_change = stage.clone();
+        no_change[1].sha256 = active.get(&no_change[1].key()).unwrap().sha256.clone();
+        assert!(!check(&no_change, &kinds()).is_empty());
+        let mut duplicate = stage.clone();
+        duplicate[0] = duplicate[2].clone();
+        assert!(!check(&duplicate, &kinds()).is_empty());
+        let mut extra = stage.clone();
+        extra.push(meta("deleted", "bb"));
+        assert!(!check(&extra, &kinds()).is_empty());
+        let mut missing = active.clone();
+        missing.remove(&(MODULE.to_owned(), 0));
+        assert!(!judge_initial_85_cohort(&stage, &missing, &kinds(), &[], &[], false).is_empty());
+    }
+
+    #[test]
+    fn initial_85_cohort_refuses_history_overlays_and_unmeasured_headers() {
+        let stage = delta();
+        let active = all_active();
+        assert!(!judge_initial_85_cohort(&stage, &active, &kinds(), &[], &[], true).is_empty());
+        assert!(
+            !judge_initial_85_cohort(
+                &stage,
+                &active,
+                &kinds(),
+                &["generation".to_owned()],
+                &[],
+                false
+            )
+            .is_empty()
+        );
+        assert!(
+            !judge_initial_85_cohort(
+                &stage,
+                &active,
+                &kinds(),
+                &[],
+                &[meta("alias", "aa")],
+                false
+            )
+            .is_empty()
+        );
+        for index in 0..stage.len() {
+            for (part, flags, size, bytes) in [
+                (1, 0, 10, 10),
+                (0, 1, 10, 10),
+                (0, 0, 11, 10),
+                (0, 0, -1, -1),
+            ] {
+                let mut bad = stage.clone();
+                bad[index].part = part;
+                bad[index].attributes = flags;
+                bad[index].data_size = size;
+                bad[index].byte_len = bytes;
+                assert!(
+                    !judge_initial_85_cohort(&bad, &active, &kinds(), &[], &[], false).is_empty()
+                );
+            }
+        }
+        // The profile cohort does not excuse a changed descriptor or version.
+        assert!(
+            judge_rows(&stage, &active, &kinds(), &mut |name| Ok(name != MODULE))
+                .unwrap()
+                .iter()
+                .any(|reason| reason.contains("descriptor's text"))
+        );
+        let mut changed_version = stage.clone();
+        changed_version[3].sha256 = "changed".to_owned();
+        assert!(
+            judge_rows(&changed_version, &active, &kinds(), &mut |_| Ok(false))
+                .unwrap()
+                .iter()
+                .any(|reason| reason.starts_with("version:"))
+        );
+    }
+
+    #[test]
+    fn initial_85_module_layout_is_bounded_and_fail_closed() {
+        use crate::v8_container::{V8Element, build_v8_container, make_v8_element_header};
+        use std::io::Write;
+        let deflate = |bytes: &[u8]| {
+            let mut out =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            out.write_all(bytes).unwrap();
+            out.finish().unwrap()
+        };
+        let element = |name: &str, data: &[u8]| V8Element {
+            name: name.to_owned(),
+            header: make_v8_element_header(name),
+            data: data.to_vec(),
+        };
+        let info = element("info", b"\xef\xbb\xbf{3,1,0,\"\",0}");
+        let text = element("text", b"\xef\xbb\xbfProcedure Marker()\nEndProcedure");
+        let packed = |elements: &[V8Element]| deflate(&build_v8_container(elements).unwrap());
+        assert_eq!(
+            initial_85_module_text(&packed(&[info.clone(), text.clone()])).unwrap(),
+            text.data
+        );
+        // Container order is semantic; missing, unknown, duplicate and changed
+        // records or invalid encoding do not approximate a valid module.
+        assert!(initial_85_module_text(&packed(&[text.clone(), info.clone()])).is_ok());
+        for bad in [
+            vec![text.clone()],
+            vec![info.clone(), text.clone(), text.clone()],
+            vec![info.clone(), element("unknown", &text.data)],
+            vec![element("info", b"\xef\xbb\xbf{3,2,0,\"\",0}"), text.clone()],
+            vec![info.clone(), element("text", b"\xef\xbb\xbf\xff")],
+            vec![info.clone(), element("text", b"missing BOM")],
+        ] {
+            assert!(initial_85_module_text(&packed(&bad)).is_err());
+        }
+        assert!(initial_85_module_text(&deflate(b"\xef\xbb\xbfplain source")).is_err());
+        let mut trailing = packed(&[info, text]);
+        trailing.extend_from_slice(b"unmeasured trailing data");
+        assert!(initial_85_module_text(&trailing).is_err());
+        assert!(initial_85_module_text(&deflate(&vec![0; 8 * 1024 * 1024 + 1])).is_err());
     }
 
     #[test]
