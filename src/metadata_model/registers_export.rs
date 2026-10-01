@@ -791,11 +791,11 @@ fn accounting_register(row: &Brace, context: &ExportContext) -> Result<Element> 
     let properties = properties
         .child(code(
             "DataLockControlMode",
-            at(22)?,
+            at(21)?,
             DATA_LOCK_CONTROL_MODE,
         )?)
         .child(flag("EnableTotalsSplitting", at(23)?)?)
-        .child(code("FullTextSearch", at(21)?, FULL_TEXT_SEARCH)?)
+        .child(code("FullTextSearch", at(22)?, FULL_TEXT_SEARCH)?)
         .child(localized_element("ListPresentation", at(26)?)?)
         .child(localized_element("ExtendedListPresentation", at(27)?)?)
         .child(localized_element("Explanation", at(28)?)?);

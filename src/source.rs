@@ -318,57 +318,24 @@ fn infer_object_hint(relative: &str, kind: &SourceKind, xml_root: Option<&str>) 
     xml_root.map(ToOwned::to_owned)
 }
 
-fn is_metadata_collection(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    matches!(
-        value.as_str(),
-        "catalogs"
-            | "documents"
-            | "informationregisters"
-            | "accumulationregisters"
-            | "accountingregisters"
-            | "calculationregisters"
-            | "chartsofcharacteristictypes"
-            | "chartsofaccounts"
-            | "chartsofcalculationtypes"
-            | "chartsofcalculationregisters"
-            | "commonmodules"
-            | "commonforms"
-            | "commonpictures"
-            | "commontemplates"
-            | "commonattributes"
-            | "commandgroups"
-            | "documentjournals"
-            | "reports"
-            | "dataprocessors"
-            | "enums"
-            | "exchangeplans"
-            | "eventsubscriptions"
-            | "filtercriteria"
-            | "functionaloptions"
-            | "functionaloptionsparameters"
-            | "httpservices"
-            | "languages"
-            | "scheduledjobs"
-            | "sessionparameters"
-            | "settingsstorages"
-            | "styleitems"
-            | "styles"
-            | "subsystems"
-            | "roles"
-            | "commoncommands"
-            | "businessprocesses"
-            | "bots"
-            | "definedtypes"
-            | "tasks"
-            | "constants"
-            | "documentnumerators"
-            | "integrationservices"
-            | "sequences"
-            | "webservices"
-            | "wsreferences"
-            | "xdtopackages"
-    )
+/// The folders of a tree that hold the configuration's objects: the model's table of root families
+/// (`metadata_model::index::ROOT_COLLECTIONS`, the only one) and the 8.5 folder of the palette colors,
+/// which the model counts among the nested kinds and a 2.21 tree keeps at its top level. A folder missing
+/// here is a folder whose files the guard takes for something that is not the configuration's, and whose
+/// exported files it finds "left in the database" (`PaletteColors`, 2026-09-30).
+pub(crate) fn is_metadata_collection(value: &str) -> bool {
+    static FOLDERS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    let folders = FOLDERS.get_or_init(|| {
+        crate::metadata_model::index::ROOT_COLLECTIONS
+            .iter()
+            .map(|(folder, _)| folder.to_ascii_lowercase())
+            // "chartsofcalculationregisters" is kept from the hand-written list this replaced (the
+            // scanner's fixtures spell it so).
+            .chain(["palettecolors", "chartsofcalculationregisters"].map(str::to_string))
+            .collect()
+    });
+    folders.contains(&value.to_ascii_lowercase())
 }
 
 fn is_xml(path: &Path) -> bool {
@@ -428,8 +395,26 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceKind, classify, infer_object_hint, scan_sources, scan_sources_with_prefixes,
+        SourceKind, classify, infer_object_hint, is_metadata_collection, scan_sources,
+        scan_sources_with_prefixes,
     };
+
+    #[test]
+    fn every_root_folder_of_the_model_and_the_8_5_palette_colors_are_collections() {
+        for (folder, _) in crate::metadata_model::index::ROOT_COLLECTIONS {
+            assert!(is_metadata_collection(folder), "{folder}");
+            assert!(
+                is_metadata_collection(&folder.to_ascii_uppercase()),
+                "{folder}"
+            );
+        }
+        assert!(is_metadata_collection("PaletteColors"));
+        assert!(is_metadata_collection("ExternalDataSources"));
+        // A folder that is not one, and the folders of nested kinds.
+        for other in ["", "Forms", "Templates", "Ext", "readme"] {
+            assert!(!is_metadata_collection(other), "{other}");
+        }
+    }
 
     #[test]
     fn classifies_common_1c_source_files() {

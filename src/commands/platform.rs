@@ -22,6 +22,7 @@ macro_rules! xml_selector {
         impl PlatformFlag for $args {
             fn apply_platform_flag(&mut self) {
                 if let Some(platform) = self.platform {
+                    crate::platform::note_export_platform(platform);
                     self.source_version = platform.xml_version();
                 }
             }
@@ -35,6 +36,7 @@ macro_rules! optional_xml_selector {
         impl PlatformFlag for $args {
             fn apply_platform_flag(&mut self) {
                 if let Some(platform) = self.platform {
+                    crate::platform::note_export_platform(platform);
                     self.source_version = Some(platform.xml_version());
                 }
             }

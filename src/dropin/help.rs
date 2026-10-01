@@ -105,6 +105,11 @@ pub fn infobase_help(program: &str) -> String {
             export
                 Экспорт конфигурации в XML
 
+                --extension=<name> | -e <name>
+                    Экспортировать расширение конфигурации с этим именем, а не
+                    конфигурацию. Выгружается то состояние расширения, которое
+                    выгружает ibcmd: подготовленное к применению, если оно есть
+
                 --threads=<n> | -T <n>
                     Количество потоков, используемых при экспорте
 
@@ -126,6 +131,41 @@ pub fn infobase_help(program: &str) -> String {
 
                 <path>
                     путь к каталогу с файлами конфигурации
+
+            apply
+                Обновление конфигурации базы данных: переносит конфигурацию,
+                сохраненную командой import (таблица ConfigSave), в действующую
+                (таблица Config) в монопольном режиме, одной транзакцией.
+                Реструктуризацию реквизитов справочников и документов
+                (добавление, удаление, увеличение длины строки, индексирование
+                реквизита) и создание нового справочника или документа (без
+                форм, макетов, команд и предопределенных элементов) выполняет
+                само, в той же транзакции, если указан
+                --recovery-backup или --i-have-a-backup; без них ничего не
+                меняет и отвечает про резервную копию, код возврата 1. Другую
+                реструктуризацию базы (или изменение, которое ibcmd-rs не
+                выполняет) не выполняет, ничего не меняет и отвечает
+                \"требуется штатный config apply: <причины>\", код возврата 1.
+                Если к базе подключены другие сеансы, отказывает словами ibcmd
+                об исключительной блокировке, код возврата -1
+
+                --force | -F
+                    Подтверждение выполнения операции в случае наличия
+                    предупреждений. Принимается: предупреждений, которые нужно
+                    подтверждать, это применение не выдает
+
+                --dynamic=<auto|disable|prompt|force>
+                    Использование динамического обновления. Применение всегда
+                    монопольное: auto (по умолчанию), disable и prompt
+                    выполняются как disable, force не поддерживается
+
+                --session-terminate=<disable|prompt|force>
+                    Завершение активных сеансов. disable (по умолчанию);
+                    prompt и force принимаются, пока к базе никто не подключен,
+                    ibcmd-rs сеансы не завершает
+
+                --session-terminate-message=<message>
+                    Принимается и не используется
 
 Параметры ibcmd-rs (у ibcmd их нет):
 
@@ -152,11 +192,40 @@ pub fn infobase_help(program: &str) -> String {
     --base-free
         (import) Собрать каждую строку из дерева, не читая конфигурацию базы
 
+    --exclusivity=<sql|assumed>
+        (apply) Как убедиться, что с базой никто не работает. sql (по
+        умолчанию): по сеансам, которые видит SQL Server (нужно право VIEW
+        SERVER STATE). assumed: сеансы не проверяются; берите его, когда у
+        логина СУБД нет этого права или соединение держит лишь пул рабочего
+        процесса, а вы знаете, что пользователей в базе нет
+
+    --recovery-backup=<file>
+        (apply) Согласие на реструктуризацию, которую применение выполняет
+        само: перед транзакцией снять BACKUP DATABASE ... WITH COPY_ONLY в
+        этот файл (путь, куда может писать служба SQL Server; файл не должен
+        существовать) и назвать его в отчете. Без этого параметра или
+        --i-have-a-backup такая реструктуризация не выполняется: отказ, код
+        возврата 1. Изменения, которые применение не выполняет само,
+        по-прежнему отправляются на штатный config apply
+
+    --i-have-a-backup
+        (apply) Подтвердить, что резервная копия базы у вас есть; это
+        записывается в отчете
+
+    --verify | --no-verify
+        (import) Перед записью в ConfigSave выгрузить моделью конфигурацию,
+        какой она станет после загрузки, и сравнить каждый файл с деревом;
+        при расхождении загрузка отменяется (код -1), ConfigSave остается как
+        был. Проверяется любая загрузка (и в базу с конфигурацией, и --base-free,
+        и в пустую базу), --verify это подтверждает; --no-verify пропускает
+        проверку
+
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
 {unsupported}
-        параметры export --base, --file, --extension, --sync, --archive
+        параметры export --base, --file, --sync, --archive
         параметры import --out, --extension
+        параметры apply --extension, --dynamic=force, --sqlcmd
         общие параметры --pid, --remote
         режимы {modes}
 
@@ -184,7 +253,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config import
+{infobase:<23}{summary}: config export, config import, config apply
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -211,7 +280,7 @@ mod tests {
         let help = infobase_help("ibcmd");
         for command in [
             "ibcmd infobase create",
-            "ibcmd infobase config apply",
+            "ibcmd infobase config check",
             "ibcmd infobase config export info",
             "ibcmd infobase config import files",
             "ibcmd infobase config support",
@@ -221,6 +290,19 @@ mod tests {
         }
         // children of a refused command are covered by it
         assert!(!help.contains("config support disable"));
+        // apply is served: described with its words, not listed as refused
+        assert!(!help.contains("ibcmd infobase config apply"));
+        for word in [
+            "--dynamic=<auto|disable|prompt|force>",
+            "--session-terminate=<disable|prompt|force>",
+            "--session-terminate-message=<message>",
+            "требуется штатный config apply: <причины>",
+            "--exclusivity=<sql|assumed>",
+            "--recovery-backup=<file>",
+            "--i-have-a-backup",
+        ] {
+            assert!(help.contains(word), "{word}");
+        }
         assert!(help.contains("--db-server"));
         assert!(help.contains("--request-db-pwd"));
         // the release audit forbids the platform's executable names

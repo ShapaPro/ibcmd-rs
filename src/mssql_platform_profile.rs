@@ -13,14 +13,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use ibcmd_core::artifact::ProfileId;
 use ibcmd_core::profile::{CapabilityId, CapabilityState, EffectiveProfile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::sql::{SqlExec, SqlLogin, SqlTarget};
+use crate::sql::{SqlBackend, SqlExec, SqlLogin, SqlTarget};
 
 /// Capability that admits main-configuration writes for a platform profile.
 pub const CAPABILITY_MAIN_WRITE: &str = "mssql.main.write";
+/// The own exclusive `config apply` (`mssql-config-apply`): a stage that needs no
+/// restructuring moved from `ConfigSave` into `Config` in one transaction.
+pub const CAPABILITY_CONFIG_APPLY: &str = "mssql.config.apply";
 /// Capability that admits extension writes for a platform profile.
 pub const CAPABILITY_EXTENSION_WRITE: &str = "mssql.extension.write";
 /// Profile fingerprint key for `IBVersion`/`PlatformVersionReq`.
@@ -85,6 +88,12 @@ impl MssqlNativePlatformProfile {
     /// Main writes require an evidenced activation protocol for the build.
     pub fn require_main_write_supported(self) -> Result<()> {
         self.require_capability(CAPABILITY_MAIN_WRITE)
+    }
+
+    /// The own exclusive apply requires that its end state was compared with
+    /// the native apply on this build.
+    pub fn require_config_apply_supported(self) -> Result<()> {
+        self.require_capability(CAPABILITY_CONFIG_APPLY)
     }
 
     /// Extension mutation requires an evidenced CAS/registry protocol.
@@ -235,6 +244,239 @@ fn verify_ras_infobase_binding(
         cluster_id,
         infobase_id,
     })
+}
+
+/// A worker process of the cluster that holds an infobase only for the RAS
+/// service's own connections: where the SQL sessions of the tool's own RAS
+/// verification live ([`read_infobase_clients`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct OwnRasProcess {
+    /// The machine the process runs on (`host_name` of its SQL sessions).
+    pub host: String,
+    /// Its operating-system process id (`host_process_id` of its SQL sessions).
+    pub pid: u32,
+}
+
+/// What the cluster says about who is connected to one infobase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasInfobaseClients {
+    /// Connections and sessions of the infobase that are not the RAS service's
+    /// own: a client, a background job, a web or COM connection, ...
+    pub clients: Vec<String>,
+    /// The worker processes that carry a RAS connection of the infobase and no
+    /// other connection or session of it.
+    pub ras_only_processes: BTreeSet<OwnRasProcess>,
+}
+
+/// Asks the cluster who is connected to the infobase: `rac connection list`,
+/// `rac session list` and `rac process list`, without the infobase login (which
+/// would itself open a RAS connection).
+///
+/// The tool's own RAS verification (`rac infobase info --infobase-user`) makes
+/// the worker process load the infobase, and the process keeps two idle
+/// `1CV83 Server` SQL sessions on the database for as long as its RAS
+/// connection lives (#409 F-3: observed for 56 minutes after the command
+/// ended). They are not users, but the SQL gate of an exclusive activation
+/// counts every session.
+pub fn read_infobase_clients(
+    rac: &Path,
+    ras_endpoint: &str,
+    cluster_id: Uuid,
+    infobase_id: Uuid,
+) -> Result<RasInfobaseClients> {
+    let list = |what: &str, extra: Vec<String>| -> Result<Vec<BTreeMap<String, String>>> {
+        let mut args = vec![what.to_owned(), "list".to_owned()];
+        args.push(format!("--cluster={cluster_id}"));
+        args.extend(extra);
+        args.push(ras_endpoint.to_owned());
+        run_rac_bounded(rac, args)
+            .map(|output| parse_rac_blocks(&output))
+            .with_context(|| format!("rac {what} list failed"))
+    };
+    let infobase = format!("--infobase={infobase_id}");
+    let connections = list("connection", vec![infobase.clone()])?;
+    let sessions = list("session", vec![infobase])?;
+    let processes = list("process", Vec::new())?;
+    Ok(infobase_clients(&connections, &sessions, &processes))
+}
+
+fn infobase_clients(
+    connections: &[BTreeMap<String, String>],
+    sessions: &[BTreeMap<String, String>],
+    processes: &[BTreeMap<String, String>],
+) -> RasInfobaseClients {
+    let field = |block: &BTreeMap<String, String>, key: &str| -> String {
+        block.get(key).cloned().unwrap_or_default()
+    };
+    let mut clients = Vec::new();
+    let mut ras_processes = BTreeSet::new();
+    let mut client_processes = BTreeSet::new();
+    for connection in connections {
+        let process = field(connection, "process");
+        let application = field(connection, "application");
+        // An application the cluster does not name is not RAS: it counts.
+        if application.eq_ignore_ascii_case("RAS") {
+            ras_processes.insert(process);
+        } else {
+            client_processes.insert(process);
+            clients.push(format!(
+                "connection {} of application {application:?} on {}",
+                field(connection, "conn-id"),
+                field(connection, "host")
+            ));
+        }
+    }
+    for session in sessions {
+        client_processes.insert(field(session, "process"));
+        clients.push(format!(
+            "session {} of user {:?} ({})",
+            field(session, "session-id"),
+            field(session, "user-name"),
+            field(session, "app-id")
+        ));
+    }
+    let ras_only_processes = processes
+        .iter()
+        .filter_map(|process| {
+            let id = field(process, "process");
+            if !ras_processes.contains(&id) || client_processes.contains(&id) {
+                return None;
+            }
+            Some(OwnRasProcess {
+                host: field(process, "host"),
+                pid: field(process, "pid").parse().ok()?,
+            })
+        })
+        .collect();
+    RasInfobaseClients {
+        clients,
+        ras_only_processes,
+    }
+}
+
+/// For an exclusive activation: refuses, before anything is written, an
+/// infobase that has client connections or sessions, and returns the worker
+/// processes whose idle SQL sessions the gate of the activation leaves out
+/// ([`exclusive_session_gate`]) because they belong to the RAS service.
+pub fn own_ras_processes_for_exclusive(
+    rac: &Path,
+    ras_endpoint: &str,
+    cluster_id: Uuid,
+    infobase_id: Uuid,
+) -> Result<Vec<OwnRasProcess>> {
+    let found = read_infobase_clients(rac, ras_endpoint, cluster_id, infobase_id)?;
+    if !found.clients.is_empty() {
+        bail!(
+            "exclusive activation refused before any write: the cluster reports {} client connection(s) or session(s) on the infobase ({}); end them, or activate `online`",
+            found.clients.len(),
+            found
+                .clients
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    Ok(found.ras_only_processes.into_iter().collect())
+}
+
+/// The statement of an exclusive activation that refuses when the database has
+/// a session other than its own: `THROW code, message`.
+///
+/// `own` are the worker processes that hold the infobase only for RAS
+/// connections ([`own_ras_processes_for_exclusive`]). Their `1CV83 Server` SQL
+/// sessions are left out while they are idle -- `sleeping`, no open
+/// transaction -- because the tool's own RAS verification made the process open
+/// them; a session of that program that runs or holds a transaction, and every
+/// session of another program or another process, still refuses. Without `own`
+/// the statement counts every session, as it always did.
+///
+/// One case is not caught: a user who signs in through the same process in the
+/// seconds between the cluster query and the transaction, while the sessions
+/// stay idle.
+pub fn exclusive_session_gate(code: u32, message: &str, own: &[OwnRasProcess]) -> String {
+    let exempt = session_exemption(own);
+    format!(
+        "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(){exempt}) THROW {code}, '{}', 1;",
+        message.replace('\'', "''")
+    )
+}
+
+/// The sessions the exclusive gates leave out, as a condition to append to a
+/// `WHERE` over `sys.dm_exec_sessions`: none when `own` is empty.
+pub(crate) fn session_exemption(own: &[OwnRasProcess]) -> String {
+    if own.is_empty() {
+        String::new()
+    } else {
+        let mut by_host = BTreeMap::<&str, Vec<u32>>::new();
+        for process in own {
+            by_host.entry(&process.host).or_default().push(process.pid);
+        }
+        let alternatives = by_host
+            .iter()
+            .map(|(host, pids)| {
+                format!(
+                    "(ISNULL(host_name,N'')=N'{}' AND ISNULL(host_process_id,-1) IN ({}))",
+                    host.replace('\'', "''"),
+                    pids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!(
+            " AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ({alternatives}))"
+        )
+    }
+}
+
+/// The sessions the gate of an exclusive activation would count, as a query for
+/// a connection that is not on the database: `session_id, login, host, program,
+/// status`. Same condition as [`exclusive_session_gate`].
+pub fn foreign_sessions_query(database: &str, own: &[OwnRasProcess]) -> String {
+    format!(
+        "SELECT session_id, ISNULL(login_name,N''), ISNULL(host_name,N''), ISNULL(program_name,N''), status FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID(N'{}'){} ORDER BY session_id",
+        database.replace('\'', "''"),
+        session_exemption(own)
+    )
+}
+
+/// For an exclusive activation: refuses, before anything is staged, a database
+/// that has a session the gate of the activation would count.
+///
+/// The gate inside the transaction stays the last word; this only moves its
+/// refusal before the stage, so that it leaves `ConfigSave` as it was (#409: an
+/// apply refused by the gate used to leave the stage behind). A connection
+/// through `--sqlcmd` cannot ask; it is left to the gate.
+pub fn refuse_foreign_sessions(sql: &SqlExec, database: &str, own: &[OwnRasProcess]) -> Result<()> {
+    let SqlBackend::Client(client) = sql.backend() else {
+        return Ok(());
+    };
+    let rows = client
+        .query_rows(&foreign_sessions_query(database, own), &[])
+        .context("failed to look at the sessions of the database")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut listed = Vec::new();
+    for row in rows.iter().take(5) {
+        listed.push(format!(
+            "session {} of {:?} on {:?} ({:?}, {})",
+            row.i64(0)?,
+            row.text(1)?,
+            row.text(2)?,
+            row.text(3)?,
+            row.text(4)?
+        ));
+    }
+    bail!(
+        "exclusive activation refused before any write: the database has {} other session(s) ({}); end them, or activate `online`",
+        rows.len(),
+        listed.join("; ")
+    );
 }
 
 fn run_rac_bounded<I>(rac: &Path, args: I) -> Result<String>
@@ -535,12 +777,13 @@ fn require_declared_fingerprint(
     }
 }
 
-fn verify_probe(
+/// Compares a live storage probe with what the claimed profile declares:
+/// the exact five-table column layout, then the profile's `IBVersion` and
+/// schema fingerprints. Returns the schema fingerprint.
+fn check_probe_against_profile(
     claimed: MssqlNativePlatformProfile,
-    agent_build: &str,
-    probe: NativeStorageProbe,
-    binding: RasDatabaseBinding,
-) -> Result<MssqlNativeProfileVerification> {
+    probe: &NativeStorageProbe,
+) -> Result<String> {
     let required_tables = [
         "Config",
         "ConfigCAS",
@@ -571,16 +814,6 @@ fn verify_probe(
     if probe.columns != expected {
         bail!("native storage schema does not exactly match the evidenced five-table fingerprint");
     }
-    let claimed_build = claimed
-        .id()
-        .strip_prefix("platform-")
-        .expect("closed platform profile has a platform- prefix");
-    if agent_build != claimed_build {
-        bail!(
-            "claimed platform profile `{}` does not match RAS agent build `{agent_build}`",
-            claimed.id()
-        );
-    }
     let mut digest = Sha256::new();
     digest.update(format!(
         "IBVersion|{}|{}\n",
@@ -595,10 +828,30 @@ fn verify_probe(
     let profile = claimed.effective_profile()?;
     require_declared_fingerprint(&profile, FINGERPRINT_IB_VERSION, &observed_ib_version)?;
     require_declared_fingerprint(&profile, FINGERPRINT_CONFIG_SCHEMA, &observed_fingerprint)?;
+    Ok(observed_fingerprint)
+}
+
+fn verify_probe(
+    claimed: MssqlNativePlatformProfile,
+    agent_build: &str,
+    probe: NativeStorageProbe,
+    binding: RasDatabaseBinding,
+) -> Result<MssqlNativeProfileVerification> {
+    let claimed_build = claimed
+        .id()
+        .strip_prefix("platform-")
+        .expect("closed platform profile has a platform- prefix");
+    let storage_schema_sha256 = check_probe_against_profile(claimed, &probe)?;
+    if agent_build != claimed_build {
+        bail!(
+            "claimed platform profile `{}` does not match RAS agent build `{agent_build}`",
+            claimed.id()
+        );
+    }
     Ok(MssqlNativeProfileVerification {
         claimed_platform_profile: claimed.id().to_owned(),
         verified_platform_profile: format!("platform-{agent_build}"),
-        storage_schema_sha256: observed_fingerprint,
+        storage_schema_sha256,
         ib_version: probe.ib_version,
         platform_version_req: probe.platform_version_req,
         verified_cluster_id: binding.cluster_id,
@@ -607,9 +860,180 @@ fn verify_probe(
     })
 }
 
+/// What a SQL-only verification of the storage layout established.
+#[derive(Debug, Clone, Serialize)]
+pub struct MssqlStorageVerification {
+    pub claimed_platform_profile: String,
+    pub storage_schema_sha256: String,
+    pub ib_version: i32,
+    pub platform_version_req: i32,
+}
+
+/// The storage half of [`verify_mssql_native_profile`] for commands that run
+/// against the database alone (no cluster, no RAS): the live column layout of
+/// the five configuration tables and `IBVersion` must equal what the claimed
+/// profile declares, and the profile must admit the own exclusive apply
+/// (`mssql.config.apply`).
+/// The platform *build* is then the caller's claim, not an observation.
+pub fn verify_mssql_storage_profile(
+    claimed: MssqlNativePlatformProfile,
+    client: &dyn crate::sql::SqlClient,
+    database: &str,
+) -> Result<MssqlStorageVerification> {
+    claimed.require_config_apply_supported()?;
+    let db = format!("[{}]", database.replace(']', "]]"));
+    let sql_text = format!(
+        "SET NOCOUNT ON;
+         IF OBJECT_ID(N'{db}.dbo.IBVersion', N'U') IS NULL THROW 57320, 'IBVersion table is missing', 1;
+         SELECT CONCAT(N'IDENTITY|', IBVersion, N'|', PlatformVersionReq) FROM {db}.dbo.IBVersion;
+         SELECT CONCAT(N'COLUMN|', t.name, N'|', c.column_id, N'|', c.name, N'|', TYPE_NAME(c.user_type_id), N'|', c.max_length, N'|', c.precision, N'|', c.scale, N'|', CONVERT(int, c.is_nullable))
+         FROM {db}.sys.tables t JOIN {db}.sys.columns c ON c.object_id = t.object_id
+         WHERE t.name IN (N'Config', N'ConfigSave', N'Params', N'ConfigCAS', N'ConfigCASSave')
+         ORDER BY t.name, c.column_id;"
+    );
+    let mut lines = String::new();
+    client
+        .read_rows(&sql_text, &[], &mut |row| {
+            lines.push_str(&row.value(0)?.to_text());
+            lines.push('\n');
+            if lines.len() > MAX_PROBE_OUTPUT_BYTES {
+                bail!("native profile verification output exceeds {MAX_PROBE_OUTPUT_BYTES} bytes");
+            }
+            Ok(())
+        })
+        .context("native profile verification query failed")?;
+    let probe = parse_probe(&lines)?;
+    let storage_schema_sha256 = check_probe_against_profile(claimed, &probe)?;
+    Ok(MssqlStorageVerification {
+        claimed_platform_profile: claimed.id().to_owned(),
+        storage_schema_sha256,
+        ib_version: probe.ib_version,
+        platform_version_req: probe.platform_version_req,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What `rac` printed on the lab cluster (8.3.27.2214) for the clone that
+    // the tool's own verification had opened: one RAS connection, two worker
+    // processes.
+    const RAS_CONNECTIONS: &str = "connection     : d243edc4-d9a1-43b5-8b19-910671df20fd\nconn-id        : 104390\nhost           : DESKTOP-SMI5N4O\nprocess        : 68c054ba-34d3-4900-9c08-ead9756a9cf1\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\napplication    : \"RAS\"\nconnected-at   : 2026-09-30T01:28:35\nsession-number : 0\nblocked-by-ls  : 0\n";
+    const RAS_PROCESSES: &str = "process              : 68c054ba-34d3-4900-9c08-ead9756a9cf1\nhost                 : DESKTOP-SMI5N4O\nport                 : 2560\npid                  : 22608\nturned-on            : yes\nrunning              : yes\nconnections          : 14\n\nprocess              : 5f8f3e05-2c7b-4ebf-8d6e-b0e6eed2b64a\nhost                 : DESKTOP-SMI5N4O\nport                 : 2564\npid                  : 110352\nturned-on            : yes\nrunning              : yes\nconnections          : 10\n";
+
+    fn clients_of(connections: &str, sessions: &str, processes: &str) -> RasInfobaseClients {
+        infobase_clients(
+            &parse_rac_blocks(connections),
+            &parse_rac_blocks(sessions),
+            &parse_rac_blocks(processes),
+        )
+    }
+
+    fn own(host: &str, pid: u32) -> OwnRasProcess {
+        OwnRasProcess {
+            host: host.to_owned(),
+            pid,
+        }
+    }
+
+    #[test]
+    fn a_ras_connection_alone_is_no_client_and_names_its_process() {
+        let found = clients_of(RAS_CONNECTIONS, "", RAS_PROCESSES);
+        assert!(found.clients.is_empty(), "{:?}", found.clients);
+        assert_eq!(
+            found.ras_only_processes,
+            BTreeSet::from([own("DESKTOP-SMI5N4O", 22608)])
+        );
+    }
+
+    #[test]
+    fn a_client_connection_or_session_is_counted_and_takes_its_process_out() {
+        // The same process also carries a client of the infobase.
+        let with_client = format!(
+            "{RAS_CONNECTIONS}\nconnection     : 5d6d5f08-6c7c-4d4b-8f2e-000000000001\nconn-id        : 104391\nhost           : DESKTOP-SMI5N4O\nprocess        : 68c054ba-34d3-4900-9c08-ead9756a9cf1\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\napplication    : \"1CV8C\"\nconnected-at   : 2026-09-30T01:30:00\nsession-number : 3\nblocked-by-ls  : 0\n"
+        );
+        let found = clients_of(&with_client, "", RAS_PROCESSES);
+        assert_eq!(found.clients.len(), 1);
+        assert!(found.clients[0].contains("1CV8C"), "{:?}", found.clients);
+        assert!(found.ras_only_processes.is_empty());
+
+        // A session with no connection listed still counts.
+        let found = clients_of(
+            RAS_CONNECTIONS,
+            "session        : 1\nsession-id     : 7\ninfobase       : 3855ed5b-ea8f-4960-a88e-6f746c8a5601\nconnection     : 5d6d5f08-6c7c-4d4b-8f2e-000000000001\nprocess        : 5f8f3e05-2c7b-4ebf-8d6e-b0e6eed2b64a\nuser-name      : Иванов\napp-id         : 1CV8C\n",
+            RAS_PROCESSES,
+        );
+        assert_eq!(found.clients.len(), 1);
+        assert_eq!(
+            found.ras_only_processes,
+            BTreeSet::from([own("DESKTOP-SMI5N4O", 22608)])
+        );
+
+        // No application name is not RAS.
+        let unnamed = RAS_CONNECTIONS.replace("application    : \"RAS\"\n", "");
+        let found = clients_of(&unnamed, "", RAS_PROCESSES);
+        assert_eq!(found.clients.len(), 1);
+        assert!(found.ras_only_processes.is_empty());
+    }
+
+    #[test]
+    fn an_empty_cluster_answer_means_no_client_and_nothing_to_leave_out() {
+        let found = clients_of("", "", RAS_PROCESSES);
+        assert!(found.clients.is_empty());
+        assert!(found.ras_only_processes.is_empty());
+    }
+
+    #[test]
+    fn the_pre_stage_query_counts_what_the_gate_counts() {
+        let own = [own("DESKTOP-SMI5N4O", 22608)];
+        let gate = exclusive_session_gate(57209, "m", &own);
+        let query = foreign_sessions_query("lab'db", &own);
+        // The same condition, on the named database instead of the current one.
+        let condition = gate
+            .split_once("WHERE ")
+            .and_then(|(_, rest)| rest.split_once(") THROW"))
+            .map(|(condition, _)| condition.replace("DB_ID()", "DB_ID(N'lab''db')"))
+            .unwrap();
+        assert!(query.contains(&condition), "{query}\n{condition}");
+        assert!(query.starts_with("SELECT session_id, ISNULL(login_name,N'')"));
+        assert!(query.ends_with(" ORDER BY session_id"));
+        // No process named: every session.
+        let plain = foreign_sessions_query("db", &[]);
+        assert!(plain.contains("database_id=DB_ID(N'db') ORDER BY session_id"));
+        assert!(!plain.contains("1CV83 Server"));
+    }
+
+    #[test]
+    fn the_exclusive_gate_counts_every_session_unless_told_which_are_the_rac_sessions() {
+        assert_eq!(
+            exclusive_session_gate(
+                57209,
+                "exclusive activation requires no other database sessions",
+                &[]
+            ),
+            "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE is_user_process=1 AND session_id<>@@SPID AND database_id=DB_ID()) THROW 57209, 'exclusive activation requires no other database sessions', 1;"
+        );
+        let text = exclusive_session_gate(
+            57209,
+            "no other sessions",
+            &[
+                own("DESKTOP-SMI5N4O", 22608),
+                own("DESKTOP-SMI5N4O", 110352),
+                own("o'host", 7),
+            ],
+        );
+        assert!(text.contains("AND NOT (ISNULL(program_name,N'')=N'1CV83 Server' AND status=N'sleeping' AND open_transaction_count=0 AND ("));
+        assert!(text.contains(
+            "(ISNULL(host_name,N'')=N'DESKTOP-SMI5N4O' AND ISNULL(host_process_id,-1) IN (22608,110352))"
+        ));
+        assert!(
+            text.contains(
+                "(ISNULL(host_name,N'')=N'o''host' AND ISNULL(host_process_id,-1) IN (7))"
+            )
+        );
+        assert!(text.ends_with(") THROW 57209, 'no other sessions', 1;"));
+    }
 
     fn test_binding() -> RasDatabaseBinding {
         RasDatabaseBinding {
@@ -673,6 +1097,24 @@ mod tests {
             .require_extension_write_supported()
             .expect_err("8.5 extension writes must fail closed");
         assert!(explicit_extension.to_string().contains("8.5.1.1150"));
+    }
+
+    #[test]
+    fn the_own_apply_is_declared_per_build_and_apart_from_main_write() {
+        // the own exclusive apply has a capability of its own: 8.5.1 leaves
+        // main-configuration writes (the live generation switch) unsupported and
+        // still admits the apply, once it was compared with the native one there
+        MssqlNativePlatformProfile::Platform8_3_27_2214
+            .require_config_apply_supported()
+            .expect("8.3.27.2214 apply is compared with the native one");
+        MssqlNativePlatformProfile::Platform8_5_1_1150
+            .require_config_apply_supported()
+            .expect("8.5.1.1150 apply is compared with the native one");
+        // 8.3.27.1989 declares no write capability of any kind
+        let undeclared = MssqlNativePlatformProfile::Platform8_3_27_1989
+            .require_config_apply_supported()
+            .expect_err("an undeclared capability must fail closed");
+        assert!(undeclared.to_string().contains("is not declared"));
     }
 
     #[test]

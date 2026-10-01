@@ -5069,7 +5069,14 @@ mod tests {
     }
 
     fn register_configuration(family: BusinessObjectFamily) -> CanonicalConfiguration {
-        let document = XmlReader::from_slice(&register_xml(family)).unwrap();
+        register_configuration_from(family, &register_xml(family))
+    }
+
+    fn register_configuration_from(
+        family: BusinessObjectFamily,
+        xml: &[u8],
+    ) -> CanonicalConfiguration {
+        let document = XmlReader::from_slice(xml).unwrap();
         let envelope = bundled_metadata_registry()
             .decode(
                 &FamilyId::parse(family.as_str()).unwrap(),
@@ -5677,6 +5684,378 @@ mod tests {
                 decode_business_object_blob(&future_blob, &profile),
                 Err(BusinessObjectBuildError::Native(_))
             ));
+        }
+    }
+
+    /// The owner record of a compiled register or chart, one text per slot
+    /// (nested lists show as `{}`), and the root's collection count.
+    fn owner_record(blob: &[u8]) -> (Vec<String>, String) {
+        let plain = inflate_bounded(blob).unwrap();
+        let NativeValue::List(root) = NativeParser::new(&plain).parse().unwrap() else {
+            panic!("a register compiles to a root list");
+        };
+        let NativeValue::List(fields) = &root[1] else {
+            panic!("the root's second member is the owner record");
+        };
+        let text = |value: &NativeValue| match value {
+            NativeValue::Token(token) => token.clone(),
+            NativeValue::Text(text) => format!("\"{text}\""),
+            NativeValue::List(_) => "{}".to_owned(),
+        };
+        (fields.iter().map(text).collect(), text(&root[2]))
+    }
+
+    /// A register fixture compiled after editing its XML: `(from, to)` pairs,
+    /// each applied to the first occurrence.
+    fn compile_edited(family: BusinessObjectFamily, edits: &[(&str, &str)]) -> Vec<u8> {
+        let mut xml = String::from_utf8(register_xml(family)).unwrap();
+        for (from, to) in edits {
+            assert!(xml.contains(from), "{family:?} fixture has no `{from}`");
+            xml = xml.replacen(from, to, 1);
+        }
+        let configuration = register_configuration_from(family, xml.as_bytes());
+        compile_register_configuration(family, configuration).unwrap()
+    }
+
+    /// `<Name>value</Name>`.
+    fn tagged(name: &str, value: &str) -> String {
+        format!("<{name}>{value}</{name}>")
+    }
+
+    /// `(property, fixture value, new value, slot, code the slot holds now)`.
+    type SlotCase = (
+        &'static str,
+        &'static str,
+        &'static str,
+        usize,
+        &'static str,
+    );
+
+    /// Edits one property at a time and requires that exactly the evidenced
+    /// slot of the owner record moves, to the evidenced code. `base` edits the
+    /// fixture first.
+    fn check_slots(family: BusinessObjectFamily, base: &[(&str, &str)], cases: &[SlotCase]) {
+        let (baseline, _) = owner_record(&compile_edited(family, base));
+        for (property, from, to, slot, code) in cases {
+            let mut edits = base.to_vec();
+            let (from_text, to_text) = (tagged(property, from), tagged(property, to));
+            edits.push((&from_text, &to_text));
+            let (edited, _) = owner_record(&compile_edited(family, &edits));
+            assert_eq!(
+                baseline.len(),
+                edited.len(),
+                "{family:?}.{property} changed the record length"
+            );
+            let moved: Vec<usize> = (0..edited.len())
+                .filter(|index| baseline[*index] != edited[*index])
+                .collect();
+            assert_eq!(
+                moved,
+                [*slot],
+                "{family:?}.{property} {from} -> {to} moved slots {moved:?}, expected {slot} only"
+            );
+            assert_eq!(edited[*slot], *code, "{family:?}.{property} {from} -> {to}");
+        }
+    }
+
+    /// Accounting register, 30 slots. Measured on ten registers (БСП 8.3.27
+    /// and 8.5, ERP УХ, an extension): DataLockControlMode is slot 21 (`0`
+    /// on nine, `1` on the extension's), FullTextSearch slot 22 (`0` on all),
+    /// the period adjustment the last slot.
+    #[test]
+    fn accounting_register_properties_ride_their_stored_slots() {
+        check_slots(
+            BusinessObjectFamily::AccountingRegister,
+            &[(
+                "<PeriodAdjustmentLength>2</PeriodAdjustmentLength>",
+                "<PeriodAdjustmentLength>0</PeriodAdjustmentLength>",
+            )],
+            &[
+                ("UseStandardCommands", "true", "false", 16, "0"),
+                ("IncludeHelpInContents", "false", "true", 17, "1"),
+                ("DataLockControlMode", "Managed", "Automatic", 21, "0"),
+                ("FullTextSearch", "Use", "DontUse", 22, "0"),
+                ("EnableTotalsSplitting", "true", "false", 23, "0"),
+            ],
+        );
+        let (fields, _) = owner_record(&compile_edited(
+            BusinessObjectFamily::AccountingRegister,
+            &[(
+                "<PeriodAdjustmentLength>2</PeriodAdjustmentLength>",
+                "<PeriodAdjustmentLength>0</PeriodAdjustmentLength>",
+            )],
+        ));
+        assert_eq!(
+            (fields.len(), fields[0].as_str(), fields[29].as_str()),
+            (30, "21", "0")
+        );
+    }
+
+    /// The standard attributes of an accounting register follow its
+    /// properties: `RecordType` (-9) after `Account` when it has no
+    /// correspondence (three of the ten registers on record), `PeriodAdjustment`
+    /// (-30) first when it has a period adjustment (the two ERP УХ ones).
+    #[test]
+    fn accounting_register_standard_attributes_follow_its_properties() {
+        let markers = |edits: &[(&str, &str)]| {
+            let blob = compile_edited(BusinessObjectFamily::AccountingRegister, edits);
+            let plain = inflate_bounded(&blob).unwrap();
+            let NativeValue::List(root) = NativeParser::new(&plain).parse().unwrap() else {
+                panic!("root list");
+            };
+            let NativeValue::List(fields) = &root[1] else {
+                panic!("owner record");
+            };
+            let slot = if fields.len() == 31 { 25 } else { 24 };
+            let NativeValue::List(bag) = &fields[slot] else {
+                panic!("standard attributes");
+            };
+            let NativeValue::List(body) = &bag[1] else {
+                panic!("standard attribute body");
+            };
+            body[2..]
+                .chunks(3)
+                .map(|entry| match &entry[0] {
+                    NativeValue::List(marker) => match &marker[0] {
+                        NativeValue::Token(token) => token.clone(),
+                        other => panic!("marker {other:?}"),
+                    },
+                    other => panic!("marker {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = "<PeriodAdjustmentLength>2</PeriodAdjustmentLength>";
+        let zero = "<PeriodAdjustmentLength>0</PeriodAdjustmentLength>";
+        let without_correspondence = (
+            "<Correspondence>true</Correspondence>",
+            "<Correspondence>false</Correspondence>",
+        );
+        assert_eq!(markers(&[(plain, zero)]), ["-10", "-5", "-4", "-3", "-2"]);
+        assert_eq!(
+            markers(&[(plain, zero), without_correspondence]),
+            ["-10", "-9", "-5", "-4", "-3", "-2"]
+        );
+        assert_eq!(markers(&[]), ["-30", "-10", "-5", "-4", "-3", "-2"]);
+    }
+
+    /// A period adjustment writes the 31-slot `{22,22,...}` record: every
+    /// slot after the second `22` one further, the length last. ERP УХ
+    /// `Хозрасчетный` and `КорректировкиНалоговойБазы` (length 1) store the
+    /// lock mode `0` at 22, the full-text mode `0` at 23, the totals splitting
+    /// `1` at 24 and the length `1` at 30.
+    #[test]
+    fn a_period_adjustment_writes_the_31_slot_accounting_register() {
+        let zero = (
+            "<PeriodAdjustmentLength>2</PeriodAdjustmentLength>",
+            "<PeriodAdjustmentLength>0</PeriodAdjustmentLength>",
+        );
+        let (flat, _) = owner_record(&compile_edited(
+            BusinessObjectFamily::AccountingRegister,
+            &[zero],
+        ));
+        let one = (zero.0, "<PeriodAdjustmentLength>1</PeriodAdjustmentLength>");
+        let (adjusted, _) = owner_record(&compile_edited(
+            BusinessObjectFamily::AccountingRegister,
+            &[one],
+        ));
+        assert_eq!(adjusted.len(), 31);
+        assert_eq!(&adjusted[..2], ["22", "22"]);
+        assert_eq!(adjusted[30], "1");
+        // Everything between moved up by one, the standard attributes (which
+        // gain `PeriodAdjustment`) aside.
+        for slot in 1..29 {
+            if slot != 24 {
+                assert_eq!(adjusted[slot + 1], flat[slot], "slot {slot}");
+            }
+        }
+        let (khozrashchetny, _) = owner_record(&compile_edited(
+            BusinessObjectFamily::AccountingRegister,
+            &[
+                one,
+                (
+                    "<DataLockControlMode>Managed</DataLockControlMode>",
+                    "<DataLockControlMode>Automatic</DataLockControlMode>",
+                ),
+                (
+                    "<FullTextSearch>Use</FullTextSearch>",
+                    "<FullTextSearch>DontUse</FullTextSearch>",
+                ),
+            ],
+        ));
+        assert_eq!(
+            [
+                khozrashchetny[22].as_str(),
+                khozrashchetny[23].as_str(),
+                khozrashchetny[24].as_str(),
+                khozrashchetny[30].as_str()
+            ],
+            ["0", "0", "1", "1"]
+        );
+    }
+
+    /// Chart of accounts, 57 slots. Measured on six charts: AutoOrderByCode is
+    /// slot 24 (`0` on the extension's, `1` on the other five), CheckUnique 34,
+    /// CodeSeries 35, DataLockControlMode 36; EditType (27), ChoiceMode (31) and
+    /// CreateOnInput (49) hold one value on every chart on record.
+    #[test]
+    fn chart_of_accounts_properties_ride_their_stored_slots() {
+        check_slots(
+            BusinessObjectFamily::ChartOfAccounts,
+            &[],
+            &[
+                ("UseStandardCommands", "true", "false", 16, "0"),
+                ("IncludeHelpInContents", "false", "true", 17, "1"),
+                ("MaxExtDimensionCount", "3", "4", 20, "4"),
+                ("CodeLength", "9", "11", 22, "11"),
+                ("DescriptionLength", "100", "120", 23, "120"),
+                ("AutoOrderByCode", "true", "false", 24, "0"),
+                ("OrderLength", "5", "7", 25, "7"),
+                ("DefaultPresentation", "AsDescription", "AsCode", 26, "0"),
+                ("EditType", "InDialog", "InList", 27, "0"),
+                ("EditType", "InDialog", "BothWays", 27, "2"),
+                ("ChoiceMode", "BothWays", "FromForm", 31, "0"),
+                ("QuickChoice", "false", "true", 32, "1"),
+                ("CheckUnique", "true", "false", 34, "0"),
+                (
+                    "CodeSeries",
+                    "WithinSubordination",
+                    "WholeChartOfAccounts",
+                    35,
+                    "0",
+                ),
+                ("DataLockControlMode", "Managed", "Automatic", 36, "0"),
+                ("FullTextSearch", "Use", "DontUse", 37, "0"),
+                ("CreateOnInput", "DontUse", "Use", 49, "2"),
+                ("PredefinedDataUpdate", "Auto", "DontAutoUpdate", 51, "2"),
+                ("ChoiceHistoryOnInput", "Auto", "DontUse", 53, "1"),
+                ("DataHistory", "DontUse", "Use", 54, "1"),
+            ],
+        );
+    }
+
+    /// Chart of calculation types, 63 slots. Measured on five charts:
+    /// DependenceOnCalculationTypes is slot 27 (`0` on the extension's, `1` on
+    /// the other four), IncludeHelpInContents 37 (direct), DataLockControlMode
+    /// 41, CodeAllowedLength 53; EditType (35), ChoiceMode (38), QuickChoice
+    /// (39) and CreateOnInput (55) hold one value on every chart on record.
+    #[test]
+    fn chart_of_calculation_types_properties_ride_their_stored_slots() {
+        check_slots(
+            BusinessObjectFamily::ChartOfCalculationTypes,
+            &[],
+            &[
+                ("UseStandardCommands", "true", "false", 24, "0"),
+                ("CodeLength", "9", "5", 25, "5"),
+                ("CodeType", "String", "Number", 26, "0"),
+                (
+                    "DependenceOnCalculationTypes",
+                    "DontUse",
+                    "OnActionPeriod",
+                    27,
+                    "1",
+                ),
+                (
+                    "DependenceOnCalculationTypes",
+                    "DontUse",
+                    "OnBasePeriod",
+                    27,
+                    "2",
+                ),
+                ("ActionPeriodUse", "false", "true", 29, "1"),
+                ("DescriptionLength", "100", "120", 30, "120"),
+                ("DefaultPresentation", "AsDescription", "AsCode", 31, "0"),
+                ("EditType", "InDialog", "InList", 35, "0"),
+                ("IncludeHelpInContents", "false", "true", 37, "1"),
+                ("ChoiceMode", "BothWays", "QuickChoice", 38, "1"),
+                ("QuickChoice", "false", "true", 39, "1"),
+                ("DataLockControlMode", "Managed", "Automatic", 41, "0"),
+                ("FullTextSearch", "Use", "DontUse", 42, "0"),
+                ("CodeAllowedLength", "Variable", "Fixed", 53, "0"),
+                ("CreateOnInput", "DontUse", "Use", 55, "2"),
+                ("PredefinedDataUpdate", "Auto", "AutoUpdate", 57, "1"),
+                ("ChoiceHistoryOnInput", "Auto", "DontUse", 59, "1"),
+                ("DataHistory", "DontUse", "Use", 60, "1"),
+            ],
+        );
+    }
+
+    /// Chart of characteristic types, 59 slots. Measured on 36 charts:
+    /// EditType is slot 25 (`0`/`1`/`2`), ChoiceMode 31, CheckUnique 34,
+    /// DataLockControlMode 36, CreateOnInput 51 (`1`/`2`), PredefinedDataUpdate 53;
+    /// DefaultPresentation (24) and CodeSeries (35) hold one value on every
+    /// chart of the four corpora.
+    #[test]
+    fn chart_of_characteristic_types_properties_ride_their_stored_slots() {
+        check_slots(
+            BusinessObjectFamily::ChartOfCharacteristicTypes,
+            &[],
+            &[
+                ("UseStandardCommands", "true", "false", 14, "0"),
+                ("IncludeHelpInContents", "false", "true", 16, "1"),
+                ("Hierarchical", "false", "true", 19, "1"),
+                ("FoldersOnTop", "true", "false", 20, "0"),
+                ("CodeLength", "9", "10", 21, "10"),
+                ("Autonumbering", "true", "false", 22, "0"),
+                ("DescriptionLength", "100", "120", 23, "120"),
+                ("DefaultPresentation", "AsDescription", "AsCode", 24, "0"),
+                ("EditType", "InDialog", "InList", 25, "0"),
+                ("EditType", "InDialog", "BothWays", 25, "2"),
+                ("ChoiceMode", "BothWays", "FromForm", 31, "0"),
+                ("QuickChoice", "false", "true", 32, "1"),
+                ("CheckUnique", "true", "false", 34, "0"),
+                (
+                    "CodeSeries",
+                    "WholeCharacteristicKind",
+                    "WithinSubordination",
+                    35,
+                    "1",
+                ),
+                ("DataLockControlMode", "Managed", "Automatic", 36, "0"),
+                ("FullTextSearch", "Use", "DontUse", 37, "0"),
+                ("CodeAllowedLength", "Variable", "Fixed", 49, "0"),
+                ("CreateOnInput", "DontUse", "Use", 51, "2"),
+                ("PredefinedDataUpdate", "Auto", "AutoUpdate", 53, "1"),
+                ("ChoiceHistoryOnInput", "Auto", "DontUse", 55, "1"),
+                ("DataHistory", "DontUse", "Use", 56, "1"),
+            ],
+        );
+    }
+
+    /// Calculation register, 33 slots. ActionPeriod (17) and BasePeriod (18) are
+    /// two booleans that each vary on the corpora (`false` on ERP УХ
+    /// `Удержания` and the extension's for the first, on the extension's alone
+    /// for the second).
+    #[test]
+    fn calculation_register_properties_ride_their_stored_slots() {
+        check_slots(
+            BusinessObjectFamily::CalculationRegister,
+            &[],
+            &[
+                ("ActionPeriod", "true", "false", 17, "0"),
+                ("BasePeriod", "true", "false", 18, "0"),
+                ("UseStandardCommands", "true", "false", 24, "0"),
+                ("IncludeHelpInContents", "false", "true", 25, "1"),
+                ("DataLockControlMode", "Managed", "Automatic", 26, "0"),
+                ("FullTextSearch", "Use", "DontUse", 27, "0"),
+            ],
+        );
+    }
+
+    /// Recalculation: `{1,{4,<3 generated pairs>,{0,<header>},DataLockControlMode},
+    /// 1,<dimensions>}`. The lock mode ends the owner record and the root
+    /// counts its one collection whatever the mode.
+    #[test]
+    fn recalculation_lock_mode_rides_the_owner_record() {
+        for (mode, code) in [("Managed", "1"), ("Automatic", "0")] {
+            let (fields, count) = owner_record(&compile_edited(
+                BusinessObjectFamily::Recalculation,
+                &[(
+                    "<DataLockControlMode>Managed</DataLockControlMode>",
+                    &format!("<DataLockControlMode>{mode}</DataLockControlMode>"),
+                )],
+            ));
+            assert_eq!(fields.len(), 9);
+            assert_eq!((fields[8].as_str(), count.as_str()), (code, "1"), "{mode}");
         }
     }
 

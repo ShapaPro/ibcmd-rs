@@ -36,6 +36,16 @@
 | StyleItem | бит 512 маски шрифта | атрибут `scale` | сравнение значения с `100` | бит маски | 306 ссылочных шрифтов стенда: бит несут 6 (маска 574) и все шесть пишут `scale`, из них пять `90` и один `100`; остальные 300 бита не несут и `scale` не пишут |
 | InformationRegister | 9 + периодичность | `MainFilterOnPeriod` | только флаг | флаг И периодичность ≠ `Nonperiodical` | 4 074 регистра: флаг и вывод совпадают у 4 073, расходятся у одного — непериодического с флагом `1`, который экспортируется `false` |
 
+> **Correction (2026-09-29, issue #389).** The extension `_ДемоРасширение`
+> separates two pairs the ordinary corpora could not. Chart of accounts:
+> `<AutoOrderByCode>` is slot 24 (`false` on the extension's chart, slot 27 is
+> `1` there) and slot 27 is `<EditType>` (`InDialog` is `1`); the row above that
+> reads `AutoOrderByCode` at slot 27 as a constant is superseded. Chart of
+> calculation types: `<DependenceOnCalculationTypes>` is slot 27 (`DontUse` on
+> the extension's chart) and slot 35 is `<EditType>`. Accounting register: slot
+> 21 is `<DataLockControlMode>`, slot 22 `<FullTextSearch>`. See
+> `docs/extensions/parity.md`.
+
 `<DefaultPresentation>` плана видов характеристик остаётся константой
 `AsDescription`: все 47 планов пишут её, разделяющего слота нет. Слоты 24
 планов счетов и видов характеристик и слот 49 планов счетов сохранены как

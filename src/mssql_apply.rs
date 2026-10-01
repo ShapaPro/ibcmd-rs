@@ -43,6 +43,9 @@ pub struct MssqlApplySourceChangeReport {
     pub recovery_token: Option<String>,
     pub staging: Option<Value>,
     pub activation: Option<Value>,
+    /// What the live gate found before the stage (#409 F-9, F-10); only for the `live` mode on the built-in SQL client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<crate::mssql_live_gate::LiveGateReport>,
     pub timings: MssqlApplySourceChangeTimings,
 }
 
@@ -66,6 +69,12 @@ pub fn apply_source_change(
     } else {
         args.platform_profile.require_main_write_supported()?;
         require_supported_main_source_cohort(args)?;
+        preflight_tail_log(args)?;
+        crate::mssql_main_activation::preflight_interrupt_sessions(
+            activation_mode(args.mode),
+            args.interrupt_sessions,
+        )
+        .map_err(anyhow::Error::new)?;
     }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
@@ -145,6 +154,8 @@ pub fn apply_source_change(
             all_extensions: false,
             output_dir: active_root.clone(),
             overwrite: false,
+            // The generation a change applies to is the registry's.
+            image: crate::cli::MssqlExtensionImage::Active,
             platform: None,
             source_version: args.source_version,
         })?;
@@ -175,6 +186,7 @@ pub fn apply_source_change(
             output_dir: active_root.clone(),
             overwrite: false,
             include_config_save: false,
+            main_configuration: false,
             file_names: selected_storage_file_names.clone(),
             file_name_lists: Vec::new(),
             inflate: false,
@@ -195,12 +207,7 @@ pub fn apply_source_change(
             &selected_storage_file_names,
             &report,
         )?;
-        overlay_active_dynamic_module(
-            args,
-            &selected_path,
-            &selected_storage_file_names,
-            &active_root,
-        )?
+        active_dynamic_generation(args)?
     };
     let active_export_ms = export_started.elapsed().as_millis();
 
@@ -264,6 +271,7 @@ pub fn apply_source_change(
             recovery_token: None,
             staging: None,
             activation: None,
+            live_gate: None,
             timings: MssqlApplySourceChangeTimings {
                 active_export_ms,
                 classification_ms,
@@ -272,6 +280,42 @@ pub fn apply_source_change(
             },
         });
     }
+    if args.extension.is_none() {
+        preflight_main_publication(args)?;
+    }
+    // An exclusive activation is refused on the cluster's word when the infobase has
+    // clients (#409 F-3), and on the database's when a session other than the tool's
+    // own RAS verification is on it; asking before the stage keeps `ConfigSave`
+    // untouched. The gate inside the activation's transaction stays the last word.
+    if matches!(args.mode, MssqlMainActivationModeArg::Exclusive) {
+        let own = crate::mssql_platform_profile::own_ras_processes_for_exclusive(
+            &args.rac,
+            &args.ras_endpoint,
+            profile_verification.verified_cluster_id,
+            profile_verification.verified_infobase_id,
+        )?;
+        crate::mssql_platform_profile::refuse_foreign_sessions(
+            &main_read_sql(args)?,
+            &args.database,
+            &own,
+        )?;
+    }
+    // The live switch is refused, before the stage, when the database has no log backup chain, the tail directory is not there or
+    // not writable, or sessions have open work that the switch would roll back (#409 F-9, F-10). The gate at the head of the
+    // activation script stays the last word.
+    let live_gate = match (
+        args.extension.is_none() && matches!(args.mode, MssqlMainActivationModeArg::Live),
+        args.tail_log_output.as_deref().and_then(Path::to_str),
+    ) {
+        (true, Some(tail)) => crate::mssql_live_gate::preflight_live(
+            &main_read_sql(args)?,
+            &args.database,
+            tail,
+            args.interrupt_sessions,
+            !args.dry_run,
+        )?,
+        _ => None,
+    };
     prepare_compile_tree_for_selected_change(&proposed_root, &selected_path)?;
 
     let path_prefix = owner_prefix(&selected_path)?;
@@ -350,6 +394,7 @@ pub fn apply_source_change(
                 per_row: true,
                 bcp_executable: None,
                 base_free: false,
+                verify: false,
             },
         )?)?
     };
@@ -407,6 +452,7 @@ pub fn apply_source_change(
                 script_output: args.script_output.clone(),
                 recovery_output: args.recovery_output.clone(),
                 tail_log_output: args.tail_log_output.clone(),
+                interrupt_sessions: args.interrupt_sessions,
                 rac: args.rac.clone(),
                 ras_endpoint: args.ras_endpoint.clone(),
                 cluster_id: args.cluster_id,
@@ -455,17 +501,10 @@ pub fn apply_source_change(
             "ConfigCAS".to_owned(),
             "_ExtensionsInfo".to_owned(),
         ]
-    } else if matches!(
-        args.mode,
-        MssqlMainActivationModeArg::Online
-            | MssqlMainActivationModeArg::Live
-            | MssqlMainActivationModeArg::Worker
-    ) {
-        vec![
-            "ConfigSave".to_owned(),
-            "Config".to_owned(),
-            "Params".to_owned(),
-        ]
+    } else if let Some(touched) = tables_touched_by_config_apply(activation.as_ref()) {
+        // the exclusive mode is carried out by the own apply (#408 step 2), which also writes the change
+        // registrations and `Files`; the tables are the ones it names
+        touched
     } else {
         vec![
             "ConfigSave".to_owned(),
@@ -494,6 +533,7 @@ pub fn apply_source_change(
         recovery_token,
         staging: Some(staging),
         activation,
+        live_gate,
         timings: MssqlApplySourceChangeTimings {
             active_export_ms,
             classification_ms,
@@ -644,25 +684,7 @@ fn export_active_managed_form_fast(
         return Ok(None);
     };
 
-    let password = if args.sql_user.is_some() {
-        args.sql_pwd
-            .clone()
-            .filter(|value| !value.is_empty())
-            .or_else(|| std::env::var(&args.sql_pwd_env).ok())
-    } else {
-        None
-    };
-    // The main activation's reads trusted the certificate (bcp -u) on the
-    // --sqlcmd path as well.
-    let sql = SqlExec::from_options(SqlOptions {
-        sqlcmd: args.sqlcmd.as_deref(),
-        bcp: args.bcp_executable.as_deref(),
-        server: &args.server,
-        user: args.sql_user.as_deref(),
-        password: password.as_deref(),
-        password_env: &args.sql_pwd_env,
-        trust_server_certificate: true,
-    })?;
+    let sql = main_read_sql(args)?;
     let fetch = |table: &str, names: &std::collections::BTreeSet<String>| {
         crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, table, names)
     };
@@ -1113,13 +1135,8 @@ fn ensure_bounded_export_complete(
     Ok(())
 }
 
-fn overlay_active_dynamic_module(
-    args: &MssqlApplySourceChangeArgs,
-    selected_path: &str,
-    selected_storage_file_names: &[String],
-    active_root: &Path,
-) -> Result<Option<String>> {
-    let marker_name = std::collections::BTreeSet::from(["DynamicallyUpdated".to_owned()]);
+/// The connection the reads of the apply's own preflights use.
+fn main_read_sql(args: &MssqlApplySourceChangeArgs) -> Result<SqlExec> {
     let password = if args.sql_user.is_some() {
         args.sql_pwd
             .clone()
@@ -1130,7 +1147,7 @@ fn overlay_active_dynamic_module(
     };
     // The main activation's reads trusted the certificate (bcp -u) on the
     // --sqlcmd path as well.
-    let sql = SqlExec::from_options(SqlOptions {
+    SqlExec::from_options(SqlOptions {
         sqlcmd: args.sqlcmd.as_deref(),
         bcp: args.bcp_executable.as_deref(),
         server: &args.server,
@@ -1138,7 +1155,117 @@ fn overlay_active_dynamic_module(
         password: password.as_deref(),
         password_env: &args.sql_pwd_env,
         trust_server_certificate: true,
-    })?;
+    })
+}
+
+fn activation_mode(
+    mode: MssqlMainActivationModeArg,
+) -> crate::mssql_main_activation::MainActivationMode {
+    use crate::mssql_main_activation::MainActivationMode;
+    match mode {
+        MssqlMainActivationModeArg::Exclusive => MainActivationMode::Exclusive,
+        MssqlMainActivationModeArg::Online => MainActivationMode::Online,
+        MssqlMainActivationModeArg::Live => MainActivationMode::Live,
+        MssqlMainActivationModeArg::Worker => MainActivationMode::Worker,
+    }
+}
+
+/// Refuses, before the export reads anything, a tail-log argument the
+/// activation would refuse after the stage (#409 F-2): `live` needs an
+/// absolute SQL Server-local path, no other mode takes one.
+fn preflight_tail_log(args: &MssqlApplySourceChangeArgs) -> Result<()> {
+    if matches!(args.mode, MssqlMainActivationModeArg::Live)
+        && args
+            .tail_log_output
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        bail!("--tail-log-output must be an absolute SQL Server-local path");
+    }
+    let tail = args
+        .tail_log_output
+        .as_ref()
+        .map(|path| {
+            path.to_str()
+                .ok_or_else(|| anyhow!("--tail-log-output is not valid Unicode"))
+        })
+        .transpose()?;
+    crate::mssql_main_activation::preflight_tail_log(
+        activation_mode(args.mode),
+        tail,
+        !args.dry_run,
+    )
+    .map_err(anyhow::Error::new)
+}
+
+/// Refuses, before anything is staged, a change the publication state of the
+/// database rules out: an ordinary mode on a database that holds online
+/// generations (#408), markers that disagree (#409 F-2: both used to be found
+/// by the activation, after the stage, with `ConfigSave` left filled).
+///
+/// The rows are read as stored -- the state the activation checks and writes
+/// -- and the plan of the activation makes the same checks
+/// ([`crate::mssql_main_activation::preflight_publication`]).
+fn preflight_main_publication(args: &MssqlApplySourceChangeArgs) -> Result<()> {
+    let sql = main_read_sql(args)?;
+    let fetch = |table: &str, names: &std::collections::BTreeSet<String>| {
+        crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, table, names)
+    };
+    let versions = fetch(
+        "Config",
+        &std::collections::BTreeSet::from(["versions".to_owned()]),
+    )?
+    .into_iter()
+    .find(|row| row.part_no == 0)
+    .ok_or_else(|| anyhow!("Config is missing versions part 0"))?;
+    let marker_name = std::collections::BTreeSet::from(["DynamicallyUpdated".to_owned()]);
+    let config_marker =
+        crate::mssql::exactly_one_optional_marker("Config", fetch("Config", &marker_name)?)?;
+    let params_marker =
+        crate::mssql::exactly_one_optional_marker("Params", fetch("Params", &marker_name)?)?;
+    // The exclusive mode is carried out by the config apply where the built-in SQL client is there, and that
+    // apply folds the rows of online generations (#408 step 2); the script of every other route refuses them.
+    let executor = crate::mssql_main_activation::MainActivationExecutor::for_mode(
+        activation_mode(args.mode),
+        matches!(sql.backend(), crate::sql::SqlBackend::Client(_)),
+    );
+    crate::mssql_main_activation::preflight_publication(
+        executor,
+        activation_mode(args.mode),
+        &versions,
+        config_marker.as_ref(),
+        params_marker.as_ref(),
+    )
+    .map_err(anyhow::Error::new)
+}
+
+/// The tables the own apply wrote, when it carried out the activation (`config_apply` of the report of
+/// `mssql-activate-staged-main`, #408 step 2).
+fn tables_touched_by_config_apply(activation: Option<&Value>) -> Option<Vec<String>> {
+    let touched = activation?
+        .pointer("/config_apply/tables_touched")?
+        .as_array()?;
+    Some(
+        touched
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// The generation an online update left active in the database, if it holds
+/// one: the last of the history the two markers record.
+///
+/// The bounded export already publishes the bodies of that generation (its
+/// view resolves the aliases, #409 F-1); this only names the generation the
+/// change applies to. It used to read the alias of the selected body as well
+/// and write it over the exported file -- a second mechanism for the same job
+/// that the export's view had made unreachable (F-16) and that would run again
+/// now that the export's view no longer outlives the export.
+fn active_dynamic_generation(args: &MssqlApplySourceChangeArgs) -> Result<Option<String>> {
+    let marker_name = std::collections::BTreeSet::from(["DynamicallyUpdated".to_owned()]);
+    let sql = main_read_sql(args)?;
     let fetch = |table: &str, names: &std::collections::BTreeSet<String>| {
         crate::mssql_dump::fetch_main_activation_rows(&sql, &args.database, table, names)
     };
@@ -1152,66 +1279,7 @@ fn overlay_active_dynamic_module(
     }
     let generations =
         dynamic_generations(&config_marker[0].binary_data, &params_marker[0].binary_data)?;
-    let generation = generations
-        .last()
-        .expect("a dynamic marker has at least one generation")
-        .clone();
-    let body_id = selected_storage_file_names
-        .iter()
-        .find(|name| name.len() > 37 && name.as_bytes().get(36) == Some(&b'.'))
-        .ok_or_else(|| anyhow!("selected storage closure has no body row"))?;
-    let aliases = generations
-        .iter()
-        .map(|candidate| dynamic_alias(body_id, candidate))
-        .collect::<std::collections::BTreeSet<_>>();
-    let rows = fetch("Config", &aliases)?;
-    let row = generations.iter().rev().find_map(|candidate| {
-        let alias = dynamic_alias(body_id, candidate);
-        rows.iter()
-            .find(|row| row.file_name == alias && row.part_no == 0)
-    });
-    let Some(row) = row else {
-        return Ok(Some(generation));
-    };
-    let active_path = active_root.join(path_from_slashes(selected_path));
-    if selected_path.ends_with("/Ext/Form.xml") || selected_path.ends_with("/Ext/Form/Module.bsl") {
-        let parsed = crate::module_blob::parse_form_body_blob(&row.binary_data)?;
-        let form_root = selected_path
-            .strip_suffix("/Ext/Form.xml")
-            .or_else(|| selected_path.strip_suffix("/Ext/Form/Module.bsl"))
-            .expect("selected form path has a known suffix");
-        let form_xml = crate::mssql_dump::extract_form_body_xml(
-            &row.binary_data,
-            &std::collections::BTreeMap::new(),
-        )
-        .ok_or_else(|| anyhow!("active dynamic form body cannot be reconstructed as source XML"))?;
-        let form_xml_path =
-            active_root.join(path_from_slashes(&format!("{form_root}/Ext/Form.xml")));
-        crate::mssql_dump::write_source_xml_file(&form_xml_path, form_xml, args.source_version)?;
-        let module_path = active_root.join(path_from_slashes(&format!(
-            "{form_root}/Ext/Form/Module.bsl"
-        )));
-        if parsed.module_text.is_empty() {
-            if module_path.is_file() {
-                fs::remove_file(&module_path)?;
-            }
-        } else {
-            fs::write(&module_path, form_module_source_bytes(&parsed.module_text))?;
-        }
-        return Ok(Some(generation));
-    }
-    let text = if selected_path.ends_with("/Ext/Form/Module.bsl") {
-        unreachable!("form modules return after reconstructing their complete active body")
-    } else {
-        crate::module_blob::unpack_module_blob_text(&row.binary_data)?
-    };
-    fs::write(&active_path, text).with_context(|| {
-        format!(
-            "failed to overlay active dynamic body {}",
-            active_path.display()
-        )
-    })?;
-    Ok(Some(generation))
+    Ok(generations.last().cloned())
 }
 
 fn form_module_source_bytes(module_text: &str) -> Vec<u8> {
@@ -1359,6 +1427,26 @@ mod tests {
     use crate::mssql_platform_profile::MssqlNativePlatformProfile;
 
     #[test]
+    fn the_tables_of_an_exclusive_promotion_are_the_ones_the_own_apply_wrote() {
+        let carried_out_by_the_apply = serde_json::json!({
+            "activation": {"executor": "config_apply"},
+            "config_apply": {"tables_touched": ["Config", "ConfigSave", "Params", "_ConfigChngR", "Files"]}
+        });
+        assert_eq!(
+            tables_touched_by_config_apply(Some(&carried_out_by_the_apply)),
+            Some(
+                ["Config", "ConfigSave", "Params", "_ConfigChngR", "Files"]
+                    .map(str::to_owned)
+                    .to_vec()
+            )
+        );
+        // the script of mssql_main_activation writes no report of the apply
+        let script = serde_json::json!({"activation": {"executor": "script"}});
+        assert_eq!(tables_touched_by_config_apply(Some(&script)), None);
+        assert_eq!(tables_touched_by_config_apply(None), None);
+    }
+
+    #[test]
     fn runtime_profile_verification_fails_before_active_export() {
         let args = MssqlApplySourceChangeArgs {
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
@@ -1381,6 +1469,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,
@@ -1427,6 +1516,7 @@ mod tests {
             script_output: None,
             recovery_output: None,
             tail_log_output: None,
+            interrupt_sessions: false,
             rac: PathBuf::from("must-not-run-rac"),
             ras_endpoint: "must-not-connect".to_owned(),
             cluster_id: None,

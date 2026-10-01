@@ -33,7 +33,7 @@ use super::objects::parts::Compat;
 use super::xml::{Element, parse_element_tree};
 
 /// Names by uuid: what a decoder needs to spell references.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NameIndex {
     /// Objects and child objects: uuid -> full name (`Catalog.X`,
     /// `Catalog.X.Form.F`, `Catalog.X.TabularSection.T.Attribute.A`).

@@ -26,9 +26,10 @@ pub enum Commands {
     Convert(ConvertArgs),
     /// Inspect, verify, export, or overlay CF without an installed 1C platform.
     Cf(CfArgs),
-    /// Drop-in `ibcmd infobase`: `config export` and `config import` in the
-    /// platform ibcmd's syntax, against Microsoft SQL Server; other commands
-    /// are refused. `infobase --help` prints its help (in Russian).
+    /// Drop-in `ibcmd infobase`: `config export`, `config import` and
+    /// `config apply` in the platform ibcmd's syntax, against Microsoft SQL
+    /// Server; other commands are refused. `infobase --help` prints its help
+    /// (in Russian).
     #[command(disable_help_flag = true)]
     Infobase(NativeModeArgs),
     /// The platform ibcmd's other modes, refused with a clear message.
@@ -163,8 +164,28 @@ pub enum Commands {
     MssqlActivationDiff(MssqlActivationDiffArgs),
     /// Publish an already staged non-structural main-configuration change without native ibcmd.
     MssqlActivateStagedMain(MssqlActivateStagedMainArgs),
+    /// Tell whether the ConfigSave of a database (with --tree: a source tree against the database) needs the platform's own apply, a restructuring; read-only.
+    MssqlApplyCheck(crate::apply_check::cli::MssqlApplyCheckArgs),
+    /// Tell whether the change from one XML tree to another needs the platform's own apply.
+    ApplyCheckTrees(crate::apply_check::cli::ApplyCheckTreesArgs),
+    /// Apply the staged main configuration (ConfigSave to Config) without the
+    /// platform, as an exclusive native `config apply` does for a
+    /// configuration that needs no restructuring: changed modules, forms,
+    /// templates, pictures and help pages of any object, new forms and
+    /// templates of existing objects, and the removal of forms and templates
+    /// that a stage's `deleted` list names. Anything else is refused with the
+    /// list of the rows that need the native apply. Takes the stage of this
+    /// program's `infobase config import`; a `deleted` list it cannot account
+    /// for name by name (a removal with a table or a column that its
+    /// restructuring gate does not judge, one file of an object that stays)
+    /// is refused whole.
+    MssqlConfigApply(MssqlConfigApplyArgs),
     /// Compile, stage, and publish one existing module or managed form without native ibcmd.
     MssqlApplySourceChange(MssqlApplySourceChangeArgs),
+    /// Restructure the tables of a catalog that got new attributes in the staged
+    /// configuration, in one transaction (research prototype of the own config
+    /// apply, issue #341; lab databases only).
+    MssqlRestructure(crate::restructure::command::MssqlRestructureArgs),
     /// Dry-run source load parity and bootstrap base-blob readiness without writing ConfigSave.
     MssqlAuditSourceParity(MssqlAuditSourceParityArgs),
     /// Clone a SQL Server database with backup/restore.
@@ -656,6 +677,20 @@ pub enum InfobaseImportStageMode {
     BaseFree,
 }
 
+/// Whether `infobase config import` checks the state its stage would leave
+/// against the tree before it writes anything (`--verify`, `--no-verify`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InfobaseImportVerify {
+    /// Check every stage: a patch stage can leave a change of the tree out,
+    /// and a stage compiled from the tree can carry a slip of the compiler.
+    #[default]
+    Auto,
+    /// Check every stage (`--verify`, the same as the default).
+    On,
+    /// Check nothing (`--no-verify`).
+    Off,
+}
+
 /// `infobase config export`: what the drop-in command line (`crate::dropin`)
 /// or the research round trip asks for.
 #[derive(Debug, Clone)]
@@ -696,6 +731,9 @@ pub struct InfobaseConfigExportArgs {
     pub sqlcmd: Option<PathBuf>,
     /// Clear a non-empty output directory first (the research round trip).
     /// The drop-in export refuses one, as the platform's own export does.
+    /// Export this configuration extension instead of the configuration
+    /// (`--extension` of the platform's `config export`).
+    pub extension: Option<String>,
     pub overwrite: bool,
     /// Count the exported files for the report (walks the whole tree).
     pub count_files: bool,
@@ -755,6 +793,8 @@ pub struct InfobaseConfigImportArgs {
     pub script_output: Option<PathBuf>,
     /// Patch the target's rows, compile every row, or decide by the target.
     pub stage_mode: InfobaseImportStageMode,
+    /// Check the state the stage would leave against the tree first.
+    pub verify: InfobaseImportVerify,
     /// Root directory with hierarchical XML sources.
     pub source_dir: PathBuf,
 }
@@ -1587,6 +1627,12 @@ pub struct MssqlDumpConfigArgs {
     /// Include pending ConfigSave rows in addition to Config.
     #[arg(long)]
     pub include_config_save: bool,
+    /// Publish the main configuration, as the platform's export does: the rows
+    /// a completed import staged in ConfigSave in place of the Config rows of
+    /// the same names, and the staged `versions` (default: the Config table
+    /// alone).
+    #[arg(long, conflicts_with_all = ["include_config_save", "rows_dir"])]
+    pub main_configuration: bool,
     /// Dump only selected Config/ConfigSave FileName values. Can be repeated.
     #[arg(long = "file-name")]
     pub file_names: Vec<String>,
@@ -1683,6 +1729,18 @@ pub struct MssqlExtensionListArgs {
     pub format: MssqlExtensionListFormat,
 }
 
+/// Which stored image of an extension `mssql-dump-extension` reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MssqlExtensionImage {
+    /// The staged image (`ConfigCASSave`) when the extension has staged rows,
+    /// as the native `config export --extension` does; otherwise the active one.
+    Auto,
+    /// Only the active image, the one the extension registry names.
+    Active,
+    /// Only the staged image; fails when the extension has no staged rows.
+    Staged,
+}
+
 #[derive(Debug, Args)]
 pub struct MssqlDumpExtensionArgs {
     /// Run this sqlcmd.exe (and bcp.exe) instead of the built-in SQL Server
@@ -1730,6 +1788,11 @@ pub struct MssqlDumpExtensionArgs {
     /// Replace an existing output tree.
     #[arg(long)]
     pub overwrite: bool,
+    /// Which stored image to export: the staged one when the extension has
+    /// staged rows (what the native export does), the active one, or exactly
+    /// one of them.
+    #[arg(long, value_enum, default_value_t = MssqlExtensionImage::Auto)]
+    pub image: MssqlExtensionImage,
     /// Platform the XML is for: a release (8.3.27, 8.5.1) or an exact build
     /// (8.3.27.2214, 8.5.1.1150); 8.3.x reads and writes XML 2.20, 8.5.x 2.21.
     #[arg(
@@ -2008,7 +2071,10 @@ pub struct MssqlActivateStagedMainArgs {
     /// Target MSSQL database.
     #[arg(long)]
     pub database: String,
-    /// Publication mode.
+    /// Publication mode. `exclusive` is carried out by the own config apply
+    /// (built-in SQL client), which folds the rows of earlier online
+    /// generations as the native apply does; with `--sqlcmd`, and for `live`
+    /// and `worker`, a database that holds online generations is refused.
     #[arg(long, value_enum)]
     pub mode: MssqlMainActivationModeArg,
     /// Render and validate the exact transition without executing it.
@@ -2026,6 +2092,10 @@ pub struct MssqlActivateStagedMainArgs {
     /// SQL Server-local tail-log backup retained by live activation.
     #[arg(long)]
     pub tail_log_output: Option<PathBuf>,
+    /// live only (#409 F-10): accept that the live switch rolls back the open transactions and running requests of the sessions
+    /// of the database. Without it the switch is refused while such sessions exist.
+    #[arg(long)]
+    pub interrupt_sessions: bool,
     /// rac executable used by worker activation.
     #[arg(long, default_value = "rac")]
     pub rac: PathBuf,
@@ -2042,6 +2112,127 @@ pub struct MssqlActivateStagedMainArgs {
     pub infobase_user: Option<String>,
     #[arg(long)]
     pub infobase_pwd: Option<String>,
+}
+
+/// How `mssql-config-apply` establishes that nobody else is connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyExclusivityArg {
+    /// No other user session on the database as SQL Server sees it.
+    Sql,
+    /// The operator has proved it (for instance with `rac session list`).
+    Assumed,
+}
+
+/// Which structural gate judges the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyGateArg {
+    /// The restructure check (`mssql-apply-check`): refuses on a
+    /// restructuring and on anything it cannot place.
+    ApplyCheck,
+    /// Modules, forms, templates, pictures and help pages only.
+    Conservative,
+}
+
+/// A class of restructuring the apply may let through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyRestructureArg {
+    /// S1 of the restructure track: attributes, tabular sections, string
+    /// widening, the index flag, plain new catalogs and documents.
+    S1,
+}
+
+/// Which overwritten rows the recovery artifact keeps the bytes of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MssqlConfigApplyRecoveryArg {
+    /// The rows the apply changes.
+    Changed,
+    /// Only a manifest of hashes.
+    None,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MssqlConfigApplyArgs {
+    /// Exact native MSSQL platform layout.
+    #[arg(long)]
+    pub platform_profile: MssqlNativePlatformProfile,
+    #[arg(long, default_value = "localhost")]
+    pub server: String,
+    /// SQL Server login; integrated authentication is used when omitted.
+    #[arg(long)]
+    pub sql_user: Option<String>,
+    /// SQL Server password. Prefer --sql-pwd-env.
+    #[arg(long)]
+    pub sql_pwd: Option<String>,
+    #[arg(long, default_value = "IBCMD_DB_PSW")]
+    pub sql_pwd_env: String,
+    /// Target MSSQL database.
+    #[arg(long)]
+    pub database: String,
+    /// Plan and check the staged configuration and render the transaction,
+    /// without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Run the whole transaction and roll it back: proves the SQL and its
+    /// postconditions on this database without changing it.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub rehearse: bool,
+    /// Acknowledgement for a write to a database outside the lab (the lab's own are
+    /// `ibcmd_rs_04_*` and `ibcmd_rs_05_*`: no flag needed there).
+    #[arg(long)]
+    pub allow_non_lab: bool,
+    /// How exclusive access is established.
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyExclusivityArg::Sql)]
+    pub exclusivity: MssqlConfigApplyExclusivityArg,
+    /// Directory for the recovery artifact (default: a folder in the
+    /// temporary directory named after the database and the plan).
+    #[arg(long)]
+    pub recovery_dir: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyRecoveryArg::Changed)]
+    pub recovery_blobs: MssqlConfigApplyRecoveryArg,
+    /// With no --recovery-dir: how many recovery artifacts of the database the
+    /// default directory (%TEMP%\ibcmd-rs\config-apply-recovery) keeps after a
+    /// successful run; older ones are removed. 0 keeps all of them.
+    #[arg(long, default_value_t = 5)]
+    pub recovery_keep: usize,
+    /// Let a class of restructuring through, run inside the apply's transaction,
+    /// instead of refusing it. Needs `--i-have-a-backup` or `--recovery-backup`.
+    #[arg(long, value_enum)]
+    pub allow_restructure: Option<MssqlConfigApplyRestructureArg>,
+    /// A restructuring drops the old tables in the transaction: say you have a
+    /// SQL Server backup to go back to.
+    #[arg(long)]
+    pub i_have_a_backup: bool,
+    /// Take `BACKUP DATABASE ... WITH COPY_ONLY` to this file (a path the SQL
+    /// Server service can write) before a restructuring.
+    #[arg(long)]
+    pub recovery_backup: Option<PathBuf>,
+    /// With --allow-restructure: the most rows of tables a stage may rebuild in the transaction (the sum);
+    /// above it the stage is refused and goes to the native apply. Without the flag:
+    /// IBCMD_RS_RESTRUCTURE_LIMIT_ROWS, `restructure-limit-rows` of ibcmd-rs.toml, the measured default.
+    #[arg(long)]
+    pub restructure_limit_rows: Option<u64>,
+    /// With --allow-restructure: the most bytes the rebuild may write to the log under full recovery (the
+    /// data of the rebuilt tables twice, their other indexes once; the sum; `2GB`, `512MB`, a number of
+    /// bytes). Without the flag: IBCMD_RS_RESTRUCTURE_LIMIT_BYTES, `restructure-limit-bytes` of
+    /// ibcmd-rs.toml, the measured default. A raised limit still needs --i-have-a-backup or --recovery-backup.
+    #[arg(long)]
+    pub restructure_limit_bytes: Option<String>,
+    /// The structural gate: the restructure check of `mssql-apply-check`
+    /// (default), or the conservative rule.
+    #[arg(long, value_enum, default_value_t = MssqlConfigApplyGateArg::ApplyCheck)]
+    pub gate: MssqlConfigApplyGateArg,
+    /// With `--gate conservative`: pass changed body rows of
+    /// command-interface, rights, package and similar roles without proving
+    /// their text unchanged (a stage made by `infobase config import` of a
+    /// tree exported from this database).
+    #[arg(long)]
+    pub admit_unverified_roles: bool,
+    /// Write the rendered SQL transaction here.
+    #[arg(long)]
+    pub script_output: Option<PathBuf>,
+    /// Write the JSON report here as well as to stdout.
+    #[arg(long)]
+    pub report: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2099,6 +2290,10 @@ pub struct MssqlApplySourceChangeArgs {
     /// SQL Server-local tail-log backup retained by live activation.
     #[arg(long)]
     pub tail_log_output: Option<PathBuf>,
+    /// live only (#409 F-10): accept that the live switch rolls back the open transactions and running requests of the sessions
+    /// of the database. Without it the switch is refused while such sessions exist.
+    #[arg(long)]
+    pub interrupt_sessions: bool,
     #[arg(long, default_value = "rac")]
     pub rac: PathBuf,
     #[arg(long, default_value = "localhost:1545")]
@@ -2710,6 +2905,13 @@ pub struct MssqlStageSourceObjectsArgs {
     /// Config. With --script-only it runs fully offline.
     #[arg(long, conflicts_with = "per_row")]
     pub base_free: bool,
+    /// Before anything is written, export the state the stage would leave --
+    /// the stored rows with the staged ones in place of theirs -- with the
+    /// model and compare every file with the tree. A difference refuses the
+    /// stage and ConfigSave is left as it was. `infobase config import` does
+    /// this by itself for a patch stage (`--no-verify` there skips it).
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Args)]
@@ -6209,6 +6411,39 @@ mod tests {
             args.tail_log_output,
             Some(PathBuf::from(r"C:\sql-backups\main-live.trn"))
         );
+        // the interruption of open work is the operator's word (#409 F-10): off unless given
+        assert!(!args.interrupt_sessions);
+    }
+
+    #[test]
+    fn parses_the_acceptance_that_the_live_switch_interrupts_sessions() {
+        let common = [
+            "ibcmd-rs",
+            "mssql-activate-staged-main",
+            "--platform-profile",
+            "platform-8.3.27.2214",
+            "--cluster-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--infobase-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--database",
+            "main_lab",
+            "--mode",
+            "live",
+            "--tail-log-output",
+            r"C:\sql-backups\main-live.trn",
+            "--allow-non-lab",
+        ];
+        let plain = Cli::parse_from(common);
+        let Commands::MssqlActivateStagedMain(args) = plain.command else {
+            panic!("unexpected command");
+        };
+        assert!(!args.interrupt_sessions);
+        let accepted = Cli::parse_from(common.iter().copied().chain(["--interrupt-sessions"]));
+        let Commands::MssqlActivateStagedMain(args) = accepted.command else {
+            panic!("unexpected command");
+        };
+        assert!(args.interrupt_sessions);
     }
 
     #[test]

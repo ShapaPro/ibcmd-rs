@@ -115,9 +115,16 @@ def audit_infobase_mode(binary: pathlib.Path, environment: dict) -> None:
         refused = run("config", command, "--db-name=audit")
         if refused.returncode != 2 or "Указана неполная команда" not in refused.stdout:
             raise SystemExit(f"release `infobase config {command}` is not refused as unknown")
-    refused = run("config", "apply", "--dbms=MSSQLServer", "--db-name=audit", "--force")
-    if refused.returncode != 1 or "не поддерживается в этой версии ibcmd-rs" not in refused.stderr:
-        raise SystemExit("release `infobase config apply` is not refused by name with exit code 1")
+    # What only the platform does is refused by name with exit code 1.
+    # `config apply` itself is served without the platform since 0.4; its
+    # dynamic update is not.
+    for args in (
+        ("create", "--dbms=MSSQLServer", "--db-name=audit"),
+        ("config", "apply", "--dbms=MSSQLServer", "--db-name=audit", "--dynamic=force"),
+    ):
+        refused = run(*args)
+        if refused.returncode != 1 or "не поддерживается в этой версии ibcmd-rs" not in refused.stderr:
+            raise SystemExit(f"release `infobase {' '.join(args[:2])}` is not refused by name with exit code 1")
 
 
 def audit_sbom(sbom_path: pathlib.Path) -> dict:

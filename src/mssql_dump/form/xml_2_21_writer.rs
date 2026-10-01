@@ -1236,6 +1236,21 @@ fn apply_rules(
             )?;
         }
     }
+    // The appended importance member says `Main` exactly for the default button
+    // (88 buttons of the БСП 8.5 ServiceDesk extension, none of them the other
+    // way round), while the 8.3.27 slot that also says so is set on six of the
+    // eight default buttons and left `0` on two.
+    if tag == "Button"
+        && fact_node(FactSource::Item("34", 5), facts, item, command)?.and_then(Node::as_leaf)
+            == Some("0")
+        && edits.direct_children(element, "DefaultButton").is_empty()
+    {
+        edits.insert_child(
+            element,
+            "DefaultButton",
+            "<DefaultButton>true</DefaultButton>\r\n",
+        )?;
+    }
     Ok(())
 }
 
@@ -1391,7 +1406,11 @@ fn upgrade_button(edits: &mut XmlEdits<'_>, button: usize) -> Result<()> {
 /// importance of its own) on a default button: 8.5.1.1529 writes `Main`, as
 /// it does for the 8.3.27 default button [`upgrade_button`] reads (fixture
 /// `v85_extension/v85_form`: a button saved by 8.5 with `DefaultButton`
-/// `true` and code `1`).
+/// `true` and code `1`). 8.5.1.1150 writes nothing there: three default
+/// buttons of the БСП 8.5 configuration (`DataProcessors/ИнформационныйЦентр`,
+/// `Reports/ИсторияРазмераПриложения`) carry code `1` and no importance in its
+/// own dump. The rule therefore applies to the builds whose registry profile
+/// declares `platform.form.default_button_importance`.
 fn default_button_importance(
     edits: &mut XmlEdits<'_>,
     button: usize,
@@ -1554,7 +1573,9 @@ pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
                 object_refs,
                 &mut assets,
             )?;
-            default_button_importance(&mut edits, element, item)?;
+            if crate::platform::export_writes_default_button_importance() {
+                default_button_importance(&mut edits, element, item)?;
+            }
         }
     }
     for (element, id) in commands {
@@ -1571,4 +1592,94 @@ pub(in crate::mssql_dump) fn apply_form_facts_8_5_1(
         }
     }
     Ok((edits.finish()?, assets))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn button(name: &str, id: u32, extra: &str) -> String {
+        format!(
+            "\t\t<Button name=\"{name}\" id=\"{id}\">\r\n\
+\t\t\t<Type>UsualButton</Type>\r\n{extra}\
+\t\t\t<CommandName>Form.Command.{name}</CommandName>\r\n\
+\t\t</Button>\r\n"
+        )
+    }
+
+    fn form(buttons: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\
+<Form xmlns=\"http://v8.1c.ru/8.3/xcf/logform\" version=\"2.21\">\r\n\
+\t<ChildItems>\r\n{buttons}\t</ChildItems>\r\n</Form>"
+        )
+    }
+
+    /// A button record of revision 34 whose appended importance member is `importance`.
+    fn button_facts(importance: &str) -> FormItemFactsV8_5_1 {
+        FormItemFactsV8_5_1 {
+            revision: "34".to_owned(),
+            // Members 0..=5 appended; member 5 is the importance.
+            tail: (0..6)
+                .map(|index| Node::Leaf(if index == 5 { importance } else { "0" }.to_owned()))
+                .collect(),
+            // The record ahead of them; its last member (51) is the
+            // main-server-unavailable behavior.
+            record: vec![Node::Leaf("0".to_owned()); 60],
+            ..FormItemFactsV8_5_1::default()
+        }
+    }
+
+    /// The appended importance member of a button says `Main` exactly for its
+    /// default button (88 of 88 on the БСП 8.5 extension ServiceDesk); the 8.3.27
+    /// slot that also says so is set on six of the eight default buttons.
+    #[test]
+    fn a_main_button_is_the_default_button() {
+        let xml = form(
+            &[
+                button("Create", 20, ""),
+                button("Other", 21, ""),
+                button("Help", 22, ""),
+                // The 8.3.27 slot already said so: written once, not twice.
+                button("Known", 23, "\t\t\t<DefaultButton>true</DefaultButton>\r\n"),
+            ]
+            .concat(),
+        );
+        let facts = FormFactsV8_5_1 {
+            items: BTreeMap::from([
+                ("20".to_owned(), button_facts("0")),
+                ("21".to_owned(), button_facts("1")),
+                ("22".to_owned(), button_facts("2")),
+                ("23".to_owned(), button_facts("0")),
+            ]),
+            ..FormFactsV8_5_1::default()
+        };
+        let (written, assets) = apply_form_facts_8_5_1(xml, &facts, &BTreeMap::new()).unwrap();
+        assert!(assets.is_empty());
+        let expected = form(
+            &[
+                button(
+                    "Create",
+                    20,
+                    "\t\t\t<DefaultButton>true</DefaultButton>\r\n",
+                )
+                .replace(
+                    "\t\t</Button>",
+                    "\t\t\t<ButtonImportance>Main</ButtonImportance>\r\n\t\t</Button>",
+                ),
+                button("Other", 21, ""),
+                button("Help", 22, "").replace(
+                    "\t\t</Button>",
+                    "\t\t\t<ButtonImportance>Supplementary</ButtonImportance>\r\n\t\t</Button>",
+                ),
+                button("Known", 23, "\t\t\t<DefaultButton>true</DefaultButton>\r\n").replace(
+                    "\t\t</Button>",
+                    "\t\t\t<ButtonImportance>Main</ButtonImportance>\r\n\t\t</Button>",
+                ),
+            ]
+            .concat(),
+        );
+        assert_eq!(written, expected);
+    }
 }

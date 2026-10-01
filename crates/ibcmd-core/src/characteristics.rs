@@ -78,6 +78,16 @@ impl CharacteristicReference {
         })
     }
 
+    /// The source of a characteristic that names none: the platform stores a
+    /// nil uuid and prints `from=""`. Only a source may be empty; a field
+    /// reference never is (see [`CharacteristicReference::new`]).
+    pub fn empty_source() -> Self {
+        Self {
+            path: "".into(),
+            source_uuid: None,
+        }
+    }
+
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -301,6 +311,11 @@ impl Characteristics {
 }
 
 fn validate_source(source: &CharacteristicReference) -> Result<(), CharacteristicsBuildError> {
+    if source.path().is_empty() {
+        // No source: every field of the group is a sentinel (a reference field
+        // fails its ancestry check).
+        return Ok(());
+    }
     let parts = source.path().split('.').collect::<Vec<_>>();
     let valid = match parts.as_slice() {
         [family, owner] => !family.is_empty() && !owner.is_empty(),
@@ -363,6 +378,36 @@ mod tests {
         .unwrap();
         let model = Characteristics::new(vec![Characteristic::new(types, values)]).unwrap();
         assert_eq!(model.items().len(), 1);
+    }
+
+    #[test]
+    fn a_characteristic_without_a_source_holds_only_sentinels() {
+        let types = CharacteristicTypes::new(
+            CharacteristicReference::empty_source(),
+            CharacteristicField::Sentinel(CharacteristicFieldSentinel::Empty),
+            CharacteristicField::Sentinel(CharacteristicFieldSentinel::Empty),
+            CharacteristicFilterValue::Undefined,
+            CharacteristicField::Sentinel(CharacteristicFieldSentinel::Undefined),
+            CharacteristicField::Sentinel(CharacteristicFieldSentinel::Undefined),
+        )
+        .unwrap();
+        assert_eq!(types.source().path(), "");
+        assert_eq!(
+            CharacteristicTypes::new(
+                CharacteristicReference::empty_source(),
+                field("Catalog.Types.Attribute.Key"),
+                CharacteristicField::Sentinel(CharacteristicFieldSentinel::Empty),
+                CharacteristicFilterValue::Undefined,
+                CharacteristicField::Sentinel(CharacteristicFieldSentinel::Empty),
+                CharacteristicField::Sentinel(CharacteristicFieldSentinel::Empty),
+            )
+            .unwrap_err(),
+            CharacteristicsBuildError::ReferenceOutsideSource
+        );
+        assert_eq!(
+            CharacteristicReference::new("", None).unwrap_err(),
+            CharacteristicsBuildError::EmptyReference
+        );
     }
 
     #[test]

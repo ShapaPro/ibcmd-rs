@@ -41,6 +41,13 @@ fn every_known_build_and_release_declares_its_xml_layout_and_features() {
             true,
             &[("palette-colors", palette)][..],
         ),
+        (
+            "8.5.1.1529",
+            InfobaseConfigSourceVersion::V2_21,
+            FormLayout::V8_5_1,
+            true,
+            &[("palette-colors", palette)][..],
+        ),
     ] {
         let spec = parse(name).unwrap();
         assert_eq!(spec.display(), name);
@@ -71,6 +78,26 @@ fn every_known_build_and_release_declares_its_xml_layout_and_features() {
     );
     assert_eq!(feature_uuid(FEATURE_PALETTE_COLORS).unwrap(), palette);
     assert!(feature_uuid("no-such-feature").is_err());
+}
+
+/// The builds agree on the XML format, the layout and the features, so
+/// `8.5.1` names them all; they differ on the importance of a default button,
+/// and the release keeps the spelling of the oldest.
+#[test]
+fn only_the_1529_build_writes_the_importance_of_a_default_button() {
+    for (name, writes) in [
+        ("8.3.27", false),
+        ("8.3.27.2214", false),
+        ("8.5.1", false),
+        ("8.5.1.1150", false),
+        ("8.5.1.1529", true),
+    ] {
+        assert_eq!(
+            parse(name).unwrap().writes_default_button_importance(),
+            writes,
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -122,7 +149,7 @@ fn unknown_and_unsupported_versions_are_refused_by_name() {
     );
     assert!(build.contains("releases 8.3.27, 8.5.1"), "{build}");
     assert!(
-        build.contains("builds 8.3.27.1989, 8.3.27.2214, 8.5.1.1150"),
+        build.contains("builds 8.3.27.1989, 8.3.27.2214, 8.5.1.1150, 8.5.1.1529"),
         "{build}"
     );
 

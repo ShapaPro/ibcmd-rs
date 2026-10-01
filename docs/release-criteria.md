@@ -127,20 +127,20 @@ cargo build --locked --release --no-default-features
 
 python scripts/generate_sbom.py `
   --manifest-path Cargo.toml `
-  --output target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.sbom.cdx.json `
+  --output target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.sbom.cdx.json `
   --target x86_64-pc-windows-msvc
 
 python scripts/package_release.py `
   --binary target/release/ibcmd-rs.exe `
-  --sbom target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.sbom.cdx.json `
-  --output target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.zip `
-  --version 0.1.1 --target x86_64-pc-windows-msvc --repository-root .
+  --sbom target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.sbom.cdx.json `
+  --output target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.zip `
+  --version 0.4.0 --target x86_64-pc-windows-msvc --repository-root .
 
 python scripts/audit_release.py `
   --binary target/release/ibcmd-rs.exe `
-  --sbom target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.sbom.cdx.json `
-  --archive target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.zip `
-  --checksum target/release-artifacts/ibcmd-rs-0.1.1-x86_64-pc-windows-msvc.zip.sha256
+  --sbom target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.sbom.cdx.json `
+  --archive target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.zip `
+  --checksum target/release-artifacts/ibcmd-rs-0.4.0-x86_64-pc-windows-msvc.zip.sha256
 ```
 
 On Linux, use the Linux target coordinate and binary path. Strict specification
