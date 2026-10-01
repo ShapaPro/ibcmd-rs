@@ -954,6 +954,9 @@ pub fn diff_activation_snapshots(
 pub fn activate_staged_main(
     args: &MssqlActivateStagedMainArgs,
 ) -> Result<MssqlActivateStagedMainReport> {
+    if args.live_compact_recovery && !args.live_checkpoint {
+        bail!("--live-compact-recovery requires --live-checkpoint");
+    }
     if args.live_checkpoint && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
         bail!("--live-checkpoint requires --mode live");
     }
@@ -1178,8 +1181,12 @@ pub fn activate_staged_main(
             recovery: rendered.recovery.clone(),
         };
         artifact.validate()?;
-        let artifact_bytes = crate::mssql_live_continue::serialize_artifact(&artifact)?;
-        write_new_or_identical(&live_artifact_path, &artifact_bytes)?;
+        if args.live_compact_recovery {
+            crate::mssql_live_artifact::write(&live_artifact_path, &artifact)?;
+        } else {
+            let artifact_bytes = crate::mssql_live_continue::serialize_artifact(&artifact)?;
+            write_new_or_identical(&live_artifact_path, &artifact_bytes)?;
+        }
         let resource = format!(
             "ibcmd-rs:live:{}",
             uuid::Uuid::parse_str(&artifact.identity.database_guid)?
@@ -10260,6 +10267,7 @@ mod tests {
     fn runtime_profile_verification_fails_before_main_stage_read() {
         let args = MssqlActivateStagedMainArgs {
             live_checkpoint: false,
+            live_compact_recovery: false,
             platform_profile: MssqlNativePlatformProfile::Platform8_5_1_1150,
             sqlcmd_trust_cert: false,
             sqlcmd: Some(PathBuf::from("must-not-run-sqlcmd")),

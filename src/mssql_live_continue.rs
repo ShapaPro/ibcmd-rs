@@ -1,8 +1,8 @@
 //! Recoverable, idle-infobase checkpoint for the two-cycle live switch.
 //! Active-session readiness is deliberately not inferred from SQL handles.
 
+#[cfg(test)]
 use std::fs;
-use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -542,20 +542,7 @@ pub fn run(args: &LiveContinueArgs) -> Result<LiveContinueReport> {
         args.allow_non_lab,
         "--allow-non-lab acknowledgement is required"
     );
-    ensure!(
-        fs::metadata(&args.artifact)?.len() <= MAX_ARTIFACT_BYTES,
-        "live artifact too large"
-    );
-    let mut bytes = Vec::new();
-    File::open(&args.artifact)?
-        .take(MAX_ARTIFACT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_ARTIFACT_BYTES,
-        "live artifact too large"
-    );
-    let artifact: LiveArtifact = serde_json::from_slice(&bytes)?;
-    artifact.validate()?;
+    let artifact = crate::mssql_live_artifact::read(&args.artifact)?;
     ensure!(
         artifact.identity.database == args.database,
         "live artifact belongs to another database"

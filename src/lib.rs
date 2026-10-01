@@ -34,6 +34,7 @@ pub mod mssql_extension_load;
 pub mod mssql_extension_stage;
 pub mod mssql_extension_tree_load;
 pub mod mssql_extensions;
+mod mssql_live_artifact;
 pub mod mssql_live_gate;
 pub mod mssql_main_activation;
 pub mod mssql_platform_profile;

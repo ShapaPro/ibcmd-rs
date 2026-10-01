@@ -275,7 +275,7 @@ pub(crate) fn write(
     Ok(())
 }
 
-fn sibling(manifest: &Path, file_name: &str) -> Result<PathBuf> {
+pub(crate) fn sibling(manifest: &Path, file_name: &str) -> Result<PathBuf> {
     ensure!(
         !file_name.is_empty()
             && !file_name.contains(['/', '\\', ':'])
@@ -291,7 +291,7 @@ fn sibling(manifest: &Path, file_name: &str) -> Result<PathBuf> {
         .join(file_name))
 }
 
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),
@@ -346,7 +346,9 @@ fn unpack_row(row: &PackedRow, pack: &[u8], cursor: &mut usize) -> Result<MainSt
 }
 
 /// Verifies representation integrity, not database ownership or a safe undo.
-fn read(path: &Path) -> Result<(String, MainActivationMode, MainActivationRecoverySnapshot)> {
+pub(crate) fn read(
+    path: &Path,
+) -> Result<(String, MainActivationMode, MainActivationRecoverySnapshot)> {
     let manifest: Manifest = serde_json::from_slice(&read_bounded(path, MAX_MANIFEST_BYTES)?)?;
     ensure!(manifest.format == 2, "unsupported compact recovery format");
     let p = manifest.payload;

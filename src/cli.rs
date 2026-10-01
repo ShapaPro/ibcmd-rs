@@ -2049,6 +2049,10 @@ pub struct MssqlActivateStagedMainArgs {
     #[arg(long)]
     pub live_checkpoint: bool,
 
+    /// Store the LIVE snapshot in verified adjacent binary files instead of JSON byte arrays.
+    #[arg(long, requires = "live_checkpoint")]
+    pub live_compact_recovery: bool,
+
     /// Exact native MSSQL platform layout.
     #[arg(long)]
     pub platform_profile: MssqlNativePlatformProfile,
@@ -6544,5 +6548,38 @@ mod tests {
             args.platform_profile,
             MssqlNativePlatformProfile::Platform8_5_1_1150
         );
+    }
+
+    #[test]
+    fn compact_live_recovery_requires_an_explicit_checkpoint() {
+        let base = vec![
+            "ibcmd-rs",
+            "mssql-activate-staged-main",
+            "--platform-profile",
+            "platform-8.3.27.2214",
+            "--cluster-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--infobase-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--database",
+            "owned_lab",
+            "--mode",
+            "live",
+        ];
+        let mut compact = base.clone();
+        compact.push("--live-compact-recovery");
+        assert!(Cli::try_parse_from(&compact).is_err());
+        compact.push("--live-checkpoint");
+        let Commands::MssqlActivateStagedMain(args) =
+            Cli::try_parse_from(&compact).unwrap().command
+        else {
+            panic!("wrong command")
+        };
+        assert!(args.live_checkpoint && args.live_compact_recovery);
+        let Commands::MssqlActivateStagedMain(args) = Cli::try_parse_from(base).unwrap().command
+        else {
+            panic!("wrong command")
+        };
+        assert!(!args.live_checkpoint && !args.live_compact_recovery);
     }
 }

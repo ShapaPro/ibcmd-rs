@@ -442,6 +442,7 @@ pub fn apply_source_change(
         Some(serde_json::to_value(crate::mssql::activate_staged_main(
             &MssqlActivateStagedMainArgs {
                 live_checkpoint: false,
+                live_compact_recovery: false,
                 platform_profile: args.platform_profile,
                 sqlcmd_trust_cert: args.sqlcmd_trust_cert,
                 sqlcmd: args.sqlcmd.clone(),
