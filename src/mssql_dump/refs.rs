@@ -3697,12 +3697,22 @@ fn configuration_properties_8_5_1(
     if fields.len() != 77 {
         return None;
     }
-    // Members 61-63 and 66-68 carry the four enumerations. One 8.5 tuple is
-    // on record (BSP 3.2.1.356), so only its combination is read; any other
-    // refuses rather than attributing codes to properties on a guess.
-    let codes = [61, 62, 63, 66, 67, 68].map(|index| fields[index].trim());
+    // Members 61, 63 and 66-68 carry the four enumerations; 62 is the 8.5
+    // code of `InterfaceCompatibilityMode`, which is read from member 38 (the
+    // compiler, `metadata_model::root`, writes 3 and 6 for
+    // `Version8_5EnableTaxi`, 2 and 2 for `TaxiEnableVersion8_2`).
+    // Two combinations are on record, so only they are read; any other
+    // refuses rather than attributing codes to properties on a guess:
+    // - BSP 3.2.1.356 under 8.5.1.1150: tabs, the 8.5 interface migration;
+    // - the configuration 8.5.1.1529 saved from an XML 2.20 tree at
+    //   compatibility 8.3.27 (`home_page/one_column_v85/input.cf`): the tree
+    //   names none of these properties, so the platform stored the values it
+    //   gives a configuration without them, the ones it prints for a
+    //   `{68,...}` tuple (above). Which of 67 and 68 is which is not known.
+    let codes = [61, 63, 66, 67, 68].map(|index| fields[index].trim());
     let (interface_variant, theme, windows_open_variant, migration_mode) = match codes {
-        ["0", "6", "0", "0", "0", "0"] => ("NavigationLeft", "Auto", "OpenDataInTabs", "Use"),
+        ["0", "0", "0", "0", "0"] => ("NavigationLeft", "Auto", "OpenDataInTabs", "Use"),
+        ["0", "0", "0", "1", "1"] => ("NavigationLeft", "Auto", "OpenDataInDialogs", "DontUse"),
         _ => return None,
     };
     let mut auxiliary_forms = Vec::with_capacity(8);

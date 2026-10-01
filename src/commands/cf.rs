@@ -666,7 +666,7 @@ fn extract_failure(
     }
 }
 
-fn bootstrap(args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
+fn bootstrap(mut args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
     let profiles = load_profile_registry(
         BUNDLED_PROFILES,
         args.profile_dir.as_deref(),
@@ -679,6 +679,15 @@ fn bootstrap(args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
             format!("failed to load target profiles: {source:#}"),
         )
     })?;
+    if args.base_free
+        && args.target_profile == DEFAULT_BOOTSTRAP_TARGET_PROFILE
+        && let Some(platform) = args.platform
+        && let Some(profile) = platform_target_profile(&profiles, platform)
+    {
+        // `--platform 8.5.1.1150` names the platform the file is for; the
+        // report names its profile instead of the 8.3.27 default.
+        args.target_profile = profile;
+    }
     let profile_id = ProfileId::parse(&args.target_profile).map_err(|source| {
         bootstrap_failure(
             &args,
@@ -779,6 +788,38 @@ fn bootstrap(args: CfBootstrapArgs) -> Result<CfCommandReport, CfCommandError> {
         }),
         errors: Vec::new(),
     }))
+}
+
+/// `cf bootstrap --target-profile`'s default (`crate::cli::CfBootstrapArgs`).
+const DEFAULT_BOOTSTRAP_TARGET_PROFILE: &str = "platform-8.3.27.1989";
+
+/// The platform profile with a storage profile that `--platform` names: the
+/// exact build's when it has one, otherwise the oldest build of the release
+/// that has one (`8.5.1` and `8.5.1.1529` → `platform-8.5.1.1150`, as
+/// `--platform 8.5.1` stands for 8.5.1.1150 elsewhere).
+fn platform_target_profile(
+    profiles: &ibcmd_core::profile::ProfileRegistry,
+    platform: crate::platform::PlatformSpec,
+) -> Option<String> {
+    let release = platform.release().map(|part| part.to_string()).join(".");
+    let builds = profiles
+        .profiles()
+        .values()
+        .filter(|profile| profile.storage_profile.is_some())
+        .filter_map(|profile| {
+            let build = profile.platform_build.as_ref()?.value.to_string();
+            let number = build
+                .strip_prefix(&format!("{release}."))?
+                .parse::<u32>()
+                .ok()?;
+            Some((number, build, profile.id.to_string()))
+        })
+        .collect::<Vec<_>>();
+    builds
+        .iter()
+        .find(|(_, build, _)| build == platform.display())
+        .or_else(|| builds.iter().min())
+        .map(|(_, _, id)| id.clone())
 }
 
 /// `cf bootstrap --base-free`: the tree's rows from the base-free stage, as
