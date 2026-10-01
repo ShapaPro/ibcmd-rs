@@ -1,6 +1,7 @@
 # Independent first-wave review
 
-Reviewer: coordinator, independent of the three implementation authors.
+Reviewers: coordinator for dynamic; an independent peer for extension/live
+and the coordinator's integration resolutions.
 Review combines specification and code correctness; actual source and raw
 test logs were inspected, not only implementer summaries.
 
@@ -53,7 +54,41 @@ Base `2a55cb3462aae8ce7cb8e08e8837bb404154bd68`, implementation
 No outstanding P1/P2 findings. Coordinator cherry-pick applied without a
 source conflict; the shared mssql.rs change remains the reviewed dispatch.
 
-## Live checkpoint
+## Live checkpoint: PASS in its bounded scope
 
-Pending fixed implementation commit, real SQL-only protocol evidence and
-independent final review. Warm-session/native RAS acceptance remains open.
+Reviewer: `release_review`. Base `2a55cb34`, implementation
+`5818be39f1fc5b4483979e53660e3ab09fc21d33`.
+
+- The explicit staged checkpoint preserves the default two-cycle SQL body,
+  refuses the high-level source option and never infers warm readiness from
+  idle SQL handles. Real active/warm session acceptance remains open.
+- Canonical database-GUID master/session locks and backup-history pending
+  guards cover the declared source-stage/default LIVE paths, including
+  no-op stage deletion. Other standalone import/stage/admin paths are outside
+  this coverage and changed state refuses continuation.
+- Actual SQL-only logs prove first-state 1/0, append 1/1, completion 2/0,
+  repeated 2/0 without a third backup set, and pending/held-lock/foreign-LSN
+  refusals. These fixtures do not promote metadata or verify RAS/client code.
+- Exact SQL 17.0.1135.8 and its measured header layout are required; the
+  earlier survey's SQL 16 attribution was corrected. Unsupported engines and
+  changed RAC agent build/storage/registration refuse before cycle 2.
+- Token/identity/fork/generation/header/chain checks share the append's SQL
+  session. Unknown completion remains unknown; error cleanup cannot undo
+  committed promotion. Serialized artifact bytes satisfy the same 64 MiB
+  read bound before writing the manifest or beginning phase 1.
+- Final targeted 49/0/1, all-targets/fmt/policy logs pass; the preceding full
+  3611/0/10 run and the final narrow regressions are identified separately.
+  Both owned SQL clones were dropped using the guarded shared helper.
+
+No outstanding P1/P2. This does not close #409 F-5 or the native/session/load
+acceptance, and does not enable 1C 8.5 or unmeasured SQL 16.
+
+## Integration resolution: PASS
+
+Independent peer review at `e8e88586` compared complete added/deleted patch
+payloads with all three accepted implementation commits. The entire LIVE
+delta is retained, and the additional activation delta exactly matches the
+accepted dynamic changes. Extension adapters, dynamic owned files and v0.4
+synonym/state behavior are preserved. Preflight precedes the recovered input
+reader; both full test groups remain and no production functions duplicate.
+Integrated compilation/tests and current CI are separate from this review.

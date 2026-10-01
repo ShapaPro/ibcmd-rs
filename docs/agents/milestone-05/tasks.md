@@ -30,16 +30,26 @@ Files: `src/mssql_main_activation.rs`, dedicated live readiness/continuation
 module(s), `src/mssql.rs`, `src/mssql_apply.rs` only necessary CLI seams,
 `scripts/apply-lab/live/`, track-owned evidence/docs.
 
-- [ ] L1 Recover the preserved lab kit and model the first/second cycle states.
+- [x] L1 Recover the preserved lab kit and model the first/second cycle states.
 - [ ] L2 Implement bounded readiness that does not wait for idle SQL handles.
   First checkpoint: automatic completion only when verified RAS has no user
   sessions; otherwise report continuation required. Adaptive warm-session
   readiness remains a separate, uncompleted acceptance item.
-- [ ] L3 Implement guarded continuation with database/artifact identity,
+- [x] L3 Implement guarded continuation with database/artifact identity,
   completion detection and refusal of ambiguous/repeated recovery states.
-- [ ] L4 Test idle/active/timeout/already-complete paths and maintain F-9/F-10 gates.
+- [x] L4 Test idle/active/timeout/already-complete paths and maintain F-9/F-10 gates.
 - [ ] L5 Run native/session smoke on new owned clones; record measured limits.
-- [ ] L6 Independent review; repair findings before integration.
+- [x] L6 Independent review; repair findings before integration.
+
+Checkpoint `5818be39`: independent review PASS. Actual SQL-only header,
+append, repeated no-op, pending/lock and foreign-backup guards are measured
+on exact SQL Server 17.0.1135.8. Final targeted tests report 49 passed/0 failed/
+1 ignored; all-targets/fmt/policy checks pass. Preceding full library run
+reports 3611 passed/0 failed/10 ignored; the final two narrow fixes have
+focused regressions. The scope uses an explicit already-staged option,
+preserves default LIVE SQL, refuses source checkpoint apply/watch and
+does not claim real RAS/session readiness. L2/L5 remain incomplete; SQL 16
+and 1C 8.5 are unmeasured and refused. See [evidence](../../apply/evidence/live-gate/checkpoint-2026-10-01.md).
 
 ## Extension track: #348 interceptor remainder
 
@@ -68,7 +78,7 @@ open. See [measured scope](../../extensions/evidence/form-interceptors-20261001.
 Worktree `F:\ibcmd\src\ibcmd-rs-05-integration`, branch `feat/0.5-integration`.
 
 - [x] C1 Inventory preserved branches and define isolated ownership/acceptance.
-- [ ] C2 Resolve shared-file conflicts after independent review.
+- [x] C2 Resolve shared-file conflicts after independent review.
 - [ ] C3 Run appropriate integrated gates and record exact verified scope.
 - [ ] C4 Publish a reviewable first-wave PR and attach it to this chat.
 
