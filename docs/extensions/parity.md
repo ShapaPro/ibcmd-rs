@@ -382,8 +382,9 @@ and for a `--path-prefix` selection that holds more than module bodies:
 Activation publishes rows and restructures nothing, so a change that would
 change what a database table holds is refused before any compile, by file and
 with the reason: the descriptor of an object of a family that may own a table
-(catalogs, documents, registers, ...), the root descriptor unless only the
-`<ChildObjects>` lines of table-less families changed, an asset of the root, a
+(catalogs, documents, registers, ...), the root descriptor unless only its
+existing numeric dotted `Version` text or the `<ChildObjects>` lines of
+table-less families changed, an asset of the root, a
 body file added or removed (except the module of a form), an object added or
 removed outside the table-less families (common forms, modules, pictures and
 templates, roles). Bodies (module, form and its module, template, picture,
@@ -411,6 +412,16 @@ the main-configuration corpora never have it, and the compiler refused it).
 
 Only platform 8.3.27.2214 writes extensions (8.5 is declared unsupported for
 extension writes).
+
+The root Version adapter preserves the existing component count and every
+other descriptor byte. For the evidenced native layout 68 (60 properties),
+it replaces only properties member 15 in the active root row; the generic
+root header compiler is bypassed for that row. Unknown layouts, other root
+property edits and Version combined with child-list edits are refused.
+Version may accompany a supported body edit. The measured ServiceDesk
+increments `1.7.0.0` to `1.7.0.1`, then `1.7.0.2` with an After handler,
+passed our load, native activation and complete native source export; see
+[the Version proof](evidence/extension-version-20261001.md).
 
 ### Measured against the platform, 2026-09-30
 
@@ -539,9 +550,9 @@ These are read off a single native sample; the evidence is in the lab folder
   unsupported for 8.5) and of a binary template (`Template.bin`): no case ran;
 * adopted-form interceptor writes beyond the measured 8.3.27 no-base common
   form handler edits, including no-base After/Override command actions;
-* a direct root `Configuration.xml` Version edit in the extension loader:
-  the wave1 twins establish the new Version natively before our handler-only
-  load. This guard is unchanged and #348 is not fully closed by that proof;
+* root Version edits outside the measured numeric dotted format/layout, other
+  root property edits, and Version combined with child-list edits; the narrow
+  Version adapter above does not fully close #348;
 * a structural change of an extension (a new attribute, an object with a table,
   a body added to an object that has none) is the platform's own load: the
   load refuses it by file and the activation restructures nothing;
