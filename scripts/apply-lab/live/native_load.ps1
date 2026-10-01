@@ -10,8 +10,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\process.ps1"
-$lab = [IO.Path]::GetFullPath($LabRoot).TrimEnd('\')
-if (-not $lab.StartsWith('F:\ibcmd\lab\05\', [StringComparison]::OrdinalIgnoreCase)) { throw 'output must stay in the F: live lab' }
+. "$PSScriptRoot\workload_lab.ps1"
+$lab = Resolve-LoadLabRoot $LabRoot
+$artifacts = @('command.json', 'lock.log', 'log') | ForEach-Object { Join-Path $lab "$Label.$_" }
+foreach ($artifact in $artifacts) {
+    if (Test-Path -LiteralPath $artifact) { throw 'native label artifacts already exist; use a fresh label' }
+}
 $owned = Import-Csv -LiteralPath 'F:\ibcmd\lab\04\databases.tsv' -Delimiter "`t" |
     Where-Object { $_.database -eq $Database -and $_.track -eq 'load' -and $_.notes -like 'from F:\ibcmd\lab\dbbak\*' }
 if (-not $owned) { throw 'database is not a restored Track load clone in the ownership manifest' }

@@ -7,6 +7,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+. "$PSScriptRoot\workload_lab.ps1"
+$LabRoot = Resolve-LoadLabRoot $LabRoot
 $root = Join-Path $LabRoot 'observer'
 $src = Join-Path $PSScriptRoot 'workload\src\IbcmdRsObserver.xml'
 $v8 = Join-Path $Platform '1cv8.exe'

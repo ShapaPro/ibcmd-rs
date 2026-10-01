@@ -8,6 +8,8 @@ one-second iteration confirms one real BSP invoice COMMIT/posting and runs the
 actual global invoice report. label.pause retains a warm marker observer,
 label.stop or 600 seconds ends its timer. Stop/terminate only exact journal +
 infobase/session/PID-owned clients; never treat a hibernating session as empty.
+Build/native helpers require an unlinked F 0.5 lab with Track load OWNED.json;
+native labels must have no pre-existing command, lock or result artifact.
 
 The snapshot/case/ownership/reconciliation scripts preserve the actual wave3
 fixture values deliberately. They refuse other databases or require fresh
