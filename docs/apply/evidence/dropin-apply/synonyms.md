@@ -70,3 +70,51 @@ and reusable scripts remain under `F:\ibcmd\lab\04\restructure-check\dn`:
 `make_syn2.py`, `make_mix2.py`, `prepare_resume.ps1`, `own_case_resume.ps1`,
 `logs/*20261001*`, `bak/{syn2,mix2}_staged.bak`, `ddl_{syn2,mix2}/snap`.
 The executable used is `suha/bin/ibcmd-rs-syn20261001.exe`.
+
+## Dynamic-alias reversion regression (079b75ad)
+
+Independent review found a missed case: physical Config descriptor A, effective dynamic alias B and
+registry B, then a stage that reverts to the exact physical A bytes. The former SHA filter excluded
+that descriptor, and the SQL reader joined physical Config instead of the effective alias. The apply
+could fold the alias and publish A while retaining synonym B in the registry.
+
+The corrected reader reconciles **all staged header synonyms with the registry**, including unchanged
+physical descriptors and headers of objects present only as aliases. No physical Config read is needed.
+Parts are joined before inflation; contradictory headers fail closed. Matching registry records and
+siVersions stay unchanged. The unit regression splits the staged compressed descriptor into two parts,
+provides no physical Config answer, reverts registry B to A, and verifies the version changes. A second
+test verifies an unchanged stage produces no registry/version rewrite.
+
+The live disposable regression used actual aliases produced by native `--dynamic=force` on a fresh
+clone of `syn2_staged.bak`. That created eight Config aliases (including an older module generation)
+and sixteen Params aliases. **The raw native state is refused by our apply because Params aliases are
+unsupported.** To exercise its supported Config-only folding path, the sixteen native-generated cache
+aliases were promoted to ordinary Params rows in this clone, retaining all Config aliases and markers.
+This normalization is explicit: it is a constructed cache-level twin, not a claim that the raw native
+online state is accepted. Native partial import then staged the original A XML. Its compiler re-encoded
+the two descriptors, so the regression replaced their staged bytes/size with the clone's own physical
+base A payloads to enforce exact digest equality. All other staged rows/versions remained native.
+
+Both native and own twins were restored from that same `alias2_staged.bak`. Logs of normalization and
+exact-base preconditions are committed alongside the results.
+
+| Check | Prior synonym build | Corrected reader |
+|---|---|---|
+| apply | exit 0, registry left B | exit 0, 2.6 s, two records rewritten |
+| Config against native twin | EXCEPT both ways 0 | EXCEPT both ways 0 |
+| DBSchema / DBNames | unchanged/equal | unchanged/equal |
+| inflated .si text | 15/16, two old B synonyms remain | **16/16 exact**, registry now A |
+| native re-apply | not needed for this negative control | exit 0, «не требуется», 2.2 s |
+| native exports | not needed for this negative control | **12198/12198 unchanged**, no missing/different files |
+
+Quick gates pass again: fmt, policy guard, layer clippy, **3583 root tests passed, 0 failed,
+9 ignored**; all ten synonym tests pass. Evidence is `synonyms/alias2_*`, with the full-export
+report's original path and SHA256 recorded in the compact JSON. The saved corrected executable is
+`F:\ibcmd\lab\04\restructure-check\suha\bin\ibcmd-rs-syn-alias20261001.exe`.
+
+The corrected reader was also rerun on fresh `syn2` and structural `mix2` clones from their original
+staged backups: Config matches native, every rebuilt-table EXCEPT is zero on `mix2`, and both cases
+still have all sixteen cache texts exact. These final-reader checks are `synonyms/{syn2,mix2}_final_*`.
+Fresh cluster sessions on the alias native/fixed twins gave identical original A synonyms and
+presentations (including type lookup and section title); `synonyms/alias2_session.txt`. Both were
+unregistered after the session probe.
