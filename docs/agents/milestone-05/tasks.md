@@ -48,12 +48,20 @@ Source work: `F:\ibcmd\lab\05\ext\STATUS.md`, `tl\ic2_orc` evidence.
 Files: `src/mssql_dump/extension/form.rs`, the form compiler event-handler
 adapter identified by tracing, `docs/extensions/parity.md`, focused fixtures.
 
-- [ ] E1 Confirm native After/Override storage and exported XML shapes.
-- [ ] E2 Decode interceptor type from primary and additional-handler codes.
-- [ ] E3 Encode the evidenced no-BaseForm shape; keep unsupported forms refused.
-- [ ] E4 Test Before/After/Override and native-twin export-back equality;
+- [x] E1 Confirm native After/Override storage and exported XML shapes.
+- [x] E2 Decode interceptor type from primary and additional-handler codes.
+- [x] E3 Encode the evidenced no-BaseForm shape; keep unsupported forms refused.
+- [x] E4 Test Before/After/Override and native-twin export-back equality;
   record fixture Version changes when applicable.
-- [ ] E5 Run quick gates and independent review; repair findings.
+- [x] E5 Run quick gates and independent review; repair findings.
+
+Checkpoint `c2cccffc`: independent reviewer PASS; final sequential quick
+gates report 3607 passed/0 failed/9 ignored. Native Before/After/Override
+reader twins and our After/Override staging followed by native activation
+preserve all source files; ConfigDumpInfo differs only in configVersion
+values. Fixture Version 1.7.0.0 → 1.7.0.1 was seeded natively. No CFE was
+built; direct loader Version edits, further cohorts, drop-in and 8.5 remain
+open. See [measured scope](../../extensions/evidence/form-interceptors-20261001.md).
 
 ## Coordinator
 

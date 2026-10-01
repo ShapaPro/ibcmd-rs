@@ -29,7 +29,31 @@ implementation `d807ec00f0f3bdfef316549b0b7c3e45500c4ec6`.
 No outstanding P1/P2 findings in this bounded checkpoint. This review does
 not close #347 or approve the wider pending-overlay/8.5/load boundaries.
 
-## Extension and live checkpoints
+## Extension checkpoint: PASS
 
-Pending fixed implementation commits and independent final review. Preliminary
-findings have already been returned to their respective implementers.
+Reviewer: `release_review`, independent of the extension implementation author.
+Base `2a55cb3462aae8ce7cb8e08e8837bb404154bd68`, implementation
+`c2cccffc061578e3f14cb7d0a8aa9219eaeffcb6`.
+
+- Stored primary/additional event codes produce native Before/After/Override
+  forms. Unsupported or ambiguous shapes refuse, retaining the BaseForm path
+  and the measured Before command behavior.
+- The lexical XML finding is repaired: semantic attributes/dispatch, comment
+  handling and after-fold checks prevent silent loss of interceptors.
+- The reviewer verified native row hashes/blocks, raw trees and thirteen
+  versioned comparisons. All source bytes match; the only CDI normalization
+  is configVersion values. Applied own CAS roots match the staged reports.
+- Final sequential raw logs on the fixed source report 3607 passed/0 failed/
+  9 ignored, with fmt/policy/clippy passing. The policy baseline adds exactly
+  two reviewed name-special-case occurrences and preserves old allowances.
+- The evidence identifies the actual staging binary, subsequent parser
+  repairs, native Version seed 1.7.0.0 → 1.7.0.1, no built CFE, and the
+  unchanged direct root-Version refusal. Scope does not close all of #348.
+
+No outstanding P1/P2 findings. Coordinator cherry-pick applied without a
+source conflict; the shared mssql.rs change remains the reviewed dispatch.
+
+## Live checkpoint
+
+Pending fixed implementation commit, real SQL-only protocol evidence and
+independent final review. Warm-session/native RAS acceptance remains open.
