@@ -376,6 +376,44 @@ mod tests {
         );
     }
     #[test]
+    fn compact_live_missing_pack_names_the_local_file_before_sql() {
+        let directory = Directory::new();
+        let artifact = fixture();
+        write(&directory.path(), &artifact).unwrap();
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(directory.path()).unwrap()).unwrap();
+        let sidecar = directory.0.join(&manifest.payload.recovery_file);
+        let recovery: serde_json::Value =
+            serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+        let pack = directory
+            .0
+            .join(recovery["payload"]["pack_file"].as_str().unwrap());
+        fs::remove_file(&pack).unwrap();
+        let args = crate::mssql_live_continue::LiveContinueArgs {
+            artifact: directory.path(),
+            database: artifact.identity.database.clone(),
+            server: "must-not-connect".into(),
+            sql_user: None,
+            sql_pwd: None,
+            sql_pwd_env: "MUST_NOT_READ_MISSING_PACK_PASSWORD".into(),
+            allow_non_lab: true,
+            interrupt_sessions: false,
+            rac: "must-not-spawn-rac".into(),
+            ras_endpoint: "must-not-contact".into(),
+            infobase_user: None,
+            infobase_pwd: None,
+        };
+        let error = crate::mssql_live_continue::run(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("read compact recovery pack {}", pack.display())
+        );
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+    #[test]
     fn compact_live_refuses_invalid_inputs_and_collisions_without_overwrite() {
         let directory = Directory::new();
         let mut artifact = fixture();

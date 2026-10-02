@@ -367,7 +367,9 @@ pub(crate) fn read(
         p.pack_file == format!("ibcmd-recovery-{}.pack", p.pack_sha256),
         "recovery pack name differs from digest"
     );
-    let pack = read_bounded(&sibling(path, &p.pack_file)?, p.pack_bytes)?;
+    let pack_path = sibling(path, &p.pack_file)?;
+    let pack = read_bounded(&pack_path, p.pack_bytes)
+        .with_context(|| format!("read compact recovery pack {}", pack_path.display()))?;
     ensure!(
         pack.len() == p.pack_bytes && digest(&pack) == p.pack_sha256,
         "recovery pack length/digest mismatch"
