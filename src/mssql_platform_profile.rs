@@ -219,7 +219,149 @@ pub fn verify_mssql_native_profile(
     claimed: MssqlNativePlatformProfile,
     options: MssqlNativeProfileVerificationOptions<'_>,
 ) -> Result<MssqlNativeProfileVerification> {
-    let agent_build = read_rac_agent_build(options.rac, options.ras_endpoint)?;
+    verify_mssql_native_profile_with_auth(claimed, options, None)
+}
+
+/// Internal credentials created by the owned creator. This is neither a
+/// serialized ownership proof nor a public endpoint-adoption switch.
+pub(crate) struct ManagedRacReadAuth<'a> {
+    pub agent_user: &'a str,
+    pub agent_password: &'a str,
+    pub cluster_user: &'a str,
+    pub cluster_password: &'a str,
+}
+
+impl ManagedRacReadAuth<'_> {
+    fn arguments(&self, agent: bool) -> Vec<String> {
+        let (prefix, user, password) = if agent {
+            ("agent", self.agent_user, self.agent_password)
+        } else {
+            ("cluster", self.cluster_user, self.cluster_password)
+        };
+        vec![
+            format!("--{prefix}-user={user}"),
+            format!("--{prefix}-pwd={password}"),
+        ]
+    }
+
+    fn redact(&self, value: &str) -> String {
+        redact_managed_secrets(value, &[self.agent_password, self.cluster_password])
+    }
+}
+
+fn redact_managed_secrets(value: &str, secrets: &[&str]) -> String {
+    let mut secrets: Vec<_> = secrets
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    // A shorter password may be a prefix of another credential.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets
+        .into_iter()
+        .fold(value.to_owned(), |message, secret| {
+            message.replace(secret, "[redacted]")
+        })
+}
+
+pub(crate) fn verify_mssql_native_profile_managed_observation(
+    claimed: MssqlNativePlatformProfile,
+    options: MssqlNativeProfileVerificationOptions<'_>,
+    authentication: &ManagedRacReadAuth<'_>,
+    agent_version: &str,
+    registration: &str,
+) -> Result<MssqlNativeProfileVerification> {
+    let secrets = [
+        authentication.agent_password,
+        authentication.cluster_password,
+        options.infobase_pwd.unwrap_or_default(),
+        options.sql_pwd.unwrap_or_default(),
+    ];
+    let result = (|| -> Result<_> {
+        if options.sqlcmd.is_some() {
+            bail!("managed profile requires the built-in SQL client");
+        }
+        let cluster_id = options
+            .cluster_id
+            .context("managed profile cluster UUID absent")?;
+        let infobase_id = options
+            .infobase_id
+            .context("managed profile infobase UUID absent")?;
+        require_registered_database(
+            &parse_rac_blocks(registration),
+            &infobase_id.to_string(),
+            options.server,
+            options.database,
+        )?;
+        let build = parse_rac_agent_build(agent_version)?;
+        let probe = parse_probe(&run_probe(&options)?)?;
+        verify_probe(
+            claimed,
+            &build,
+            probe,
+            RasDatabaseBinding {
+                cluster_id,
+                infobase_id,
+            },
+        )
+    })();
+    result
+        // Native failure text can echo argv. Redact the complete error chain.
+        .map_err(|error| {
+            anyhow!(
+                "{}",
+                redact_managed_secrets(&format!("{error:#}"), &secrets)
+            )
+        })
+}
+
+#[cfg(test)]
+mod managed_auth_tests {
+    use super::*;
+
+    #[test]
+    fn managed_auth_uses_separate_agent_cluster_flags_and_redacts_all_credentials() {
+        let auth = ManagedRacReadAuth {
+            agent_user: "generated-agent",
+            agent_password: "abc",
+            cluster_user: "generated-cluster",
+            cluster_password: "abcdef",
+        };
+        assert_eq!(
+            auth.arguments(true),
+            ["--agent-user=generated-agent", "--agent-pwd=abc"]
+        );
+        assert_eq!(
+            auth.arguments(false),
+            ["--cluster-user=generated-cluster", "--cluster-pwd=abcdef"]
+        );
+        assert_eq!(
+            auth.redact("native echoed abcdef then abc"),
+            "native echoed [redacted] then [redacted]"
+        );
+        assert_eq!(
+            redact_managed_secrets(
+                "abc/abcdef/IBpassword/SQLpassword",
+                &["abc", "abcdef", "IBpassword", "SQLpassword", ""]
+            ),
+            "[redacted]/[redacted]/[redacted]/[redacted]"
+        );
+    }
+}
+
+fn verify_mssql_native_profile_with_auth(
+    claimed: MssqlNativePlatformProfile,
+    options: MssqlNativeProfileVerificationOptions<'_>,
+    authentication: Option<&ManagedRacReadAuth<'_>>,
+) -> Result<MssqlNativeProfileVerification> {
+    let agent_build = if let Some(authentication) = authentication {
+        let mut args = vec!["agent".to_owned(), "version".to_owned()];
+        args.extend(authentication.arguments(true));
+        args.push(options.ras_endpoint.to_owned());
+        parse_rac_agent_build(&run_rac_bounded(options.rac, args)?)?
+    } else {
+        read_rac_agent_build(options.rac, options.ras_endpoint)?
+    };
     let binding = verify_ras_infobase_binding(
         options.rac,
         options.ras_endpoint,
@@ -229,6 +371,7 @@ pub fn verify_mssql_native_profile(
         options.infobase_id,
         options.infobase_user,
         options.infobase_pwd,
+        authentication,
     )?;
     let output = run_probe(&options)?;
     verify_probe(claimed, &agent_build, parse_probe(&output)?, binding)
@@ -274,6 +417,7 @@ fn verify_ras_infobase_binding(
     infobase_id: Option<Uuid>,
     infobase_user: Option<&str>,
     infobase_pwd: Option<&str>,
+    authentication: Option<&ManagedRacReadAuth<'_>>,
 ) -> Result<RasDatabaseBinding> {
     let cluster_id = cluster_id.ok_or_else(|| {
         anyhow!("native MSSQL write verification requires --cluster-id to bind RAS to SQL")
@@ -295,6 +439,9 @@ fn verify_ras_infobase_binding(
         ));
     } else if infobase_pwd.is_some() {
         bail!("--infobase-pwd requires --infobase-user");
+    }
+    if let Some(authentication) = authentication {
+        args.extend(authentication.arguments(false));
     }
     args.push(ras_endpoint.to_owned());
     let registration = run_rac_bounded(rac, args)?;
