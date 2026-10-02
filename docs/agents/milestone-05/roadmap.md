@@ -3,6 +3,12 @@
 Live issue state is maintained in the [GitHub milestone](https://github.com/Untru/ibcmd-rs/milestone/3).
 This page records the resumed work boundary, not a release-completion claim.
 
+The [current verification checkpoint](current-checkpoint-2026-10-02.md) records
+14 original local PASS plus two separately repeated packaging PASS on unchanged
+source. It also records independent certification of the existing 12198-file
+template source with exactly three donor changes. Source readiness is proven;
+native/OWN template activation and milestone acceptance remain open.
+
 | Issue | Implemented checkpoints | Remaining acceptance |
 |---|---|---|
 | [#344](https://github.com/Untru/ibcmd-rs/issues/344) | Independent review of resumed dynamic/live code | Complete four oracle groups, current session measurements, security/correctness review and operational/recovery documentation |
