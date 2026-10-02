@@ -11799,7 +11799,9 @@ mod tests {
     /// separators of the platform the test runs on: the inference functions
     /// join components, so the expectation has to be components too.
     fn native_path(windows_spelling: &str) -> std::path::PathBuf {
-        windows_spelling.split('\\').collect()
+        windows_spelling
+            .replace('\\', std::path::MAIN_SEPARATOR_STR)
+            .into()
     }
 
     #[test]
