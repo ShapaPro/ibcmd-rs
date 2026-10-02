@@ -12015,7 +12015,11 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"rows\":1}");
         super::write_new_or_identical(&path, b"{\"rows\":1}").unwrap();
         let error = super::write_new_or_identical(&path, b"{\"rows\":2}").unwrap_err();
-        assert!(error.to_string().contains("refusing to overwrite"));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("refusing to overwrite"))
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"rows\":1}");
         let left = std::fs::read_dir(path.parent().unwrap())
             .unwrap()

@@ -617,7 +617,10 @@ mod tests {
                 family_guid: Uuid::from_u128(4).to_string(),
                 recovery_fork: Uuid::from_u128(5).to_string(),
             },
-            tail: r"F:\lab\tail's.trn".into(),
+            tail: std::env::temp_dir()
+                .join("tail's.trn")
+                .to_string_lossy()
+                .into_owned(),
             recovery_token: format!(
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(&recovery).unwrap())
