@@ -960,6 +960,11 @@ pub fn activate_staged_main(
     if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
         bail!("--interrupt-sessions is only valid for live activation");
     }
+    // An argument check costs nothing; the verification costs two rac calls
+    // and a SQL probe (#409 F-6).
+    if !args.allow_non_lab {
+        bail!("--allow-non-lab acknowledgement is required");
+    }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
@@ -978,6 +983,20 @@ pub fn activate_staged_main(
             sqlcmd_trust_cert: args.sqlcmd_trust_cert,
         },
     )?;
+    activate_staged_main_verified(args, profile_verification)
+}
+
+/// [`activate_staged_main`] for a caller that has verified the platform
+/// profile of this same target already (`apply_source_change`), so the two
+/// rac calls and the SQL probe run once per command (#409 F-6).
+pub(crate) fn activate_staged_main_verified(
+    args: &MssqlActivateStagedMainArgs,
+    profile_verification: crate::mssql_platform_profile::MssqlNativeProfileVerification,
+) -> Result<MssqlActivateStagedMainReport> {
+    args.platform_profile.require_main_write_supported()?;
+    if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
+        bail!("--interrupt-sessions is only valid for live activation");
+    }
     if !args.allow_non_lab {
         bail!("--allow-non-lab acknowledgement is required");
     }
