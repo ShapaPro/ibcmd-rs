@@ -34,6 +34,14 @@ Outside startup, including stop, the immediate listeners-first/single-census
 refusal guard remains unchanged. Failed listeners retain a bounded sanitized
 receipt from the already captured censuses, including an observed listener
 executable outside the server whitelist. Ports and counters are not ownership.
+Startup refusal receipts also retain the original absolute deadline, its
+initialization time, acquisition entry/observation time and current port/RAC
+phase. Expiry has reason `startup_deadline_expired` and no failed-listener PID;
+the preserved censuses may contain entirely owned listeners. It never admits
+an observation at or after the deadline. Observed foreign listeners and identity
+drift still refuse immediately with their distinct reasons. The historical D2
+60-second refusal did not record the absolute deadline; its owned two-census
+replay supports expiry, without proving the unavailable historical clock value.
 
 Use `private-register.ps1 -Action register -Database <owned-new-clone>` and
 `-Action unregister` for these contexts. The wrapper binds the current cluster
@@ -60,6 +68,9 @@ Existing registry history cannot be reused for another fresh start.
 `test_private_ownership.ps1` exercises identity, orphan retention, PID reuse,
 foreign executable/command/listener, registration, FIFO, path/reparse and actual
 entrypoint refusals with mocked OS calls. It starts/signals/deletes nothing.
+`test_private_startup_deadline.ps1` runs the actual functions with only a mock
+clock and in-memory observations to check exact deadline, foreign and identity
+boundaries without writing receipts or acquiring resources.
 These mocks establish refusal boundaries; native lifecycle acceptance is a
 separate measurement. The kit covers these fresh, recorded lifetimes only.
 General historical/unregistered loaded-infobase ownership (F11) remains open.

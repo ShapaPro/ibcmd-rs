@@ -74,8 +74,8 @@ if($stable.Count -ne 1 -or $global:Private83CensusCount -ne 4){throw 'missing st
 # immediate one-census refusal regardless of startup sampling support.
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700099;LocalAddress='127.0.0.1'})
 $global:Private83CensusCount=0
-Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(180))} 'foreign/unproved'
-if($global:Private83CensusCount -lt 2 -or $global:Private83LastRefusal.failed_listener.pid -ne 700099){throw 'unstable deadline did not retain exact refusal'}
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(180))} 'startup deadline expired'
+if($global:Private83CensusCount -lt 2 -or $global:Private83LastRefusal.failed_listener -or $global:Private83LastRefusal.reason -cne 'startup_deadline_expired' -or !$global:Private83LastRefusal.startup.unstable_listener_observation -or $global:Private83LastRefusal.listeners[0].pid -ne 700099){throw 'unstable deadline did not retain exact refusal'}
 $global:Private83CensusCount=0;Refuse {Private-RequireListeners $state} 'foreign/unproved'
 if($global:Private83CensusCount -ne 1){throw 'stop guard acquired a startup resampling loop'}
 # Full census captures a non-whitelisted listener even when the server-only
@@ -108,7 +108,7 @@ $global:Private83FakeProcesses=@($agent,$ras,$child,$unknown);$global:Private83F
 Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddSeconds(2))} 'unknown private-looking'
 $global:Private83FakeProcesses=@($agent,$ras,$child)
 $global:Private83FakeListeners=@([pscustomobject]@{LocalPort=5561;OwningProcess=700003});$global:Private83CensusDelay=80
-Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(100))} 'foreign/unproved'
+Refuse {Private-StartupListeners $state ([DateTime]::UtcNow.AddMilliseconds(100))} 'startup deadline expired'
 $global:Private83CensusDelay=0
 $global:Private83FakeProcesses=@($agent,$ras,$child,$foreign);$global:Private83FakeListeners=@()
 Private-RequireNames @('ibcmd_rs_05_load_w3_mock')

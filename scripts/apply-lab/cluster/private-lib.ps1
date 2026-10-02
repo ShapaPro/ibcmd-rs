@@ -13,6 +13,8 @@ $script:RasAddress='localhost:5545';$script:Srvr='localhost:5541';$script:Rac=Jo
 $script:AllPorts=@(5540,5541,5545)+@(5560..5591)
 $script:ServerNames=@('ragent.exe','rmngr.exe','rphost.exe','ras.exe','dbda.exe')
 $script:PrivateStartupDeadline=[DateTime]::MinValue
+$script:PrivateStartupInitializedUtc=[DateTime]::MinValue
+$script:PrivateStartupPhase='startup_listener_acquisition'
 . "$PSScriptRoot\..\live\process.ps1"
 function Require-PrivatePath([string]$Path) {
  if(!$script:PrivateMappings.ContainsKey($script:Root) -or $script:PrivateContext.track -cne $script:PrivateMappings[$script:Root].track -or $script:PrivateContext.prefix -cne $script:PrivateMappings[$script:Root].prefix){throw 'unknown private83 root/track mapping'}
@@ -115,25 +117,33 @@ function Private-PublishRefusalReceipt($Receipt){
  try{$file.Write($bytes);$file.Flush($true)}finally{$file.Dispose()}
  return $path
 }
-function Private-ListenerRefusal($State,$FailedListener,$Listeners,$Processes,$OwnedIds,[string]$Reason='listener_unproved'){
+function Private-ListenerRefusal($State,$FailedListener,$Listeners,$Processes,$OwnedIds,[string]$Reason='listener_unproved',$StartupObservation=$null){
  # Diagnostics consume only the existing listener/process censuses. They never
  # perform another census for admission, retry or process signal.
  try{
   $receipt=[ordered]@{format=1;captured_utc=[DateTime]::UtcNow.ToString('o');root=$script:Root;state_sha256=$(if($State){Private-StateDigest}else{$null});failed_listener=$FailedListener;listeners=@($Listeners|ForEach-Object{[ordered]@{port=$_.LocalPort;pid=$_.OwningProcess;address=$_.LocalAddress}});owned_ids=@($OwnedIds);process_census=@($Processes|ForEach-Object{
    [ordered]@{pid=$_.ProcessId;parent=$_.ParentProcessId;born=$_.CreationDate.ToUniversalTime().ToString('o');name=$_.Name;executable=$_.ExecutablePath;command_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$_.CommandLine)));root_marker=([string]$_.CommandLine).IndexOf($script:Root,[StringComparison]::OrdinalIgnoreCase) -ge 0}
   });admission='refused';reason=$Reason;additional_admission_censuses=0}
+  if($StartupObservation){$receipt.startup=$StartupObservation}
   $path=Private-PublishRefusalReceipt $receipt
  }catch{
+  if($Reason -ceq 'startup_deadline_expired'){throw 'private startup deadline expired; no admission or signal permitted; diagnostic receipt unavailable'}
   throw 'private port has foreign/unproved listener; no signal permitted; diagnostic receipt unavailable'
  }
+ if($Reason -ceq 'startup_deadline_expired'){throw "private startup deadline expired; no admission or signal permitted; retained receipt $path"}
  throw "private port has foreign/unproved listener; no signal permitted; retained receipt $path"
+}
+function Private-StartupObservation([DateTime]$Deadline,[DateTime]$EntryUtc,[bool]$Unstable=$false){
+ [ordered]@{deadline_utc=$Deadline.ToUniversalTime().ToString('o');initialized_utc=$(if($script:PrivateStartupInitializedUtc -ne [DateTime]::MinValue){$script:PrivateStartupInitializedUtc.ToUniversalTime().ToString('o')}else{$null});entry_utc=$EntryUtc.ToUniversalTime().ToString('o');observed_utc=[DateTime]::UtcNow.ToString('o');phase=$script:PrivateStartupPhase;unstable_listener_observation=$Unstable}
 }
 function Private-RelevantCensus($Processes,$Listeners){
  $ids=@($Listeners|ForEach-Object{$_.OwningProcess})
  @($Processes|Where-Object{$_.Name -in $script:ServerNames -or $_.ProcessId -in $ids})
 }
 function Private-StartupListeners($State,[DateTime]$Deadline){
- if(!$State -or !$State.fresh -or $Deadline -le [DateTime]::UtcNow){throw 'bounded fresh startup acquisition required'}
+ $entryUtc=[DateTime]::UtcNow
+ if(!$State -or !$State.fresh){throw 'bounded fresh startup acquisition required'}
+ if($Deadline -le $entryUtc){Private-ListenerRefusal $State $null @() @() @() 'startup_deadline_expired' (Private-StartupObservation $Deadline $entryUtc)}
  do{
   Private-RequireLease $State
   $first=@(Get-CimInstance Win32_Process)
@@ -148,11 +158,11 @@ function Private-StartupListeners($State,[DateTime]$Deadline){
    foreach($sample in @(@{entries=$a;owned=$ownedFirst},@{entries=$b;owned=$ownedSecond})){
     foreach($entry in $sample.entries){
      if($entry.Name -notin $script:ServerNames -or $entry.ProcessId -notin $sample.owned.ProcessId){
-      Private-ListenerRefusal $State ([ordered]@{port=$listener.LocalPort;pid=$listener.OwningProcess;address=$listener.LocalAddress}) $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId)
+      Private-ListenerRefusal $State ([ordered]@{port=$listener.LocalPort;pid=$listener.OwningProcess;address=$listener.LocalAddress}) $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId) 'listener_unproved' (Private-StartupObservation $Deadline $entryUtc)
      }
     }
    }
-   if($a.Count -and $b.Count -and (!(Private-Same $b[0] (Private-Identity $a[0])) -or $a[0].ParentProcessId -ne $b[0].ParentProcessId)){Private-ListenerRefusal $State ([ordered]@{port=$listener.LocalPort;pid=$listener.OwningProcess;address=$listener.LocalAddress}) $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId) 'listener_identity_or_ancestry_drift'}
+   if($a.Count -and $b.Count -and (!(Private-Same $b[0] (Private-Identity $a[0])) -or $a[0].ParentProcessId -ne $b[0].ParentProcessId)){Private-ListenerRefusal $State ([ordered]@{port=$listener.LocalPort;pid=$listener.OwningProcess;address=$listener.LocalAddress}) $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId) 'listener_identity_or_ancestry_drift' (Private-StartupObservation $Deadline $entryUtc)}
    if(!$a.Count -or !$b.Count){$unstable=$true}
   }
   foreach($sample in @(@{processes=$first;owned=$ownedFirst},@{processes=$second;owned=$ownedSecond})){
@@ -164,8 +174,9 @@ function Private-StartupListeners($State,[DateTime]$Deadline){
   if(!$unstable -and [DateTime]::UtcNow -lt $Deadline){return $listeners}
   if([DateTime]::UtcNow -lt $Deadline){Start-Sleep -Milliseconds 100}
  }while([DateTime]::UtcNow -lt $Deadline)
- if($listeners.Count){$failed=@($listeners|Where-Object{$_.OwningProcess -notin $ownedSecond.ProcessId}|Select-Object -First 1);if(!$failed.Count){$failed=@($listeners|Select-Object -First 1)};Private-ListenerRefusal $State ([ordered]@{port=$failed[0].LocalPort;pid=$failed[0].OwningProcess;address=$failed[0].LocalAddress}) $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId)}
- throw 'startup process/listener observation did not stabilize before deadline; no signal permitted'
+ # Expiry does not identify a foreign listener. Preserve both original censuses,
+ # including missing/unstable observations, without selecting an owned PID as a culprit.
+ Private-ListenerRefusal $State $null $listeners (Private-RelevantCensus (@($first)+@($second)) $listeners) @($ownedSecond.ProcessId) 'startup_deadline_expired' (Private-StartupObservation $Deadline $entryUtc $unstable)
 }
 function Private-RequireListeners($State,[DateTime]$StartupDeadline=[DateTime]::MinValue){
  if($StartupDeadline -ne [DateTime]::MinValue){[void](Private-StartupListeners $State $StartupDeadline);return}
@@ -191,6 +202,7 @@ function Private-Lease {
 function Private-RequireLease($State){if((Private-Lease) -cne $State.worker_lease){throw 'worker FIFO lease changed; no signal permitted'}}
 function Invoke-Rac{
  $state=Read-State;if(!$state){throw 'no private state for RAS operation'}
+ if($script:PrivateStartupDeadline -ne [DateTime]::MinValue){$script:PrivateStartupPhase='rac '+(@($args|Select-Object -First 2) -join ' ')}
  Private-RequireListeners $state -StartupDeadline $script:PrivateStartupDeadline
  $ras=@(Private-Owned $state|Where-Object{$_.Name -eq 'ras.exe'})
  if($ras.Count -ne 1 -or !(Get-ClusterListeners|Where-Object{$_.LocalPort -eq 5545 -and $_.OwningProcess -eq $ras[0].ProcessId})){throw 'private RAS listener identity unavailable'}
