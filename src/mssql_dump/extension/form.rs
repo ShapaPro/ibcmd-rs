@@ -5,8 +5,8 @@
 //! completes them in memory on load, taking the ids of the new items from the
 //! id after the largest one of the form ([`upgrade_items`]). (The base form of
 //! an adopted form and the call types of its handlers are written with the form
-//! itself, by `form_extension::with_adopted_form_parts`; [`add_call_types`]
-//! covers the adopted form that has no base form record.)
+//! itself, from the facts `form_extension::form_adoption` reads;
+//! [`add_call_types`] covers the adopted form that has no base form record.)
 
 const EOL: &str = "\r\n";
 

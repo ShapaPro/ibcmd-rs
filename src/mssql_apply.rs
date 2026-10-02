@@ -90,6 +90,19 @@ pub fn apply_source_change(
     {
         bail!("live continuation checkpoint is measured on platform-8.3.27.2214 only");
     }
+    // The argument checks come before the verification, which costs two rac
+    // calls and a SQL probe (#409 F-6).
+    if !args.dry_run && !args.allow_non_lab {
+        bail!("--allow-non-lab acknowledgement is required for source activation");
+    }
+    if args.extension.is_some()
+        && matches!(
+            args.mode,
+            MssqlMainActivationModeArg::Live | MssqlMainActivationModeArg::Worker
+        )
+    {
+        bail!("live/worker activation is not supported for extensions; use online or exclusive");
+    }
     let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
         args.platform_profile,
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
@@ -108,17 +121,6 @@ pub fn apply_source_change(
             sqlcmd_trust_cert: args.sqlcmd_trust_cert,
         },
     )?;
-    if !args.dry_run && !args.allow_non_lab {
-        bail!("--allow-non-lab acknowledgement is required for source activation");
-    }
-    if args.extension.is_some()
-        && matches!(
-            args.mode,
-            MssqlMainActivationModeArg::Live | MssqlMainActivationModeArg::Worker
-        )
-    {
-        bail!("live/worker activation is not supported for extensions; use online or exclusive");
-    }
 
     let source_root = fs::canonicalize(&args.source_root)
         .with_context(|| format!("failed to canonicalize {}", args.source_root.display()))?;
@@ -199,6 +201,8 @@ pub fn apply_source_change(
                 no_binary_rows: true,
                 write_binary_rows: false,
                 write_manifest: false,
+                base: None,
+                sync: false,
             },
             Some(main_read_sql(args)?),
         )?;
@@ -389,6 +393,7 @@ pub fn apply_source_change(
                 platform: None,
                 source_version: Some(args.source_version),
                 path_prefix: vec![path_prefix.clone()],
+                files: Vec::new(),
                 script_output: None,
                 script_only: false,
                 bulk: false,
@@ -412,7 +417,7 @@ pub fn apply_source_change(
         None
     } else if let Some(extension) = args.extension.as_deref() {
         Some(serde_json::to_value(
-            crate::mssql_extension_load::activate_staged_extension(
+            crate::mssql_extension_load::activate_staged_extension_verified(
                 &MssqlActivateStagedExtensionArgs {
                     platform_profile: args.platform_profile,
                     rac: args.rac.clone(),
@@ -436,37 +441,41 @@ pub fn apply_source_change(
                     script_output: args.script_output.clone(),
                     recovery_output: args.recovery_output.clone(),
                 },
+                profile_verification.clone(),
             )?,
         )?)
     } else {
-        Some(serde_json::to_value(crate::mssql::activate_staged_main(
-            &MssqlActivateStagedMainArgs {
-                live_checkpoint: false,
-                live_compact_recovery: false,
-                platform_profile: args.platform_profile,
-                sqlcmd_trust_cert: args.sqlcmd_trust_cert,
-                sqlcmd: args.sqlcmd.clone(),
-                bcp_executable: args.bcp_executable.clone(),
-                server: args.server.clone(),
-                sql_user: args.sql_user.clone(),
-                sql_pwd: args.sql_pwd.clone(),
-                sql_pwd_env: args.sql_pwd_env.clone(),
-                database: args.database.clone(),
-                mode: args.mode,
-                dry_run: false,
-                allow_non_lab: args.allow_non_lab,
-                script_output: args.script_output.clone(),
-                recovery_output: args.recovery_output.clone(),
-                tail_log_output: args.tail_log_output.clone(),
-                interrupt_sessions: args.interrupt_sessions,
-                rac: args.rac.clone(),
-                ras_endpoint: args.ras_endpoint.clone(),
-                cluster_id: args.cluster_id,
-                infobase_id: args.infobase_id,
-                infobase_user: args.infobase_user.clone(),
-                infobase_pwd: args.infobase_pwd.clone(),
-            },
-        )?)?)
+        Some(serde_json::to_value(
+            crate::mssql::activate_staged_main_verified(
+                &MssqlActivateStagedMainArgs {
+                    live_checkpoint: false,
+                    live_compact_recovery: false,
+                    platform_profile: args.platform_profile,
+                    sqlcmd_trust_cert: args.sqlcmd_trust_cert,
+                    sqlcmd: args.sqlcmd.clone(),
+                    bcp_executable: args.bcp_executable.clone(),
+                    server: args.server.clone(),
+                    sql_user: args.sql_user.clone(),
+                    sql_pwd: args.sql_pwd.clone(),
+                    sql_pwd_env: args.sql_pwd_env.clone(),
+                    database: args.database.clone(),
+                    mode: args.mode,
+                    dry_run: false,
+                    allow_non_lab: args.allow_non_lab,
+                    script_output: args.script_output.clone(),
+                    recovery_output: args.recovery_output.clone(),
+                    tail_log_output: args.tail_log_output.clone(),
+                    interrupt_sessions: args.interrupt_sessions,
+                    rac: args.rac.clone(),
+                    ras_endpoint: args.ras_endpoint.clone(),
+                    cluster_id: args.cluster_id,
+                    infobase_id: args.infobase_id,
+                    infobase_user: args.infobase_user.clone(),
+                    infobase_pwd: args.infobase_pwd.clone(),
+                },
+                profile_verification.clone(),
+            )?,
+        )?)
     };
     let activation_ms = activation_started.elapsed().as_millis();
 
@@ -1606,6 +1615,15 @@ mod tests {
         let runtime_error =
             apply_source_change(&evidenced).expect_err("runtime verification must still run");
         assert!(runtime_error.to_string().contains("failed to launch rac"));
+
+        // The acknowledgement is an argument: it is refused before rac runs
+        // (#409 F-6).
+        let unacknowledged = MssqlApplySourceChangeArgs {
+            allow_non_lab: false,
+            ..evidenced
+        };
+        let refusal = apply_source_change(&unacknowledged).expect_err("must refuse");
+        assert!(refusal.to_string().contains("--allow-non-lab"), "{refusal}");
     }
 
     #[test]
