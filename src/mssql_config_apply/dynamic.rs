@@ -63,9 +63,6 @@ use super::{
 /// The number of generations past which the report warns that the overlay grows.
 pub const WARN_GENERATIONS: usize = 50;
 
-/// The kinds of object whose bodies are published dynamically: the two a session was measured with
-/// (`docs/apply/online-activation.md`).
-
 /// The reasons listed in a refusal before "и ещё N".
 const REASONS_SHOWN: usize = 8;
 
