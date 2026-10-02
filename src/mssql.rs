@@ -1383,10 +1383,13 @@ fn write_new_or_identical(path: &Path, bytes: &[u8]) -> Result<()> {
         .ok_or_else(|| anyhow!("artifact path {} has no file name", path.display()))?;
     let mut temporary_name = std::ffi::OsString::from(".");
     temporary_name.push(name);
-    temporary_name.push(format!(".{}.tmp", std::process::id()));
+    temporary_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let temporary = path.with_file_name(temporary_name);
     let written = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&temporary)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()
     })();
@@ -1396,13 +1399,16 @@ fn write_new_or_identical(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let published = match fs::hard_link(&temporary, path) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            existing_matches(path).map(|_| ())
-        }
-        // A file system without hard links: the rename replaces atomically;
-        // the check above already refused a different artifact.
-        Err(_) => fs::rename(&temporary, path)
-            .with_context(|| format!("failed to write {}", path.display())),
+        Err(error) => match existing_matches(path) {
+            Ok(true) => Ok(()),
+            // A replacing rename would lose a concurrently published recovery
+            // artifact. Refuse when atomic, non-replacing publication is not
+            // available, including file systems that do not support hard links.
+            Ok(false) => Err(error).with_context(|| {
+                format!("failed to publish {} without replacing it", path.display())
+            }),
+            Err(error) => Err(error),
+        },
     };
     let _ = fs::remove_file(&temporary);
     published
@@ -11834,9 +11840,6 @@ mod tests {
         );
     }
 
-    /// A path written the Windows way (`Catalogs\Products.xml`), in the
-    /// separators of the platform the test runs on: the inference functions
-    /// join components, so the expectation has to be components too.
     #[test]
     fn recovery_artifacts_are_written_once_and_whole() {
         let root = std::env::temp_dir().join(format!("ibcmd-rs-artifact-{}", uuid::Uuid::new_v4()));
@@ -11855,6 +11858,48 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn concurrent_recovery_writers_preserve_the_winners_bytes() {
+        for _ in 0..4 {
+            let root = std::env::temp_dir()
+                .join(format!("ibcmd-rs-artifact-race-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("recovery.json");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles = (0..8_u8)
+                .map(|writer| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        let bytes = vec![writer; 512 * 1024];
+                        barrier.wait();
+                        (writer, super::write_new_or_identical(&path, &bytes).is_ok())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let winners = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|(_, succeeded)| *succeeded)
+                .map(|(writer, _)| writer)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                winners.len(),
+                1,
+                "only one distinct artifact may be published"
+            );
+            assert!(
+                std::fs::read(&path).unwrap() == vec![winners[0]; 512 * 1024],
+                "the published bytes must belong to the successful writer"
+            );
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A path written the Windows way (`Catalogs\Products.xml`), in the
+    /// separators of the platform the test runs on: the inference functions
+    /// join components, so the expectation has to be components too.
     fn native_path(windows_spelling: &str) -> std::path::PathBuf {
         windows_spelling
             .replace('\\', std::path::MAIN_SEPARATOR_STR)
