@@ -66,6 +66,38 @@ pub fn base_free_patch(
     root: &Path,
     source_version: InfobaseConfigSourceVersion,
 ) -> Result<(StoragePatch, usize)> {
+    #[cfg(not(feature = "platform-oracle"))]
+    let entries = base_free_entries(root, source_version)?;
+    #[cfg(feature = "platform-oracle")]
+    let entries = research_entries(root, source_version)?;
+    let total: usize = entries.values().map(Vec::len).sum();
+    let mut patch = Vec::with_capacity(entries.len());
+    for (name, bytes) in entries {
+        patch.push(StoragePatchEntry::new(
+            StoragePatchTarget::new(
+                StorageKey::new(&name)?,
+                MultipartIdentity::single(),
+                StorageProvenance::new(&format!("bootstrap:base-free:{name}"))?,
+            ),
+            StoragePatchOutcome::compiled(bytes)?,
+        ));
+    }
+    // The patch retains every compiled payload plus keys and provenance, so
+    // its budget follows the tree's own size (an ERP-sized tree retains more
+    // than the 512 MiB floor) rather than the floor alone.
+    let budget = total.saturating_mul(2);
+    Ok((
+        StoragePatch::with_retained_byte_limit(patch, budget)?,
+        total,
+    ))
+}
+
+/// Entry substitution is an oracle diagnostic, excluded from portable builds.
+#[cfg(feature = "platform-oracle")]
+fn research_entries(
+    root: &Path,
+    source_version: InfobaseConfigSourceVersion,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut entries = if std::env::var_os("IBCMD_RS_BASE_FREE_ENTRIES_FROM").is_some()
         && std::env::var_os("IBCMD_RS_BASE_FREE_KEEP_OURS").is_none()
     {
@@ -114,24 +146,5 @@ pub fn base_free_patch(
         }
         entries = theirs;
     }
-    let total: usize = entries.values().map(Vec::len).sum();
-    let mut patch = Vec::with_capacity(entries.len());
-    for (name, bytes) in entries {
-        patch.push(StoragePatchEntry::new(
-            StoragePatchTarget::new(
-                StorageKey::new(&name)?,
-                MultipartIdentity::single(),
-                StorageProvenance::new(&format!("bootstrap:base-free:{name}"))?,
-            ),
-            StoragePatchOutcome::compiled(bytes)?,
-        ));
-    }
-    // The patch retains every compiled payload plus keys and provenance, so
-    // its budget follows the tree's own size (an ERP-sized tree retains more
-    // than the 512 MiB floor) rather than the floor alone.
-    let budget = total.saturating_mul(2);
-    Ok((
-        StoragePatch::with_retained_byte_limit(patch, budget)?,
-        total,
-    ))
+    Ok(entries)
 }

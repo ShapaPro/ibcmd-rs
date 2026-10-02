@@ -267,3 +267,32 @@ fn xml_2_21_bootstraps_into_the_cf_8_5_saved() {
         theirs_root
     );
 }
+
+#[cfg(not(feature = "platform-oracle"))]
+#[test]
+fn base_free_bootstrap_ignores_research_entry_overrides() {
+    let scratch = Scratch::new("research-overrides");
+    let tree = scratch.join("tree");
+    export_v85(&common::fixture(CASE).join("input.cf"), &tree);
+    let built = scratch.join("built.cf");
+    let run = Command::new(env!("CARGO_BIN_EXE_ibcmd-rs"))
+        .args(["cf", "bootstrap", "--base-free", "--platform", "8.5.1.1150"])
+        .arg(&tree)
+        .arg(&built)
+        .env("PATH", "")
+        .env(
+            "IBCMD_RS_BASE_FREE_ENTRIES_FROM",
+            scratch.join("missing.cf"),
+        )
+        .env(
+            "IBCMD_RS_BASE_FREE_ENTRIES_ONLY",
+            scratch.join("missing.txt"),
+        )
+        .env("IBCMD_RS_BASE_FREE_KEEP_OURS", "root")
+        .output()
+        .unwrap();
+    ok(&run);
+    let rebuilt = scratch.join("rebuilt");
+    export_v85(&built, &rebuilt);
+    assert_same_tree(&tree, &rebuilt);
+}

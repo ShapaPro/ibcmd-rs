@@ -437,6 +437,32 @@ fn serve_speaks_the_protocol_and_its_lifecycle() {
 }
 
 #[test]
+fn invalid_rpc_envelopes_do_not_dispatch_operations() {
+    let corpus = Corpus::new("invalid-envelopes");
+    let mut server = Server::start(&corpus);
+    for message in [
+        json!({"id": 1, "method": "initialize", "params": corpus.initialize_params()}),
+        json!({"jsonrpc": "1.0", "id": 1, "method": "initialize", "params": corpus.initialize_params()}),
+        json!({"jsonrpc": "2.0", "id": true, "method": "initialize", "params": corpus.initialize_params()}),
+        json!({"jsonrpc": "2.0", "id": {}, "method": "initialize", "params": corpus.initialize_params()}),
+        json!({"jsonrpc": "2.0", "id": [], "method": "initialize", "params": corpus.initialize_params()}),
+    ] {
+        server.write_raw(&Server::frame(&message));
+        let response = server.read_message();
+        assert_eq!(response["error"]["code"], -32600, "{response}");
+    }
+    server.ok("initialize", corpus.initialize_params());
+    // An invalid exit notification must not terminate the server.
+    server.write_raw(&Server::frame(&json!({"method": "exit"})));
+    let rejected = server.read_message();
+    assert_eq!(rejected["error"]["code"], -32600);
+    assert!(rejected["id"].is_null());
+    server.ok("infobases/list", Value::Null);
+    server.ok("shutdown", Value::Null);
+    assert_eq!(server.finish(true), 0);
+}
+
+#[test]
 fn serve_exports_objects_as_the_command_line_does() {
     let corpus = Corpus::new("export");
     let mut server = Server::start(&corpus);

@@ -162,6 +162,27 @@ pub fn serve(input: &mut dyn BufRead, output: Output) -> i32 {
                 continue;
             }
         };
+        let valid_id = message
+            .get("id")
+            .is_none_or(|id| matches!(id, Value::Null | Value::String(_) | Value::Number(_)));
+        if !message.is_object()
+            || message.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || !valid_id
+        {
+            let id = if valid_id {
+                message.get("id").unwrap_or(&Value::Null)
+            } else {
+                &Value::Null
+            };
+            output.send(&rpc::response(
+                id,
+                Err(RpcError::new(
+                    codes::INVALID_REQUEST,
+                    "a request needs jsonrpc: 2.0 and a string, number or null id",
+                )),
+            ));
+            continue;
+        }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             // A response to a request of ours (we send none) or garbage.
             if message.get("result").is_none() && message.get("error").is_none() {

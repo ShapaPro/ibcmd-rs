@@ -38,6 +38,70 @@ impl Secret {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(mask: bool) -> Entry {
+        let name = if mask { "demo_*" } else { "demo" };
+        let spec = crate::platform::parse_flag("8.3.27").unwrap();
+        Entry {
+            id: entry_id(Some("sql01"), name),
+            name: name.to_string(),
+            server: Some("sql01".to_string()),
+            source: "mssql",
+            rows_dir: None,
+            platform: spec.to_string(),
+            xml_version: spec.xml_version().as_str().to_string(),
+            platform_source: "test".to_string(),
+            mask,
+            origin: "test".to_string(),
+            spec,
+        }
+    }
+
+    #[test]
+    fn a_fixed_infobase_cannot_be_redirected_to_another_database() {
+        let result = Session::open(
+            &entry(false),
+            Some("other"),
+            Login::default(),
+            &Settings::default(),
+        );
+        assert!(
+            result.is_err(),
+            "opened a different database under the fixed id"
+        );
+    }
+
+    #[test]
+    fn a_fixed_infobase_can_repeat_its_database_name() {
+        let session = Session::open(
+            &entry(false),
+            Some("demo"),
+            Login::default(),
+            &Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(session.entry.id, "sql01/demo");
+        assert_eq!(session.database, "demo");
+    }
+
+    #[test]
+    fn a_mask_opens_the_database_under_its_own_id() {
+        let session = Session::open(
+            &entry(true),
+            Some("demo_test"),
+            Login::default(),
+            &Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(session.entry.id, "sql01/demo_test");
+        assert_eq!(session.database, "demo_test");
+        assert!(!session.entry.mask);
+    }
+}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("***")
@@ -229,6 +293,13 @@ impl Session {
             (true, None) => {
                 return Err(anyhow!(
                     "infobase {} is a mask ({}); name the database with `database`",
+                    entry.id,
+                    entry.name
+                ));
+            }
+            (false, Some(database)) if database != entry.name => {
+                return Err(anyhow!(
+                    "infobase {} names database {}; database cannot redirect a fixed infobase to {database}",
                     entry.id,
                     entry.name
                 ));

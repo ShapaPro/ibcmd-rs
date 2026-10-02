@@ -127,7 +127,12 @@ impl DumpInfo {
                     buffer.clear();
                     continue;
                 }
-                Event::Eof => break,
+                Event::Eof => {
+                    if !open.is_empty() {
+                        bail!("the file ended inside <{}>", open.last().unwrap());
+                    }
+                    break;
+                }
                 _ => {
                     buffer.clear();
                     continue;
@@ -751,6 +756,16 @@ mod tests {
 
     const V1: &str = "11111111111111111111111111111111111111";
     const V2: &str = "22222222222222222222222222222222222222";
+
+    #[test]
+    fn a_truncated_base_manifest_is_refused() {
+        for xml in [
+            "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"><ConfigVersions>",
+            "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"><ConfigVersions><Metadata name=\"Catalog.X\" id=\"a\" configVersion=\"v1\"/>",
+        ] {
+            assert!(DumpInfo::parse(xml.as_bytes()).is_err(), "accepted {xml}");
+        }
+    }
 
     fn entry(name: &str, id: &str, version: &str) -> DumpInfoEntry {
         DumpInfoEntry {
