@@ -361,6 +361,9 @@ pub struct MssqlActivateStagedMainReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_continuation: Option<crate::mssql_live_continue::LiveContinueReport>,
     pub worker_switch: Option<crate::mssql_worker_switch::WorkerSwitchReport>,
+    /// Internally created lifetime only; absent on generic endpoint commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_worker: Option<serde_json::Value>,
     /// What the live gate found before the promotion (#409 F-9, F-10): the log backup chain, the tail directory, the sessions whose
     /// work the switch interrupts. Only for the `live` mode on the built-in SQL client.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1010,6 +1013,42 @@ pub(crate) fn activate_staged_main_verified(
     args: &MssqlActivateStagedMainArgs,
     profile_verification: crate::mssql_platform_profile::MssqlNativeProfileVerification,
 ) -> Result<MssqlActivateStagedMainReport> {
+    activate_staged_main_verified_inner(args, profile_verification, None)
+}
+
+/// No user JSON/endpoint can call this path with a lifetime capability. Only
+/// the product creator retains the original session and its exclusive journal.
+pub(crate) fn activate_staged_main_managed(
+    args: &MssqlActivateStagedMainArgs,
+    session: &mut crate::mssql_managed_worker::NativeManagedWorker,
+) -> Result<MssqlActivateStagedMainReport> {
+    session.require_activation_target(args)?;
+    let profile = session.verify_target_profile(
+        args.platform_profile,
+        crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
+            sqlcmd: args.sqlcmd.as_deref(),
+            rac: &args.rac,
+            ras_endpoint: &args.ras_endpoint,
+            server: &args.server,
+            database: &args.database,
+            cluster_id: args.cluster_id,
+            infobase_id: args.infobase_id,
+            infobase_user: args.infobase_user.as_deref(),
+            infobase_pwd: args.infobase_pwd.as_deref(),
+            sql_user: args.sql_user.as_deref(),
+            sql_pwd: args.sql_pwd.as_deref(),
+            sql_pwd_env: &args.sql_pwd_env,
+            sqlcmd_trust_cert: args.sqlcmd_trust_cert,
+        },
+    )?;
+    activate_staged_main_verified_inner(args, profile, Some(session))
+}
+
+fn activate_staged_main_verified_inner(
+    args: &MssqlActivateStagedMainArgs,
+    profile_verification: crate::mssql_platform_profile::MssqlNativeProfileVerification,
+    mut managed: Option<&mut crate::mssql_managed_worker::NativeManagedWorker>,
+) -> Result<MssqlActivateStagedMainReport> {
     args.platform_profile.require_main_write_supported()?;
     if args.interrupt_sessions && !matches!(args.mode, MssqlMainActivationModeArg::Live) {
         bail!("--interrupt-sessions is only valid for live activation");
@@ -1071,7 +1110,17 @@ pub(crate) fn activate_staged_main_verified(
         args.allow_non_lab,
     )
     .map_err(anyhow::Error::new)?;
-    crate::mssql_worker_switch::preflight_worker_execution(mode, args.dry_run, plan.is_no_op())?;
+    if let Some(session) = managed.as_deref_mut() {
+        if !args.dry_run && !plan.is_no_op() {
+            session.require_activation_target(args)?;
+        }
+    } else {
+        crate::mssql_worker_switch::preflight_worker_execution(
+            mode,
+            args.dry_run,
+            plan.is_no_op(),
+        )?;
+    }
     // The tool's own RAS verification made the cluster open idle SQL sessions on
     // this database; the session gate of an exclusive activation must not count
     // them (#409 F-3), and an infobase that has clients is refused before any
@@ -1141,18 +1190,20 @@ pub(crate) fn activate_staged_main_verified(
         args.live_checkpoint,
         &mut rendered,
     );
-    let worker_options =
-        if matches!(args.mode, MssqlMainActivationModeArg::Worker) && !plan.is_no_op() {
-            Some(crate::mssql_worker_switch::WorkerSwitchOptions {
-                rac: args.rac.clone(),
-                ras_endpoint: args.ras_endpoint.clone(),
-                cluster_id: profile_verification.verified_cluster_id,
-                infobase_id: profile_verification.verified_infobase_id,
-                timeout: Duration::from_secs(10),
-            })
-        } else {
-            None
-        };
+    let worker_options = if matches!(args.mode, MssqlMainActivationModeArg::Worker)
+        && !plan.is_no_op()
+        && managed.is_none()
+    {
+        Some(crate::mssql_worker_switch::WorkerSwitchOptions {
+            rac: args.rac.clone(),
+            ras_endpoint: args.ras_endpoint.clone(),
+            cluster_id: profile_verification.verified_cluster_id,
+            infobase_id: profile_verification.verified_infobase_id,
+            timeout: Duration::from_secs(10),
+        })
+    } else {
+        None
+    };
 
     let artifact_root = std::env::temp_dir().join("ibcmd-rs");
     fs::create_dir_all(&artifact_root)
@@ -1237,12 +1288,22 @@ pub(crate) fn activate_staged_main_verified(
     write_new_or_identical(&script, rendered.sql.as_bytes())?;
     let mut live_continuation = None;
     let mut worker_switch = None;
+    let mut managed_worker = None;
     if !args.dry_run {
         let worker_plan = worker_options
             .as_ref()
             .map(crate::mssql_worker_switch::prepare_dedicated_worker)
             .transpose()?;
-        run_sql_file(&sql, &script).with_context(|| if live_artifact.is_some() { format!("promotion/cycle 1 may have committed; retained recovery {} and live continuation {} must be inspected before retry",recovery.display(),live_artifact_path.display()) } else {format!("activation outcome must be inspected using retained recovery {} before retry",recovery.display())})?;
+        if let Some(session) = managed.as_deref_mut().filter(|_| !plan.is_no_op()) {
+            // SQL stage was already physically captured by the activation plan.
+            // This dispatch journals publication uncertainty and preserves a
+            // confirmed COMMIT even when worker handoff cannot be proved.
+            managed_worker = Some(serde_json::to_value(
+                session.publish_and_handoff(|| Ok(()), || run_sql_file(&sql, &script))?,
+            )?);
+        } else {
+            run_sql_file(&sql, &script).with_context(|| if live_artifact.is_some() { format!("promotion/cycle 1 may have committed; retained recovery {} and live continuation {} must be inspected before retry",recovery.display(),live_artifact_path.display()) } else {format!("activation outcome must be inspected using retained recovery {} before retry",recovery.display())})?;
+        }
         if let Some(artifact) = &live_artifact {
             let SqlBackend::Client(client) = sql.backend() else {
                 unreachable!()
@@ -1302,9 +1363,19 @@ pub(crate) fn activate_staged_main_verified(
         },
         live_continuation,
         worker_switch,
+        managed_worker,
         config_apply: None,
         live_gate,
     })
+}
+
+pub(crate) fn activate_staged_main_managed_verified(
+    args: &MssqlActivateStagedMainArgs,
+    profile: crate::mssql_platform_profile::MssqlNativeProfileVerification,
+    session: &mut crate::mssql_managed_worker::NativeManagedWorker,
+) -> Result<MssqlActivateStagedMainReport> {
+    session.require_activation_target(args)?;
+    activate_staged_main_verified_inner(args, profile, Some(session))
 }
 
 /// What a main activation plans from, as stored: the exact `ConfigSave` image, the `Config` rows of the
@@ -1425,6 +1496,7 @@ fn activate_by_config_apply(
         live_recovery_command: None,
         live_continuation: None,
         worker_switch: None,
+        managed_worker: None,
         config_apply: Some(applied),
         live_gate: None,
     })

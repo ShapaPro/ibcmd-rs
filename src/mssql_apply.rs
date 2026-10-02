@@ -61,6 +61,20 @@ pub struct MssqlApplySourceChangeTimings {
 pub fn apply_source_change(
     args: &MssqlApplySourceChangeArgs,
 ) -> Result<MssqlApplySourceChangeReport> {
+    apply_source_change_inner(args, None)
+}
+
+pub(crate) fn apply_source_change_managed(
+    args: &MssqlApplySourceChangeArgs,
+    session: &mut crate::mssql_managed_worker::NativeManagedWorker,
+) -> Result<MssqlApplySourceChangeReport> {
+    apply_source_change_inner(args, Some(session))
+}
+
+fn apply_source_change_inner(
+    args: &MssqlApplySourceChangeArgs,
+    mut managed: Option<&mut crate::mssql_managed_worker::NativeManagedWorker>,
+) -> Result<MssqlApplySourceChangeReport> {
     if args.live_checkpoint {
         bail!(
             "--live-checkpoint is only supported by mssql-activate-staged-main; concurrent source staging is not established, so source apply refused before staging"
@@ -103,8 +117,7 @@ pub fn apply_source_change(
     {
         bail!("live/worker activation is not supported for extensions; use online or exclusive");
     }
-    let profile_verification = crate::mssql_platform_profile::verify_mssql_native_profile(
-        args.platform_profile,
+    let verification_options =
         crate::mssql_platform_profile::MssqlNativeProfileVerificationOptions {
             sqlcmd: args.sqlcmd.as_deref(),
             rac: &args.rac,
@@ -119,8 +132,15 @@ pub fn apply_source_change(
             sql_pwd: args.sql_pwd.as_deref(),
             sql_pwd_env: &args.sql_pwd_env,
             sqlcmd_trust_cert: args.sqlcmd_trust_cert,
-        },
-    )?;
+        };
+    let profile_verification = if let Some(session) = managed.as_deref_mut() {
+        session.verify_target_profile(args.platform_profile, verification_options)?
+    } else {
+        crate::mssql_platform_profile::verify_mssql_native_profile(
+            args.platform_profile,
+            verification_options,
+        )?
+    };
 
     let source_root = fs::canonicalize(&args.source_root)
         .with_context(|| format!("failed to canonicalize {}", args.source_root.display()))?;
@@ -286,7 +306,13 @@ pub fn apply_source_change(
             },
         });
     }
-    preflight_classified_worker_source(args.mode, args.dry_run, &classified)?;
+    if let Some(session) = managed.as_deref_mut() {
+        if !args.dry_run {
+            session.require_source_target(args)?;
+        }
+    } else {
+        preflight_classified_worker_source(args.mode, args.dry_run, &classified)?;
+    }
     if args.extension.is_none() {
         preflight_main_publication(args)?;
     }
@@ -327,86 +353,94 @@ pub fn apply_source_change(
 
     let path_prefix = owner_prefix(&selected_path)?;
     let staging_started = Instant::now();
-    let staging = if let Some(extension) = args.extension.as_deref() {
-        let load_args = MssqlLoadExtensionArgs {
-            platform_profile: args.platform_profile,
-            rac: args.rac.clone(),
-            ras_endpoint: args.ras_endpoint.clone(),
-            cluster_id: args.cluster_id,
-            infobase_id: args.infobase_id,
-            infobase_user: args.infobase_user.clone(),
-            infobase_pwd: args.infobase_pwd.clone(),
-            sqlcmd: args.sqlcmd.clone(),
-            bcp_executable: args.bcp_executable.clone(),
-            server: args.server.clone(),
-            sql_user: args.sql_user.clone(),
-            sql_pwd: args.sql_pwd.clone(),
-            sql_pwd_env: args.sql_pwd_env.clone(),
-            database: args.database.clone(),
-            extension: Some(extension.to_owned()),
-            all_extensions: false,
-            input_dir: proposed_root.clone(),
-            path_prefix: vec![path_prefix.clone()],
-            replace_staging: true,
-            dry_run: args.dry_run,
-            allow_non_lab: args.allow_non_lab,
-            sqlcmd_trust_cert: args.sqlcmd_trust_cert,
-            platform: None,
-            source_version: args.source_version,
-        };
-        // This command stages and publishes together, so the publisher's
-        // registry requirement is verified before the first staged row.
-        crate::mssql_extension_load::require_publishable_extension_registry(&load_args)?;
-        serde_json::to_value(crate::mssql_extension_load::load_extensions(&load_args)?)?
-    } else if args.dry_run {
-        if args.sql_user.is_some() {
-            bail!(
-                "main dry-run with SQL authentication is not yet supported by the parity auditor"
-            );
-        }
-        serde_json::to_value(crate::mssql::audit_source_parity_with_sql(
-            &MssqlAuditSourceParityArgs {
-                server: args.server.clone(),
-                database: args.database.clone(),
-                source_root: proposed_root.clone(),
+    let build_stage = || -> Result<Value> {
+        let staging = if let Some(extension) = args.extension.as_deref() {
+            let load_args = MssqlLoadExtensionArgs {
+                platform_profile: args.platform_profile,
+                rac: args.rac.clone(),
+                ras_endpoint: args.ras_endpoint.clone(),
+                cluster_id: args.cluster_id,
+                infobase_id: args.infobase_id,
+                infobase_user: args.infobase_user.clone(),
+                infobase_pwd: args.infobase_pwd.clone(),
                 sqlcmd: args.sqlcmd.clone(),
-                batch_size: Some(1),
-                platform: None,
-                source_version: Some(args.source_version),
-                path_prefix: vec![path_prefix.clone()],
-                output: None,
-            },
-            Some(main_read_sql(args)?),
-        )?)?
-    } else {
-        serde_json::to_value(crate::mssql::stage_source_objects_with_sql(
-            &MssqlStageSourceObjectsArgs {
+                bcp_executable: args.bcp_executable.clone(),
                 server: args.server.clone(),
                 sql_user: args.sql_user.clone(),
                 sql_pwd: args.sql_pwd.clone(),
                 sql_pwd_env: args.sql_pwd_env.clone(),
                 database: args.database.clone(),
-                source_root: proposed_root.clone(),
-                sqlcmd: args.sqlcmd.clone(),
-                replace_config_save: true,
-                allow_non_lab: args.allow_non_lab,
-                batch_size: Some(1),
-                platform: None,
-                source_version: Some(args.source_version),
+                extension: Some(extension.to_owned()),
+                all_extensions: false,
+                input_dir: proposed_root.clone(),
                 path_prefix: vec![path_prefix.clone()],
-                files: Vec::new(),
-                script_output: None,
-                script_only: false,
-                bulk: false,
-                // One object: a bulk read of every Config row would cost more
-                // than the handful of per-object queries it replaces.
-                per_row: true,
-                bcp_executable: None,
-                base_free: false,
-                verify: false,
-            },
-            Some(main_read_sql(args)?),
-        )?)?
+                replace_staging: true,
+                dry_run: args.dry_run,
+                allow_non_lab: args.allow_non_lab,
+                sqlcmd_trust_cert: args.sqlcmd_trust_cert,
+                platform: None,
+                source_version: args.source_version,
+            };
+            // This command stages and publishes together, so the publisher's
+            // registry requirement is verified before the first staged row.
+            crate::mssql_extension_load::require_publishable_extension_registry(&load_args)?;
+            serde_json::to_value(crate::mssql_extension_load::load_extensions(&load_args)?)?
+        } else if args.dry_run {
+            if args.sql_user.is_some() {
+                bail!(
+                    "main dry-run with SQL authentication is not yet supported by the parity auditor"
+                );
+            }
+            serde_json::to_value(crate::mssql::audit_source_parity_with_sql(
+                &MssqlAuditSourceParityArgs {
+                    server: args.server.clone(),
+                    database: args.database.clone(),
+                    source_root: proposed_root.clone(),
+                    sqlcmd: args.sqlcmd.clone(),
+                    batch_size: Some(1),
+                    platform: None,
+                    source_version: Some(args.source_version),
+                    path_prefix: vec![path_prefix.clone()],
+                    output: None,
+                },
+                Some(main_read_sql(args)?),
+            )?)?
+        } else {
+            serde_json::to_value(crate::mssql::stage_source_objects_with_sql(
+                &MssqlStageSourceObjectsArgs {
+                    server: args.server.clone(),
+                    sql_user: args.sql_user.clone(),
+                    sql_pwd: args.sql_pwd.clone(),
+                    sql_pwd_env: args.sql_pwd_env.clone(),
+                    database: args.database.clone(),
+                    source_root: proposed_root.clone(),
+                    sqlcmd: args.sqlcmd.clone(),
+                    replace_config_save: true,
+                    allow_non_lab: args.allow_non_lab,
+                    batch_size: Some(1),
+                    platform: None,
+                    source_version: Some(args.source_version),
+                    path_prefix: vec![path_prefix.clone()],
+                    files: Vec::new(),
+                    script_output: None,
+                    script_only: false,
+                    bulk: false,
+                    // One object: a bulk read of every Config row would cost more
+                    // than the handful of per-object queries it replaces.
+                    per_row: true,
+                    bcp_executable: None,
+                    base_free: false,
+                    verify: false,
+                },
+                Some(main_read_sql(args)?),
+            )?)?
+        };
+        Ok(staging)
+    };
+    let staging = if let Some(session) = managed.as_deref_mut().filter(|_| !args.dry_run) {
+        session.stage_source(build_stage)?
+    } else {
+        build_stage()?
     };
     if args.dry_run && args.extension.is_none() {
         ensure_main_dry_run_stageable(&staging)?;
@@ -414,6 +448,13 @@ pub fn apply_source_change(
     let staging_ms = staging_started.elapsed().as_millis();
 
     let activation_started = Instant::now();
+    let mut activate_main = |activation_args: &MssqlActivateStagedMainArgs, profile| {
+        if let Some(session) = managed.as_deref_mut() {
+            crate::mssql::activate_staged_main_managed_verified(activation_args, profile, session)
+        } else {
+            crate::mssql::activate_staged_main_verified(activation_args, profile)
+        }
+    };
     let activation = if args.dry_run {
         None
     } else if let Some(extension) = args.extension.as_deref() {
@@ -446,37 +487,35 @@ pub fn apply_source_change(
             )?,
         )?)
     } else {
-        Some(serde_json::to_value(
-            crate::mssql::activate_staged_main_verified(
-                &MssqlActivateStagedMainArgs {
-                    live_checkpoint: false,
-                    live_compact_recovery: false,
-                    platform_profile: args.platform_profile,
-                    sqlcmd_trust_cert: args.sqlcmd_trust_cert,
-                    sqlcmd: args.sqlcmd.clone(),
-                    bcp_executable: args.bcp_executable.clone(),
-                    server: args.server.clone(),
-                    sql_user: args.sql_user.clone(),
-                    sql_pwd: args.sql_pwd.clone(),
-                    sql_pwd_env: args.sql_pwd_env.clone(),
-                    database: args.database.clone(),
-                    mode: args.mode,
-                    dry_run: false,
-                    allow_non_lab: args.allow_non_lab,
-                    script_output: args.script_output.clone(),
-                    recovery_output: args.recovery_output.clone(),
-                    tail_log_output: args.tail_log_output.clone(),
-                    interrupt_sessions: args.interrupt_sessions,
-                    rac: args.rac.clone(),
-                    ras_endpoint: args.ras_endpoint.clone(),
-                    cluster_id: args.cluster_id,
-                    infobase_id: args.infobase_id,
-                    infobase_user: args.infobase_user.clone(),
-                    infobase_pwd: args.infobase_pwd.clone(),
-                },
-                profile_verification.clone(),
-            )?,
-        )?)
+        Some(serde_json::to_value(activate_main(
+            &MssqlActivateStagedMainArgs {
+                live_checkpoint: false,
+                live_compact_recovery: false,
+                platform_profile: args.platform_profile,
+                sqlcmd_trust_cert: args.sqlcmd_trust_cert,
+                sqlcmd: args.sqlcmd.clone(),
+                bcp_executable: args.bcp_executable.clone(),
+                server: args.server.clone(),
+                sql_user: args.sql_user.clone(),
+                sql_pwd: args.sql_pwd.clone(),
+                sql_pwd_env: args.sql_pwd_env.clone(),
+                database: args.database.clone(),
+                mode: args.mode,
+                dry_run: false,
+                allow_non_lab: args.allow_non_lab,
+                script_output: args.script_output.clone(),
+                recovery_output: args.recovery_output.clone(),
+                tail_log_output: args.tail_log_output.clone(),
+                interrupt_sessions: args.interrupt_sessions,
+                rac: args.rac.clone(),
+                ras_endpoint: args.ras_endpoint.clone(),
+                cluster_id: args.cluster_id,
+                infobase_id: args.infobase_id,
+                infobase_user: args.infobase_user.clone(),
+                infobase_pwd: args.infobase_pwd.clone(),
+            },
+            profile_verification.clone(),
+        )?)?)
     };
     let activation_ms = activation_started.elapsed().as_millis();
 
