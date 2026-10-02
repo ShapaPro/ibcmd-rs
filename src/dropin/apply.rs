@@ -9,9 +9,10 @@
 //! - the platform's default, `--dynamic=auto`, applies exactly like
 //!   `--dynamic=disable` when the exclusive lock can be taken: the staged rows
 //!   replace the active ones in place, no `_dynupdate_` rows are written. So
-//!   `auto`, `disable` and `prompt` are served by the exclusive apply, and
-//!   with sessions connected they are refused (below), never turned into a
-//!   dynamic update the user did not ask for: this program has no prompt;
+//!   `auto`, `disable` and noninteractive `prompt` retain that route. Interactive
+//!   `prompt` may offer a SQL-guard fallback after a typed pre-write session refusal:
+//!   cancel, one exclusive retry, or an explicitly chosen dynamic apply. It does not
+//!   implement native standalone-server mode or session administration;
 //! - `--dynamic=force` (dynamic update only) is served by the dynamic apply
 //!   (`crate::mssql_config_apply::dynamic`, `docs/apply/dropin-dynamic.md`,
 //!   the second seam [`call_apply_dynamic`]): a small stage of common-module
@@ -62,9 +63,13 @@ use crate::sql::{SqlExec, SqlOptions};
 use super::parse::{ApplyRequest, Common, DynamicMode, ExclusivityMode, SessionTerminate};
 use super::{APPLY, read_requested_password, sql_server_name, write_json};
 
+mod routing;
+
 /// What one `config apply` came to, before it is told to the user.
 #[derive(Debug)]
 pub enum Outcome {
+    /// The operator explicitly cancelled the SQL-guard interactive fallback.
+    Cancelled,
     /// The staged configuration was applied.
     Applied(Box<ConfigApplyReport>),
     /// `ConfigSave` held nothing.
@@ -105,6 +110,21 @@ pub fn run(mut request: ApplyRequest) -> i32 {
 /// Says what happened, in the platform's words, and gives the exit code.
 fn tell(outcome: Outcome, report: Option<&Path>) -> i32 {
     match outcome {
+        Outcome::Cancelled => {
+            if let Some(path) = report
+                && let Err(error) = write_json(
+                    path,
+                    &serde_json::json!({
+                        "operation": APPLY.command, "ok": true, "cancelled": true,
+                        "applied": false,
+                    }),
+                )
+            {
+                return APPLY.fail_with(&format!("{error:#}"), None);
+            }
+            eprintln!("[WARN] Обновление конфигурации базы данных отменено");
+            0
+        }
         Outcome::Applied(applied) => {
             if let Some(generation) = applied
                 .new_generation
@@ -160,29 +180,37 @@ fn report_file(
 
 /// Connects, applies and classifies what came back.
 ///
-/// `--dynamic=force` is the dynamic apply and nothing else: it is never turned into an exclusive
-/// one. Every other value is the exclusive apply, and when that one is refused for the sessions
-/// connected, the refusal says whether the stage could have been applied dynamically.
+/// Force is always dynamic. Other modes first try the exclusive apply. Only prompt, a terminal,
+/// and a known pre-write session refusal can offer an explicit dynamic choice.
 pub fn execute(request: &ApplyRequest) -> Outcome {
     let (sql, options) = match connect(request) {
         Ok(connected) => connected,
         Err(error) => return Outcome::Failed(format!("{error:#}")),
     };
-    let dynamic = request.dynamic == DynamicMode::Force;
-    let result = if dynamic {
-        call_apply_dynamic(&sql, &options)
-    } else {
-        call_apply(&sql, &options)
-    };
-    match result {
-        Ok(report) if report.nothing_to_apply => Outcome::NothingToApply(Box::new(report)),
-        Ok(report) => Outcome::Applied(Box::new(report)),
-        Err(error) => {
-            let hint = points_at_force(request.dynamic)
-                && error.downcast_ref::<ExclusiveAccessRefused>().is_some()
-                && call_would_qualify(&sql, &options);
-            classify_with(&error, request.session_terminate, hint)
-        }
+    routing::apply(
+        request,
+        &options.database,
+        &mut SqlDispatch {
+            sql: &sql,
+            options: &options,
+        },
+        &mut routing::TerminalInteraction,
+    )
+}
+
+struct SqlDispatch<'a> {
+    sql: &'a SqlExec,
+    options: &'a ConfigApplyOptions,
+}
+impl routing::Dispatch for SqlDispatch<'_> {
+    fn exclusive(&mut self) -> Result<ConfigApplyReport> {
+        call_apply(self.sql, self.options)
+    }
+    fn dynamic(&mut self) -> Result<ConfigApplyReport> {
+        call_apply_dynamic(self.sql, self.options)
+    }
+    fn qualifies(&mut self) -> bool {
+        call_would_qualify(self.sql, self.options)
     }
 }
 
@@ -491,7 +519,7 @@ mod tests {
     use crate::mssql_config_apply::gate::{GateBlocker, GateVerdict};
     use crate::mssql_config_apply::{ApplyMode, BackupPolicy};
 
-    fn request(list: &[&str]) -> ApplyRequest {
+    pub(super) fn request(list: &[&str]) -> ApplyRequest {
         let args = list
             .iter()
             .map(std::ffi::OsString::from)
@@ -502,7 +530,7 @@ mod tests {
         }
     }
 
-    fn session(id: i64, host: &str, program: &str) -> OtherSession {
+    pub(super) fn session(id: i64, host: &str, program: &str) -> OtherSession {
         OtherSession {
             session_id: id,
             login: "sa".to_string(),
@@ -1071,7 +1099,7 @@ mod tests {
         );
     }
 
-    fn sample_report() -> ConfigApplyReport {
+    pub(super) fn sample_report() -> ConfigApplyReport {
         ConfigApplyReport {
             schema_version: 1,
             mode: ApplyMode::Exclusive,
