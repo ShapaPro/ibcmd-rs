@@ -591,6 +591,8 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
     let selected_path = normalize_relative_path(&args.source_path)?;
     let paths = selected_source_closure_paths(&source_root, &selected_path)?;
     let mut observed = source_closure_fingerprint(&source_root, &paths)?;
+    let mut stamp = source_closure_stamp(&source_root, &paths).ok();
+    let mut ticks_since_hash = 0_u32;
     let debounce = Duration::from_millis(args.watch_debounce_ms.clamp(50, 10_000));
     let mut changed_at = None;
     eprintln!(
@@ -601,6 +603,21 @@ pub fn watch_source_changes(args: &MssqlApplySourceChangeArgs) -> Result<()> {
 
     loop {
         thread::sleep(Duration::from_millis(100));
+        // Hash the closure only when a file's size or modification time
+        // moved, or once every two seconds as a backstop for a write that
+        // keeps both; reading every file every 100 ms costs a whole closure
+        // of I/O per tick (Untru/ibcmd-rs#409, F-14).
+        let current_stamp = source_closure_stamp(&source_root, &paths).ok();
+        ticks_since_hash += 1;
+        if changed_at.is_none()
+            && current_stamp.is_some()
+            && current_stamp == stamp
+            && ticks_since_hash < WATCH_FULL_HASH_TICKS
+        {
+            continue;
+        }
+        stamp = current_stamp;
+        ticks_since_hash = 0;
         let current = match source_closure_fingerprint(&source_root, &paths) {
             Ok(value) => value,
             Err(error) => {
@@ -660,6 +677,26 @@ fn require_supported_main_source_cohort(args: &MssqlApplySourceChangeArgs) -> Re
         );
     }
     Ok(())
+}
+
+/// Ticks of the watch loop (100 ms each) between two full hashes of an
+/// unchanged-looking closure.
+const WATCH_FULL_HASH_TICKS: u32 = 20;
+
+/// Size and modification time of every watched file, in `paths` order.
+fn source_closure_stamp(
+    source_root: &Path,
+    paths: &[String],
+) -> Result<Vec<(u64, Option<std::time::SystemTime>)>> {
+    paths
+        .iter()
+        .map(|relative| {
+            let path = source_root.join(path_from_slashes(relative));
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to stat watched source {}", path.display()))?;
+            Ok((metadata.len(), metadata.modified().ok()))
+        })
+        .collect()
 }
 
 fn source_closure_fingerprint(source_root: &Path, paths: &[String]) -> Result<[u8; 32]> {
@@ -1691,6 +1728,21 @@ mod tests {
         assert_eq!(source_closure_fingerprint(&root, &paths).unwrap(), first);
         fs::write(root.join("Module.bsl"), "v2").unwrap();
         assert_ne!(source_closure_fingerprint(&root, &paths).unwrap(), first);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn watched_source_stamp_moves_with_size_and_fails_on_a_missing_file() {
+        let root = std::env::temp_dir().join(format!("ibcmd-rs-stamp-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Module.bsl"), "v1").unwrap();
+        let paths = vec!["Module.bsl".to_owned()];
+        let first = source_closure_stamp(&root, &paths).unwrap();
+        assert_eq!(source_closure_stamp(&root, &paths).unwrap(), first);
+        fs::write(root.join("Module.bsl"), "v1 and more").unwrap();
+        assert_ne!(source_closure_stamp(&root, &paths).unwrap(), first);
+        fs::remove_file(root.join("Module.bsl")).unwrap();
+        assert!(source_closure_stamp(&root, &paths).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -991,6 +991,10 @@ fn validate_windows_component(component: &str) -> Result<(), SourceChangeError> 
     Ok(())
 }
 
+/// The one case-insensitive key every path comparison of this module uses.
+/// NTFS folds case for every script, not only ASCII: `Справочники` and
+/// `СПРАВОЧНИКИ` name one folder, so an ASCII-only fold would call the held
+/// root changed or a Cyrillic file outside it (Untru/ibcmd-rs#409, F-14).
 fn windows_path_key(path: &str) -> String {
     path.chars().flat_map(char::to_lowercase).collect()
 }
@@ -1000,8 +1004,7 @@ fn paths_equal_text_windows(left: &str, right: &str) -> bool {
 }
 
 fn paths_equal_windows(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+    paths_equal_text_windows(&left.to_string_lossy(), &right.to_string_lossy())
 }
 
 fn path_is_within_windows(candidate: &Path, root: &Path) -> bool {
@@ -1009,9 +1012,10 @@ fn path_is_within_windows(candidate: &Path, root: &Path) -> bool {
     let root = root.components().collect::<Vec<_>>();
     candidate.len() >= root.len()
         && candidate.iter().zip(root.iter()).all(|(left, right)| {
-            left.as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+            paths_equal_text_windows(
+                &left.as_os_str().to_string_lossy(),
+                &right.as_os_str().to_string_lossy(),
+            )
         })
 }
 
@@ -1125,6 +1129,28 @@ impl Error for SourceChangeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_path_comparison_folds_cyrillic_case() {
+        assert!(paths_equal_text_windows(
+            "Справочники/Банки",
+            "СПРАВОЧНИКИ/банки"
+        ));
+        assert!(paths_equal_windows(
+            Path::new("Справочники"),
+            Path::new("СПРАВОЧНИКИ")
+        ));
+        assert!(path_is_within_windows(
+            &Path::new("Выгрузка")
+                .join("CommonModules")
+                .join("Общий.xml"),
+            Path::new("ВЫГРУЗКА"),
+        ));
+        assert!(!path_is_within_windows(
+            &Path::new("Выгрузка2").join("Общий.xml"),
+            Path::new("Выгрузка"),
+        ));
+    }
 
     fn file(path: &str, value: &str) -> SourceFileDigest {
         SourceFileDigest::for_bytes(path, value.as_bytes()).unwrap()
