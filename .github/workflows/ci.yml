@@ -79,6 +79,11 @@ jobs:
       - name: Test the root library
         run: cargo test --locked -p ibcmd-rs --lib --no-default-features
 
+      # Native XML tree -> `cf bootstrap --base-free` -> CF -> XML tree over
+      # the three retained 8.3.27.2214 corpora (Untru/ibcmd-rs#351).
+      - name: Test the XML to CF round trip
+        run: cargo test --locked -p ibcmd-rs --test cf_native_roundtrip --no-default-features
+
   legacy-windows:
     name: Legacy Root (Windows)
     runs-on: windows-latest
