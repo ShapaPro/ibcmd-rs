@@ -1354,19 +1354,58 @@ fn safe_file_stem(value: &str) -> String {
         .collect()
 }
 
+/// Writes an artifact that must not change once written: identical bytes
+/// already there are accepted, different ones refused. The bytes go to a
+/// temporary file first, are flushed, and only then appear under `path`
+/// (a hard link, which fails rather than replace a file written meanwhile),
+/// so a crash never leaves a truncated artifact that every repeat would
+/// refuse (#409 F-8).
 fn write_new_or_identical(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    match fs::read(path) {
-        Ok(existing) if existing == bytes => Ok(()),
-        Ok(_) => bail!("refusing to overwrite existing artifact {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+    let existing_matches = |path: &Path| -> Result<bool> {
+        match fs::read(path) {
+            Ok(existing) if existing == bytes => Ok(true),
+            Ok(_) => bail!("refusing to overwrite existing artifact {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
         }
-        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    };
+    if existing_matches(path)? {
+        return Ok(());
     }
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("artifact path {} has no file name", path.display()))?;
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(temporary_name);
+    let written = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to write {}", temporary.display()));
+    }
+    let published = match fs::hard_link(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            existing_matches(path).map(|_| ())
+        }
+        // A file system without hard links: the rename replaces atomically;
+        // the check above already refused a different artifact.
+        Err(_) => fs::rename(&temporary, path)
+            .with_context(|| format!("failed to write {}", path.display())),
+    };
+    let _ = fs::remove_file(&temporary);
+    published
 }
 
 pub fn write_activation_diff(report: &MssqlActivationDiffReport, output: &Path) -> Result<()> {
@@ -11798,6 +11837,24 @@ mod tests {
     /// A path written the Windows way (`Catalogs\Products.xml`), in the
     /// separators of the platform the test runs on: the inference functions
     /// join components, so the expectation has to be components too.
+    #[test]
+    fn recovery_artifacts_are_written_once_and_whole() {
+        let root = std::env::temp_dir().join(format!("ibcmd-rs-artifact-{}", uuid::Uuid::new_v4()));
+        let path = root.join("nested").join("recovery.json");
+        super::write_new_or_identical(&path, b"{\"rows\":1}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"rows\":1}");
+        super::write_new_or_identical(&path, b"{\"rows\":1}").unwrap();
+        let error = super::write_new_or_identical(&path, b"{\"rows\":2}").unwrap_err();
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"rows\":1}");
+        let left = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, [std::ffi::OsString::from("recovery.json")]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn native_path(windows_spelling: &str) -> std::path::PathBuf {
         windows_spelling
             .replace('\\', std::path::MAIN_SEPARATOR_STR)
