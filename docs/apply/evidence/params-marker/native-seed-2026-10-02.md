@@ -75,3 +75,7 @@ native matrix outcomes, a locked semantic preimage guard, meaningful race/no-op
 regressions, mandatory quick gates and a newly built matching OWN binary.
 No broader 8.5, Params SI folding, licensing or global-clear capability follows
 from this seed.
+
+The later [OWN Comment/Synonym native-STAGED twins](own-native-staged-twins-2026-10-02.md)
+record two completed exclusive Apply experiments and their independently
+reviewed marker outcomes. The remaining retention matrix is still open.
