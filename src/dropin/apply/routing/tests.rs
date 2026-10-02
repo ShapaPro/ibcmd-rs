@@ -245,7 +245,7 @@ fn late_foreign_empty_visibility_and_unknown_failures_never_offer_a_retry() {
         }
         .into(),
         anyhow::anyhow!("COMMIT response lost: exclusive access is not established"),
-        NeedsNativeApply::apply("unknown metadata".into()).into(),
+        NeedsNativeApply::apply("unknown metadata").into(),
     ] {
         let mut db = backend(error, true);
         let mut io = input(b"2\n");
@@ -295,7 +295,7 @@ fn one_explicit_retry_keeps_exclusive_guards_and_cannot_loop_or_fall_back() {
 #[test]
 fn dynamic_choice_preserves_fresh_admission_refusal_and_unknown_outcome() {
     for error in [
-        NeedsNativeApply::apply("stage changed during prompt; CAS refused".into()).into(),
+        NeedsNativeApply::apply("stage changed during prompt; CAS refused").into(),
         anyhow::anyhow!("transaction outcome uncertain; inspect recovery artifact before retry"),
     ] {
         let mut db = backend(refused("db", false), true);
