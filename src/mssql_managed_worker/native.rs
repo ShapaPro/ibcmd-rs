@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -104,6 +105,131 @@ fn ordinary(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn system_console_image() -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buffer = [0u16; 32768];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if length == 0 || length >= buffer.len() {
+        bail!("OS SystemDirectory unproved");
+    }
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])).join("conhost.exe");
+    ordinary(&path)?;
+    Ok(path)
+}
+
+#[cfg(not(windows))]
+fn system_console_image() -> Result<PathBuf> {
+    bail!("Windows lifecycle console authority unavailable")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForeignProcessFact {
+    pid: u32,
+    parent: u32,
+    birth_filetime: Option<u64>,
+    executable_present: bool,
+    executable_path_sha256: Option<String>,
+    command_present: bool,
+    command_sha256: Option<String>,
+    private_root_marker: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShutdownCensus {
+    owned: Vec<CensusIdentity>,
+    foreign: Vec<ForeignProcessFact>,
+    listeners: Vec<Listener>,
+}
+
+fn require_shutdown_census(census: &ShutdownCensus, seeds: &BTreeSet<u32>) -> Result<()> {
+    let mut all = BTreeSet::new();
+    if census.owned.len() + census.foreign.len() > 4096 || census.listeners.len() > 512 {
+        bail!("bounded shutdown census required");
+    }
+    for row in &census.owned {
+        if !all.insert(row.pid)
+            || row.pid == 0
+            || row.birth_filetime == 0
+            || !row.executable.is_absolute()
+            || row.command.is_empty()
+            || row.command.len() > 32768
+        {
+            bail!("complete relevant shutdown identity required");
+        }
+    }
+    for row in &census.foreign {
+        let digest = |present: bool, value: &Option<String>| match value {
+            Some(hash) => {
+                present && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            }
+            None => !present,
+        };
+        if !all.insert(row.pid)
+            || row.private_root_marker == Some(true)
+            || row.private_root_marker.is_some() != row.command_present
+            || !digest(row.command_present, &row.command_sha256)
+            || !digest(row.executable_present, &row.executable_path_sha256)
+            || seeds.contains(&row.pid)
+            || seeds.contains(&row.parent)
+            || (row.pid != 0 && row.birth_filetime == Some(0))
+        {
+            bail!("foreign observation cannot confer owned authority");
+        }
+    }
+    let mut owned = seeds.clone();
+    loop {
+        let previous = owned.len();
+        for row in &census.owned {
+            if owned.contains(&row.parent) {
+                owned.insert(row.pid);
+            }
+        }
+        if previous == owned.len() {
+            break;
+        }
+    }
+    if census.owned.iter().any(|row| !owned.contains(&row.pid))
+        || census
+            .foreign
+            .iter()
+            .any(|row| owned.contains(&row.pid) || owned.contains(&row.parent))
+        || census.listeners.iter().any(|listener| {
+            !owned.contains(&listener.pid)
+                || !census.owned.iter().any(|row| row.pid == listener.pid)
+        })
+    {
+        bail!("unknown private ancestry or selected listener; no signal");
+    }
+    Ok(())
+}
+
+fn shutdown_census_script(root: &str, seeds: &str, ports: &str) -> String {
+    r#"$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 10 | Select-Object -First 4097); if($all.Count -gt 4096){throw 'cold census bound'}
+$listeners=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object {$_.LocalPort -in @(__PORTS__)} | Select-Object -First 513); if($listeners.Count -gt 512){throw 'cold listener bound'}
+$ids=[Collections.Generic.HashSet[uint32]]::new(); foreach($id in @(__SEEDS__)){[void]$ids.Add([uint32]$id)}
+do{$n=$ids.Count; foreach($p in $all){if($ids.Contains([uint32]$p.ParentProcessId)){[void]$ids.Add([uint32]$p.ProcessId)}}}while($n -ne $ids.Count)
+$owned=@();$foreign=@()
+foreach($p in $all){
+ if(($p.CommandLine -and $p.CommandLine.Length -gt 32768) -or ($p.ExecutablePath -and $p.ExecutablePath.Length -gt 32768)){throw 'cold field bound'}
+ $marker=if($p.CommandLine){$p.CommandLine.IndexOf('__ROOT__',[StringComparison]::OrdinalIgnoreCase) -ge 0}else{$null}
+ $selected=$ids.Contains([uint32]$p.ProcessId) -or $marker -eq $true -or @($listeners|Where-Object{$_.OwningProcess -eq $p.ProcessId}).Count -gt 0
+ if($selected){
+  if(!$p.ExecutablePath -or !$p.CommandLine -or !$p.CreationDate){throw 'cold relevant complete identity absent'}
+  $owned+=@{pid=[uint32]$p.ProcessId;parent=[uint32]$p.ParentProcessId;birth_filetime=[uint64]$p.CreationDate.ToFileTimeUtc();executable=$p.ExecutablePath;command=$p.CommandLine}
+ }else{
+  $foreign+=@{pid=[uint32]$p.ProcessId;parent=[uint32]$p.ParentProcessId;birth_filetime=$(if($p.CreationDate){[uint64]$p.CreationDate.ToFileTimeUtc()}else{$null});executable_present=([bool]$p.ExecutablePath);executable_path_sha256=$(if($p.ExecutablePath){[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($p.ExecutablePath)))}else{$null});command_present=([bool]$p.CommandLine);command_sha256=$(if($p.CommandLine){[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($p.CommandLine)))}else{$null});private_root_marker=$marker}
+ }
+}
+$ls=@($listeners|ForEach-Object{@{port=[uint16]$_.LocalPort;pid=[uint32]$_.OwningProcess}})
+ConvertTo-Json -InputObject @{owned=$owned;foreign=$foreign;listeners=$ls} -Depth 5 -Compress"#
+    .replace("__ROOT__", root).replace("__SEEDS__", seeds).replace("__PORTS__", ports)
+}
+
 /// Even failed creation returns its original children/journal. The caller
 /// cannot silently discard uncertain ownership or restart a second attempt.
 pub(crate) enum Creation {
@@ -132,6 +258,9 @@ pub(crate) struct NativeRuntime {
     authenticated_boundary: bool,
     startup_deadline: Option<Instant>,
     anchor_tools: Vec<Tool>,
+    console_tool: Tool,
+    shutdown_handles: BTreeMap<u32, KernelProcess>,
+    cold: bool,
 }
 
 pub(crate) fn create(options: CreatorOptions) -> Result<Creation> {
@@ -165,6 +294,9 @@ pub(crate) fn create(options: CreatorOptions) -> Result<Creation> {
     let journal = Journal::create(&root.join("lifetime.jsonl"), nonce)?;
     let rac = Tool::pin(options.platform_bin.join("rac.exe"))?;
     let pwsh = Tool::pin(options.powershell.clone())?;
+    // SystemDirectory comes from the OS API, never a caller path or mutable
+    // SystemRoot/PATH environment. This Tool confers shutdown-only authority.
+    let console_tool = Tool::pin(system_console_image()?)?;
     let anchor_tools = [
         "ragent.exe",
         "ras.exe",
@@ -208,6 +340,9 @@ pub(crate) fn create(options: CreatorOptions) -> Result<Creation> {
         authenticated_boundary: false,
         startup_deadline: None,
         anchor_tools,
+        console_tool,
+        shutdown_handles: BTreeMap::new(),
+        cold: false,
     };
     let mut journal = journal;
     let result = (|| -> Result<()> {
@@ -240,6 +375,7 @@ pub(crate) fn create(options: CreatorOptions) -> Result<Creation> {
                 registered: false,
                 admitted_worker: None,
                 tainted: false,
+                stopped: false,
             }))
         }
         Err(error) => {
@@ -450,15 +586,261 @@ impl OwnedRuntime for NativeRuntime {
         )?;
         Ok(())
     }
+
+    fn stop_owned(&mut self, journal: &mut Journal) -> Result<()> {
+        if self.failed
+            || self.cold
+            || !self.authenticated_boundary
+            || self.collectors.iter().any(|child| !child.terminal_proved())
+        {
+            bail!("unproved original administration/collector forbids owned shutdown");
+        }
+        self.startup_deadline = Some(
+            Instant::now()
+                .checked_add(self.options.timeout)
+                .context("owned shutdown shared deadline overflow")?,
+        );
+        // A complete authenticated barrier and both endpoint censuses precede
+        // acquisition of any PROCESS_TERMINATE right.
+        let observation = self.observe()?;
+        require_shutdown_inventory(&observation, &self.binding, &self.admitted_load)?;
+        self.require_private_endpoint()?;
+        let first = self.shutdown_census()?;
+        let second = self.shutdown_census()?;
+        let a = self.descendants(&first)?;
+        let b = self.descendants(&second)?;
+        self.console_tool.check()?;
+        require_shutdown_graph(
+            &a,
+            &b,
+            &self.options.platform_bin,
+            &self.console_tool.path,
+            &self.binding,
+        )?;
+        journal.append(
+            "cold_console_lifecycle_tool",
+            (&self.console_tool.path, &self.console_tool.digest),
+        )?;
+        for rows in [&first, &second] {
+            if rows.iter().any(|row| {
+                row.command
+                    .to_ascii_lowercase()
+                    .contains(&self.binding.root.to_string_lossy().to_ascii_lowercase())
+                    && !b.iter().any(|owned| owned.pid == row.pid)
+            }) {
+                bail!("foreign process names shutdown root; no signal");
+            }
+        }
+        for row in &b {
+            if row.pid != self.binding.agent.pid && row.pid != self.binding.ras.pid {
+                self.shutdown_handles
+                    .insert(row.pid, KernelProcess::bind_for_shutdown(row)?);
+            }
+        }
+        journal.append(
+            "cold_descendants_retained",
+            self.shutdown_handles
+                .values()
+                .map(|handle| &handle.identity)
+                .collect::<Vec<_>>(),
+        )?;
+
+        // Stop the spawning anchor first, after retaining the complete union.
+        // Every signal uses an original handle, never a fresh PID lookup.
+        for (agent, expected) in [
+            (true, self.binding.agent.clone()),
+            (false, self.binding.ras.clone()),
+        ] {
+            let rows = self.shutdown_census()?;
+            self.require_shutdown_members(&rows)?;
+            self.console_tool.check()?;
+            let row = rows
+                .iter()
+                .find(|row| row.pid == expected.pid)
+                .context("original shutdown anchor census absent")?;
+            journal.append("cold_direct_stop_intent", &expected)?;
+            let remaining = self.startup_remaining()?.min(Duration::from_secs(5));
+            let anchor = if agent {
+                &mut self.agent
+            } else {
+                &mut self.ras
+            };
+            anchor
+                .as_mut()
+                .context("original shutdown anchor handle absent")?
+                .stop_exact(row, &expected, remaining)?;
+            journal.append("cold_direct_stop_confirmed", &expected)?;
+        }
+        // The agent cannot spawn replacements now. Descendants that exited
+        // naturally are proved through their retained kernel handles.
+        let pids: Vec<_> = self.shutdown_handles.keys().copied().collect();
+        for pid in pids {
+            let rows = self.shutdown_census()?;
+            self.require_shutdown_members(&rows)?;
+            self.console_tool.check()?;
+            let remaining = self.startup_remaining()?.min(Duration::from_secs(5));
+            let handle = self
+                .shutdown_handles
+                .get(&pid)
+                .context("retained shutdown handle absent")?;
+            if let Some(row) = rows.iter().find(|row| row.pid == pid) {
+                journal.append("cold_direct_stop_intent", &handle.identity)?;
+                handle.stop_exact(row, remaining)?;
+                journal.append("cold_direct_stop_confirmed", &handle.identity)?;
+            } else {
+                handle.require_exited()?;
+                journal.append("cold_natural_exit_confirmed", &handle.identity)?;
+            }
+        }
+        // No descendant can still hold an inherited anchor pipe now. Only at
+        // this point prove EOF; a failure remains unproved, never cold/undo.
+        for anchor in [&mut self.agent, &mut self.ras] {
+            let remaining = self
+                .startup_deadline
+                .context("shutdown deadline missing")?
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
+            if remaining.is_zero() {
+                bail!("owned shutdown deadline before pipe proof");
+            }
+            anchor
+                .as_mut()
+                .context("original shutdown anchor absent")?
+                .completed(remaining)?;
+        }
+        self.cold = true;
+        self.require_cold()?;
+        self.startup_remaining()?;
+        self.startup_deadline = None;
+        Ok(())
+    }
+
+    fn require_cold(&mut self) -> Result<()> {
+        self.console_tool.check()?;
+        if !self.cold
+            || self.failed
+            || !self.authenticated_boundary
+            || self.collectors.iter().any(|child| !child.terminal_proved())
+            || !self
+                .agent
+                .as_ref()
+                .is_some_and(OriginalChild::terminal_proved)
+            || !self
+                .ras
+                .as_ref()
+                .is_some_and(OriginalChild::terminal_proved)
+        {
+            bail!("owned original exit/pipe/admin proof incomplete");
+        }
+        for handle in self.shutdown_handles.values() {
+            handle.require_exited()?;
+        }
+        let rows = self.shutdown_census()?;
+        self.require_shutdown_members(&rows)?;
+        if rows.iter().any(|row| self.is_shutdown_member(row)) {
+            bail!("owned shutdown process still present or replaced; no undo");
+        }
+        let ports = self.selected_ports();
+        let raw = self.shell(format!("$ErrorActionPreference='Stop'; if(@(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object {{ $_.LocalPort -in @({ports}) }}).Count) {{throw 'cold private listener present'}}; 'EMPTY'"))?;
+        if raw.trim() != "EMPTY" {
+            bail!("cold private listener absence unproved");
+        }
+        Ok(())
+    }
 }
 
 impl NativeRuntime {
+    fn selected_ports(&self) -> String {
+        [
+            self.options.agent_port,
+            self.options.cluster_port,
+            self.options.ras_port,
+        ]
+        .into_iter()
+        .chain(self.options.worker_first..=self.options.worker_last)
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+    }
+
+    fn shutdown_census(&mut self) -> Result<Vec<CensusIdentity>> {
+        let root = self.binding.root.to_string_lossy().replace('\'', "''");
+        let seeds: BTreeSet<_> = self
+            .agent
+            .as_ref()
+            .map(OriginalChild::pid)
+            .into_iter()
+            .chain(self.ras.as_ref().map(OriginalChild::pid))
+            .chain(self.shutdown_handles.keys().copied())
+            .collect();
+        let text = seeds
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = shutdown_census_script(&root, &text, &self.selected_ports());
+        let raw = self.shell(script)?;
+        let census: ShutdownCensus =
+            serde_json::from_str(&raw).context("bounded owned/opaque-foreign census shape")?;
+        require_shutdown_census(&census, &seeds)?;
+        Ok(census.owned)
+    }
+    fn is_shutdown_member(&self, row: &CensusIdentity) -> bool {
+        row.pid == self.binding.agent.pid
+            || row.pid == self.binding.ras.pid
+            || self.shutdown_handles.contains_key(&row.pid)
+            || row
+                .command
+                .to_ascii_lowercase()
+                .contains(&self.binding.root.to_string_lossy().to_ascii_lowercase())
+            || row.parent == self.binding.agent.pid
+            || row.parent == self.binding.ras.pid
+            || self.shutdown_handles.contains_key(&row.parent)
+    }
+
+    fn require_shutdown_members(&self, rows: &[CensusIdentity]) -> Result<()> {
+        for (child, expected) in [
+            (&self.agent, &self.binding.agent),
+            (&self.ras, &self.binding.ras),
+        ] {
+            match rows.iter().find(|row| row.pid == expected.pid) {
+                Some(row) => require_shutdown_identity(row, expected)?,
+                None if child
+                    .as_ref()
+                    .is_some_and(OriginalChild::direct_exit_proved) => {}
+                None => bail!("original shutdown anchor absent without original direct exit proof"),
+            }
+        }
+        for handle in self.shutdown_handles.values() {
+            match rows.iter().find(|row| row.pid == handle.identity.pid) {
+                Some(row) => handle.require_current(row)?,
+                None => handle.require_exited()?,
+            }
+        }
+        for row in rows.iter().filter(|row| self.is_shutdown_member(row)) {
+            if row.pid != self.binding.agent.pid
+                && row.pid != self.binding.ras.pid
+                && !self.shutdown_handles.contains_key(&row.pid)
+            {
+                bail!("new or unknown descendant during shutdown; retain lifetime");
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn require_endpoint(&self, rac: &Path, endpoint: &str, server: &str) -> Result<()> {
         if rac != self.rac.path
             || endpoint != format!("localhost:{}", self.options.ras_port)
             || server != self.options.database_server
         {
             bail!("managed runtime endpoint does not match original creator");
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_cold_sql_target(&self, sql: &crate::sql::SqlExec) -> Result<()> {
+        if sql.server() != self.options.database_server || sql.client().is_none() {
+            bail!("cold undo SQL endpoint/backend differs from original creator");
         }
         Ok(())
     }
@@ -553,10 +935,11 @@ impl NativeRuntime {
     }
 
     fn census(&mut self) -> Result<Vec<CensusIdentity>> {
-        let raw = self.shell("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=@(Get-CimInstance Win32_Process -OperationTimeoutSec 10 | Where-Object { $_.Name -in @('ragent.exe','ras.exe','rmngr.exe','rphost.exe','dbda.exe') } | Select-Object -First 257); if($p.Count -gt 256){throw 'census bound'}; $r=@($p | ForEach-Object { if(!$_.ExecutablePath -or !$_.CommandLine -or !$_.CreationDate){throw 'incomplete identity'}; @{pid=[uint32]$_.ProcessId;parent=[uint32]$_.ParentProcessId;birth_filetime=[uint64]$_.CreationDate.ToFileTimeUtc();executable=$_.ExecutablePath;command=$_.CommandLine} }); ConvertTo-Json -InputObject $r -Depth 4 -Compress".into())?;
-        serde_json::from_str(&raw).context("managed census shape")
+        // Full identities are required only for the original graph, root
+        // markers and selected listeners. Opaque foreign service facts grant
+        // no registration, worker or signal authority.
+        self.shutdown_census()
     }
-
     /// No command is addressed to a port merely because it was vacant at
     /// creation. Bind every current listener between two complete censuses.
     fn require_private_endpoint(&mut self) -> Result<()> {
@@ -899,6 +1282,118 @@ impl NativeRuntime {
     }
 }
 
+fn require_shutdown_graph(
+    first: &[&CensusIdentity],
+    second: &[&CensusIdentity],
+    platform: &Path,
+    console: &Path,
+    binding: &LifetimeBinding,
+) -> Result<()> {
+    if first.len() != second.len() || second.len() < 2 || second.len() > 64 {
+        bail!("complete bounded original shutdown graph required");
+    }
+    for row in second {
+        let old = first
+            .iter()
+            .find(|old| old.pid == row.pid)
+            .context("shutdown graph drift")?;
+        if row.parent != old.parent
+            || row.birth_filetime != old.birth_filetime
+            || row.command != old.command
+            || row.executable != old.executable
+            || row.command.is_empty()
+            || row.birth_filetime == 0
+        {
+            bail!("shutdown graph full identity drift");
+        }
+        let image = row
+            .executable
+            .file_name()
+            .context("shutdown image absent")?
+            .to_string_lossy();
+        let server_image = [
+            "ragent.exe",
+            "ras.exe",
+            "rmngr.exe",
+            "rphost.exe",
+            "dbda.exe",
+        ]
+        .iter()
+        .any(|name| image.eq_ignore_ascii_case(name))
+            && row
+                .executable
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&platform.join(image.as_ref()).to_string_lossy());
+        let lifecycle_console = image.eq_ignore_ascii_case("conhost.exe")
+            && console.is_absolute()
+            && row
+                .executable
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&console.to_string_lossy());
+        if !server_image && !lifecycle_console {
+            bail!("unknown shutdown descendant executable; no signal");
+        }
+        if row.pid != binding.agent.pid && row.pid != binding.ras.pid {
+            let parent = second
+                .iter()
+                .find(|p| p.pid == row.parent)
+                .context("shutdown descendant parent outside retained graph")?;
+            if row.pid == row.parent || parent.birth_filetime > row.birth_filetime {
+                bail!("shutdown descendant genesis unproved");
+            }
+        }
+    }
+    for expected in [&binding.agent, &binding.ras] {
+        let row = second
+            .iter()
+            .find(|row| row.pid == expected.pid)
+            .context("shutdown anchor missing")?;
+        require_shutdown_identity(row, expected)?;
+    }
+    Ok(())
+}
+
+fn require_shutdown_identity(row: &CensusIdentity, expected: &ProcessIdentity) -> Result<()> {
+    if row.pid != expected.pid
+        || row.parent != expected.parent
+        || row.birth_filetime > expected.birth_100ns
+        || expected.birth_100ns
+            > row
+                .birth_filetime
+                .checked_add(9)
+                .context("shutdown birth interval overflow")?
+        || !row
+            .executable
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.executable.to_string_lossy())
+        || format!("{:X}", Sha256::digest(row.command.as_bytes())) != expected.command_sha256
+    {
+        bail!("original shutdown anchor identity drift");
+    }
+    Ok(())
+}
+
+fn require_shutdown_inventory(
+    observation: &Observation,
+    binding: &LifetimeBinding,
+    retained: &BTreeSet<Uuid>,
+) -> Result<()> {
+    let sole = BTreeSet::from([binding.infobase]);
+    if binding.infobase.is_nil()
+        || observation.binding != *binding
+        || retained != &sole
+        || observation.registrations != sole
+        || observation.loaded != sole
+        || !observation.password_only_admins_exact
+        || !observation.authenticated_inventory_exact
+        || !observation.lease_original_handle_exact
+        || observation.unknown_administration
+    {
+        bail!("fresh sole target/history/administration changed before owned shutdown; no signal");
+    }
+    Ok(())
+}
+
 fn remaining_budget(
     deadline: Option<Instant>,
     now: Instant,
@@ -1032,6 +1527,201 @@ fn measured_denials() -> &'static [DenialFingerprint] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_foreign_census_is_opaque_and_cannot_own_listener_or_descendant() {
+        let full = |pid, parent, name: &str| CensusIdentity {
+            pid,
+            parent,
+            birth_filetime: 100,
+            executable: std::env::temp_dir().join(name),
+            command: format!("{name} original"),
+        };
+        let mut census = ShutdownCensus {
+            owned: vec![
+                full(10, 1, "ragent.exe"),
+                full(11, 1, "ras.exe"),
+                full(12, 10, "conhost.exe"),
+            ],
+            foreign: vec![ForeignProcessFact {
+                pid: 900,
+                parent: 800,
+                birth_filetime: None,
+                executable_present: false,
+                executable_path_sha256: None,
+                command_present: false,
+                command_sha256: None,
+                private_root_marker: None,
+            }],
+            listeners: vec![Listener {
+                pid: 10,
+                port: 7540,
+            }],
+        };
+        let seeds = BTreeSet::from([10, 11]);
+        assert!(require_shutdown_census(&census, &seeds).is_ok());
+        census.listeners.push(Listener {
+            pid: 900,
+            port: 7545,
+        });
+        assert!(require_shutdown_census(&census, &seeds).is_err());
+        census.listeners.pop();
+        census.foreign[0].parent = 12;
+        assert!(require_shutdown_census(&census, &seeds).is_err());
+        census.foreign[0].parent = 800;
+        census.foreign[0].private_root_marker = Some(true);
+        assert!(require_shutdown_census(&census, &seeds).is_err());
+        census.foreign[0].private_root_marker = None;
+        census.owned.push(full(901, 800, "unknown-root-marker.exe"));
+        assert!(require_shutdown_census(&census, &seeds).is_err());
+        census.owned.pop();
+        census.owned[2].command.clear();
+        assert!(require_shutdown_census(&census, &seeds).is_err());
+        let script = shutdown_census_script("C:\\owned", "10,11", "7540,7545");
+        assert!(script.contains("if($selected)"));
+        assert!(script.contains("command_sha256="));
+        assert!(!script.contains("Name -in"));
+        assert!(!script.contains("__ROOT__"));
+    }
+
+    #[test]
+    fn shutdown_graph_requires_every_complete_original_and_pinned_descendant() {
+        let platform = std::env::temp_dir().join("owned-shutdown-platform");
+        let console = std::env::temp_dir().join("trusted-os/System32/conhost.exe");
+        let make = |pid, parent, name: &str| CensusIdentity {
+            pid,
+            parent,
+            birth_filetime: 100,
+            executable: platform.join(name),
+            command: format!("{name} exact original command"),
+        };
+        let agent = make(10, 1, "ragent.exe");
+        let ras = make(11, 1, "ras.exe");
+        let worker = make(12, 10, "rphost.exe");
+        let identity = |row: &CensusIdentity| ProcessIdentity {
+            pid: row.pid,
+            parent: row.parent,
+            birth_100ns: 106,
+            executable: row.executable.clone(),
+            command_sha256: format!("{:X}", Sha256::digest(row.command.as_bytes())),
+        };
+        let binding = LifetimeBinding {
+            nonce: Uuid::new_v4(),
+            root: std::env::temp_dir(),
+            cluster: Uuid::new_v4(),
+            infobase: Uuid::new_v4(),
+            database: "one".into(),
+            agent: identity(&agent),
+            ras: identity(&ras),
+        };
+        let clean = [&agent, &ras, &worker];
+        assert!(require_shutdown_graph(&clean, &clean, &platform, &console, &binding).is_ok());
+        let console_row = CensusIdentity {
+            pid: 13,
+            parent: 10,
+            birth_filetime: 100,
+            executable: console.clone(),
+            command: "exact inherited lifecycle console".into(),
+        };
+        let with_console = [&agent, &ras, &worker, &console_row];
+        assert!(
+            require_shutdown_graph(&with_console, &with_console, &platform, &console, &binding)
+                .is_ok()
+        );
+        let foreign_console = CensusIdentity {
+            executable: platform.join("conhost.exe"),
+            ..console_row
+        };
+        let foreign = [&agent, &ras, &worker, &foreign_console];
+        assert!(require_shutdown_graph(&foreign, &foreign, &platform, &console, &binding).is_err());
+        assert!(require_working_image(&foreign_console, &platform.join("rphost.exe"), 99).is_err());
+        let make_observation = || Observation {
+            binding: binding.clone(),
+            registrations: BTreeSet::from([binding.infobase]),
+            loaded: BTreeSet::from([binding.infobase]),
+            worker: Some((Uuid::new_v4(), identity(&worker))),
+            password_only_admins_exact: true,
+            authenticated_inventory_exact: true,
+            lease_original_handle_exact: true,
+            unknown_administration: false,
+        };
+        let retained = BTreeSet::from([binding.infobase]);
+        assert!(require_shutdown_inventory(&make_observation(), &binding, &retained).is_ok());
+        for drift in [
+            "second_registration",
+            "second_load",
+            "unregistered",
+            "admin",
+            "lease",
+            "uuid",
+        ] {
+            let mut o = make_observation();
+            match drift {
+                "second_registration" => {
+                    o.registrations.insert(Uuid::new_v4());
+                }
+                "second_load" => {
+                    o.loaded.insert(Uuid::new_v4());
+                }
+                "unregistered" => o.registrations.clear(),
+                "admin" => o.unknown_administration = true,
+                "lease" => o.lease_original_handle_exact = false,
+                _ => o.binding.infobase = Uuid::new_v4(),
+            }
+            assert!(
+                require_shutdown_inventory(&o, &binding, &retained).is_err(),
+                "{drift}"
+            );
+        }
+        assert!(
+            require_shutdown_inventory(
+                &make_observation(),
+                &binding,
+                &BTreeSet::from([binding.infobase, Uuid::new_v4()])
+            )
+            .is_err()
+        );
+        for change in [
+            "parent",
+            "birth",
+            "command",
+            "foreign_image",
+            "unknown_image",
+        ] {
+            let mut changed = make(12, 10, "rphost.exe");
+            match change {
+                "parent" => changed.parent = 99,
+                "birth" => changed.birth_filetime += 1,
+                "command" => changed.command.push('x'),
+                "foreign_image" => {
+                    changed.executable = std::env::temp_dir().join("foreign/rphost.exe")
+                }
+                _ => changed.executable = platform.join("powershell.exe"),
+            }
+            let altered = [&agent, &ras, &changed];
+            assert!(
+                require_shutdown_graph(&clean, &altered, &platform, &console, &binding).is_err(),
+                "{change}"
+            );
+            if change.ends_with("image") {
+                assert!(
+                    require_shutdown_graph(&altered, &altered, &platform, &console, &binding)
+                        .is_err()
+                );
+            }
+        }
+        assert!(
+            require_shutdown_graph(&clean, &[&agent, &ras], &platform, &console, &binding).is_err()
+        );
+        let mut overlap = binding.clone();
+        overlap.agent.birth_100ns = 109;
+        assert!(require_shutdown_graph(&clean, &clean, &platform, &console, &overlap).is_ok());
+        overlap.agent.birth_100ns = 110;
+        assert!(require_shutdown_graph(&clean, &clean, &platform, &console, &overlap).is_err());
+        overlap = binding;
+        overlap.ras.command_sha256 = "0".repeat(64);
+        assert!(require_shutdown_graph(&clean, &clean, &platform, &console, &overlap).is_err());
+    }
 
     #[test]
     fn working_image_without_any_listener_still_requires_exact_pinned_executable() {

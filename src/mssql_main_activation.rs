@@ -1302,7 +1302,7 @@ fn is_existing_body_target(name: &str) -> bool {
         && (suffix.is_empty() || suffix.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn generation_from_versions(blob: &[u8]) -> Result<Uuid, MainActivationError> {
+pub(crate) fn generation_from_versions(blob: &[u8]) -> Result<Uuid, MainActivationError> {
     let mut decoder = DeflateDecoder::new(blob).take((MAX_INFLATED_VERSIONS_BYTES + 1) as u64);
     let mut plain = Vec::new();
     decoder

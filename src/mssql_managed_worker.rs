@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 mod child;
 mod native;
+pub(crate) mod undo;
 pub(crate) use native::{Creation, CreatorOptions, create};
 pub(crate) type NativeManagedWorker = ManagedWorker<native::NativeRuntime>;
 #[cfg(test)]
@@ -65,6 +66,12 @@ pub(crate) trait OwnedRuntime {
     fn register(&mut self) -> Result<Uuid>;
     fn load(&mut self, infobase: Uuid) -> Result<()>;
     fn turn_off(&mut self, worker_id: Uuid, identity: &ProcessIdentity) -> Result<()>;
+    fn stop_owned(&mut self, _journal: &mut Journal) -> Result<()> {
+        bail!("owned cold shutdown is unsupported by this runtime")
+    }
+    fn require_cold(&mut self) -> Result<()> {
+        bail!("original owned cold lifetime is not proved")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -198,6 +205,7 @@ pub(crate) struct ManagedWorker<R: OwnedRuntime> {
     registered: bool,
     admitted_worker: Option<(Uuid, ProcessIdentity)>,
     tainted: bool,
+    stopped: bool,
 }
 
 impl<R: OwnedRuntime> ManagedWorker<R> {
@@ -221,6 +229,7 @@ impl<R: OwnedRuntime> ManagedWorker<R> {
             registered: false,
             admitted_worker: None,
             tainted: false,
+            stopped: false,
         };
         let observation = session.checked_observation()?;
         if !observation.registrations.is_empty()
@@ -236,7 +245,7 @@ impl<R: OwnedRuntime> ManagedWorker<R> {
     }
 
     fn checked_observation(&mut self) -> Result<Observation> {
-        if self.tainted || self.journal.failed {
+        if self.tainted || self.journal.failed || self.stopped {
             bail!("managed lifetime already unproved; retained journal requires recovery");
         }
         let result = (|| -> Result<Observation> {
@@ -361,6 +370,32 @@ impl<R: OwnedRuntime> ManagedWorker<R> {
         }
     }
 
+    /// Retains the original runtime and exclusive journal on failure. There is
+    /// no automatic Drop cleanup, replay constructor or PID-absence shortcut.
+    pub(crate) fn shutdown(&mut self) -> Result<ColdSession<'_, R>> {
+        self.prepare()?;
+        self.journal
+            .append("cold_shutdown_intent", &self.binding.nonce.to_string())?;
+        let result = self.runtime.stop_owned(&mut self.journal);
+        // Even a fully proved stop invalidates every publication capability.
+        self.stopped = true;
+        if let Err(error) = result {
+            self.tainted = true;
+            self.journal.append("cold_shutdown_unproved", ())?;
+            return Err(error.context("owned shutdown unproved; lifetime retained"));
+        }
+        if let Err(error) = self.runtime.require_cold() {
+            self.tainted = true;
+            self.journal.append("cold_shutdown_unproved", ())?;
+            return Err(error);
+        }
+        self.journal.append("cold_shutdown_confirmed", ())?;
+        Ok(ColdSession {
+            session: self,
+            undo_attempted: false,
+        })
+    }
+
     /// Real orchestration seam: stage and commit callbacks are unreachable on
     /// ownership refusal. Uncertain SQL and post-commit handoff are returned
     /// as distinct states; neither can be rewritten as a successful rollback.
@@ -427,6 +462,61 @@ impl<R: OwnedRuntime> ManagedWorker<R> {
             handoff_proved: true,
             diagnostic: None,
         })
+    }
+}
+
+/// A borrowed live authority, never serialized or recovered from a user's
+/// certificate. The runtime/lease and original exited handles stay retained.
+pub(crate) struct ColdSession<'a, R: OwnedRuntime> {
+    session: &'a mut ManagedWorker<R>,
+    undo_attempted: bool,
+}
+
+impl<R: OwnedRuntime> ColdSession<'_, R> {
+    pub(crate) fn require_current(&mut self) -> Result<()> {
+        self.session.journal.require_original()?;
+        if self.session.tainted || !self.session.stopped {
+            bail!("original cold lifetime authority lost");
+        }
+        let result = self.session.runtime.require_cold();
+        if result.is_err() {
+            self.session.tainted = true;
+        }
+        result
+    }
+
+    /// Internal executor seam only. The caller's transaction must perform
+    /// database identity and full published-postimage CAS before its writes.
+    /// Unknown SQL outcome never allows a second dispatch with this authority.
+    pub(crate) fn run_cold_transaction_once<T>(
+        &mut self,
+        undo: impl FnOnce(&LifetimeBinding) -> Result<T>,
+    ) -> Result<T> {
+        if self.undo_attempted {
+            bail!("undo already dispatched; retained outcome must be inspected");
+        }
+        self.require_current()?;
+        self.session.journal.append("guarded_undo_intent", ())?;
+        self.undo_attempted = true;
+        match undo(&self.session.binding) {
+            Ok(value) => {
+                self.session
+                    .journal
+                    .append("guarded_undo_sql_confirmed", ())?;
+                // Report a late restarted process as failure, never silently
+                // claim the committed SQL was rolled back.
+                self.require_current()
+                    .context("undo SQL confirmed but cold postcondition unproved")?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.session.tainted = true;
+                self.session
+                    .journal
+                    .append("guarded_undo_sql_unproved", ())?;
+                Err(error.context("undo SQL outcome unproved; no automatic retry"))
+            }
+        }
     }
 }
 
