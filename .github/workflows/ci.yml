@@ -75,9 +75,8 @@ jobs:
         run: cargo test --locked -p ibcmd-rs --test xml_profiles
 
       # The root library's unit tests (the converters and the load/export
-      # engines) have only been measured on Windows so far.
+      # engines) build their paths portably, so they run on every OS.
       - name: Test the root library
-        if: runner.os == 'Windows'
         run: cargo test --locked -p ibcmd-rs --lib --no-default-features
 
   legacy-windows:

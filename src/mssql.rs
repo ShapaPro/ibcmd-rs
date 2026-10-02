@@ -10116,11 +10116,15 @@ fn qualified_table(database: &str, table: &str) -> String {
     format!("{}.dbo.{}", quote_ident(database), quote_ident(table))
 }
 
+/// `file_name` in the folder of `source`, a file path on the database
+/// server: SQL Server on Windows spells it with `\\`, on Linux with `/`,
+/// whatever the platform this client runs on, so the folder is cut at the last
+/// separator of either kind and the separator kept.
 fn sibling_path(source: &str, file_name: &str) -> Result<String> {
-    let parent = Path::new(source)
-        .parent()
+    let cut = source
+        .rfind(['\\', '/'])
         .ok_or_else(|| anyhow!("cannot find parent path for {source}"))?;
-    Ok(parent.join(file_name).to_string_lossy().to_string())
+    Ok(format!("{}{file_name}", &source[..=cut]))
 }
 
 fn quote_ident(value: &str) -> String {
@@ -11791,31 +11795,49 @@ mod tests {
         );
     }
 
+    /// A path written the Windows way (`Catalogs\Products.xml`), in the
+    /// separators of the platform the test runs on: the inference functions
+    /// join components, so the expectation has to be components too.
+    fn native_path(windows_spelling: &str) -> std::path::PathBuf {
+        windows_spelling.split('\\').collect()
+    }
+
     #[test]
     fn infers_common_module_text_path_from_xml_path() {
         assert_eq!(
-            infer_common_module_text_path(r"CommonModules\РаботаСБанкамиВызовСервера.xml".as_ref()),
-            std::path::PathBuf::from(r"CommonModules\РаботаСБанкамиВызовСервера\Ext\Module.bsl")
+            infer_common_module_text_path(
+                native_path(r"CommonModules\РаботаСБанкамиВызовСервера.xml").as_path()
+            ),
+            native_path(r"CommonModules\РаботаСБанкамиВызовСервера\Ext\Module.bsl")
         );
     }
 
     #[test]
     fn infers_raw_deflated_metadata_body_paths() {
         assert_eq!(
-            super::infer_common_picture_body_path(r"CommonPictures\Address.xml".as_ref()),
-            std::path::PathBuf::from(r"CommonPictures\Address\Ext\Picture.xml")
+            super::infer_common_picture_body_path(
+                native_path(r"CommonPictures\Address.xml").as_path()
+            ),
+            native_path(r"CommonPictures\Address\Ext\Picture.xml")
         );
         assert_eq!(
-            super::infer_object_help_body_path(r"Catalogs\Products.xml".as_ref(), "Catalog"),
-            std::path::PathBuf::from(r"Catalogs\Products\Ext\Help.xml")
+            super::infer_object_help_body_path(
+                native_path(r"Catalogs\Products.xml").as_path(),
+                "Catalog"
+            ),
+            native_path(r"Catalogs\Products\Ext\Help.xml")
         );
         assert_eq!(
-            super::infer_xdto_package_body_path(r"XDTOPackages\Exchange.xml".as_ref()),
-            std::path::PathBuf::from(r"XDTOPackages\Exchange\Ext\Package.bin")
+            super::infer_xdto_package_body_path(
+                native_path(r"XDTOPackages\Exchange.xml").as_path()
+            ),
+            native_path(r"XDTOPackages\Exchange\Ext\Package.bin")
         );
         assert_eq!(
-            super::infer_ws_reference_definition_path(r"WSReferences\UpdateFiles.xml".as_ref()),
-            std::path::PathBuf::from(r"WSReferences\UpdateFiles\Ext\WSDefinition.xml")
+            super::infer_ws_reference_definition_path(
+                native_path(r"WSReferences\UpdateFiles.xml").as_path()
+            ),
+            native_path(r"WSReferences\UpdateFiles\Ext\WSDefinition.xml")
         );
     }
 
@@ -11966,102 +11988,115 @@ mod tests {
         );
         assert_eq!(super::additional_indexes_body_suffix("Catalog"), None);
         assert_eq!(
-            super::infer_additional_indexes_body_path(r"Documents\Order.xml".as_ref()),
-            std::path::PathBuf::from(r"Documents\Order\Ext\AdditionalIndexes.xml")
+            super::infer_additional_indexes_body_path(
+                native_path(r"Documents\Order.xml").as_path()
+            ),
+            native_path(r"Documents\Order\Ext\AdditionalIndexes.xml")
         );
     }
 
     #[test]
     fn infers_object_module_body_paths() {
         assert_eq!(
-            super::infer_object_module_body_path(r"Catalogs\Products.xml".as_ref(), "Catalog", "0"),
-            std::path::PathBuf::from(r"Catalogs\Products\Ext\ObjectModule.bsl")
+            super::infer_object_module_body_path(
+                native_path(r"Catalogs\Products.xml").as_path(),
+                "Catalog",
+                "0"
+            ),
+            native_path(r"Catalogs\Products\Ext\ObjectModule.bsl")
         );
         assert_eq!(
             super::infer_object_module_body_path(
-                r"InformationRegisters\Prices.xml".as_ref(),
+                native_path(r"InformationRegisters\Prices.xml").as_path(),
                 "InformationRegister",
                 "1"
             ),
-            std::path::PathBuf::from(r"InformationRegisters\Prices\Ext\RecordSetModule.bsl")
+            native_path(r"InformationRegisters\Prices\Ext\RecordSetModule.bsl")
         );
         assert_eq!(
             super::infer_object_module_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "Configuration",
                 "6"
             ),
-            std::path::PathBuf::from(r"Ext\ManagedApplicationModule.bsl")
+            native_path(r"Ext\ManagedApplicationModule.bsl")
         );
     }
 
     #[test]
     fn infers_configuration_ext_body_paths() {
         assert_eq!(
-            super::infer_configuration_ext_body_path(r"Configuration.xml".as_ref(), "Splash.xml"),
-            std::path::PathBuf::from(r"Ext\Splash.xml")
+            super::infer_configuration_ext_body_path(
+                native_path(r"Configuration.xml").as_path(),
+                "Splash.xml"
+            ),
+            native_path(r"Ext\Splash.xml")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "ParentConfigurations.bin"
             ),
-            std::path::PathBuf::from(r"Ext\ParentConfigurations.bin")
+            native_path(r"Ext\ParentConfigurations.bin")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "MobileClientSignature.bin"
             ),
-            std::path::PathBuf::from(r"Ext\MobileClientSignature.bin")
+            native_path(r"Ext\MobileClientSignature.bin")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "CommandInterface.xml"
             ),
-            std::path::PathBuf::from(r"Ext\CommandInterface.xml")
+            native_path(r"Ext\CommandInterface.xml")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "HomePageWorkArea.xml"
             ),
-            std::path::PathBuf::from(r"Ext\HomePageWorkArea.xml")
+            native_path(r"Ext\HomePageWorkArea.xml")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "ClientApplicationInterface.xml"
             ),
-            std::path::PathBuf::from(r"Ext\ClientApplicationInterface.xml")
+            native_path(r"Ext\ClientApplicationInterface.xml")
         );
         assert_eq!(
             super::infer_configuration_ext_body_path(
-                r"Configuration.xml".as_ref(),
+                native_path(r"Configuration.xml").as_path(),
                 "StandaloneConfigurationContent.bin"
             ),
-            std::path::PathBuf::from(r"Ext\StandaloneConfigurationContent.bin")
+            native_path(r"Ext\StandaloneConfigurationContent.bin")
         );
     }
 
     #[test]
     fn infers_form_body_paths() {
         assert_eq!(
-            super::infer_form_body_path(r"Catalogs\Products\Forms\ItemForm.xml".as_ref()),
-            std::path::PathBuf::from(r"Catalogs\Products\Forms\ItemForm\Ext\Form.xml")
+            super::infer_form_body_path(
+                native_path(r"Catalogs\Products\Forms\ItemForm.xml").as_path()
+            ),
+            native_path(r"Catalogs\Products\Forms\ItemForm\Ext\Form.xml")
         );
         assert_eq!(
-            super::infer_form_module_body_path(r"CommonForms\SharedForm.xml".as_ref()),
-            std::path::PathBuf::from(r"CommonForms\SharedForm\Ext\Form\Module.bsl")
+            super::infer_form_module_body_path(
+                native_path(r"CommonForms\SharedForm.xml").as_path()
+            ),
+            native_path(r"CommonForms\SharedForm\Ext\Form\Module.bsl")
         );
     }
 
     #[test]
     fn infers_role_rights_body_path() {
         assert_eq!(
-            super::infer_role_rights_body_path(r"Roles\Editor.xml".as_ref()),
-            std::path::PathBuf::from(r"Roles\Editor\Ext\Rights.xml")
+            super::infer_role_rights_body_path(native_path(r"Roles\Editor.xml").as_path()),
+            native_path(r"Roles\Editor\Ext\Rights.xml")
         );
     }
 
@@ -12503,12 +12538,12 @@ mod tests {
 
     #[test]
     fn filters_source_paths_by_prefix() {
-        let root = PathBuf::from(r"C:\sources");
+        let root = native_path(r"C:\sources");
         let paths = vec![
-            PathBuf::from(r"C:\sources\Catalogs\Products.xml"),
-            PathBuf::from(r"C:\sources\Catalogs\Products\Forms\ItemForm.xml"),
-            PathBuf::from(r"C:\sources\Catalogs\Services.xml"),
-            PathBuf::from(r"C:\sources\CommonModules\Utils.xml"),
+            native_path(r"C:\sources\Catalogs\Products.xml"),
+            native_path(r"C:\sources\Catalogs\Products\Forms\ItemForm.xml"),
+            native_path(r"C:\sources\Catalogs\Services.xml"),
+            native_path(r"C:\sources\CommonModules\Utils.xml"),
         ];
 
         let filtered = filter_source_paths_by_prefix(
@@ -16315,8 +16350,11 @@ mod tests {
     #[test]
     fn infers_command_interface_body_path_and_suffix() {
         assert_eq!(
-            super::infer_command_interface_body_path(r"Subsystems\Admin.xml".as_ref(), "Subsystem"),
-            std::path::PathBuf::from(r"Subsystems\Admin\Ext\CommandInterface.xml")
+            super::infer_command_interface_body_path(
+                native_path(r"Subsystems\Admin.xml").as_path(),
+                "Subsystem"
+            ),
+            native_path(r"Subsystems\Admin\Ext\CommandInterface.xml")
         );
         assert_eq!(
             super::command_interface_body_suffix("CommonCommand"),
@@ -16329,16 +16367,18 @@ mod tests {
     #[test]
     fn infers_exchange_plan_content_body_path() {
         assert_eq!(
-            super::infer_exchange_plan_content_body_path(r"ExchangePlans\Sync.xml".as_ref()),
-            std::path::PathBuf::from(r"ExchangePlans\Sync\Ext\Content.xml")
+            super::infer_exchange_plan_content_body_path(
+                native_path(r"ExchangePlans\Sync.xml").as_path()
+            ),
+            native_path(r"ExchangePlans\Sync\Ext\Content.xml")
         );
     }
 
     #[test]
     fn infers_predefined_data_body_path_and_suffix() {
         assert_eq!(
-            super::infer_predefined_data_body_path(r"Catalogs\Products.xml".as_ref()),
-            std::path::PathBuf::from(r"Catalogs\Products\Ext\Predefined.xml")
+            super::infer_predefined_data_body_path(native_path(r"Catalogs\Products.xml").as_path()),
+            native_path(r"Catalogs\Products\Ext\Predefined.xml")
         );
         assert_eq!(super::predefined_data_body_suffix("Catalog"), Some("1c"));
         assert_eq!(
@@ -16352,9 +16392,9 @@ mod tests {
     fn infers_business_process_flowchart_body_path() {
         assert_eq!(
             super::infer_business_process_flowchart_body_path(
-                r"BusinessProcesses\Approval.xml".as_ref()
+                native_path(r"BusinessProcesses\Approval.xml").as_path()
             ),
-            std::path::PathBuf::from(r"BusinessProcesses\Approval\Ext\Flowchart.xml")
+            native_path(r"BusinessProcesses\Approval\Ext\Flowchart.xml")
         );
     }
 
@@ -16439,60 +16479,62 @@ mod tests {
     fn infers_raw_deflated_template_body_paths() {
         assert_eq!(
             super::infer_raw_deflated_template_body_path(
-                r"CommonTemplates\SharedText.xml".as_ref(),
+                native_path(r"CommonTemplates\SharedText.xml").as_path(),
                 "TextDocument"
             ),
-            Some(std::path::PathBuf::from(
-                r"CommonTemplates\SharedText\Ext\Template.txt"
-            ))
+            Some(native_path(r"CommonTemplates\SharedText\Ext\Template.txt"))
         );
         assert_eq!(
             super::infer_raw_deflated_template_body_path(
-                r"DataProcessors\ImportData\Templates\Schema.xml".as_ref(),
+                native_path(r"DataProcessors\ImportData\Templates\Schema.xml").as_path(),
                 "DataCompositionSchema"
             ),
-            Some(std::path::PathBuf::from(
+            Some(native_path(
                 r"DataProcessors\ImportData\Templates\Schema\Ext\Template.xml"
             ))
         );
         assert_eq!(
             super::infer_raw_deflated_template_body_path(
-                r"CommonTemplates\ReportAppearance.xml".as_ref(),
+                native_path(r"CommonTemplates\ReportAppearance.xml").as_path(),
                 "DataCompositionAppearanceTemplate"
             ),
-            Some(std::path::PathBuf::from(
+            Some(native_path(
                 r"CommonTemplates\ReportAppearance\Ext\Template.xml"
             ))
         );
         assert_eq!(
             super::infer_raw_deflated_template_body_path(
-                r"DataProcessors\Routes\Templates\RouteSchema.xml".as_ref(),
+                native_path(r"DataProcessors\Routes\Templates\RouteSchema.xml").as_path(),
                 "GraphicalSchema"
             ),
-            Some(std::path::PathBuf::from(
+            Some(native_path(
                 r"DataProcessors\Routes\Templates\RouteSchema\Ext\Template.xml"
             ))
         );
         assert_eq!(
             super::infer_raw_deflated_template_body_path(
-                r"CommonTemplates\Table.xml".as_ref(),
+                native_path(r"CommonTemplates\Table.xml").as_path(),
                 "SpreadsheetDocument"
             ),
             None
         );
         assert_eq!(
-            super::infer_spreadsheet_template_body_path(r"CommonTemplates\Table.xml".as_ref()),
-            std::path::PathBuf::from(r"CommonTemplates\Table\Ext\Template.xml")
+            super::infer_spreadsheet_template_body_path(
+                native_path(r"CommonTemplates\Table.xml").as_path()
+            ),
+            native_path(r"CommonTemplates\Table\Ext\Template.xml")
         );
         assert_eq!(
-            super::infer_binary_template_body_path(r"CommonTemplates\Archive.xml".as_ref()),
-            std::path::PathBuf::from(r"CommonTemplates\Archive\Ext\Template.bin")
+            super::infer_binary_template_body_path(
+                native_path(r"CommonTemplates\Archive.xml").as_path()
+            ),
+            native_path(r"CommonTemplates\Archive\Ext\Template.bin")
         );
         assert_eq!(
             super::infer_html_template_body_path(
-                r"Catalogs\Products\Templates\Description.xml".as_ref()
+                native_path(r"Catalogs\Products\Templates\Description.xml").as_path()
             ),
-            std::path::PathBuf::from(r"Catalogs\Products\Templates\Description\Ext\Template.xml")
+            native_path(r"Catalogs\Products\Templates\Description\Ext\Template.xml")
         );
     }
 
@@ -16520,6 +16562,11 @@ mod tests {
         let path = super::sibling_path(r"C:\temp\source\db.mdf", "target.mdf").unwrap();
 
         assert_eq!(path, r"C:\temp\source\target.mdf");
+        assert_eq!(
+            super::sibling_path("/var/opt/mssql/data/db.mdf", "target.mdf").unwrap(),
+            "/var/opt/mssql/data/target.mdf"
+        );
+        assert!(super::sibling_path("db.mdf", "target.mdf").is_err());
     }
 
     #[test]

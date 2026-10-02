@@ -1575,12 +1575,15 @@ mod tests {
         assert_eq!(
             SourceAssetRegistry
                 .source_path(
-                    Path::new(r"CommonPictures\Logo.xml"),
+                    &Path::new("CommonPictures").join("Logo.xml"),
                     "CommonPicture",
                     SourceAssetRole::Picture,
                 )
                 .unwrap(),
-            PathBuf::from(r"CommonPictures\Logo\Ext\Picture.xml")
+            Path::new("CommonPictures")
+                .join("Logo")
+                .join("Ext")
+                .join("Picture.xml")
         );
         for (family, suffix) in [
             ("Catalog", ".1c"),
@@ -1629,7 +1632,7 @@ mod tests {
             SourceAssetRegistry
                 .source_path_by_suffix(Path::new("Configuration.xml"), "Configuration", "6")
                 .unwrap(),
-            PathBuf::from(r"Ext\ManagedApplicationModule.bsl")
+            Path::new("Ext").join("ManagedApplicationModule.bsl")
         );
         assert_eq!(
             SourceAssetRegistry
