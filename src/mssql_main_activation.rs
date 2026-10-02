@@ -857,7 +857,7 @@ fn online_history_refusal(mode: MainActivationMode, evidence: &str) -> String {
 
 fn render_marker_upsert(sql: &mut String, table: &str, payload: &[u8], code: u32) {
     let data = hex(payload);
-    writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0) UPDATE dbo.{table} SET Modified=SYSUTCDATETIME(),DataSize={},BinaryData=0x{} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 ELSE INSERT dbo.{table} (FileName,Creation,Modified,Attributes,DataSize,BinaryData,PartNo) VALUES (N'DynamicallyUpdated',SYSUTCDATETIME(),SYSUTCDATETIME(),0,{},0x{},0);", payload.len(), data, payload.len(), data).unwrap();
+    writeln!(sql, "IF EXISTS (SELECT 1 FROM dbo.{table} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0) UPDATE dbo.{table} SET Modified=DATEADD(year,2000,SYSUTCDATETIME()),DataSize={},BinaryData=0x{} WHERE FileName=N'DynamicallyUpdated' AND PartNo=0 ELSE INSERT dbo.{table} (FileName,Creation,Modified,Attributes,DataSize,BinaryData,PartNo) VALUES (N'DynamicallyUpdated',DATEADD(year,2000,SYSUTCDATETIME()),DATEADD(year,2000,SYSUTCDATETIME()),0,{},0x{},0);", payload.len(), data, payload.len(), data).unwrap();
     writeln!(
         sql,
         "IF @@ROWCOUNT <> 1 THROW {code}, '{table}.DynamicallyUpdated upsert failed', 1;"
@@ -1982,6 +1982,27 @@ mod tests {
         assert_eq!(report.recovery_token.len(), 64);
         assert_eq!(plan.recovery().overwritten_config_rows.len(), 5);
         assert_eq!(report.touched_tables, ["Config", "ConfigSave", "Params"]);
+    }
+
+    #[test]
+    fn markers_carry_the_platform_year_offset() {
+        // Native rows store their times 2000 years ahead (`4026-…`), as every
+        // other row this crate writes does (#409 F-7).
+        let script =
+            render_main_activation_sql("lab", &fixture(MainActivationMode::Online), None).unwrap();
+        let marker_lines = script
+            .sql
+            .lines()
+            .filter(|line| line.contains("N'DynamicallyUpdated',"))
+            .collect::<Vec<_>>();
+        assert_eq!(marker_lines.len(), 2);
+        for line in marker_lines {
+            assert_eq!(
+                line.matches("SYSUTCDATETIME()").count(),
+                line.matches("DATEADD(year,2000,SYSUTCDATETIME())").count(),
+                "{line}"
+            );
+        }
     }
 
     #[test]
