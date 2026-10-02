@@ -38556,8 +38556,7 @@ const FORM_PLANNER_TIME_UNITS: &[(&str, &str)] = &[
     ("70", "Year"),
 ];
 /// The `BWAValue` header switches: a boolean with an `auto` state of its own.
-const FORM_PLANNER_BWA_VALUES: &[(&str, &str)] =
-    &[("0", "false"), ("1", "true"), ("2", "auto")];
+const FORM_PLANNER_BWA_VALUES: &[(&str, &str)] = &[("0", "false"), ("1", "true"), ("2", "auto")];
 /// The chart namespace the platform spells inline on every direct child of
 /// `<pl:timeScale>` and on the scale level itself.
 const FORM_PLANNER_CHART_NAMESPACE_ATTR: &str = r#" xmlns="http://v8.1c.ru/8.2/data/chart""#;

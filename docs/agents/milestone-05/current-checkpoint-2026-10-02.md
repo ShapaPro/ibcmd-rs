@@ -25,8 +25,38 @@ certificate corrects the earlier incomplete *knowledge state*; historical
 receipts remain immutable. No redundant copy, acquire or SQL/native write was
 performed. This proves source readiness only; template activation remains open.
 
-Compact7's actual prewrite archive refusal and the separate compact8 archive
-identity preparation are now included in this PR. Compact8's complete runtime
-acceptance, the native/OWN Params matrix, nested forms, larger stage and other
-roadmap criteria remain open. No issue closure or release tag follows from
-this checkpoint.
+The producer above is historical. Integration now includes the later master
+change for typical configuration export/import and partial files. Its initial
+local clippy run refused the merged source; the exact owned heavy lease was
+released with known exit zero. Missing compile seams, five lint warnings and
+two portable-test fixtures were corrected. The current merged source still
+requires its own complete CI/local gates and a newly bound producer; the older
+release executable does not certify these later Rust changes.
+
+The actual native D2 template run restored its owned database, then refused
+private-cluster startup before registration or configuration writes. Exact
+stop and worker release returned zero. The existing database and full preimage
+are preserved. Independent review of the additive resume preparation found
+two errors before execution: snapshot CLI paths and a state-absence check that
+would reject its own successfully started cluster. A separate successor is
+being tested against actual emitted paths and phase-specific ownership.
+
+Compact8 refused before restore or native writes at the archive-node budget.
+The distinct compact9 V2 preparation uses a streaming bounded archive census,
+explicit startup expiry diagnostics and a caller deadline within the existing
+maximum. Root and independent peer verified its 147-file closure. The historical
+producer is retained explicitly for this scoped laboratory experiment; no LIVE
+continuation, second-cycle or load acceptance is claimed before actual results.
+
+Native Params empty-stage apply returned zero but left all six storage tables
+and ten auxiliary tables exactly unchanged; the expected settled-shape guard
+then refused. The subsequent B/C/D resume stopped before SQL capture or native
+commands because uppercase snapshot labels violated the existing whitelist.
+A separate successor uses lowercase evidence labels while preserving fixture
+paths, the same owned database and all prior receipts. Its full marker matrix,
+OWN parity and production rule remain open.
+
+Nested forms, larger stages, platform 8.5, repeated generation changes, full
+LIVE load, general WORKER ownership and guarded undo remain open. All eight
+milestone issues stay open; no issue closure or release tag follows from this
+checkpoint.
