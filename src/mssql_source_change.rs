@@ -154,7 +154,7 @@ impl HeldSourceRoot {
 
     pub fn capture_current(&self) -> Result<SourceInventory, SourceChangeError> {
         let current_root = canonical_directory(&self.requested_root)?;
-        if !paths_equal_windows(&current_root, &self.canonical_root) {
+        if !held_root_paths_equal(&current_root, &self.canonical_root) {
             return Err(SourceChangeError::HeldRootChanged);
         }
         capture_inventory(&current_root, self.limits, &BTreeSet::new())
@@ -169,7 +169,7 @@ impl HeldSourceRoot {
         let selected = resolve_selected_path(&self.canonical_root, selected_path)?;
         let retention = candidate_retention_paths(&selected);
         let current_root = canonical_directory(&self.requested_root)?;
-        if !paths_equal_windows(&current_root, &self.canonical_root) {
+        if !held_root_paths_equal(&current_root, &self.canonical_root) {
             return Err(SourceChangeError::HeldRootChanged);
         }
         let current = capture_inventory(&current_root, self.limits, &retention)?;
@@ -1003,8 +1003,23 @@ fn paths_equal_text_windows(left: &str, right: &str) -> bool {
     windows_path_key(left) == windows_path_key(right)
 }
 
+#[cfg(any(windows, test))]
 fn paths_equal_windows(left: &Path, right: &Path) -> bool {
     paths_equal_text_windows(&left.to_string_lossy(), &right.to_string_lossy())
+}
+
+// Physical roots follow the host's path rules, independently of the Windows
+// names used to match metadata in an inventory. Case folding on Unix could
+// accept an ancestor link redirected to a different, case-distinct directory.
+fn held_root_paths_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        paths_equal_windows(left, right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn path_is_within_windows(candidate: &Path, root: &Path) -> bool {
@@ -1129,6 +1144,40 @@ impl Error for SourceChangeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_root_refuses_case_distinct_ancestor_link_retargeting() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("ibcmd-rs-held-root-{}", uuid::Uuid::new_v4()));
+        let first = root.join("Выгрузка");
+        let second = root.join("ВЫГРУЗКА");
+        fs::create_dir_all(first.join("sources")).unwrap();
+        fs::create_dir_all(second.join("sources")).unwrap();
+        fs::write(first.join("sources/Module.bsl"), b"first").unwrap();
+        fs::write(second.join("sources/Module.bsl"), b"second").unwrap();
+        let link = root.join("selected");
+        symlink(&first, &link).unwrap();
+        let held =
+            HeldSourceRoot::open(&link.join("sources"), SourceInventoryLimits::default()).unwrap();
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        assert!(matches!(
+            held.capture_current(),
+            Err(SourceChangeError::HeldRootChanged)
+        ));
+        assert!(matches!(
+            held.classify_current(
+                Path::new("Module.bsl"),
+                ActivationTarget::Main,
+                ActivationMode::Online
+            ),
+            Err(SourceChangeError::HeldRootChanged)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn every_path_comparison_folds_cyrillic_case() {
