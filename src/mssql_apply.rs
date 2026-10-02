@@ -198,6 +198,7 @@ pub fn apply_source_change(
                 collect_all_source_asset_diagnostics: false,
                 platform: None,
                 source_version: args.source_version,
+                objects: Vec::new(),
                 no_binary_rows: true,
                 write_binary_rows: false,
                 write_manifest: false,
