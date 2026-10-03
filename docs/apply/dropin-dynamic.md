@@ -97,15 +97,39 @@ checkpoint does not enable its fold of the newly collected Params SI shape.
 
 ## 1. What each value of `--dynamic` does
 
+### SQL-guard interactive fallback (new source checkpoint; runtime acceptance pending)
+
+The preserved direct-mode native cases `auto1`, `prompt1` and `term1`
+([design](dropin-dynamic-design.md), section 2) remain the basis for noninteractive
+behavior: auto/prompt use exclusive apply and the native direct command did not
+terminate the connected client. The standalone-server dialog is a distinct mode.
+
+With `--dynamic=prompt`, terminal stdin and stderr, and a typed **pre-write**
+SQL-session refusal for this database, this implementation now offers a SQL-guard
+interaction when the current stage passes the existing read-only dynamic judgment:
+`1` cancels (exit 0, report `cancelled=true, applied=false`), `2` performs one fresh
+exclusive apply, and `3` explicitly calls the existing dynamic apply with complete
+fresh profile/metadata/stage admission and locked CAS. A second refusal is terminal.
+No transaction error, unknown transport outcome, blind census, foreign target,
+`--exclusivity=assumed`, or requested session termination can open the interaction.
+EOF, invalid/oversized input and input errors dispatch no second apply; closed or
+redirected stdin preserves the previous refusal. `--force` confirms warnings and
+does not provide dynamic consent. Auto retains its refusal and hint.
+
+This is a user-visible SQL-guard route, **not** native `--pid`/`--remote` prompt
+equivalence or authority to kill SQL/RAC sessions. No native runtime is claimed for
+this source checkpoint. Issue #347 remains open for current-producer scenarios,
+standalone-server integration and exact owned-session termination evidence.
+
 | Value | Nobody else connected | Sessions connected (SQL Server shows them) |
 |---|---|---|
 | `disable` | exclusive apply (as before) | the lock refusal and the list of sessions, exit -1 (as before) |
 | `auto` (the default) | exclusive apply (= the platform run against a database) | the same refusal, exit -1, **plus the line `можно применить динамически: --dynamic=force` when the stage would qualify** |
-| `prompt` | exclusive apply (the platform never asks in direct mode) | as `auto` |
+| `prompt` | exclusive apply (the platform never asks in direct mode) | noninteractive: as `auto`; terminal: explicit SQL-guard fallback above |
 | `force` | the dynamic apply if the stage qualifies, else `требуется штатный config apply: <reasons>` (exit 1) | the same: sessions are what it is for |
 
-`auto`, `disable` and `prompt` are **never turned into a dynamic update**: this program has no prompt, and a user who did
-not ask for a dynamic update gets a refusal that says how to ask for one. `force` is **never turned into an exclusive
+`auto`, `disable` and noninteractive `prompt` are **never turned into a dynamic update**. Interactive prompt requires
+the explicit `3` choice; a user who did not ask for a dynamic update gets the exclusive route. `force` is **never turned into an exclusive
 apply** either. `--session-terminate` concerns the exclusive lock only; with `force` it is not consulted (the platform's
 `force` ends no session either). `disable` is not pointed at `force` (it said no to dynamic updates).
 
@@ -196,7 +220,8 @@ Nothing of this needs exclusive access, and none of it is asked for.
 * **Help/search index rebuilding** (`Files.userDocs_ru*`, `userPostings_ru*`, `userVocabulary_ru*`) is not implemented.
   The native-derived caches differ from the preserved own preimage; full storage/help-search equivalence is not claimed.
 * **More kinds** (object modules, forms of top-level objects, templates, pictures, help, rights, command interfaces): #345.
-* **A prompt** (`--dynamic=prompt` asking the terminal) and **ending sessions** (`--session-terminate`): not built.
+* **Native standalone-server prompts** and **ending sessions** (`--session-terminate`): not built.
+  The new SQL-guard terminal fallback is a separate bounded route, described above.
 * **The cluster is not told.** Like the platform run against a database, this apply writes to SQL Server only; a session that
   is open keeps its generation (measured for both), a new one reads the new generation.
 * **8.5 outside the exact initial CommonModule cohort above**, and **8.3.27.1989**.
