@@ -159,7 +159,7 @@ fn tell(outcome: Outcome, report: Option<&Path>) -> i32 {
 fn overlay_warning(published: &DynamicPublication) -> Option<String> {
     (published.history.len() > published.warn_after_generations).then(|| {
         format!(
-            "[WARN] В информационной базе накоплено динамических поколений конфигурации: {}; их сворачивает обычное обновление (config apply --dynamic=disable, когда к базе никто не подключён)",
+            "[WARN] В информационной базе накоплено динамических поколений конфигурации: {}; для их свёртки используйте штатное ibcmd infobase config apply --dynamic=disable, когда к базе никто не подключён",
             published.history.len()
         )
     })
@@ -370,7 +370,7 @@ pub fn classify_with(
 ) -> Outcome {
     if let Some(unsupported) = error.downcast_ref::<DynamicUnsupported>() {
         return Outcome::Refused(format!(
-            "Параметр `--dynamic=force` команды `{}` не поддерживается для платформы {}: динамическое обновление измерено только на 8.3.27.2214 ({})",
+            "Параметр `--dynamic=force` команды `{}` не поддерживается для платформы {}: {}",
             APPLY.command, unsupported.platform, unsupported.reason
         ));
     }
@@ -723,6 +723,14 @@ mod tests {
         let warning = overlay_warning(&published(51)).unwrap();
         assert!(warning.starts_with("[WARN] "), "{warning}");
         assert!(warning.contains(": 51;"), "{warning}");
+        assert!(
+            warning.contains("штатное ibcmd infobase config apply --dynamic=disable"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("обычное обновление (config apply"),
+            "{warning}"
+        );
     }
 
     #[test]
@@ -746,18 +754,31 @@ mod tests {
 
     #[test]
     fn a_platform_without_the_dynamic_apply_is_named_and_is_exit_one_material() {
+        for supported in [
+            MssqlNativePlatformProfile::Platform8_3_27_2214,
+            MssqlNativePlatformProfile::Platform8_5_1_1150,
+        ] {
+            supported.require_config_apply_dynamic_supported().unwrap();
+        }
+        let unsupported = MssqlNativePlatformProfile::Platform8_3_27_1989;
+        let reason = unsupported
+            .require_config_apply_dynamic_supported()
+            .unwrap_err()
+            .to_string();
         let error = anyhow::Error::new(DynamicUnsupported {
-            platform: "platform-8.5.1.1150".to_string(),
-            reason: "capability `mssql.config.apply.dynamic` is explicitly unsupported for platform profile `platform-8.5.1.1150`".to_string(),
+            platform: unsupported.id().to_string(),
+            reason: reason.clone(),
         })
         .context("planning");
         match classify(&error, SessionTerminate::Disable) {
             Outcome::Refused(text) => {
                 assert!(
-                    text.starts_with("Параметр `--dynamic=force` команды `infobase config apply` не поддерживается для платформы platform-8.5.1.1150"),
+                    text.starts_with("Параметр `--dynamic=force` команды `infobase config apply` не поддерживается для платформы platform-8.3.27.1989"),
                     "{text}"
                 );
                 assert!(text.contains("mssql.config.apply.dynamic"), "{text}");
+                assert!(text.ends_with(&reason), "{text}");
+                assert!(!text.contains("измерено только на 8.3"), "{text}");
             }
             other => panic!("{other:?}"),
         }
