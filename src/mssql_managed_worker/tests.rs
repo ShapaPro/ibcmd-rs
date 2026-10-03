@@ -10,6 +10,8 @@ struct Host {
     register_error: bool,
     load_error: bool,
     switch_error: bool,
+    stop_error: bool,
+    cold_observations: Vec<bool>,
 }
 
 impl OwnedRuntime for Host {
@@ -38,6 +40,22 @@ impl OwnedRuntime for Host {
         self.effects.borrow_mut().push("turn_off");
         if self.switch_error {
             bail!("handoff command unknown");
+        }
+        Ok(())
+    }
+    fn stop_owned(&mut self, journal: &mut Journal) -> Result<()> {
+        journal.append("test_direct_stop_intent", ())?;
+        self.effects.borrow_mut().push("stop_owned");
+        if self.stop_error {
+            bail!("original stop completion unproved");
+        }
+        journal.append("test_direct_stop_confirmed", ())?;
+        Ok(())
+    }
+    fn require_cold(&mut self) -> Result<()> {
+        self.effects.borrow_mut().push("require_cold");
+        if self.cold_observations.is_empty() || !self.cold_observations.remove(0) {
+            bail!("new private process/listener or original exit/pipe proof lost");
         }
         Ok(())
     }
@@ -115,12 +133,94 @@ fn setup(
         register_error: false,
         load_error: false,
         switch_error: false,
+        stop_error: false,
+        cold_observations: vec![true; 6],
     };
     let path = std::env::temp_dir().join(format!("ibcmd-managed-journal-{}.jsonl", initial.nonce));
     let journal = Journal::create(&path, initial.nonce).unwrap();
     let mut session = ManagedWorker::from_fresh_creator(host, initial, journal).unwrap();
     session.register_and_load().unwrap();
     (session, path, effects)
+}
+
+#[test]
+fn shutdown_retains_history_and_original_journal_and_invalidates_publication() {
+    let (mut session, path, effects) = setup(|b| vec![observation(b, true, true, Some(43))]);
+    let cold = session.shutdown().unwrap();
+    assert_eq!(cold.session.ever_loaded.len(), 1);
+    assert_eq!(
+        &*effects.borrow(),
+        &["register", "load", "stop_owned", "require_cold"]
+    );
+    drop(cold);
+    assert!(session.prepare().is_err());
+    drop(session);
+    let rows = retained_rows(&path);
+    let position = |event| rows.iter().position(|row| row["event"] == event).unwrap();
+    assert!(position("cold_shutdown_intent") < position("test_direct_stop_intent"));
+    assert!(position("test_direct_stop_confirmed") < position("cold_shutdown_confirmed"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn shutdown_unknown_and_foreign_observation_never_issue_cold_or_undo_authority() {
+    for scenario in ["second_base", "stop_unknown", "cold_unknown"] {
+        let (mut session, path, effects) = setup(|b| {
+            let mut o = observation(b, true, true, Some(43));
+            if scenario == "second_base" {
+                o.loaded.insert(Uuid::new_v4());
+            }
+            vec![o]
+        });
+        session.runtime.stop_error = scenario == "stop_unknown";
+        if scenario == "cold_unknown" {
+            session.runtime.cold_observations = vec![false];
+        }
+        assert!(session.shutdown().is_err(), "{scenario}");
+        assert_eq!(
+            effects.borrow().contains(&"stop_owned"),
+            scenario != "second_base"
+        );
+        assert!(session.prepare().is_err());
+        assert_eq!(session.ever_loaded.len(), 1);
+        dispose(session, &path);
+    }
+}
+
+#[test]
+fn cold_replacement_prevents_undo_and_unknown_sql_can_never_retry() {
+    for scenario in ["before_sql", "unknown_sql", "after_sql"] {
+        let (mut session, path, _) = setup(|b| vec![observation(b, true, true, Some(43))]);
+        session.runtime.cold_observations = match scenario {
+            "before_sql" => vec![true, false],
+            "after_sql" => vec![true, true, false],
+            _ => vec![true, true],
+        };
+        let mut cold = session.shutdown().unwrap();
+        let calls = RefCell::new(0);
+        let result = cold.run_cold_transaction_once(|_| {
+            *calls.borrow_mut() += 1;
+            if scenario == "unknown_sql" {
+                bail!("COMMIT response lost");
+            }
+            Ok(())
+        });
+        assert!(result.is_err(), "{scenario}");
+        assert_eq!(*calls.borrow(), usize::from(scenario != "before_sql"));
+        if scenario == "after_sql" {
+            assert!(result.unwrap_err().to_string().contains("SQL confirmed"));
+        }
+        assert!(
+            cold.run_cold_transaction_once(|_| {
+                *calls.borrow_mut() += 1;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(*calls.borrow(), usize::from(scenario != "before_sql"));
+        drop(cold);
+        dispose(session, &path);
+    }
 }
 
 fn retained_rows(path: &Path) -> Vec<serde_json::Value> {
