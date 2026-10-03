@@ -5154,8 +5154,20 @@ fn prepare_metadata_object_stage(
     )?;
     let required = required_base_key(&dependency, "metadata XML")?;
     let base_metadata_blob = fetch_config_blob(sql, database, required.as_str())?;
-    let packed_metadata =
+    let template = matches!(properties.kind.as_str(), "Template" | "CommonTemplate");
+    if template {
+        crate::compiler::bodies::mxl_native::inflate_template_patch(&base_metadata_blob)?;
+    }
+    let mut packed_metadata =
         pack_simple_metadata_blob_from_xml_with_source(&base_metadata_blob, &xml, source)?;
+    if template {
+        packed_metadata.blob =
+            crate::compiler::bodies::mxl_native::preserve_identical_template_blob(
+                &base_metadata_blob,
+                &packed_metadata.blob,
+            )?;
+        packed_metadata.output_sha256 = hex_sha256(&packed_metadata.blob);
+    }
     if packed_metadata.properties.uuid != object_id {
         return Err(anyhow!(
             "XML metadata uuid {} changed while packing {}",
@@ -5692,8 +5704,8 @@ fn prepare_raw_template_body_row(
 }
 
 fn prepare_spreadsheet_template_body_row(
-    _sql: &SqlExec,
-    _database: &str,
+    sql: &SqlExec,
+    database: &str,
     xml_path: &Path,
     properties: &SimpleMetadataXmlProperties,
     source: Option<&MetadataSourceContext>,
@@ -5726,6 +5738,12 @@ fn prepare_spreadsheet_template_body_row(
         )
     })?;
     let packed = spreadsheet_template_for_platform(&xml, packed)?;
+    let packed = if base_free(sql) {
+        packed
+    } else {
+        let base = fetch_config_blob(sql, database, &body_id)?;
+        crate::compiler::bodies::mxl_native::preserve_spreadsheet_language(&base, &packed)?
+    };
     Ok(vec![PreparedMetadataBodyStage {
         body_id,
         path: body_path,
@@ -15415,7 +15433,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_spreadsheet_template_without_fetching_base_blob() {
+    fn prepares_base_free_spreadsheet_template_without_fetching_base_blob() {
         let root = std::env::temp_dir().join(format!(
             "ibcmd-rs-spreadsheet-template-no-fetch-{}",
             uuid::Uuid::new_v4().hyphenated()
@@ -15436,7 +15454,7 @@ mod tests {
         );
 
         let rows = super::prepare_spreadsheet_template_body_row(
-            &test_sql(),
+            &crate::sql::SqlExec::detached(super::BASE_FREE_MISSING_ROW),
             "missing-database",
             &template_xml,
             &properties,
