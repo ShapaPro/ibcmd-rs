@@ -18,6 +18,11 @@ use super::child::{CensusIdentity, KernelProcess, OriginalChild};
 use super::{Journal, LifetimeBinding, ManagedWorker, Observation, OwnedRuntime, ProcessIdentity};
 use crate::mssql_platform_profile::ManagedRacReadAuth;
 
+mod authentication;
+use authentication::{
+    Action as AdminAction, Credentials as AdminCredentials, Family as AdminFamily,
+};
+
 pub(crate) struct CreatorOptions {
     pub parent: PathBuf,
     pub platform_bin: PathBuf,
@@ -1210,53 +1215,17 @@ impl NativeRuntime {
     }
 
     fn challenge_authentication(&mut self, journal: &mut Journal) -> Result<()> {
-        for agent in [true, false] {
-            let family = if agent { "agent" } else { "cluster" };
-            let mut base = vec![family.to_owned(), "admin".into(), "list".into()];
-            if !agent {
-                base.push(format!("--cluster={}", self.binding.cluster));
-            }
-            let before = self.rac(base.clone(), agent, true)?;
-            for wrong_password in [false, true] {
-                let kind = if wrong_password {
-                    "wrong-password"
-                } else {
-                    "implicit-OS"
-                };
-                journal.append("authentication_challenge_intent", (family, kind))?;
-                let mut argv = base.clone();
-                if wrong_password {
-                    argv.push(format!("--{family}-user={}", self.administrator));
-                    argv.push(format!("--{family}-pwd={}", Uuid::new_v4()));
-                }
-                argv.push(format!("localhost:{}", self.options.ras_port));
-                self.require_private_endpoint()?;
-                let tool = self.rac.clone();
-                let (exit, out, err) = self.execute(&tool, &argv)?;
-                let fingerprint = DenialFingerprint {
-                    exit,
-                    stdout: format!("{:X}", Sha256::digest(&out)),
-                    stderr: format!("{:X}", Sha256::digest(&err)),
-                };
-                journal.append(
-                    "authentication_challenge_observed",
-                    serde_json::json!({
-                        "family": family, "kind": kind, "exit": exit,
-                        "stdout_bytes": out.len(), "stderr_bytes": err.len(),
-                        "stdout_sha256": fingerprint.stdout, "stderr_sha256": fingerprint.stderr,
-                        "classified_denial": denial_admitted(&fingerprint, measured_denials()),
-                    }),
-                )?;
-                if !denial_admitted(&fingerprint, measured_denials()) {
-                    bail!(
-                        "managed authentication challenge unclassified or OS bypass admitted; no ownership authority issued"
-                    );
-                }
-                if self.rac(base.clone(), agent, true)? != before {
-                    bail!("authenticated administration inventory changed across challenge");
-                }
-            }
-        }
+        let plan = authentication::Plan::new(&self.administrator, self.binding.cluster)?;
+        authentication::verify(
+            &mut NativeAdminIo {
+                runtime: self,
+                journal,
+                plan: &plan,
+                wrong_password: format!("{}{}", Uuid::new_v4(), Uuid::new_v4()),
+                throwaway_password: format!("{}{}", Uuid::new_v4(), Uuid::new_v4()),
+            },
+            &plan,
+        )?;
         self.authenticated_boundary = true;
         Ok(())
     }
@@ -1279,6 +1248,78 @@ impl NativeRuntime {
             bail!("managed descendant bound");
         }
         Ok(result)
+    }
+}
+
+struct NativeAdminIo<'a> {
+    runtime: &'a mut NativeRuntime,
+    journal: &'a mut Journal,
+    plan: &'a authentication::Plan,
+    wrong_password: String,
+    throwaway_password: String,
+}
+
+impl authentication::Io for NativeAdminIo<'_> {
+    fn inventory(
+        &mut self,
+        family: AdminFamily,
+        allowed: &[&str],
+    ) -> Result<authentication::Inventory> {
+        let mut args = vec![family.name().into(), "admin".into(), "list".into()];
+        if !family.is_agent() {
+            args.push(format!("--cluster={}", self.runtime.binding.cluster));
+        }
+        let raw = self.runtime.rac(args, family.is_agent(), true)?;
+        if raw.len() > 65536 {
+            bail!("bounded authenticated admin inventory required");
+        }
+        authentication::Inventory::from_rows(blocks(&raw)?, allowed)
+    }
+    fn mutation(
+        &mut self,
+        family: AdminFamily,
+        challenge: AdminCredentials,
+        action: AdminAction,
+        credentials: AdminCredentials,
+    ) -> Result<authentication::Receipt> {
+        let mut argv = self.plan.mutation_arguments(
+            family,
+            challenge,
+            action,
+            credentials,
+            [
+                &self.runtime.password,
+                &self.wrong_password,
+                &self.throwaway_password,
+            ],
+        );
+        argv.push(format!("localhost:{}", self.runtime.options.ras_port));
+        self.runtime.require_private_endpoint()?;
+        let tool = self.runtime.rac.clone();
+        let (exit, stdout, stderr) = self.runtime.execute(&tool, &argv)?;
+        Ok(authentication::Receipt {
+            exit,
+            stdout,
+            stderr,
+        })
+    }
+    fn record(&mut self, event: &'static str, value: serde_json::Value) -> Result<()> {
+        self.journal.append(event, value)
+    }
+    fn denial_is_measured(
+        &self,
+        family: AdminFamily,
+        kind: AdminCredentials,
+        receipt: &authentication::Receipt,
+    ) -> bool {
+        let fingerprint = DenialFingerprint {
+            family,
+            kind,
+            exit: receipt.exit,
+            stdout: format!("{:X}", Sha256::digest(&receipt.stdout)),
+            stderr: format!("{:X}", Sha256::digest(&receipt.stderr)),
+        };
+        denial_admitted(&fingerprint, measured_denials())
     }
 }
 
@@ -1508,6 +1549,8 @@ fn listener_authority(
 
 #[derive(Debug, PartialEq, Eq)]
 struct DenialFingerprint {
+    family: AdminFamily,
+    kind: AdminCredentials,
     exit: i32,
     stdout: String,
     stderr: String,
@@ -1847,6 +1890,8 @@ mod tests {
     #[test]
     fn authentication_opaque_failure_and_forced_os_success_are_not_authority() {
         let measured = DenialFingerprint {
+            family: AdminFamily::Agent,
+            kind: AdminCredentials::WrongPassword,
             exit: 1,
             stdout: "A".repeat(64),
             stderr: "B".repeat(64),
@@ -1854,6 +1899,8 @@ mod tests {
         assert!(denial_admitted(
             &measured,
             &[DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
                 exit: 1,
                 stdout: "A".repeat(64),
                 stderr: "B".repeat(64)
@@ -1861,16 +1908,22 @@ mod tests {
         ));
         for changed in [
             DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
                 exit: 0,
                 stdout: "A".repeat(64),
                 stderr: "B".repeat(64),
             },
             DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
                 exit: 1,
                 stdout: "C".repeat(64),
                 stderr: "B".repeat(64),
             },
             DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
                 exit: 1,
                 stdout: "A".repeat(64),
                 stderr: "C".repeat(64),
@@ -1879,6 +1932,34 @@ mod tests {
             assert!(!denial_admitted(&changed, std::slice::from_ref(&measured)));
         }
         assert!(!denial_admitted(&measured, measured_denials()));
+        let other_family = DenialFingerprint {
+            family: AdminFamily::Cluster,
+            ..DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
+                exit: 1,
+                stdout: "A".repeat(64),
+                stderr: "B".repeat(64),
+            }
+        };
+        let other_kind = DenialFingerprint {
+            kind: AdminCredentials::ImplicitOs,
+            ..DenialFingerprint {
+                family: AdminFamily::Agent,
+                kind: AdminCredentials::WrongPassword,
+                exit: 1,
+                stdout: "A".repeat(64),
+                stderr: "B".repeat(64),
+            }
+        };
+        assert!(!denial_admitted(
+            &other_family,
+            std::slice::from_ref(&measured)
+        ));
+        assert!(!denial_admitted(
+            &other_kind,
+            std::slice::from_ref(&measured)
+        ));
     }
 
     #[test]
