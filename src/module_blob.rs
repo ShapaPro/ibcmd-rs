@@ -4996,6 +4996,16 @@ fn native_root_property_bag(
         if let Some(target) = items.get(name) {
             return Ok(target.id.clone());
         }
+        // An item's extended tooltip is an item too (Документооборот 3.0
+        // `Reports/НеограниченныеПрава`: `<CustomSettingsFolder>` names one).
+        if let Some(id) = properties.child_items.iter().find_map(|item| {
+            item.extended_tooltip
+                .as_ref()
+                .filter(|tip| tip.name == name)
+                .map(|tip| tip.id.clone())
+        }) {
+            return Ok(id);
+        }
         match name.split_once(':') {
             Some((id, _)) if id.chars().all(|c| c.is_ascii_digit()) => Ok(id.to_string()),
             _ => Err(anyhow!(
@@ -5304,11 +5314,10 @@ fn native_table_addition(
         },
         None => match served_table_id {
             Some(table_id) => table_id.to_string(),
-            None => {
-                return Err(anyhow!(
-                    "an addition with no <AdditionSource> is not measured"
-                ));
-            }
+            // An addition standing outside any table (a search string inside
+            // a command bar) serves no item: the stored member is `{-1,-1}`
+            // (Документооборот 3.0 `Catalogs/МестаХраненияДел/Forms/ФормаВыбора`).
+            None => "-1".to_string(),
         },
     };
 
@@ -5960,7 +5969,7 @@ fn native_choice_list(
 /// `<SpellCheckingOnTextInput>` (`Use` 1, `DontUse` 2), a constant 0, and
 /// `<SpecialTextInputMode>` (`Email` 4, `PhoneNumber` 5, `Digits` 6); 0 when
 /// absent. Another spelling is refused.
-fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 6]> {
+fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 7]> {
     let code = |name: &str, table: &[(&str, &'static str)]| -> Result<&'static str> {
         match item.scalars.get(name).map(String::as_str) {
             None => Ok("0"),
@@ -5977,11 +5986,15 @@ fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 6]> 
         code("AutoShowOpenButtonMode", &show)?,
         code("AutoCorrectionOnTextInput", &usage)?,
         code("SpellCheckingOnTextInput", &usage)?,
-        "0",
+        // Slot 59 `<AutoCapitalizationOnTextInput>` (Sentences 3) and slot 61
+        // `<OnScreenKeyboardReturnKeyText>` (Done 7): the exporter's
+        // InputFieldSlot table in form_schema.rs.
+        code("AutoCapitalizationOnTextInput", &[("Sentences", "3")])?,
         code(
             "SpecialTextInputMode",
             &[("Email", "4"), ("PhoneNumber", "5"), ("Digits", "6")],
         )?,
+        code("OnScreenKeyboardReturnKeyText", &[("Done", "7")])?,
     ])
 }
 
@@ -6542,6 +6555,25 @@ fn native_field_payload(
                 anyhow!("<GraphicalSchemaField> names a spelling the writer cannot place")
             })
         }
+        "PlannerField" => {
+            if item.max_width.is_some()
+                || item.max_height.is_some()
+                || item.auto_max_width.is_some()
+                || item.auto_max_height.is_some()
+                || item.horizontal_stretch == Some(false)
+                || item.vertical_stretch == Some(false)
+            {
+                return Err(anyhow!(
+                    "a <PlannerField> names a property whose slot is not measured"
+                ));
+            }
+            Ok(native::format_planner_payload(
+                item.width.as_deref().unwrap_or("50"),
+                item.height.as_deref().unwrap_or("10"),
+                item.enable_start_drag.unwrap_or(false),
+                &events,
+            ))
+        }
         "ChartField" => {
             let horizontal = item.horizontal_stretch.unwrap_or(true);
             let vertical = item.vertical_stretch.unwrap_or(true);
@@ -6652,6 +6684,8 @@ fn native_field_payload(
                     events: &events,
                     auto_max_width: item.auto_max_width.unwrap_or(true),
                     auto_max_height: item.auto_max_height.unwrap_or(true),
+                    text_color: &native_scalar_color(item, "TextColor", source)?,
+                    max_height: item.max_height.as_deref().unwrap_or("0"),
                 },
             ))
         }
@@ -6781,9 +6815,29 @@ fn native_field_payload(
                 native_item_control_border(item)?
             };
             Ok(format!(
-                "{{6,{width},{height},1,1,0,{current},1,00010101000000,00010101000000,{font},{color},0,0,{events},{months_panel},{across},{down},{border},{auto_max_width},0,0,{auto_max_height},0}}",
+                "{{6,{width},{height},{hstretch},{vstretch},{selection},{current},1,00010101000000,00010101000000,{font},{color},0,{drag},{events},{months_panel},{across},{down},{border},{auto_max_width},0,0,{auto_max_height},{max_height}}}",
                 width = item.width.as_deref().unwrap_or("16"),
                 height = item.height.as_deref().unwrap_or("9"),
+                // Slot 5 is `<SelectionMode>` (Multiple=1, Interval=2) and slot 13
+                // `<EnableDrag>`; the exporter's reader in form_body.rs is the
+                // evidence for both tables.
+                // Slots 3/4 are the stretch flags (default 1) and slot 23 is
+                // `<MaxHeight>` (0 when absent), per the document-field
+                // geometry table of the exporter for `CalendarField`.
+                hstretch = u8::from(item.horizontal_stretch.unwrap_or(true)),
+                vstretch = u8::from(item.vertical_stretch.unwrap_or(true)),
+                max_height = item.max_height.as_deref().unwrap_or("0"),
+                selection = match item.scalars.get("SelectionMode").map(String::as_str) {
+                    None => "0",
+                    Some("Multiple") => "1",
+                    Some("Interval") => "2",
+                    Some(other) => {
+                        return Err(anyhow!(
+                            "a calendar's <SelectionMode>{other} is not measured"
+                        ));
+                    }
+                },
+                drag = u8::from(item.enable_drag.unwrap_or(false)),
                 current = u8::from(native_scalar_flag(item, "ShowCurrentDate", true)),
                 font = native_item_font(item, source)?,
                 color = native_scalar_color(item, "TextColor", source)?,
@@ -6812,7 +6866,7 @@ fn native_field_payload(
                 }
             };
             Ok(format!(
-                "{{2,{width},{height},{stretch},0,{min},{max},{step},0,{large_step},{marking_step},{marking},{{3,4,{{0}}}},{auto_max_width},0,0,1,0}}",
+                "{{2,{width},{height},{stretch},0,{min},{max},{step},0,{large_step},{marking_step},{marking},{{3,4,{{0}}}},{auto_max_width},{max_width},0,1,0}}",
                 width = item.width.as_deref().unwrap_or("32"),
                 height = item.height.as_deref().unwrap_or("2"),
                 stretch = u8::from(item.horizontal_stretch.unwrap_or(true)),
@@ -6822,6 +6876,8 @@ fn native_field_payload(
                 large_step = item.scalars.get("LargeStep").map_or("10", String::as_str),
                 marking_step = item.scalars.get("MarkingStep").map_or("5", String::as_str),
                 auto_max_width = u8::from(item.auto_max_width.unwrap_or(true)),
+                // Member 14 is `<MaxWidth>` (form_schema.rs `max_width`).
+                max_width = item.max_width.as_deref().unwrap_or("0"),
             ))
         }
         "PictureField" => {
@@ -6958,7 +7014,12 @@ fn native_decoration_payload(
             },
         )
         .ok_or_else(|| {
-            anyhow!("<PictureDecoration> names a spelling the payload writer cannot place")
+            anyhow!(
+                "<PictureDecoration> {} names a spelling the payload writer cannot place (PictureSize {:?}, FileDragMode {:?})",
+                item.name,
+                item.scalars.get("PictureSize"),
+                file_drag_mode
+            )
         });
     }
 
@@ -8156,7 +8217,12 @@ fn native_embedded_chart_kind(attribute: &FormXmlAttribute) -> Option<bool> {
 /// The attribute's `<Settings xsi:type="d4p1:Chart">` or `d4p1:GanttChart`,
 /// written by the chart codec: member 14 is the chart's own serialization
 /// (rt-embedded.md §1.2), and the codec refuses whatever it cannot place.
-fn native_embedded_chart(form_text: &str, attribute: &str, gantt: bool) -> Result<String> {
+fn native_embedded_chart(
+    form_text: &str,
+    attribute: &str,
+    gantt: bool,
+    source: Option<&MetadataSourceContext>,
+) -> Result<String> {
     let missing =
         || anyhow!("the chart attribute {attribute} spells no <Settings> the writer can find");
     let head = format!("<Attribute name=\"{attribute}\"");
@@ -8171,12 +8237,47 @@ fn native_embedded_chart(form_text: &str, attribute: &str, gantt: bool) -> Resul
     if close <= open {
         return Err(missing());
     }
-    let settings = &block[open..close];
+    let settings = native_chart_style_colours(&block[open..close], source);
+    let settings = settings.as_str();
     if gantt {
         crate::compiler::bodies::form_chart::format_form_embedded_gantt_chart(settings)
     } else {
         crate::compiler::bodies::form_chart::format_form_embedded_chart(settings)
     }
+}
+
+/// The chart's `style:<name>` colours that name a style item of the
+/// configuration, spelled `0:<uuid>` the way the chart record stores them
+/// (`{3,3,{0,<uuid>}}`) and the exporter prints one it cannot name
+/// (Документооборот 3.0 `DataProcessors/ПротоколРаботыСотрудников`,
+/// `style:ПользовательВыбранный`). The platform's own styles stay as they are.
+fn native_chart_style_colours(settings: &str, source: Option<&MetadataSourceContext>) -> String {
+    let Some(source) = source else {
+        return settings.to_string();
+    };
+    let mut out = String::with_capacity(settings.len());
+    let mut rest = settings;
+    while let Some(at) = rest.find(">style:") {
+        let name_start = at + ">style:".len();
+        let Some(end) = rest[name_start..].find('<') else {
+            break;
+        };
+        let name = &rest[name_start..name_start + end];
+        out.push_str(&rest[..at + 1]);
+        match source.resolve_style_item_uuid(&format!("StyleItem.{name}")) {
+            Ok(uuid) => {
+                out.push_str("0:");
+                out.push_str(&uuid);
+            }
+            Err(_) => {
+                out.push_str("style:");
+                out.push_str(name);
+            }
+        }
+        rest = &rest[name_start + end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A column's `<View>` and `<Edit>`, each the default tuple when absent.
@@ -8442,8 +8543,9 @@ fn native_form_body_blockers(properties: &FormXmlBodyProperties) -> Vec<String> 
             attribute.types.first().map(|value| value.trim()) == Some("mxl:SpreadsheetDocument");
         // A chart's `<Settings>` is written by the chart codec, which refuses
         // on its own what it cannot place (rt-embedded.md §1.2).
-        let embedded_chart =
-            native_embedded_chart_kind(attribute).is_some() || native_embedded_flowchart(attribute);
+        let embedded_chart = native_embedded_chart_kind(attribute).is_some()
+            || native_embedded_flowchart(attribute)
+            || native_embedded_planner(attribute);
         if attribute.settings.is_some()
             && attribute.types.first().map(|value| value.trim()) != Some("cfg:DynamicList")
             && !embedded_spreadsheet
@@ -9020,7 +9122,7 @@ fn format_native_form_body(
         {
             let text =
                 form_text.ok_or_else(|| anyhow!("an embedded chart needs the Form.xml text"))?;
-            Some(native_embedded_chart(text, &attribute.name, gantt)?)
+            Some(native_embedded_chart(text, &attribute.name, gantt, source)?)
         } else if attribute.settings.is_some() && native_embedded_planner(attribute) {
             let text =
                 form_text.ok_or_else(|| anyhow!("an embedded planner needs the Form.xml text"))?;

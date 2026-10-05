@@ -1671,10 +1671,16 @@ fn build_business_process(
         BusinessObjectFamily::BusinessProcess,
         indexes,
     )?;
+    // The exporter reads `NumberAllowedLength` at slot 40 and
+    // `DataLockControlMode` at slot 28 of a business process
+    // (`BUSINESS_PROCESS_NUMBER_ALLOWED_LENGTH_SLOT`); the pair was written
+    // the other way round, which a process that is `Variable` and `Managed`
+    // (`1`,`1`) cannot show. Документооборот 3.0 `BusinessProcesses/Подписание`
+    // is `Fixed` and `Managed`.
     fields[28] = enum_code(
         object,
-        "NumberAllowedLength",
-        &[("Fixed", "0"), ("Variable", "1")],
+        "DataLockControlMode",
+        &[("Automatic", "0"), ("Managed", "1")],
     )?;
     fields[29] = bool_token(object, "CreateTaskInPrivilegedMode")?;
     fields[30] = standard_attributes(&["-9", "-8", "-7", "-5", "-4", "-3", "-2"])?;
@@ -1697,8 +1703,8 @@ fn build_business_process(
     }
     fields[40] = enum_code(
         object,
-        "DataLockControlMode",
-        &[("Automatic", "0"), ("Managed", "1")],
+        "NumberAllowedLength",
+        &[("Fixed", "0"), ("Variable", "1")],
     )?;
     fields[41] = list(vec![token("0"), list(vec![token("0")])]);
     fields[42] = enum_code(object, "FullTextSearch", &[("DontUse", "0"), ("Use", "1")])?;

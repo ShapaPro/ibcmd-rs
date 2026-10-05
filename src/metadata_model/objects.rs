@@ -732,6 +732,9 @@ static CHART_OF_CALCULATION_TYPES: Layout = Layout {
 };
 
 /// BusinessProcess, tag 30, 49 slots.
+// Slot 28 carries DataLockControlMode and slot 40 NumberAllowedLength: the
+// exporter census (BUSINESS_PROCESS_*_SLOT in mssql_dump/mod.rs) over 40
+// native business processes and dm `Подписание` (Fixed + Managed).
 static BUSINESS_PROCESS: Layout = Layout {
     slots: &[
         Tag(30, 30, 30),
@@ -756,7 +759,7 @@ static BUSINESS_PROCESS: Layout = Layout {
         Reference("Task"),
         Flag("IncludeHelpInContents"),
         Fields("InputByString"),
-        Code("NumberAllowedLength", ALLOWED_LENGTH),
+        Code("DataLockControlMode", DATA_LOCK_CONTROL_MODE),
         Flag("CreateTaskInPrivilegedMode"),
         StandardAttributes(BUSINESS_PROCESS_STANDARD),
         Code("NumberPeriodicity", BP_NUMBER_PERIODICITY),
@@ -768,7 +771,7 @@ static BUSINESS_PROCESS: Layout = Layout {
         Localized("ListPresentation"),
         Localized("ExtendedListPresentation"),
         Localized("Explanation"),
-        Code("DataLockControlMode", DATA_LOCK_CONTROL_MODE),
+        Code("NumberAllowedLength", ALLOWED_LENGTH),
         Characteristics,
         Code("FullTextSearch", USE),
         Fields("DataLockFields"),

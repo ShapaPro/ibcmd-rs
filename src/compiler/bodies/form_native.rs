@@ -452,6 +452,26 @@ const FORM_EVENT_UUIDS: &[(&str, &str, &str, &str)] = &[
         "OnPeriodOutput",
         "1490ede6-6f33-4c6d-b971-53b2541331ea",
     ),
+    // Документооборот 3.0 `Catalogs/ЗаписиРабочегоКалендаря/Forms/Календарь`:
+    // the exporter's own names for the stored uuids.
+    (
+        "CalendarField",
+        "",
+        "Drag",
+        "8ad48496-8d0b-4f6c-ae48-99d95227884b",
+    ),
+    (
+        "CalendarField",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "CalendarField",
+        "",
+        "OnActivateDate",
+        "3793cac5-9f9a-4b7c-adda-386e5cccf794",
+    ),
     (
         "CalendarField",
         "",
@@ -638,6 +658,43 @@ const FORM_EVENT_UUIDS: &[(&str, &str, &str, &str)] = &[
         "OnMainServerAvailabilityChange",
         "d6b86f20-722b-4fe6-83fa-85c6aa4c1fe5",
     ),
+    // Документооборот 3.0 КОРП: stored uuids of events the corpus names.
+    (
+        "Form",
+        "",
+        "OnPasteFromClipboard",
+        "2c5f182c-1a2b-4fe1-a340-71979d5c39a8",
+    ),
+    (
+        "HTMLDocumentField",
+        "",
+        "BeforePrint",
+        "7de586c4-b5b7-40f7-917f-8049b127e015",
+    ),
+    (
+        "InputField",
+        "",
+        "Click",
+        "11707a99-4eb9-4373-bc8c-84891483a034",
+    ),
+    (
+        "InputField",
+        "",
+        "URLProcessing",
+        "d710ea07-5c96-4c43-ab6e-e138d3653780",
+    ),
+    (
+        "InputField",
+        "",
+        "MultipleValueOpening",
+        "e6e68c5f-dc83-43c1-b6ca-438be00b77c1",
+    ),
+    (
+        "Table",
+        "",
+        "URLListGetProcessing",
+        "44498116-1641-4bfa-ae33-86e53c205797",
+    ),
     ("Form", "", "OnOpen", "3ccc650e-f631-4cae-8e33-3eaac610b5f9"),
     (
         "Form",
@@ -748,6 +805,60 @@ const FORM_EVENT_UUIDS: &[(&str, &str, &str, &str)] = &[
         "",
         "OnActivate",
         "83c14f85-ab1f-4c77-bd3b-81970b72543b",
+    ),
+    (
+        "GraphicalSchemaField",
+        "",
+        "OnChange",
+        "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
+    ),
+    (
+        "PlannerField",
+        "",
+        "BeforeCreate",
+        "2c8ad9e0-53f0-406d-9c8b-460f6cb6fd74",
+    ),
+    (
+        "PlannerField",
+        "",
+        "BeforeDelete",
+        "6f758c30-b414-4949-a236-584bccb0102a",
+    ),
+    (
+        "PlannerField",
+        "",
+        "BeforeStartEdit",
+        "82f5f464-5aa5-4efc-9813-51432c74ff8e",
+    ),
+    (
+        "PlannerField",
+        "",
+        "BeforeStartQuickEdit",
+        "b56fa930-855b-4e67-a87c-8ea917d1dfab",
+    ),
+    (
+        "PlannerField",
+        "",
+        "OnActivate",
+        "be7d3bef-f900-44da-a5e9-88da3c0a9a8a",
+    ),
+    (
+        "PlannerField",
+        "",
+        "OnCurrentRepresentationPeriodChange",
+        "5e6c8466-44d0-4fd0-8d87-ac749c16ff60",
+    ),
+    (
+        "PlannerField",
+        "",
+        "OnEditEnd",
+        "68fc3ed6-a517-4843-a7a4-473cf4e27209",
+    ),
+    (
+        "PlannerField",
+        "",
+        "Selection",
+        "b6aaed5c-8a5a-4a03-bd5b-1f14d0f099ec",
     ),
     (
         "GraphicalSchemaField",
@@ -1823,6 +1934,7 @@ pub(crate) fn native_field_kind(tag: &str) -> Option<u8> {
         "GraphicalSchemaField" => 14,
         "HTMLDocumentField" => 15,
         "FormattedDocumentField" => 17,
+        "PlannerField" => 19,
         "PDFDocumentField" => 20,
         _ => return None,
     })
@@ -2136,6 +2248,23 @@ pub(crate) fn format_graphical_schema_payload(
     ))
 }
 
+/// The `{1,…}` payload of a `<PlannerField>`: width and height (`50`, `10`
+/// unless named), the two stretch flags (`1`,`1` on all five Документооборот
+/// 3.0 planner fields), the `<EnableStartDrag>` flag (`0` unless `true`), a
+/// constant, the events and three constants. The five fields of that
+/// configuration reproduce byte for byte.
+pub(crate) fn format_planner_payload(
+    width: &str,
+    height: &str,
+    enable_start_drag: bool,
+    events: &str,
+) -> String {
+    format!(
+        "{{1,{width},{height},1,1,{drag},0,{events},0,0,0}}",
+        drag = u8::from(enable_start_drag),
+    )
+}
+
 /// The `{1,…}` payload of a `<ChartField>` (rt-fields2.md §3, 9 of 9).
 pub(crate) fn format_chart_payload(
     width: &str,
@@ -2260,7 +2389,7 @@ pub(crate) struct NativeInputPayload<'a> {
     /// Slots 55 to 60: `<AutoShowClearButtonMode>`, `<AutoShowOpenButtonMode>`,
     /// `<AutoCorrectionOnTextInput>`, `<SpellCheckingOnTextInput>`, a constant,
     /// `<SpecialTextInputMode>` -- already coded.
-    pub(crate) text_input_tail: [&'a str; 6],
+    pub(crate) text_input_tail: [&'a str; 7],
     /// Slot 45, `<CreateButton>`.
     pub(crate) create_button: Option<bool>,
     /// Slot 46, `<ChoiceButtonRepresentation>`: `ShowInDropList` 1,
@@ -2347,7 +2476,7 @@ impl NativeInputPayload<'_> {
             type_link: "{3,0,0}",
             choice_parameters: "{0,0}",
             available_types: "{\"Pattern\"}",
-            text_input_tail: ["0", "0", "0", "0", "0", "0"],
+            text_input_tail: ["0", "0", "0", "0", "0", "0", "0"],
             create_button: None,
             choice_button_representation: None,
             drop_list_button: None,
@@ -2418,7 +2547,7 @@ pub(crate) fn format_input_payload(payload: &NativeInputPayload<'_>) -> Option<S
          {text_color},{back_color},{border_color},{font},{text_edit},{type_link},\
          {edit_text_update},{input_hint},{create_button},{choice_representation},\
          {drop_list_button},{history},{auto_max_width},{max_width},0,{auto_max_height},\
-         {max_height},{height_variant},{tail0},{tail1},{tail2},{tail3},{tail4},{tail5},0,{drop_list_settings},0,\
+         {max_height},{height_variant},{tail0},{tail1},{tail2},{tail3},{tail4},{tail5},{tail6},{drop_list_settings},0,\
          {links_again},{multiple_values}}}",
         width = payload.width,
         height = payload.height,
@@ -2470,6 +2599,7 @@ pub(crate) fn format_input_payload(payload: &NativeInputPayload<'_>) -> Option<S
         tail3 = payload.text_input_tail[3],
         tail4 = payload.text_input_tail[4],
         tail5 = payload.text_input_tail[5],
+        tail6 = payload.text_input_tail[6],
         create_button = tristate(payload.create_button),
         drop_list_button = tristate(payload.drop_list_button),
         auto_max_width = u8::from(payload.auto_max_width),
@@ -4606,6 +4736,19 @@ const FORM_STANDARD_COMMAND_UUIDS: &[(&str, &str, &str)] = &[
     ("", "CustomizeForm", "198ea630-fda2-4cda-8a23-f999f4c67ee6"),
     ("", "Help", "39bb0fe9-771d-4dd5-8a6e-2d16984523af"),
     ("", "Ignore", "d7e9e72c-8fa7-430c-a3e9-aeadfd57dfc7"),
+    // Документооборот 3.0 КОРП `Catalogs/Организации/Forms/ФормаСписка`.
+    (
+        "cfg:DynamicList",
+        "GetURL",
+        "9885f4b6-d830-435f-a0e3-6b70ffe0f85c",
+    ),
+    // Документооборот 3.0 `CommonForms/СотрудникиИПодразделения`: a form with
+    // no main attribute names the command by this uuid.
+    (
+        "",
+        "OpenFromMainServer",
+        "573e81b7-57eb-45f0-ba4d-ada7c2537a2d",
+    ),
     (
         "",
         "OpenFromStandaloneServer",
@@ -5461,6 +5604,7 @@ pub(crate) fn dynamic_list_delete_command_uuid(
             | "Catalog"
             | "DocumentJournal"
             | "BusinessProcess"
+            | "Task"
             | "ChartOfCharacteristicTypes"
             | "ExchangePlan",
         ) => Some("3dd3bd8a-ac1e-44d6-ac83-e7802642a5e2"),
@@ -5486,6 +5630,7 @@ pub(crate) fn dynamic_list_item_delete_command_uuid(
             | "Catalog"
             | "DocumentJournal"
             | "BusinessProcess"
+            | "Task"
             | "ChartOfCharacteristicTypes"
             | "ExchangePlan",
         ) => Some("ec576e13-1e76-4c33-98aa-a33204514227"),
@@ -5795,7 +5940,11 @@ pub(crate) fn format_table_head(head: &NativeTableHead<'_>) -> Option<String> {
     )?;
     let row_input_mode = root_code(
         head.row_input_mode,
-        &[("EndOfWindow", "1"), ("AfterCurrentRow", "2")],
+        &[
+            ("EndOfWindow", "1"),
+            ("AfterCurrentRow", "2"),
+            ("BeforeCurrentRow", "3"),
+        ],
         "0",
     )?;
     let selection_mode = root_code(
@@ -6178,7 +6327,7 @@ pub(crate) fn format_table_addition(addition: &NativeTableAddition<'_>) -> Optio
     Some(format!(
         "{{5,{{{id},{ns}}},0,0,0,{kind},{name},{title},{tooltip_title},{visible},{enabled},\
          {tooltip_representation},1,{payload},1,{context_menu},1,{extended_tooltip},2,\
-         {{{source},{kind}}},{children},{align},3,{importance}}}",
+         {source_member},{children},{align},3,{importance}}}",
         id = addition.id,
         ns = FORM_ITEM_NAMESPACE_UUID,
         kind = addition.kind,
@@ -6190,7 +6339,13 @@ pub(crate) fn format_table_addition(addition: &NativeTableAddition<'_>) -> Optio
         payload = addition.payload,
         context_menu = addition.context_menu,
         extended_tooltip = addition.extended_tooltip,
-        source = addition.source_item,
+        // An addition that serves no item (a search-string addition inside a
+        // command bar) stores `{-1,-1}` for the item and the kind alike.
+        source_member = if addition.source_item == "-1" {
+            "{-1,-1}".to_string()
+        } else {
+            format!("{{{},{}}}", addition.source_item, addition.kind)
+        },
         children = addition.children,
     ))
 }
@@ -6224,7 +6379,8 @@ pub(crate) fn format_view_status_addition_payload(
     horizontal_location: Option<&str>,
     auto_max_width: bool,
 ) -> Option<String> {
-    let location = root_code(horizontal_location, &[("Left", "0")], "3")?;
+    // `1` is `Center`, as the exporter reads member 11 of the option tuple.
+    let location = root_code(horizontal_location, &[("Left", "0"), ("Center", "1")], "3")?;
     Some(format!(
         "{{1,0,2,{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},\
          {{7,3,0,1,100}},{{7,3,0,1,100}},\
@@ -6688,6 +6844,7 @@ pub(crate) fn format_picture_decoration_payload(
         &[
             ("Stretch", "1"),
             ("Proportionally", "2"),
+            ("Tile", "3"),
             ("AutoSize", "4"),
             ("RealSizeIgnoreScale", "5"),
             ("AutoSizeIgnoreScale", "6"),
@@ -7736,18 +7893,24 @@ pub(crate) struct NativeFormattedDocumentPayload<'a> {
     pub(crate) events: &'a str,
     pub(crate) auto_max_width: bool,
     pub(crate) auto_max_height: bool,
+    /// Member 6 (`<TextColor>`) and member 15 (`<MaxHeight>`, `0` when absent);
+    /// slots from the exporter's FormattedDocumentField schema and geometry rows.
+    pub(crate) text_color: &'a str,
+    pub(crate) max_height: &'a str,
 }
 
 pub(crate) fn format_formatted_document_payload(
     payload: &NativeFormattedDocumentPayload<'_>,
 ) -> String {
     format!(
-        "{{1,{width},{height},{horizontal},{vertical},0,{{3,4,{{0}}}},{back_color},\
-         {border_color},{font},{events},{auto_width},0,0,{auto_height},0}}",
+        "{{1,{width},{height},{horizontal},{vertical},0,{text_color},{back_color},\
+         {border_color},{font},{events},{auto_width},0,0,{auto_height},{max_height}}}",
         width = payload.width,
         height = payload.height,
         horizontal = u8::from(payload.horizontal_stretch),
         vertical = u8::from(payload.vertical_stretch),
+        text_color = payload.text_color,
+        max_height = payload.max_height,
         back_color = payload.back_color,
         border_color = payload.border_color,
         font = payload.font,
@@ -8879,6 +9042,9 @@ const DATA_PATH_STANDARD_ATTRIBUTES: &[(&str, &str, &str)] = &[
     ("Catalog", "Description", "-3"),
     ("Catalog", "Parent", "-4"),
     ("Catalog", "Owner", "-5"),
+    // Документооборот 3.0 КОРП `Documents/ВыгрузкаВССТУ/Forms/ФормаДокумента`:
+    // `Объект.Обращения.Обращение.DeletionMark` stores `{-7}` on the column.
+    ("Catalog", "DeletionMark", "-7"),
     ("Catalog", "Ref", "-8"),
     ("Catalog", "Predefined", "-10"),
     ("Catalog", "PredefinedDataName", "-13"),
@@ -12066,12 +12232,13 @@ mod tests {
             Some("{2,{1},{-8}}")
         );
 
-        // `DeletionMark` is a standard attribute of every catalog, but no form
-        // of the corpus binds one, so its number was never measured. Writing
-        // a guess would load wrong; refusing is the whole point of the table.
+        // `DeletionMark` of a catalog is standard attribute -7: the 1C:Документооборот
+        // 3.0 forms that bind it load back as `Объект.DeletionMark` only with
+        // this number (platform load comparison of the `dm` corpus).
         assert_eq!(
-            resolve_form_data_path(&catalog, Some(&configuration), "Объект.DeletionMark"),
-            None
+            resolve_form_data_path(&catalog, Some(&configuration), "Объект.DeletionMark")
+                .as_deref(),
+            Some("{2,{1},{-7}}")
         );
     }
 
