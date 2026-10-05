@@ -4746,11 +4746,28 @@ fn format_native_table_record(
                 )
             })?;
             let segments = scan_braced_fields(&resolved, 0)?;
-            let last = segments
-                .last()
-                .cloned()
-                .ok_or_else(|| anyhow!("a table's <RowPictureDataPath> resolved to no segment"))?;
-            format!("{{1,{}}}", &resolved[last])
+            // The segments past the table's own binding: a path reaching
+            // through a reference column keeps all of them (`{2,{0,<column>},{-7}}`
+            // for `Объект.Обращения.Обращение.DeletionMark` in dmh
+            // `Documents/ВыгрузкаВССТУ`), while one reaching into the row
+            // keeps its single trailing segment.
+            let table_segments = data_paths
+                .resolve(item.data_path.as_deref().unwrap_or(""))
+                .and_then(|own| scan_braced_fields(&own, 0).ok())
+                .map_or(0, |own| own.len().saturating_sub(1));
+            let first = segments.len().saturating_sub(1).min(1 + table_segments);
+            let keep = &segments[first.max(1)..];
+            let keep = if keep.len() > 1 {
+                keep
+            } else {
+                &segments[segments.len() - 1..]
+            };
+            let joined = keep
+                .iter()
+                .map(|range| resolved[range.clone()].trim())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{},{joined}}}", keep.len())
         }
     };
     let head = native::format_table_head(&native::NativeTableHead {
@@ -5332,6 +5349,7 @@ fn native_table_addition(
         1 => native::format_view_status_addition_payload(
             item.scalars.get("HorizontalLocation").map(String::as_str),
             auto_max_width,
+            item.horizontal_stretch,
         )
         .ok_or_else(|| anyhow!("a view status addition names an unmeasured location"))?,
         _ => native::format_search_control_addition_payload(auto_max_width),
@@ -5969,7 +5987,7 @@ fn native_choice_list(
 /// `<SpellCheckingOnTextInput>` (`Use` 1, `DontUse` 2), a constant 0, and
 /// `<SpecialTextInputMode>` (`Email` 4, `PhoneNumber` 5, `Digits` 6); 0 when
 /// absent. Another spelling is refused.
-fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 7]> {
+fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 8]> {
     let code = |name: &str, table: &[(&str, &'static str)]| -> Result<&'static str> {
         match item.scalars.get(name).map(String::as_str) {
             None => Ok("0"),
@@ -5995,6 +6013,8 @@ fn native_text_input_tail(item: &FormXmlChildItem) -> Result<[&'static str; 7]> 
             &[("Email", "4"), ("PhoneNumber", "5"), ("Digits", "6")],
         )?,
         code("OnScreenKeyboardReturnKeyText", &[("Done", "7")])?,
+        // Slot 63 `<AutofillHint>` (FullName 1), behind the slot 62 sub-tuple.
+        code("AutofillHint", &[("FullName", "1")])?,
     ])
 }
 
@@ -6421,7 +6441,7 @@ fn native_field_payload(
                     "ExtendedEditMultipleValues",
                     false,
                 ),
-                drop_list_settings: &native_input_drop_list_settings(item, data_paths)?,
+                drop_list_settings: &native_input_drop_list_settings(item, data_paths, source)?,
                 auto_choice_incomplete: native_scalar_tristate(item, "AutoChoiceIncomplete")?,
                 choice_folders_and_items: item
                     .scalars
@@ -7932,9 +7952,11 @@ fn native_item_extended_tooltip(
         horizontal_stretch: native_flag(tip.horizontal_stretch),
         vertical_stretch: native_flag(tip.vertical_stretch),
         content: &title_content,
-        enabled: true,
+        // Members 9 and 20 of a tooltip record are its `<Visible>` and
+        // `<Enabled>` (exporter: `tooltip.hidden` / `tooltip.disabled`).
+        enabled: tip.enabled.unwrap_or(true),
         context_menu: None,
-        visible: true,
+        visible: tip.visible.unwrap_or(true),
         skip_on_input: None,
         tooltip_representation: None,
         group_horizontal_align: tip
@@ -8430,6 +8452,7 @@ fn native_extra_picture(
 fn native_input_drop_list_settings(
     item: &FormXmlChildItem,
     data_paths: &NativeDataPaths<'_>,
+    source: Option<&MetadataSourceContext>,
 ) -> Result<String> {
     let check = native_scalar_tristate(item, "ShowCheckBoxesInDropList")?;
     let column = |name: &str| -> Result<Option<String>> {
@@ -8460,9 +8483,24 @@ fn native_input_drop_list_settings(
         )))
     };
     let value_path = column("MultipleValueDataPath")?;
+    let picture_path = column("MultipleValuePictureDataPath")?;
     let present_path = column("MultipleValuePresentDataPath")?;
     let allow_empty = native_scalar_tristate(item, "AllowInputEmptyMultipleValues")?;
-    if check.is_none() && value_path.is_none() && present_path.is_none() && allow_empty.is_none() {
+    let hyperlink = native_scalar_flag(item, "MultipleValuesHyperlink", false);
+    let font = match item.fonts.get("MultipleValuesFont") {
+        Some(attributes) => native_font_of(item, Some(attributes), source)?,
+        None => "{7,3,0,1,100}".to_string(),
+    };
+    let back_color = native_scalar_color(item, "MultipleValuesBackColor", source)?;
+    if check.is_none()
+        && value_path.is_none()
+        && picture_path.is_none()
+        && present_path.is_none()
+        && allow_empty.is_none()
+        && !hyperlink
+        && !item.fonts.contains_key("MultipleValuesFont")
+        && !item.scalars.contains_key("MultipleValuesBackColor")
+    {
         return Ok("{0}".to_string());
     }
     Ok(
@@ -8470,7 +8508,11 @@ fn native_input_drop_list_settings(
             allow_empty.unwrap_or(false),
             check,
             value_path.as_deref().unwrap_or("{0}"),
+            picture_path.as_deref().unwrap_or("{0}"),
             present_path.as_deref().unwrap_or("{0}"),
+            hyperlink,
+            &font,
+            &back_color,
         ),
     )
 }

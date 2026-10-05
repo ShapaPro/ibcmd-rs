@@ -2203,12 +2203,18 @@ pub(crate) fn format_label_payload(payload: &NativeLabelPayload<'_>) -> String {
 /// `true` 1), member 4 is `<ShowCheckBoxesInDropList>` (absent 2, `false` 0,
 /// `true` 1), member 9 `<MultipleValueDataPath>` and member 15
 /// `<MultipleValuePresentDataPath>`, each `{1,{<column id>}}` or `{0}`. The
-/// rest is constant over the 5 such fields of both corpora.
+/// rest is constant over the 5 such fields of both corpora. Member 1 is
+/// `<MultipleValuesHyperlink>` (`true` 1, else 2), member 5 `<MultipleValuesFont>`
+/// and member 7 `<MultipleValuesBackColor>` (exporter reads in form_body.rs).
 pub(crate) fn format_input_drop_list_settings(
     allow_empty_multiple_values: bool,
     show_check_boxes: Option<bool>,
     value_path: &str,
+    picture_path: &str,
     present_path: &str,
+    hyperlink: bool,
+    font: &str,
+    back_color: &str,
 ) -> String {
     let check = match show_check_boxes {
         Some(true) => "1",
@@ -2216,10 +2222,11 @@ pub(crate) fn format_input_drop_list_settings(
         None => "2",
     };
     format!(
-        "{{1,2,{allow_empty},0,{check},{{7,3,0,1,100}},{{3,4,{{0}}}},{{3,4,{{0}}}},\
-         {{4,0,{{0}},\"\",-1,-1,1,0,\"\"}},{value_path},\"\",{{\"Pattern\"}},{{0}},\"\",\
+        "{{1,{hyperlink},{allow_empty},0,{check},{font},{{3,4,{{0}}}},{back_color},\
+         {{4,0,{{0}},\"\",-1,-1,1,0,\"\"}},{value_path},\"\",{{\"Pattern\"}},{picture_path},\"\",\
          {{\"Pattern\"}},{present_path},\"\",{{\"Pattern\"}},0,0}}",
         allow_empty = u8::from(allow_empty_multiple_values),
+        hyperlink = if hyperlink { 1 } else { 2 },
     )
 }
 
@@ -2389,7 +2396,7 @@ pub(crate) struct NativeInputPayload<'a> {
     /// Slots 55 to 60: `<AutoShowClearButtonMode>`, `<AutoShowOpenButtonMode>`,
     /// `<AutoCorrectionOnTextInput>`, `<SpellCheckingOnTextInput>`, a constant,
     /// `<SpecialTextInputMode>` -- already coded.
-    pub(crate) text_input_tail: [&'a str; 7],
+    pub(crate) text_input_tail: [&'a str; 8],
     /// Slot 45, `<CreateButton>`.
     pub(crate) create_button: Option<bool>,
     /// Slot 46, `<ChoiceButtonRepresentation>`: `ShowInDropList` 1,
@@ -2476,7 +2483,7 @@ impl NativeInputPayload<'_> {
             type_link: "{3,0,0}",
             choice_parameters: "{0,0}",
             available_types: "{\"Pattern\"}",
-            text_input_tail: ["0", "0", "0", "0", "0", "0", "0"],
+            text_input_tail: ["0", "0", "0", "0", "0", "0", "0", "0"],
             create_button: None,
             choice_button_representation: None,
             drop_list_button: None,
@@ -2547,7 +2554,7 @@ pub(crate) fn format_input_payload(payload: &NativeInputPayload<'_>) -> Option<S
          {text_color},{back_color},{border_color},{font},{text_edit},{type_link},\
          {edit_text_update},{input_hint},{create_button},{choice_representation},\
          {drop_list_button},{history},{auto_max_width},{max_width},0,{auto_max_height},\
-         {max_height},{height_variant},{tail0},{tail1},{tail2},{tail3},{tail4},{tail5},{tail6},{drop_list_settings},0,\
+         {max_height},{height_variant},{tail0},{tail1},{tail2},{tail3},{tail4},{tail5},{tail6},{drop_list_settings},{tail7},\
          {links_again},{multiple_values}}}",
         width = payload.width,
         height = payload.height,
@@ -2600,6 +2607,7 @@ pub(crate) fn format_input_payload(payload: &NativeInputPayload<'_>) -> Option<S
         tail4 = payload.text_input_tail[4],
         tail5 = payload.text_input_tail[5],
         tail6 = payload.text_input_tail[6],
+        tail7 = payload.text_input_tail[7],
         create_button = tristate(payload.create_button),
         drop_list_button = tristate(payload.drop_list_button),
         auto_max_width = u8::from(payload.auto_max_width),
@@ -6378,15 +6386,23 @@ pub(crate) fn format_search_control_addition_payload(auto_max_width: bool) -> St
 pub(crate) fn format_view_status_addition_payload(
     horizontal_location: Option<&str>,
     auto_max_width: bool,
+    horizontal_stretch: Option<bool>,
 ) -> Option<String> {
     // `1` is `Center`, as the exporter reads member 11 of the option tuple.
     let location = root_code(horizontal_location, &[("Left", "0"), ("Center", "1")], "3")?;
     Some(format!(
-        "{{1,0,2,{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},\
+        "{{1,0,{stretch},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},{{3,4,{{0}}}},\
          {{7,3,0,1,100}},{{7,3,0,1,100}},\
          {{3,0,{{0}},0,1,0,48312c09-257f-4b29-b280-284dd89efc1e}},{location},{{0,1,0}},\
          {auto_max_width},0,0}}",
         auto_max_width = u8::from(auto_max_width),
+        // Option member 2 is `<HorizontalStretch>`: `0` when written `false`,
+        // `2` when unwritten (exporter: parse_form_view_status_addition_horizontal_stretch).
+        stretch = if horizontal_stretch == Some(false) {
+            0
+        } else {
+            2
+        },
     ))
 }
 
