@@ -6260,15 +6260,26 @@ pub(super) fn reconcile_form_list_settings_data_parameter_values(
     let Some(fragment) = settings.data_parameters.as_mut() else {
         return;
     };
-    let parameter_names =
-        form_server_state_nil_value_list_parameter_names(server_state_xml.unwrap_or_default());
-    if parameter_names.is_empty() {
-        return;
+    let xml = server_state_xml.unwrap_or_default();
+    let restricted_names = form_server_state_nil_parameter_names(xml, "useRestriction");
+    *fragment = reconcile_nil_data_parameter_items(fragment, &restricted_names, true);
+    let parameter_names = form_server_state_nil_parameter_names(xml, "valueListAllowed");
+    *fragment = reconcile_nil_data_parameter_items(fragment, &parameter_names, false);
+    if fragment
+        .replace("<dcsset:dataParameters>", "")
+        .replace("</dcsset:dataParameters>", "")
+        .trim()
+        .is_empty()
+    {
+        if let Some(start) = fragment.find("<dcsset:dataParameters>") {
+            *fragment = format!("{}<dcsset:dataParameters/>\r\n", &fragment[..start]);
+        } else {
+            settings.data_parameters = None;
+        }
     }
-    *fragment = omit_nil_data_parameter_values(fragment, &parameter_names);
 }
 
-fn form_server_state_nil_value_list_parameter_names(xml: &str) -> BTreeSet<String> {
+fn form_server_state_nil_parameter_names(xml: &str, flag: &str) -> BTreeSet<String> {
     #[derive(Default)]
     struct ParameterState {
         name: Option<String>,
@@ -6300,7 +6311,7 @@ fn form_server_state_nil_value_list_parameter_names(xml: &str) -> BTreeSet<Strin
             Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
                 b"Parameter" => parameter = Some(ParameterState::default()),
                 b"name" if parameter.is_some() => text_target = Some("name"),
-                b"valueListAllowed" if parameter.is_some() => {
+                name if name == flag.as_bytes() && parameter.is_some() => {
                     text_target = Some("valueListAllowed")
                 }
                 b"value" if parameter.is_some() && has_true_nil_attribute(&event) => {
@@ -6334,7 +6345,7 @@ fn form_server_state_nil_value_list_parameter_names(xml: &str) -> BTreeSet<Strin
                 }
             }
             Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
-                b"name" | b"valueListAllowed" => text_target = None,
+                name if name == b"name" || name == flag.as_bytes() => text_target = None,
                 b"Parameter" => {
                     if let Some(parameter) = parameter.take()
                         && parameter.nil_default
@@ -6355,7 +6366,11 @@ fn form_server_state_nil_value_list_parameter_names(xml: &str) -> BTreeSet<Strin
     names
 }
 
-fn omit_nil_data_parameter_values(fragment: &str, parameter_names: &BTreeSet<String>) -> String {
+fn reconcile_nil_data_parameter_items(
+    fragment: &str,
+    parameter_names: &BTreeSet<String>,
+    omit_restricted_item: bool,
+) -> String {
     const ITEM_OPEN: &str = r#"<dcscor:item xsi:type="dcsset:SettingsParameterValue">"#;
     const ITEM_CLOSE: &str = "</dcscor:item>";
     const PARAMETER_OPEN: &str = "<dcscor:parameter>";
@@ -6390,6 +6405,24 @@ fn omit_nil_data_parameter_values(fragment: &str, parameter_names: &BTreeSet<Str
             .is_some_and(|name| parameter_names.contains(name))
             && let Some(value_start) = item.find(NIL_VALUE)
         {
+            if omit_restricted_item {
+                if item.contains("<dcscor:use>false</dcscor:use>") {
+                    let line_start = output.rfind('\n').map_or(0, |offset| offset + 1);
+                    if output[line_start..]
+                        .bytes()
+                        .all(|byte| matches!(byte, b' ' | b'\t'))
+                    {
+                        output.truncate(line_start);
+                    }
+                    remainder = item_remainder[item_end..]
+                        .strip_prefix("\r\n")
+                        .unwrap_or(&item_remainder[item_end..]);
+                    continue;
+                }
+                output.push_str(item);
+                remainder = &item_remainder[item_end..];
+                continue;
+            }
             let line_start = item[..value_start]
                 .rfind('\n')
                 .map_or(0, |offset| offset + 1);
@@ -11743,6 +11776,49 @@ pub(super) enum FormStandardCommandOwnerKind {
     GraphicalSchema,
     FormattedDocument,
     PdfDocument,
+    Planner,
+}
+
+#[cfg(test)]
+mod planner_command_tests {
+    use super::*;
+
+    #[test]
+    fn planner_dated_labels_keep_dates_colors_and_ticks() {
+        let raw = r#"{0,{1,2,20150729090000,{5,{0},{1,0},{"U"},{3,2,{8}},{3,2,{8}},{1,{1,0},0}},20150730000000,{5,{0},{1,0},{"U"},{3,2,{8}},{3,3,{-11}},{1,{1,0},0}},540000000}}"#;
+        let xml = form_planner_labels_xml(raw, &BTreeMap::new(), 1).unwrap();
+        assert_eq!(xml.matches("<label>").count(), 2);
+        assert!(xml.contains("<key>2015-07-29T09:00:00</key>"));
+        assert!(xml.contains("<key>2015-07-30T00:00:00</key>"));
+        assert!(xml.contains("<lineColor>web:Black</lineColor>"));
+        assert!(xml.contains("<textColor>style:FieldTextColor</textColor>"));
+        assert!(xml.contains("<ticks>540000000</ticks>"));
+        assert!(
+            form_planner_labels_xml(&raw.replacen("{1,2,", "{1,3,", 1), &BTreeMap::new(), 1)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolves_planner_preview_under_its_item_owner() {
+        let owners = BTreeMap::from([(
+            "346".to_string(),
+            FormStandardCommandOwner {
+                name: "Planner".to_string(),
+                kind: FormStandardCommandOwnerKind::Planner,
+            },
+        )]);
+        assert_eq!(
+            parse_form_button_command_name(
+                "{346,2c75e90f-36f0-48c8-913d-0d92afdb4b93}",
+                &[],
+                &BTreeMap::new(),
+                &owners,
+                &BTreeMap::new(),
+            ),
+            Some("Form.Item.Planner.StandardCommand.Preview".to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -12315,6 +12391,15 @@ fn collect_form_child_item_indexes_from_field_traced(
             FormStandardCommandOwner {
                 name,
                 kind: FormStandardCommandOwnerKind::PdfDocument,
+            },
+        );
+    }
+    if let Some((_, "PlannerField", id, name)) = structural_identity.as_ref() {
+        indexes.standard_command_owner_name_by_id.insert(
+            (*id).to_string(),
+            FormStandardCommandOwner {
+                name: name.clone(),
+                kind: FormStandardCommandOwnerKind::Planner,
             },
         );
     }
@@ -25675,6 +25760,25 @@ pub(super) fn resolve_form_bound_chain_member_path(
     // attribute, so both are read from the one table that already holds them
     // rather than from a name-only copy beside it.
     let attribute = attribute_metadata_owners_by_id.get(attribute_id)?;
+    // A document object's Ref reaches the reference of that same document.
+    // Src carries `{3,{1},{-5},{-2}}`, published as `Объект.Ref.Number`.
+    // No declared column is involved, so a neighbouring field binding must
+    // not supply the terminal's name.
+    if members.len() == 2
+        && members[0].as_slice() == ["-5"]
+        && attribute
+            .exact_single_type_reference
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("cfg:DocumentObject."))
+        && !owner_scoped_bindings
+            .undeclared_root_standard_attributes
+            .contains(&(attribute_id.to_string(), "Ref"))
+        && let [marker] = members[1].as_slice()
+        && let Some(name) =
+            lookup_form_standard_attribute(DOCUMENT_REF_STANDARD_ATTRIBUTES, marker.trim())
+    {
+        return Some(format!("{}.Ref.{name}", attribute.name));
+    }
     walk_form_bound_chain_members(
         members,
         attribute_id,
@@ -27330,6 +27434,61 @@ const CHART_OF_CALCULATION_TYPES_OBJECT_STANDARD_ATTRIBUTES: &[(&str, &str)] = &
 /// the same place and writes `Заказы.Ссылка.Date`.
 const DOCUMENT_REF_STANDARD_ATTRIBUTES: &[(&str, &str)] = &[("-2", "Number"), ("-3", "Date")];
 
+#[cfg(test)]
+mod document_ref_chain_tests {
+    use super::*;
+
+    #[test]
+    fn document_object_ref_reaches_its_number_without_neighbouring_bindings() {
+        let owner = FormAttributeMetadataOwner {
+            name: "Object".into(),
+            type_references: vec!["cfg:DocumentObject.Probe".into()],
+            exact_single_type_reference: Some("cfg:DocumentObject.Probe".into()),
+            has_dynamic_list_settings: false,
+            main_table: None,
+            manual_query: false,
+            additional_columns: vec![],
+        };
+        let mut owners = BTreeMap::from([("1".into(), owner)]);
+        let bindings = FormOwnerScopedBindingIndexes::default();
+        let refs = BTreeMap::new();
+        assert_eq!(
+            resolve_form_bound_chain_member_path(
+                "{3,{1},{-5},{-2}}",
+                &owners,
+                &bindings,
+                &refs,
+                false
+            )
+            .as_deref(),
+            Some("Object.Ref.Number")
+        );
+        assert_eq!(
+            resolve_form_bound_chain_member_path(
+                "{3,{1},{-5},{-3}}",
+                &owners,
+                &bindings,
+                &refs,
+                false
+            )
+            .as_deref(),
+            Some("Object.Ref.Date")
+        );
+        owners.get_mut("1").unwrap().exact_single_type_reference =
+            Some("cfg:CatalogObject.Probe".into());
+        assert!(
+            resolve_form_bound_chain_member_path(
+                "{3,{1},{-5},{-2}}",
+                &owners,
+                &bindings,
+                &refs,
+                false
+            )
+            .is_none()
+        );
+    }
+}
+
 /// Business-process standard attributes reachable through a bound field slot,
 /// limited to the markers the platform bytes actually spell out.
 ///
@@ -28445,6 +28604,10 @@ pub(super) fn parse_form_button_command_name_with_main_attribute(
                 form_spreadsheet_document_standard_command_suffix(&uuid)
             }
             FormStandardCommandOwnerKind::Table => form_table_standard_command_suffix(&uuid),
+            FormStandardCommandOwnerKind::Planner => match uuid.as_str() {
+                "2c75e90f-36f0-48c8-913d-0d92afdb4b93" => Some("Preview"),
+                _ => None,
+            },
         } {
             return Some(format!(
                 "Form.Item.{}.StandardCommand.{standard}",
@@ -38314,17 +38477,7 @@ fn form_planner_time_scale_level_xml(
     if level.len() != FORM_PLANNER_TIME_SCALE_LEVEL_FIELDS || level.first()?.trim() != "8" {
         return None;
     }
-    let labels = split_1c_braced_fields(level.get(8)?.trim(), 0)?;
-    if labels.len() != 2 || labels.first()?.trim() != "0" {
-        return None;
-    }
-    let ticks_record = split_1c_braced_fields(labels.get(1)?.trim(), 0)?;
-    if ticks_record.len() != 3
-        || ticks_record.first()?.trim() != "1"
-        || ticks_record.get(1)?.trim() != "0"
-    {
-        return None;
-    }
+    let labels_xml = form_planner_labels_xml(level.get(8)?, object_refs, inner)?;
     let mut xml = format!("{tab}<level{FORM_PLANNER_CHART_NAMESPACE_ATTR}>\r\n");
     xml.push_str(&format!(
         "{inner_tab}<measure>{}</measure>\r\n",
@@ -38355,12 +38508,7 @@ fn form_planner_time_scale_level_xml(
         )?
     ));
     xml.push_str(&form_planner_localized_xml("format", level.get(7)?, inner)?);
-    xml.push_str(&format!("{inner_tab}<labels>\r\n"));
-    xml.push_str(&format!(
-        "{inner_tab}\t<ticks>{}</ticks>\r\n",
-        form_chart_integer(ticks_record.get(2)?)?
-    ));
-    xml.push_str(&format!("{inner_tab}</labels>\r\n"));
+    xml.push_str(&labels_xml);
     xml.push_str(&format!(
         "{inner_tab}<backColor>{}</backColor>\r\n",
         form_chart_color(level.get(9)?, object_refs)?
@@ -38374,6 +38522,48 @@ fn form_planner_time_scale_level_xml(
         form_chart_bool(level.get(11)?)?
     ));
     xml.push_str(&format!("{tab}</level>\r\n"));
+    Some(xml)
+}
+
+fn form_planner_labels_xml(
+    field: &str,
+    object_refs: &BTreeMap<String, String>,
+    indent: usize,
+) -> Option<String> {
+    let labels = split_1c_braced_fields(field.trim(), 0)?;
+    if labels.len() != 2 || labels.first()?.trim() != "0" {
+        return None;
+    }
+    let record = split_1c_braced_fields(labels.get(1)?.trim(), 0)?;
+    let count: usize = record.get(1)?.trim().parse().ok()?;
+    if record.first()?.trim() != "1"
+        || count > MAX_FORM_PLANNER_ITEMS
+        || record.len() != 3 + 2 * count
+    {
+        return None;
+    }
+    let tab = "\t".repeat(indent);
+    let mut xml = format!("{tab}<labels>\r\n");
+    for pair in record.get(2..2 + 2 * count)?.chunks_exact(2) {
+        let label = split_1c_braced_fields(pair.get(1)?.trim(), 0)?;
+        // The dated labels in the corpus carry empty unformatted text and
+        // two independent colors. Decline other payloads rather than lose them.
+        if label.len() != 7
+            || label.first()?.trim() != "5"
+            || form_chart_compact(label.get(1)?) != "{0}"
+            || form_chart_compact(label.get(2)?) != "{1,0}"
+            || form_chart_compact(label.get(3)?) != "{\"U\"}"
+            || form_chart_compact(label.get(6)?) != "{1,{1,0},0}"
+        {
+            return None;
+        }
+        xml.push_str(&format!("{tab}\t<label>\r\n{tab}\t\t<key>{}</key>\r\n{tab}\t\t<text/>\r\n{tab}\t\t<textFormatted>false</textFormatted>\r\n{tab}\t\t<lineColor>{}</lineColor>\r\n{tab}\t\t<textColor>{}</textColor>\r\n{tab}\t</label>\r\n",
+            form_planner_date(pair.first()?.trim())?, form_chart_color(label.get(4)?, object_refs)?, form_chart_color(label.get(5)?, object_refs)?));
+    }
+    xml.push_str(&format!(
+        "{tab}\t<ticks>{}</ticks>\r\n{tab}</labels>\r\n",
+        form_chart_integer(record.last()?)?
+    ));
     Some(xml)
 }
 

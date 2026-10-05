@@ -2993,6 +2993,17 @@ fn parse_dcs_conditional_selection(
             "conditional-appearance selection namespace or attributes are unsupported",
         ));
     }
+    if selection
+        .children()
+        .iter()
+        .filter(|node| matches!(node, XmlNode::Element(_)))
+        .count()
+        > 1
+    {
+        return Ok(DcsChildParseOutcome::Unsupported(
+            "conditional-appearance selection has multiple items",
+        ));
+    }
     let Some(selected_item) = one_direct_element_child(selection)? else {
         return Ok(DcsChildParseOutcome::Unsupported(
             "empty conditional-appearance selection is unsupported",
@@ -3007,6 +3018,17 @@ fn parse_dcs_conditional_selection(
     {
         return Ok(DcsChildParseOutcome::Unsupported(
             "conditional-appearance selection item is unsupported",
+        ));
+    }
+    if selected_item
+        .children()
+        .iter()
+        .filter(|node| matches!(node, XmlNode::Element(_)))
+        .count()
+        > 1
+    {
+        return Ok(DcsChildParseOutcome::Unsupported(
+            "conditional-appearance selection item has multiple children",
         ));
     }
     let Some(field) = one_direct_element_child(selected_item)? else {
@@ -3039,6 +3061,17 @@ fn parse_dcs_appearance_value(
     if !xml_element_uses_namespace(appearance, root, policy.namespace_uri()) {
         return Ok(DcsChildParseOutcome::Unsupported(
             "appearance container namespace is unsupported",
+        ));
+    }
+    if appearance
+        .children()
+        .iter()
+        .filter(|node| matches!(node, XmlNode::Element(_)))
+        .count()
+        > 1
+    {
+        return Ok(DcsChildParseOutcome::Unsupported(
+            "appearance has multiple parameter items",
         ));
     }
     let Some(item) = one_direct_element_child(appearance)? else {
@@ -5699,6 +5732,24 @@ mod tests {
             emit_dcs_conditional_appearance_storage_document(&metadata).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn multiple_conditional_fields_and_parameters_are_cohort_refusals() {
+        let document = XmlReader::from_slice(
+            br#"<selection xmlns="http://v8.1c.ru/8.1/data-composition-system/settings"><item><field>A</field></item><item><field>B</field></item></selection>"#,
+        ).unwrap();
+        assert!(matches!(
+            parse_dcs_conditional_selection(document.root(), document.root()).unwrap(),
+            DcsChildParseOutcome::Unsupported(_)
+        ));
+        let document = XmlReader::from_slice(
+            br#"<appearance xmlns="http://v8.1c.ru/8.1/data-composition-system/settings"><item/><item/></appearance>"#,
+        ).unwrap();
+        assert!(matches!(
+            parse_dcs_appearance_value(document.root(), document.root()).unwrap(),
+            DcsChildParseOutcome::Unsupported(_)
+        ));
     }
 
     #[test]

@@ -1808,9 +1808,13 @@ pub fn pack_module_blob_container_bytes(container: &[u8]) -> Result<PackedModule
 }
 
 pub fn unpack_module_blob_text(blob: &[u8]) -> Result<Vec<u8>> {
-    read_element_from_blob(blob, "text")
+    let text = read_element_from_blob(blob, "text")
         .context("failed to read module blob text element")?
-        .ok_or_else(|| anyhow!("module blob does not contain text element"))
+        .ok_or_else(|| anyhow!("module blob does not contain text element"))?;
+    // Protected modules can retain a `text` element containing ciphertext.
+    // It is not BSL source; exporting it would lose the binary container.
+    std::str::from_utf8(&text).context("module text element is not UTF-8 source")?;
+    Ok(text)
 }
 
 /// Recognizes a module body carrying no V8-container framing at all: the
@@ -33876,6 +33880,12 @@ mod tests {
         let text = b"Procedure Run()\r\nEndProcedure\r\n";
         let packed = super::pack_module_blob_bytes(text, None, None).unwrap();
         assert_eq!(super::unpack_module_blob_text(&packed.blob).unwrap(), text);
+    }
+
+    #[test]
+    fn rejects_encrypted_module_text_element() {
+        let packed = super::pack_module_blob_bytes(&[0xd2, 0xc6, 0x98, 0xff], None, None).unwrap();
+        assert!(super::unpack_module_blob_text(&packed.blob).is_err());
     }
 
     /// Real ERP УХ 3.2.12.6 `CommonModules` module bodies carrying no V8

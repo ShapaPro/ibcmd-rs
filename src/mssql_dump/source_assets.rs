@@ -387,7 +387,9 @@ pub(super) fn is_binary_module_container(bytes: &[u8]) -> bool {
     let Some(names) = v8_container_element_names(&inflated) else {
         return false;
     };
-    names.contains("image") && names.contains("info") && !names.contains("text")
+    names.contains("image")
+        && names.contains("info")
+        && (!names.contains("text") || unpack_module_blob_text(bytes).is_err())
 }
 
 pub(super) fn v8_container_element_names(bytes: &[u8]) -> Option<BTreeSet<String>> {

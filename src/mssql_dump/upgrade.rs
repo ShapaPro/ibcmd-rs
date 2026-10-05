@@ -84,7 +84,34 @@ pub(super) fn upgrade_record_by_shape(text: &str, uuid: &str) -> Option<String> 
     let text_now = upgraded.as_deref().unwrap_or(text);
     let upgraded = upgrade_root_section_identities(text_now, uuid).or(upgraded);
     let text_now = upgraded.as_deref().unwrap_or(text);
+    let upgraded = upgrade_legacy_history_owner(text_now).or(upgraded);
+    let text_now = upgraded.as_deref().unwrap_or(text);
     upgrade_form_record(text_now).or(upgraded)
+}
+
+/// The two history processing flags were appended to these owner layouts.
+/// Native 8.3.27 XML of R6 publishes false for both absent flags; the old
+/// members occupy the same slots as the current readers, including DataHistory.
+fn upgrade_legacy_history_owner(text: &str) -> Option<String> {
+    let root_open = text.find('{')?;
+    let (root, _) = members(text, root_open)?;
+    if root.len() != 8 || member(text, &root[0]) != "1" || member(text, &root[2]) != "5" {
+        return None;
+    }
+    let owner_open = list_open(text, root.get(1)?)?;
+    let (owner, owner_close) = members(text, owner_open)?;
+    let target = match (member(text, owner.first()?), owner.len()) {
+        ("29", 47) => "30",
+        ("54", 59) => "56",
+        _ => return None,
+    };
+    let tag = trimmed(text, &owner[0]);
+    Some(format!(
+        "{}{target}{},0,0{}",
+        &text[..tag.start],
+        &text[tag.end..owner_close],
+        &text[owner_close..]
+    ))
 }
 
 /// A form's metadata record `{12,<header>,…}` (5 members; an owned form under
@@ -103,7 +130,7 @@ fn upgrade_form_record(text: &str) -> Option<String> {
     let (mut wrapper, _) = members(text, wrapper_open)?;
     // One form record of 1C:Документооборот sits a level deeper,
     // `{1,{0,{12,…}},{0}}`.
-    if wrapper.len() == 3 && member(text, &wrapper[0]) == "1" {
+    if matches!(wrapper.len(), 2 | 3) && member(text, &wrapper[0]) == "1" {
         let inner_open = list_open(text, &wrapper[1])?;
         wrapper = members(text, inner_open)?.0;
         if member(text, wrapper.first()?) != "0" {
@@ -443,6 +470,20 @@ fn list_open(text: &str, range: &Range<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrades_form_inside_two_member_legacy_wrapper() {
+        let header = format!(
+            "{{3,{{1,0,aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa}},\"Form\",{{0}},\"\",0,0,{NIL_UUID},0}}"
+        );
+        for extra in ["", ",{0}"] {
+            let old = format!("{{1,{{1,{{0,{{12,{header},0,1,{{2,1,2}}}},{{0}}}}{extra}}},{{0}}}}");
+            assert_eq!(
+                upgrade_form_record(&old),
+                Some(old.replacen("{12,", "{13,", 1))
+            );
+        }
+    }
 
     fn plan(tag: &str, count: usize) -> String {
         let owner = std::iter::once(tag.to_string())

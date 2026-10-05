@@ -356,19 +356,26 @@ fn form_metadata_fields_and_extended_presentation_in_block<'a>(
 ) -> Option<(Vec<&'a str>, Option<&'a str>)> {
     let fields = split_1c_braced_fields(block, 0)?;
     if matches!(fields.first().map(|field| field.trim()), Some("13" | "14"))
-        && metadata_header_field_index(&fields, uuid).is_some()
+        || (fields.first().map(|field| field.trim()) == Some("12")
+            && fields.len() == 5
+            && direct_form_application_purposes_are_valid(fields[4]))
     {
-        return Some((fields, None));
+        if metadata_header_field_index(&fields, uuid).is_some() {
+            return Some((fields, None));
+        }
     }
 
     for (index, field) in fields.iter().enumerate() {
         let Some(child_fields) = split_1c_braced_fields(field.trim(), 0) else {
             continue;
         };
-        if matches!(
+        if (matches!(
             child_fields.first().map(|field| field.trim()),
             Some("13" | "14")
-        ) && metadata_header_field_index(&child_fields, uuid).is_some()
+        ) || (child_fields.first().map(|field| field.trim()) == Some("12")
+            && child_fields.len() == 5
+            && direct_form_application_purposes_are_valid(child_fields[4])))
+            && metadata_header_field_index(&child_fields, uuid).is_some()
         {
             let extended_presentation = fields
                 .get(index + 1)

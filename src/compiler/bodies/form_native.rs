@@ -3001,6 +3001,12 @@ pub(crate) fn format_document_payload(
 /// command's name. Measured over every item button of ERP УХ.
 const ITEM_STANDARD_COMMAND_UUIDS: &[(&str, bool, &str, &str)] = &[
     (
+        "PlannerField",
+        false,
+        "Preview",
+        "2c75e90f-36f0-48c8-913d-0d92afdb4b93",
+    ),
+    (
         "FormattedDocumentField",
         false,
         "AlignCenter",

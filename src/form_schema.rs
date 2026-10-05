@@ -4078,6 +4078,9 @@ impl FormChildItemEventCollectionSchema {
                 (FORM_GRAPHICAL_SCHEMA_ON_ACTIVATE_EVENT_UUID, "OnActivate"),
             ],
             FormChildItemEventCollectionOwner::PlannerField => &[
+                (FORM_ITEM_DRAG_CHECK_EVENT_UUID, "DragCheck"),
+                (FORM_ITEM_DRAG_START_EVENT_UUID, "DragStart"),
+                (FORM_ITEM_DRAG_END_EVENT_UUID, "DragEnd"),
                 (FORM_PLANNER_BEFORE_CREATE_EVENT_UUID, "BeforeCreate"),
                 (
                     FORM_PLANNER_ON_CURRENT_REPRESENTATION_PERIOD_CHANGE_EVENT_UUID,
@@ -7066,8 +7069,8 @@ impl FormSpecialFieldSchema {
     ///   default `1`; 9 `LargeStep`, default `10`; 10 `MarkingStep`, default
     ///   `5`.
     /// * 11 `MarkingAppearance`: `1` on exactly the 3 items the platform
-    ///   writes `TopLeft` on, `2` on the other 6. No other code occurs, so the
-    ///   remaining appearances stay unread rather than guessed.
+    ///   writes `TopLeft` on, `2` on the other 6. Src also stores `0` on a
+    ///   track bar whose native XML publishes `DontShow`.
     /// * 13 `AutoMaxWidth`: `0` on the one item the platform writes `false`
     ///   on, `1` on the other 8.
     fn track_bar_dimension(options: &[&str], slot: usize, default: &str) -> Option<String> {
@@ -7144,11 +7147,11 @@ impl FormSpecialFieldSchema {
     }
 
     pub(crate) fn marking_appearance(self, options: &[&str]) -> Option<&'static str> {
-        matches!(
-            (self.kind, options.get(11).map(|field| field.trim())),
-            (FormSpecialFieldKind::TrackBar, Some("1"))
-        )
-        .then_some("TopLeft")
+        match (self.kind, options.get(11).map(|field| field.trim())) {
+            (FormSpecialFieldKind::TrackBar, Some("0")) => Some("DontShow"),
+            (FormSpecialFieldKind::TrackBar, Some("1")) => Some("TopLeft"),
+            _ => None,
+        }
     }
 
     pub(crate) fn auto_max_width(self, options: &[&str]) -> Option<bool> {
@@ -7169,10 +7172,15 @@ impl FormSpecialFieldSchema {
     /// this member from the default `1` to `0`; every other option member is
     /// byte-identical. The full corpus agrees: the sole native `false` has `0`
     /// here and all 148 omitted properties have `1`.
+    /// The revision-3 Gantt bag uses member 9: Src stores `0` where native
+    /// XML publishes false, while the existing default bags store `1`.
     pub(crate) fn auto_max_height(self, options: &[&str]) -> Option<bool> {
-        (self.kind == FormSpecialFieldKind::ProgressBar
-            && options.get(14).map(|field| field.trim()) == Some("0"))
-        .then_some(false)
+        let slot = match self.kind {
+            FormSpecialFieldKind::ProgressBar => 14,
+            FormSpecialFieldKind::GanttChart if !self.gantt_short_option_revision => 9,
+            _ => return None,
+        };
+        (options.get(slot).map(|field| field.trim()) == Some("0")).then_some(false)
     }
 
     /// The progress bar keeps `HorizontalStretch` in the same option member the
@@ -9866,6 +9874,42 @@ mod table_tail_property_tests {
 #[cfg(test)]
 mod track_bar_extent_tests {
     use super::*;
+
+    #[test]
+    fn native_src_special_fields_keep_height_limit_and_hidden_marks() {
+        let gantt = [
+            "3", "50", "10", "1", "1", "{0,1,0}", "0", "0", "0", "0", "0", "0", "0", "0", "2", "2",
+        ];
+        let schema =
+            FormSpecialFieldSchema::from_raw_layout("37", 60, Some("12"), 0, &gantt, Some("1"))
+                .unwrap();
+        assert_eq!(schema.auto_max_width(&gantt), Some(false));
+        assert_eq!(schema.auto_max_height(&gantt), Some(false));
+        let track = [
+            "2",
+            "39",
+            "1",
+            "0",
+            "0",
+            "40",
+            "200",
+            "10",
+            "0",
+            "30",
+            "5",
+            "0",
+            "{3,4,{0}}",
+            "1",
+            "0",
+            "0",
+            "1",
+            "0",
+        ];
+        let schema =
+            FormSpecialFieldSchema::from_raw_layout("37", 59, Some("10"), 0, &track, Some("2"))
+                .unwrap();
+        assert_eq!(schema.marking_appearance(&track), Some("DontShow"));
+    }
 
     /// Evidence: `DataProcessors/СопоставлениеНоменклатурыБЭД/Forms/Форма`
     /// `ТочностьПоискаРегулирование` of 1C:Документооборот 3.0.17, whose option

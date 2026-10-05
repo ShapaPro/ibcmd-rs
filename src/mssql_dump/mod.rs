@@ -698,8 +698,8 @@ mod characteristics {
                         CharacteristicsReferenceKind::FieldUuid,
                     )
                 })?;
-                let path =
-                    resolve_exchange_plan_index_reference(&uuid, object_refs).ok_or_else(|| {
+                let Some(path) = resolve_exchange_plan_index_reference(&uuid, object_refs) else {
+                    let uuid = ObjectUuid::parse(&uuid).map_err(|_| {
                         unresolved(
                             family,
                             item_index,
@@ -708,6 +708,8 @@ mod characteristics {
                             CharacteristicsReferenceKind::FieldUuid,
                         )
                     })?;
+                    return Ok(CharacteristicField::Unresolved(uuid));
+                };
                 if !CharacteristicsPhysicalSchema::owns_field(source.path(), &path) {
                     return Err(malformed_field(
                         family,
@@ -1317,7 +1319,14 @@ const PLANNER_TYPE_REFERENCE: &str = "pl:Planner";
 // name whose prefix the metadata-root document fixes stays here: `Chart` at
 // depth 7. SettingsComposer stays on its stricter owner-wide admission path
 // below.
-const DATA_PROCESSOR_BUILTIN_TYPE_REFERENCES: &[(&str, &str)] = &[(CHART_TYPE_UUID, "d7p1:Chart")];
+const DATA_PROCESSOR_BUILTIN_TYPE_REFERENCES: &[(&str, &str)] = &[
+    (CHART_TYPE_UUID, "d7p1:Chart"),
+    ("4652c4ec-1d1d-4af4-b835-e33fcb43af8c", "d7p1:Filter"),
+    (
+        "4af83795-fc2a-48cd-9bea-ce665789a62c",
+        "d7p1:FlowchartContextType",
+    ),
+];
 const MAX_METADATA_CHOICE_PARAMETER_VALUE_DEPTH: usize = 64;
 // Platform collection type IDs, stable across independent infobases.
 const CATALOG_TABULAR_ATTRIBUTE_GROUP_UUID: &str = "888744e1-b616-11d4-9436-004095e12fc7";
@@ -6238,19 +6247,20 @@ fn form_metadata_file_names(rows: &[ConfigRow]) -> BTreeSet<String> {
 }
 
 fn is_direct_code14_form_metadata_text(text: &str, uuid: &str) -> bool {
-    if parse_metadata_object_code(text) != Some(14) {
+    if !matches!(parse_metadata_object_code(text), Some(12 | 14)) {
         return false;
     }
     let Some(fields) = metadata_object_fields(text) else {
         return false;
     };
-    fields.len() == 6
-        && fields.first().map(|field| field.trim()) == Some("14")
-        && metadata_header_field_index(&fields, uuid) == Some(1)
+    matches!(
+        (fields.first().map(|field| field.trim()), fields.len()),
+        (Some("12"), 5) | (Some("14"), 6)
+    ) && metadata_header_field_index(&fields, uuid) == Some(1)
         && information_register_bool(fields[2]).is_some()
         && information_register_bool(fields[3]).is_some()
         && direct_form_application_purposes_are_valid(fields[4])
-        && information_register_bool(fields[5]).is_some()
+        && (fields.len() == 5 || information_register_bool(fields[5]).is_some())
 }
 
 fn direct_form_application_purposes_are_valid(value: &str) -> bool {
@@ -12876,7 +12886,7 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
         let xml = format_common_module_source_xml(&header, &flags, source_version).into_bytes();
         return Some(ExtractedMetadataSourceXml { relative_path, xml });
     }
-    if object_code == 16 {
+    if object_code == 16 && row.kind.as_deref() == Some("Constant") {
         let header = row.header.as_ref()?;
         let constant =
             parse_constant_properties_from_text(text, uuid, type_index, object_refs, form_refs)?;
@@ -32150,7 +32160,7 @@ fn parse_data_processor_properties_from_text(
 ) -> Option<DataProcessorProperties> {
     let header = parse_metadata_header_from_text(text, uuid)?;
     let fields = metadata_object_fields(text)?;
-    if fields.first().map(|value| value.trim()) != Some("17") {
+    if !matches!(fields.first().map(|value| value.trim()), Some("16" | "17")) {
         return None;
     }
 
@@ -45411,6 +45421,18 @@ fn metadata_type_xml_namespace_attr(value_type: &ConstantValueType) -> &'static 
             if reference == "d7p1:Chart" =>
         {
             r#" xmlns:d7p1="http://v8.1c.ru/8.2/data/chart""#
+        }
+        ConstantValueType::Reference { reference }
+        | ConstantValueType::ReferenceTypeSet { reference }
+            if reference == "d7p1:Filter" =>
+        {
+            r#" xmlns:d7p1="http://v8.1c.ru/8.2/misc""#
+        }
+        ConstantValueType::Reference { reference }
+        | ConstantValueType::ReferenceTypeSet { reference }
+            if reference == "d7p1:FlowchartContextType" =>
+        {
+            r#" xmlns:d7p1="http://v8.1c.ru/8.2/data/graphscheme""#
         }
         _ => "",
     }
