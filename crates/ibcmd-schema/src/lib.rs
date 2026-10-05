@@ -2366,6 +2366,13 @@ where
         [kind] if kind.trim() == r#""U""# && payload[1].trim() == "0" && typed_ids(&payload) => {
             FormChoiceParameterValue::DesignTimeRef(resolve(payload[3].trim(), payload[4].trim())?)
         }
+        // Mode `0` with both ids nil is a design-time reference that names no
+        // type at all; the platform writes it as an empty
+        // `<Value xsi:type="xr:DesignTimeRef"/>` (ЛИМС КОРП, 3 items in 3 forms,
+        // e.g. `Catalogs/СертификатыНоменклатуры/Forms/ФормаСписка`).
+        [kind] if kind.trim() == r#""U""# && payload[1].trim() == "0" && nil_ids(&payload) => {
+            FormChoiceParameterValue::DesignTimeRef(String::new())
+        }
         [kind, array_type, values]
             if exact_1c_string(kind).as_deref() == Some("#")
                 && array_type

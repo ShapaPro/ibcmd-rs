@@ -1333,6 +1333,7 @@ pub(super) struct FormBodyProperties {
     pub(super) width: Option<String>,
     pub(super) height: Option<String>,
     pub(super) window_opening_mode: Option<&'static str>,
+    pub(super) scale: Option<String>,
     pub(super) enter_key_behavior: Option<&'static str>,
     pub(super) save_window_settings: Option<bool>,
     pub(super) auto_title: Option<bool>,
@@ -2769,7 +2770,23 @@ pub(super) fn extract_form_body_properties(
         report_result_view_mode: extract_form_report_result_view_mode(fields),
         view_mode_application_on_set_report_result:
             extract_form_view_mode_application_on_set_report_result(fields),
+        scale: extract_form_scale(fields),
     }
+}
+
+/// The root `<Scale>`: trailer slot 16 plus the optional-block count, right
+/// ahead of `ShowTitle`. It is `100` on every form that writes no element (all
+/// 1 548 root-`49` forms of the stand, per `extract_form_show_title`), and
+/// `130` on ЛИМС КОРП `Documents/лимсПроведениеИспытаний/Forms/
+/// НастройкаОтображенияТаблица`, which writes `<Scale>130</Scale>`.
+pub(super) fn extract_form_scale(fields: &[&str]) -> Option<String> {
+    let tail_start = form_root_trailer_start(fields)?;
+    let blocks = form_root_trailer_optional_blocks(
+        fields.first().map(|field| field.trim()),
+        fields.get(tail_start..)?,
+    )?;
+    let value = fields.get(tail_start + 16 + blocks)?.trim();
+    (value != "100" && value.parse::<u32>().is_ok()).then(|| value.to_string())
 }
 
 pub(super) fn extract_form_dimension(fields: &[&str], index: usize) -> Option<String> {
@@ -7295,6 +7312,13 @@ fn form_dynamic_list_use_always_field_name(
             let unresolvable =
                 has_universe && !resolves(item_id, field_name, secondary.map(String::as_str));
             if unresolvable {
+                // A marked field keeps only its last segment: no `~` field of
+                // the stand spells a dotted path, and ЛИМС КОРП
+                // `InformationRegisters/лимсДействиеГарантированныхЗначений/
+                // Forms/ФормаСписка` remembers `КлючАналитикиГЗ.ВидПроверки`
+                // and the platform writes `~Список.ВидПроверки`.
+                let field_name = field_name.rsplit('.').next().unwrap_or(field_name);
+                let secondary = secondary.map(|name| name.rsplit('.').next().unwrap_or(name));
                 match secondary {
                     Some(secondary) if secondary != field_name => {
                         format!("~{attribute_name}.{field_name}~{attribute_name}.{secondary}")
@@ -10964,15 +10988,18 @@ fn form_attribute_undeclared_standard_attributes(
         let Some(owner) = form_generated_owner_type_from_type_reference(reference) else {
             continue;
         };
-        if owner.family() != GeneratedMetadataOwnerFamily::Catalog {
-            continue;
-        }
+        let names: &[&'static str] = match owner.family() {
+            GeneratedMetadataOwnerFamily::Catalog => &["Code", "Description", "Parent"],
+            // A non-periodical information register declares no `Period`.
+            GeneratedMetadataOwnerFamily::InformationRegister => &["Period"],
+            _ => continue,
+        };
         let Some(table) = declarations.table(&owner.owner_reference()) else {
             continue;
         };
         // `Parent` under a non-hierarchical catalogue too: Монитор
         // `Catalogs/ПолучателиУведомлений/Forms/ФормаЭлемента` writes `1/-4`.
-        for name in ["Code", "Description", "Parent"] {
+        for &name in names {
             if !table.declares(name) {
                 undeclared.insert((attribute.id.clone(), name));
             }
@@ -11332,6 +11359,8 @@ pub(super) struct FormOwnerScopedBindingIndexes {
     /// holds exactly one. A chain that dereferences a column reads its standard
     /// attributes, and which name a marker spells depends on that type's family.
     declared_column_types: BTreeMap<FormAttributeColumnKey, Option<String>>,
+    /// Declared columns whose type lists more than one reference.
+    composite_reference_columns: BTreeSet<FormAttributeColumnKey>,
     /// The single reference type each *metadata* field is declared to hold,
     /// keyed by that field's uuid. Configuration-wide and shared, not form
     /// local: a chain segment that names a metadata field reaches a value of
@@ -11614,6 +11643,16 @@ pub(super) fn collect_form_chain_walk_member_indexes(
                 key.clone(),
                 column.name.clone(),
             );
+            if column.value_types.len() > 1
+                && column
+                    .value_types
+                    .iter()
+                    .all(|value_type| matches!(value_type, ConstantValueType::Reference { .. }))
+            {
+                owner_scoped_bindings
+                    .composite_reference_columns
+                    .insert(key.clone());
+            }
             if let [ConstantValueType::Reference { reference }] = column.value_types.as_slice() {
                 insert_unambiguous_form_binding(
                     &mut owner_scoped_bindings.declared_column_types,
@@ -15753,15 +15792,27 @@ fn parse_form_child_item_with_metadata_owners(
         // ОтветНаЗапросРеквизитовДляВыплатыПособия, ОтветНаЗапросФССДляРасчетаПособия,
         // СведенияДляОплатыОтпускаСФР, СведенияОЗастрахованномЛицеФСС}/Forms/
         // ФормаДокумента` -- lost the element.
-        usual_group_current_row_use: (tag == "UsualGroup")
-            .then(|| fields.get(20))
-            .flatten()
-            .and_then(|field| split_1c_braced_fields(field.trim(), 0))
-            .and_then(|members| match members.get(25)?.trim() {
-                "0" => Some("Use"),
-                "1" => Some("DontUse"),
-                _ => None,
-            }),
+        usual_group_current_row_use: match tag {
+            "UsualGroup" => fields
+                .get(20)
+                .and_then(|field| split_1c_braced_fields(field.trim(), 0))
+                .and_then(|members| match members.get(25)?.trim() {
+                    "0" => Some("Use"),
+                    "1" => Some("DontUse"),
+                    _ => None,
+                }),
+            // The long `{4,…}` pages tuple keeps the same code in member 3: `2`
+            // on every container that writes no element (`Страницы` of ЛИМС
+            // КОРП `Documents/лимсПретензия/Forms/ФормаДокумента` among them)
+            // and `1` on `Catalogs/ПодключаемоеОборудование/Forms/
+            // ФормаЭлемента` `Закладки`, which writes `DontUse`.
+            "Pages" => fields
+                .get(20)
+                .and_then(|field| split_1c_braced_fields(field.trim(), 0))
+                .filter(|members| members.len() == 6 && members[0].trim() == "4")
+                .and_then(|members| (members.get(3)?.trim() == "1").then_some("DontUse")),
+            _ => None,
+        },
         decoration_enable_start_drag: picture_decoration_options.as_deref().and_then(|options| {
             let slot = FormPictureDecorationSchema.enable_start_drag_option_slot(options)?;
             (options.get(slot)?.trim() == "1").then_some(true)
@@ -24017,81 +24068,89 @@ pub(super) fn parse_form_child_item_data_path(
             return dynamic_list;
         }
         let chain = FormOwnerScopedDataPath::from_option(
-            resolve_form_settings_composer_chain_data_path(
-                field,
-                attribute_metadata_owners_by_id,
-                object_refs,
-                &owner_scoped_bindings.metadata_field_types,
-            )
-            .or_else(|| {
-                resolve_form_standard_period_column_data_path(
-                    field,
-                    attribute_metadata_owners_by_id,
-                )
-            })
-            // A record-set member the register splits between the two sides of
-            // an entry is named by the terminal's marker as much as by its
-            // uuid, and the chain walker below reads only the uuid -- so it
-            // answers `НаборЗаписей.Подразделение` where the platform writes
-            // `НаборЗаписей.ПодразделениеDr`. This pass answers that one shape
-            // and nothing else, leaving every shape the walker already spells
-            // right to the walker.
-            .or_else(|| {
-                resolve_form_register_record_set_member_data_path(
-                    field,
-                    true,
-                    attribute_metadata_owners_by_id,
-                    object_refs,
-                )
-            })
-            // A configuration metadata UUID absent from its declarations
-            // cannot be named. Preserve the physical chain before the generic
-            // member walker reconstructs a plausible name from neighbouring
-            // declarations. Runtime value-table markers are excluded by the
-            // resolver itself.
-            .or_else(|| resolve_form_absent_metadata_physical_data_path(field, object_refs))
-            .or_else(|| {
-                resolve_form_bound_chain_member_path(
-                    field,
-                    attribute_metadata_owners_by_id,
-                    owner_scoped_bindings,
-                    object_refs,
-                    aggregate,
-                )
-            })
-            // A dynamic list's own negative member is named by the source,
-            // so it is read before the routes that spell a name the source
-            // never states. The table-path index reached `{2,{2},{-2}}` on
-            // `DataProcessors/СервисSellmonitor/Forms/ПодборКарточекТоваров`
-            // and answered it with the bound item's own name,
-            // `СписокМаркетплейсOzon.СписокМаркетплейсOzonОтбор`, where the
-            // platform writes `СписокМаркетплейсOzon.Filter`.
-            .or_else(|| {
-                resolve_form_dynamic_list_member_data_path(field, attribute_metadata_owners_by_id)
-            })
-            // A register-records chain reaches a whole register, not a member
-            // of the document, so it is read before the metadata route -- which
-            // sees a bare `AccumulationRegister.X` where it expects a member
-            // path and condemns the slot as ambiguous.
-            .or_else(|| {
-                resolve_form_document_register_records_data_path(
-                    field,
-                    attribute_metadata_owners_by_id,
-                    object_refs,
-                )
-            })
-            // A form attribute may stand on a register's record set outright,
-            // and then the very same terminals name the very same members --
-            // read before the metadata route, which sees only the member's own
-            // uuid and so drops the correspondence side the marker states.
-            .or_else(|| {
-                resolve_form_register_record_set_member_data_path(
-                    field,
-                    false,
-                    attribute_metadata_owners_by_id,
-                    object_refs,
-                )
-            }),
+            resolve_form_physical_verdict_data_path(field, owner_scoped_bindings)
+                .or_else(|| {
+                    resolve_form_settings_composer_chain_data_path(
+                        field,
+                        attribute_metadata_owners_by_id,
+                        object_refs,
+                        &owner_scoped_bindings.metadata_field_types,
+                    )
+                })
+                .or_else(|| {
+                    resolve_form_standard_period_column_data_path(
+                        field,
+                        attribute_metadata_owners_by_id,
+                    )
+                })
+                // A record-set member the register splits between the two sides of
+                // an entry is named by the terminal's marker as much as by its
+                // uuid, and the chain walker below reads only the uuid -- so it
+                // answers `НаборЗаписей.Подразделение` where the platform writes
+                // `НаборЗаписей.ПодразделениеDr`. This pass answers that one shape
+                // and nothing else, leaving every shape the walker already spells
+                // right to the walker.
+                .or_else(|| {
+                    resolve_form_register_record_set_member_data_path(
+                        field,
+                        true,
+                        attribute_metadata_owners_by_id,
+                        object_refs,
+                        &owner_scoped_bindings.undeclared_root_standard_attributes,
+                    )
+                })
+                // A configuration metadata UUID absent from its declarations
+                // cannot be named. Preserve the physical chain before the generic
+                // member walker reconstructs a plausible name from neighbouring
+                // declarations. Runtime value-table markers are excluded by the
+                // resolver itself.
+                .or_else(|| resolve_form_absent_metadata_physical_data_path(field, object_refs))
+                .or_else(|| {
+                    resolve_form_bound_chain_member_path(
+                        field,
+                        attribute_metadata_owners_by_id,
+                        owner_scoped_bindings,
+                        object_refs,
+                        aggregate,
+                    )
+                })
+                // A dynamic list's own negative member is named by the source,
+                // so it is read before the routes that spell a name the source
+                // never states. The table-path index reached `{2,{2},{-2}}` on
+                // `DataProcessors/СервисSellmonitor/Forms/ПодборКарточекТоваров`
+                // and answered it with the bound item's own name,
+                // `СписокМаркетплейсOzon.СписокМаркетплейсOzonОтбор`, where the
+                // platform writes `СписокМаркетплейсOzon.Filter`.
+                .or_else(|| {
+                    resolve_form_dynamic_list_member_data_path(
+                        field,
+                        attribute_metadata_owners_by_id,
+                    )
+                })
+                // A register-records chain reaches a whole register, not a member
+                // of the document, so it is read before the metadata route -- which
+                // sees a bare `AccumulationRegister.X` where it expects a member
+                // path and condemns the slot as ambiguous.
+                .or_else(|| {
+                    resolve_form_document_register_records_data_path(
+                        field,
+                        attribute_metadata_owners_by_id,
+                        object_refs,
+                    )
+                })
+                // A form attribute may stand on a register's record set outright,
+                // and then the very same terminals name the very same members --
+                // read before the metadata route, which sees only the member's own
+                // uuid and so drops the correspondence side the marker states.
+                .or_else(|| {
+                    resolve_form_register_record_set_member_data_path(
+                        field,
+                        false,
+                        attribute_metadata_owners_by_id,
+                        object_refs,
+                        &owner_scoped_bindings.undeclared_root_standard_attributes,
+                    )
+                }),
         );
         if !matches!(chain, FormOwnerScopedDataPath::Unknown) {
             return chain;
@@ -24471,12 +24530,46 @@ pub(super) fn parse_form_child_item_data_path(
             .as_ref()?;
         Some(format!("{primary}.{column}"))
     });
+    // A member that names a metadata attribute (`{1,{<marker>,<uuid>}}`) is
+    // that attribute of the value the field shows: ЛИМС КОРП
+    // `Documents/лимсПретензия/Forms/ФормаДокумента`
+    // `АнализыПретензииСписокСотрудников` (bound to a column typed by a tabular
+    // section) stores `{1,{0,deb0d622-…}}` in members 9 and 15 and the
+    // platform writes `Объект.АнализыПретензии.СписокСотрудников.Ответственный`
+    // for both.
+    let metadata_member = |member: usize| -> Option<String> {
+        if tag != "InputField" {
+            return None;
+        }
+        let primary = data_path.as_ref()?.data_path.as_str();
+        let options = form_input_field_extended_options(fields)?;
+        let members = split_1c_braced_fields(options.get(62)?.trim(), 0)?;
+        if members.len() != 20 {
+            return None;
+        }
+        let segments = parse_form_bound_chain_segments(members.get(member)?.trim())?;
+        let [segment] = segments.as_slice() else {
+            return None;
+        };
+        let [marker, uuid] = segment.as_slice() else {
+            return None;
+        };
+        marker.trim().parse::<i64>().ok()?;
+        let uuid = parse_non_zero_uuid(uuid.trim())?;
+        let reference = object_refs.get(&uuid)?;
+        let (_, relative_path) = form_metadata_data_path_route(reference)?;
+        let name = relative_path.rsplit('.').next()?;
+        (!name.is_empty()).then(|| format!("{primary}.{name}"))
+    };
+    let multiple_value = multiple_value.or_else(|| metadata_member(9));
+    let multiple_value_picture = multiple_value_paths.1.or_else(|| metadata_member(12));
+    let multiple_value_present = multiple_value_paths.2.or_else(|| metadata_member(15));
     let paths = FormChildItemDataPaths {
         primary: data_path,
         footer: footer_data_path,
         multiple_value,
-        multiple_value_picture: multiple_value_paths.1,
-        multiple_value_present: multiple_value_paths.2,
+        multiple_value_picture,
+        multiple_value_present,
     };
     paths
 }
@@ -24506,6 +24599,57 @@ pub(super) fn parse_form_child_item_data_path(
 ///
 /// Both slots used to fall through to the item's own name joined to its parent
 /// path -- a guess, and the wrong one on both.
+/// Chains the platform writes physically although every id in them is known.
+///
+/// * `Period` (`-2`) of a non-periodical information register's record set:
+///   ЛИМС КОРП `InformationRegisters/лимсАттестацииПрограммыПоДолжностям/
+///   Forms/РедактированиеИстории` binds `{2,{1},{-2}}` and the platform writes
+///   `1/-2`.
+/// * A member reached past a column of several reference types: ЛИМС КОРП
+///   `Documents/лимсРегистрацияПробы/Forms/ФормаВыбораРегистрацииПробыБезРРК`
+///   binds `{3,{1},{1},{0,29818e09-…}}` and the platform writes
+///   `1/1/0:29818e09-…`.
+fn resolve_form_physical_verdict_data_path(
+    field: &str,
+    owner_scoped_bindings: &FormOwnerScopedBindingIndexes,
+) -> Option<String> {
+    let segments = parse_form_bound_chain_segments(field)?;
+    let (root, members) = segments.split_first()?;
+    let [root_id] = root.as_slice() else {
+        return None;
+    };
+    let root_id = parse_form_chain_numeric_id(root_id)?;
+    match members {
+        [terminal]
+            if terminal.as_slice().len() == 1
+                && terminal[0].trim() == "-2"
+                && owner_scoped_bindings
+                    .undeclared_root_standard_attributes
+                    .contains(&(root_id.to_string(), "Period")) =>
+        {
+            Some(format!("{root_id}/-2"))
+        }
+        [column, member] if column.len() == 1 && member.len() == 2 => {
+            let column_id = parse_form_chain_numeric_id(column[0])?;
+            let key = FormAttributeColumnKey {
+                attribute_id: root_id.to_string(),
+                column_id: column_id.to_string(),
+            };
+            if !owner_scoped_bindings
+                .composite_reference_columns
+                .contains(&key)
+            {
+                return None;
+            }
+            let marker = member[0].trim();
+            marker.parse::<i64>().ok()?;
+            let uuid = parse_non_zero_uuid(member[1].trim())?;
+            Some(format!("{root_id}/{column_id}/{marker}:{uuid}"))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn resolve_form_absent_metadata_physical_data_path(
     field: &str,
     object_refs: &BTreeMap<String, String>,
@@ -25207,6 +25351,7 @@ fn resolve_form_register_record_set_member_data_path(
     correspondence_only: bool,
     attribute_metadata_owners_by_id: &BTreeMap<String, FormAttributeMetadataOwner>,
     object_refs: &BTreeMap<String, String>,
+    undeclared: &BTreeSet<(String, &'static str)>,
 ) -> Option<String> {
     let segments = parse_form_bound_chain_segments(field)?;
     let [root, terminal] = segments.as_slice() else {
@@ -25223,7 +25368,15 @@ fn resolve_form_register_record_set_member_data_path(
             if correspondence_only {
                 return None;
             }
-            form_register_record_set_standard_attribute_name(family, marker.trim())?.to_string()
+            let name = form_register_record_set_standard_attribute_name(family, marker.trim())?;
+            // A member the register does not declare is written physically
+            // (`1/-2` for `Period` of a non-periodical register: ЛИМС КОРП
+            // `InformationRegisters/лимсАттестацииПрограммыПоДолжностям/Forms/
+            // РедактированиеИстории`).
+            if undeclared.contains(&(attribute_id.trim().to_string(), name)) {
+                return None;
+            }
+            name.to_string()
         }
         [index, uuid] => {
             // The declared-column reader owns this terminal and spells it right
@@ -25820,7 +25973,9 @@ fn walk_form_bound_chain_members(
     // reference's own role decides which standard attributes the next
     // dereferencing marker may address.
     let mut reached_metadata_reference: Option<&str> = None;
+    let mut reached_composite_column = false;
     for (index, segment) in members.iter().enumerate() {
+        let previous_composite_column = std::mem::take(&mut reached_composite_column);
         let previous_type = reached_type.take();
         let previous_metadata_reference = reached_metadata_reference.take();
         match segment.as_slice() {
@@ -25891,6 +26046,10 @@ fn walk_form_bound_chain_members(
                                 .metadata_field_types
                                 .get(&format!("owner-of:{reference}"))
                                 .map(String::as_str);
+                        }
+                        // `Ref` stands on the very reference the chain holds.
+                        if name == "Ref" {
+                            reached_type = Some(reference);
                         }
                         name
                     }
@@ -26017,7 +26176,18 @@ fn walk_form_bound_chain_members(
                     .declared_column_types
                     .get(&lookup)
                     .and_then(|reference| reference.as_deref());
+                reached_composite_column = owner_scoped_bindings
+                    .composite_reference_columns
+                    .contains(&lookup);
             }
+            // A member reached past a column of several reference types is not
+            // named: the platform writes the chain physically. ЛИМС КОРП
+            // `Documents/лимсРегистрацияПробы/Forms/
+            // ФормаВыбораРегистрацииПробыБезРРК`: column `РегистрацияПробы`
+            // (`DocumentRef.лимсРегистрацияПробСписком`,
+            // `DocumentRef.лимсРегистрацияПробы`) and member `ТипПробы` are
+            // written `1/1/0:29818e09-…`.
+            [_, _] if previous_composite_column => return None,
             [marker, uuid] => {
                 let marker = marker.trim();
                 marker.parse::<i64>().ok()?;
@@ -27432,7 +27602,12 @@ const CHART_OF_CALCULATION_TYPES_OBJECT_STANDARD_ATTRIBUTES: &[(&str, &str)] = &
 /// attribute `Заказы` is `Ссылка` of type `cfg:DocumentRef.ЗаказПоставщику`, and
 /// the platform writes `Заказы.Ссылка.Number`; `ЗаказыДата` carries `{-3}` in
 /// the same place and writes `Заказы.Ссылка.Date`.
-const DOCUMENT_REF_STANDARD_ATTRIBUTES: &[(&str, &str)] = &[("-2", "Number"), ("-3", "Date")];
+// `-5` is the reference itself: ЛИМС КОРП `Documents/лимсРегистрацияПробы/
+// Forms/ФормаСозданияНаОсновании` binds `{4,{1},{1},{-5},{0,<attribute>}}`
+// past a `DocumentRef` column and the platform writes
+// `ТаблицаДокументов.лимсРегистрацияРезультатовКонтроля.Ref.СтатусКонтроля`.
+const DOCUMENT_REF_STANDARD_ATTRIBUTES: &[(&str, &str)] =
+    &[("-2", "Number"), ("-3", "Date"), ("-5", "Ref")];
 
 #[cfg(test)]
 mod document_ref_chain_tests {
@@ -28016,6 +28191,7 @@ fn resolve_form_table_row_picture_member(
             false,
             attribute_metadata_owners_by_id,
             object_refs,
+            &owner_scoped_bindings.undeclared_root_standard_attributes,
         )
     })
 }
@@ -29013,6 +29189,14 @@ pub(super) fn form_extension_owns_standard_command(
     let command = command_name
         .strip_prefix("Form.StandardCommand.")
         .unwrap_or(command_name);
+    // The row commands of a list belong to a main attribute too: a form with
+    // none stores them and the platform writes none. ЛИМС КОРП
+    // `Catalogs/лимсЛабораторноеОборудование/Forms/
+    // ФормаВыбораОборудованияВСтатусеВработеНаДатуПоМетодикеИИзмерению` keeps
+    // all five in its root command set and its XML has no `<CommandSet>`.
+    if matches!(command, "Change" | "Choose" | "Copy" | "Create" | "Delete") {
+        return !matches!(main_attribute, FormMainAttributeExtension::Absent);
+    }
     if !matches!(
         command,
         "CancelEdit"
@@ -30543,6 +30727,10 @@ fn resolve_form_command_interface_attribute_path(
             true,
             context.attribute_metadata_owners_by_id,
             context.object_refs,
+            &context
+                .child_item_indexes
+                .owner_scoped_bindings
+                .undeclared_root_standard_attributes,
         )
     })
     .or_else(|| {
@@ -30570,6 +30758,10 @@ fn resolve_form_command_interface_attribute_path(
             false,
             context.attribute_metadata_owners_by_id,
             context.object_refs,
+            &context
+                .child_item_indexes
+                .owner_scoped_bindings
+                .undeclared_root_standard_attributes,
         )
     })
     .or_else(|| {
@@ -31762,6 +31954,11 @@ fn format_form_body_open_xml_with_dcs_profiles(
             "\t<GroupList>{}</GroupList>\r\n",
             escape_xml_text(value)
         ));
+    }
+    // `Scale` closes the scalar run, ahead of `AutoCommandBar` (the 2.21
+    // element order in form/xml_2_21_order.rs).
+    if let Some(value) = &properties.scale {
+        xml.push_str(&format!("\t<Scale>{}</Scale>\r\n", escape_xml_text(value)));
     }
     if let Some(command_bar) = auto_command_bar {
         let display_importance = command_bar
@@ -35076,7 +35273,9 @@ pub(super) fn format_form_child_item_xml(
     // `ExtendedTooltip` and `Events`.  It never shares an item with
     // `SpecialTextInputMode`, so their order relative to each other is
     // unobserved and they stay adjacent.
-    if let Some(value) = item.auto_correction_on_text_input {
+    if item.auto_show_open_button_mode.is_none()
+        && let Some(value) = item.auto_correction_on_text_input
+    {
         xml.push_str(&format!(
             "{tab}\t<AutoCorrectionOnTextInput>{}</AutoCorrectionOnTextInput>\r\n",
             escape_xml_text(value)
@@ -35632,6 +35831,17 @@ pub(super) fn format_form_child_item_xml(
             escape_xml_text(auto_show_open_button_mode)
         ));
     }
+    // Beside an `AutoShowOpenButtonMode` the correction switch trails it and
+    // leads `SpellCheckingOnTextInput` (ЛИМС КОРП `Catalogs/ФизическиеЛица/
+    // Forms/Отсутствия` `ОтсутствияРегистратор`).
+    if item.auto_show_open_button_mode.is_some()
+        && let Some(value) = item.auto_correction_on_text_input
+    {
+        xml.push_str(&format!(
+            "{tab}\t<AutoCorrectionOnTextInput>{}</AutoCorrectionOnTextInput>\r\n",
+            escape_xml_text(value)
+        ));
+    }
     // `SpellCheckingOnTextInput` stands immediately behind
     // `AutoShowOpenButtonMode`: the one native item that carries it lists that
     // property among its predecessors (with `DataPath`, `Title`,
@@ -35754,6 +35964,17 @@ pub(super) fn format_form_child_item_xml(
         xml.push_str(&format!(
             "{tab}\t<PagesRepresentation>{}</PagesRepresentation>\r\n",
             escape_xml_text(representation)
+        ));
+    }
+    // A pages container writes `CurrentRowUse` right behind its
+    // representation (ЛИМС КОРП `Catalogs/ПодключаемоеОборудование/Forms/
+    // ФормаЭлемента` `Закладки`).
+    if item.tag == "Pages"
+        && let Some(value) = item.usual_group_current_row_use
+    {
+        xml.push_str(&format!(
+            "{tab}\t<CurrentRowUse>{}</CurrentRowUse>\r\n",
+            escape_xml_text(value)
         ));
     }
     if matches!(item.tag, "Page" | "UsualGroup")

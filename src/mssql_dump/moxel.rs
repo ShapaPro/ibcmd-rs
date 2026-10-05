@@ -3924,6 +3924,20 @@ pub(super) fn parse_moxel_rows(fields: &[&str]) -> Vec<MoxelRow> {
         else {
             continue;
         };
+        // The structurally anchored block stating no rows is an answer, not a
+        // miss: falling through to the scanning reader made it invent rows.
+        // ЛИМС КОРП `Catalogs/лимсПробы/Templates/QRКод` stores `1,2,0` there
+        // and the platform publishes the one default empty row `0` alone.
+        if height == 0 && is_anchor {
+            return vec![MoxelRow {
+                index: 0,
+                index_to: None,
+                format_index: 1,
+                source_format_index: Some(1),
+                columns_id: None,
+                cells: Vec::new(),
+            }];
+        }
         if height == 0 || height > 1_000_000 {
             continue;
         }

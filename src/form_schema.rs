@@ -8025,8 +8025,9 @@ pub(crate) const FORM_TABLE_XML_ORDER: &[FormTableXmlProperty] = &[
     // itself is emitted separately right after this ordered block (see the
     // `item.tag == "Table" && item.row_filter_nil` check in
     // `format_form_child_item_xml`), so this position alone reproduces the
-    // evidenced order.
-    FormTableXmlProperty::BehaviorOnHorizontalCompression,
+    // evidenced order. It sits behind `CurrentRowUse` (below): ЛИМС КОРП
+    // `Documents/лимсРегистрацияРезультатовКонтроля/Forms/ФормаДокумента`
+    // `ДеревоНормативов` writes `CurrentRowUse` first.
     FormTableXmlProperty::ToolTip,
     FormTableXmlProperty::ToolTipRepresentation,
     FormTableXmlProperty::SearchStringLocation,
@@ -8062,6 +8063,7 @@ pub(crate) const FORM_TABLE_XML_ORDER: &[FormTableXmlProperty] = &[
     // and `GroupVerticalAlign` (1), with no pair counted both ways.
     FormTableXmlProperty::RefreshRequest,
     FormTableXmlProperty::CurrentRowUse,
+    FormTableXmlProperty::BehaviorOnHorizontalCompression,
     FormTableXmlProperty::AutoRefresh,
     FormTableXmlProperty::AutoRefreshPeriod,
     FormTableXmlProperty::Period,
@@ -8736,7 +8738,7 @@ impl FormTableSchema {
         let slot = fields
             .len()
             .checked_sub(Self::BEHAVIOR_ON_HORIZONTAL_COMPRESSION_REVERSE_OFFSET)?;
-        matches!(fields.get(slot)?.trim(), "0" | "2").then_some(slot)
+        matches!(fields.get(slot)?.trim(), "0" | "1" | "2").then_some(slot)
     }
 
     /// `<BehaviorOnHorizontalCompression>`, evidenced only as
@@ -8747,11 +8749,17 @@ impl FormTableSchema {
         self,
         fields: &[&str],
     ) -> Option<&'static str> {
-        (fields
+        // `1` is `HideItemsByImportance`: ЛИМС КОРП
+        // `Documents/лимсРегистрацияРезультатовКонтроля/Forms/ФормаДокумента`
+        // `ДеревоНормативов` holds it and the platform writes that spelling.
+        match fields
             .get(self.behavior_on_horizontal_compression_slot(fields)?)?
             .trim()
-            == "2")
-            .then_some("MoveItemsByImportance")
+        {
+            "1" => Some("HideItemsByImportance"),
+            "2" => Some("MoveItemsByImportance"),
+            _ => None,
+        }
     }
 
     pub(crate) fn current_row_use_slot(self, fields: &[&str]) -> Option<usize> {

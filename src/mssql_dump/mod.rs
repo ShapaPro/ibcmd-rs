@@ -11809,8 +11809,114 @@ fn parse_indexed_generated_types_from_text(
             &header.name,
         );
     }
+    push_indexed_tabular_section_generated_types(&mut entries, text, &header.name);
 
     Some(entries)
+}
+
+/// The two generated types of every tabular section of an owner, so a form
+/// attribute typed by one is written by name. ЛИМС КОРП
+/// `Documents/лимсПретензия/Forms/ФормаДокумента` declares a column of type
+/// `cfg:DocumentTabularSection.лимсПретензия.ОтветственныеЗаАнализ` and the
+/// platform writes that name; without the entry the export wrote the bare
+/// type id. The DCS resolution is left as it was (`KeepId`).
+fn push_indexed_tabular_section_generated_types(
+    entries: &mut Vec<IndexedGeneratedType>,
+    text: &str,
+    owner_name: &str,
+) {
+    const OWNER_KINDS: [(&str, &str); 10] = [
+        ("cfg:CatalogRef.", "Catalog"),
+        ("cfg:DocumentRef.", "Document"),
+        (
+            "cfg:ChartOfCharacteristicTypesRef.",
+            "ChartOfCharacteristicTypes",
+        ),
+        ("cfg:ChartOfAccountsRef.", "ChartOfAccounts"),
+        ("cfg:ChartOfCalculationTypesRef.", "ChartOfCalculationTypes"),
+        ("cfg:ExchangePlanRef.", "ExchangePlan"),
+        ("cfg:BusinessProcessRef.", "BusinessProcess"),
+        ("cfg:TaskRef.", "Task"),
+        ("cfg:DataProcessorObject.", "DataProcessor"),
+        ("cfg:ReportObject.", "Report"),
+    ];
+    let Some(kind) = entries.iter().find_map(|entry| {
+        OWNER_KINDS.iter().find_map(|(prefix, kind)| {
+            (entry.reference.strip_prefix(prefix) == Some(owner_name)).then_some(*kind)
+        })
+    }) else {
+        return;
+    };
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = text[from..].find("{11,") {
+        let start = from + offset;
+        from = start + 4;
+        let Some(end) = matching_1c_brace(bytes, start) else {
+            continue;
+        };
+        let Some(fields) = split_1c_braced_fields(&text[start..=end], 0) else {
+            continue;
+        };
+        if fields.len() < 6 || fields[0].trim() != "11" {
+            continue;
+        }
+        let ids = fields[1..5]
+            .iter()
+            .map(|field| parse_uuid_field(field))
+            .collect::<Option<Vec<_>>>();
+        let Some(ids) = ids else { continue };
+        let Some(name) = split_1c_braced_fields(fields[5].trim(), 0)
+            .filter(|outer| outer.len() == 2 && outer[0].trim() == "0")
+            .and_then(|outer| split_1c_braced_fields(outer[1].trim(), 0))
+            .filter(|header| header.first().map(|code| code.trim()) == Some("3"))
+            .and_then(|header| parse_information_register_quoted_string(header.get(2)?))
+        else {
+            continue;
+        };
+        found.push((ids, name));
+    }
+    for (ids, name) in found {
+        for (type_id, prefix) in [(&ids[0], "TabularSection"), (&ids[2], "TabularSectionRow")] {
+            entries.push(IndexedGeneratedType {
+                type_id: type_id.clone(),
+                reference: format!("cfg:{kind}{prefix}.{owner_name}.{name}"),
+                dcs_policy: GeneratedTypeDcsPolicy::KeepId,
+            });
+        }
+    }
+}
+
+/// The offset of the `}` that closes the `{` at `start`, skipping quoted
+/// strings (whose `""` is an escaped quote).
+fn matching_1c_brace(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            if byte == b'"' {
+                if bytes.get(index + 1) == Some(&b'"') {
+                    index += 1;
+                } else {
+                    quoted = false;
+                }
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn parse_indexed_recalculation_generated_types_from_text(
@@ -14455,11 +14561,13 @@ fn parse_exchange_plan_child_objects(
                 type_index,
                 object_refs,
                 form_refs,
-            )?;
+            );
+            let child = child?;
             strict_metadata_child_identity_is_unique(&child, &mut child_uuids, &mut root_names)
                 .then_some(child)
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>();
+    let mut child_objects = child_objects?;
 
     let generic_sections = parse_attribute_tabular_section_child_objects(
         "ExchangePlan",
@@ -14487,7 +14595,8 @@ fn parse_exchange_plan_child_objects(
         form_refs,
         &mut child_uuids,
         &mut root_names,
-    )?;
+    );
+    let sections = sections?;
     child_objects.extend(sections);
     Some((child_objects, emit_empty_child_objects))
 }
@@ -14640,10 +14749,18 @@ fn parse_strict_tabular_sections(
         }
         let wrapper = split_information_register_braced_fields(item.first()?)?;
         match owner_kind {
+            // A modern plan may still keep a section in the two-member
+            // envelope, which stores no `LineNumberLength` and means the
+            // default 5: ЛИМС КОРП `ExchangePlans/
+            // СинхронизацияДанныхЧерезУниверсальныйФормат` (owner version 37)
+            // stores all four sections that way and the platform writes
+            // `<LineNumberLength>5</LineNumberLength>` on each.
             "ExchangePlan" if exchange_plan_modern_layout => {
-                if wrapper.len() != 3
-                    || wrapper.first()?.trim() != "1"
-                    || wrapper.get(2)?.trim() != "5"
+                let legacy_envelope = wrapper.len() == 2 && wrapper.first()?.trim() == "0";
+                if !legacy_envelope
+                    && (wrapper.len() != 3
+                        || wrapper.first()?.trim() != "1"
+                        || wrapper.get(2)?.trim() != "5")
                 {
                     return None;
                 }
@@ -18626,7 +18743,20 @@ fn parse_register_include_help_in_contents(
     uuid: &str,
 ) -> Option<bool> {
     match kind {
-        "AccumulationRegister" => Some(false),
+        // Four slots behind the header: default list form, register type,
+        // UseStandardCommands, then this flag -- the order the writer in
+        // metadata_model/registers.rs stores. ЛИМС КОРП `AccumulationRegisters/
+        // лимсРасходы` holds `1` there and the platform writes `true`.
+        "AccumulationRegister" => {
+            // Only the full code-28 owner layout keeps the flag there; a short
+            // record ends with the register type in that slot and states no
+            // flag (the writer's `false`).
+            let header_index = metadata_header_field_index(fields, uuid)?;
+            if fields.len() < header_index + 10 {
+                return Some(false);
+            }
+            parse_1c_bool_field(fields.get(header_index + 4).copied()).or(Some(false))
+        }
         "AccountingRegister" => {
             let header_index = metadata_header_field_index(fields, uuid)?;
             parse_1c_bool_field(fields.get(header_index + 2).copied())
@@ -27012,6 +27142,27 @@ fn metadata_reference_collection_len(value: &str) -> Option<usize> {
         return None;
     }
     Some(count)
+}
+
+/// `CodeLength` of a catalog whose `CodeType` is `String`, read off its owner
+/// record; `None` for a numeric code or a record this reader cannot place.
+pub(super) fn catalog_string_code_length(text: &str, uuid: &str) -> Option<usize> {
+    let header = parse_metadata_header_from_text(text, uuid)?;
+    let mut diagnostic = None;
+    let owner_graph = decode_owner_graph_for_family_parser(
+        owner_graph::OwnerGraphFamily::Catalog,
+        text,
+        &header,
+        &mut diagnostic,
+    )?;
+    let fields = &owner_graph.owner_fields;
+    if catalog_code_type_xml(parse_exchange_plan_u32(fields.get(18)?)?)? != "String" {
+        return None;
+    }
+    usize::try_from(parse_exchange_plan_u32(
+        fields.get(CATALOG_OWNER_FIELD_CODE_LENGTH)?,
+    )?)
+    .ok()
 }
 
 fn parse_strict_catalog_properties_from_text(

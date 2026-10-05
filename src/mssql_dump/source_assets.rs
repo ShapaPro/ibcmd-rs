@@ -2986,13 +2986,30 @@ fn write_source_asset_inner(
             }
         }
         SourceAssetKind::PredefinedData { model, owner_uuid } => {
-            let items = parse_predefined_data_blob_with_model(bytes, context.type_index, *model)
-                .with_context(|| {
-                    format!(
-                        "failed to extract predefined data from source asset {}",
-                        asset.primary_path.display()
-                    )
-                })?;
+            let mut items =
+                parse_predefined_data_blob_with_model(bytes, context.type_index, *model)
+                    .with_context(|| {
+                        format!(
+                            "failed to extract predefined data from source asset {}",
+                            asset.primary_path.display()
+                        )
+                    })?;
+            // A stored string code longer than the catalog's `CodeLength` is
+            // written cut to that length: ЛИМС КОРП
+            // `Catalogs/лимсВидыТрудовыхОтношений` (CodeLength 5) stores
+            // `000000002` and `000000001` and the platform writes `00000` for
+            // both. `CodeLength` 0 cuts nothing: ERP УХ
+            // `Catalogs/ГруппыПользователей` and Монитор `Catalogs/Триггеры`
+            // keep `000000001` and `000001` whole.
+            if model.xsi_type == "CatalogPredefinedItems"
+                && let Some(length) = context
+                    .metadata_texts_by_file_name
+                    .get(owner_uuid.as_str())
+                    .and_then(|row| super::catalog_string_code_length(&row.text, owner_uuid))
+                    .filter(|length| *length > 0)
+            {
+                truncate_predefined_text_codes(&mut items, length);
+            }
             let chart_names = match model.item_layout {
                 PredefinedItemLayout::Account => Some(
                     context
@@ -5135,6 +5152,17 @@ pub(super) fn chart_of_accounts_predefined_names(
             crate::mssql_dump::refs::ChartOfAccountsFlagFamily::ExtDimensionAccounting,
         )?,
     })
+}
+
+fn truncate_predefined_text_codes(items: &mut [PredefinedItem], length: usize) {
+    for item in items {
+        if let PredefinedItemCode::Text(code) = &mut item.code
+            && code.chars().count() > length
+        {
+            *code = code.chars().take(length).collect();
+        }
+        truncate_predefined_text_codes(&mut item.children, length);
+    }
 }
 
 pub(super) fn format_predefined_data_xml(

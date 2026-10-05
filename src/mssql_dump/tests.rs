@@ -9034,9 +9034,13 @@ fn extracts_form_command_set_multiple_excluded_commands() {
 
     let form_xml = extract_form_body_xml(&form_body, &BTreeMap::new()).unwrap();
 
-    assert!(form_xml.contains("<ExcludedCommand>Change</ExcludedCommand>"));
-    assert!(form_xml.contains("<ExcludedCommand>Copy</ExcludedCommand>"));
-    assert!(form_xml.contains("<ExcludedCommand>Create</ExcludedCommand>"));
+    // The body declares no attribute, so no main attribute: the list row
+    // commands it excludes are not written (ЛИМС КОРП
+    // `Catalogs/лимсЛабораторноеОборудование/Forms/
+    // ФормаВыбораОборудованияВСтатусеВработеНаДатуПоМетодикеИИзмерению`).
+    assert!(!form_xml.contains("<ExcludedCommand>Change</ExcludedCommand>"));
+    assert!(!form_xml.contains("<ExcludedCommand>Copy</ExcludedCommand>"));
+    assert!(!form_xml.contains("<ExcludedCommand>Create</ExcludedCommand>"));
 }
 
 #[test]
@@ -9145,9 +9149,6 @@ fn extracts_form_command_set_dynamic_list_standard_commands() {
         "Abort",
         "Cancel",
         "CancelSearch",
-        "Change",
-        "Copy",
-        "Create",
         "DynamicListStandardSettings",
         "Find",
         "FindByCurrentValue",
@@ -29568,6 +29569,7 @@ fn form_body_writes_collapse_items_by_importance_variant_behind_mobile_device_co
     // not the reverse this writer used to assume for want of a
     // counter-example.
     let properties = FormBodyProperties {
+        scale: None,
         collapse_items_by_importance_variant: Some("Use"),
         mobile_device_command_bar_content: vec!["КоманднаяПанель".to_string()],
         ..FormBodyProperties::default()
@@ -69935,6 +69937,7 @@ fn form_document_properties_trail_command_set_and_precede_show_title() {
     // precedes the trio (2 each) -- so the writer puts the two window switches
     // ahead of the trio and this synthetic form sees `ShowTitle` there.
     let properties = FormBodyProperties {
+        scale: None,
         command_set_excluded_commands: vec!["Form.Command"],
         scaling_mode: Some("Normal"),
         command_bar_location: Some("Top"),
