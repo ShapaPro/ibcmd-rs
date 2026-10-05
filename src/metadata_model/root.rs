@@ -681,7 +681,6 @@ fn properties_tuple(
         ("Content", &[][..]),
         ("DefaultReportAppearanceTemplate", &[][..]),
         ("DefaultDynamicListSettingsForm", &[][..]),
-        ("DefaultSearchForm", &[][..]),
         ("DefaultDataHistoryChangeHistoryForm", &[][..]),
         ("DefaultDataHistoryVersionDataForm", &[][..]),
         ("DefaultDataHistoryVersionDifferencesForm", &[][..]),
@@ -800,8 +799,10 @@ fn properties_tuple(
             &[("Use", 0), ("UseWithWarnings", 1), ("DontUse", 2)],
             "DontUse",
         )?,
-        // 37
-        nil(),
+        // 37: `<DefaultSearchForm>`, read back by the exporter from this
+        // tuple field on the same terms as 30..32 (Управление задачами
+        // names `CommonForm.ФормаПоиска` there).
+        reference(p, "DefaultSearchForm", "CommonForm", context)?,
         // 38
         interface_8_3,
         // 39

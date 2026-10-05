@@ -1539,6 +1539,24 @@ impl MetadataSourceContext {
             .split_once('.')
             .map(|(_, name)| name)
             .ok_or_else(|| anyhow!("invalid metadata type reference: {reference}"))?;
+        // A tabular section's types (`DocumentTabularSection.<owner>.<section>`)
+        // live in the owner's own file.
+        let owner_file = if generated_type_name
+            .split_once('.')
+            .is_some_and(|(head, _)| head.contains("TabularSection"))
+        {
+            name.split_once('.').map(|(owner, _)| owner)
+        } else {
+            None
+        };
+        if let Some(owner) = owner_file {
+            let path = self.source_root.join(folder).join(format!("{owner}.xml"));
+            if let Ok(xml) = self.read_source(&path)
+                && let Ok(type_id) = parse_generated_type_type_id(&xml, generated_type_name)
+            {
+                return Ok(type_id);
+            }
+        }
         let path = self.source_root.join(folder).join(format!("{name}.xml"));
         let xml = self
             .read_source(&path)
@@ -5645,8 +5663,13 @@ fn native_container_payload(
             // Payload member 2 holds the group's own events --
             // `OnCurrentPageChange` -- 374 of 374.
             let events = native_item_events(item, "")?;
-            native::format_pages_payload(item.pages_representation.as_deref(), &events, &associated)
-                .ok_or_else(|| anyhow!("<Pages> names a spelling the writer cannot place"))
+            native::format_pages_payload(
+                item.pages_representation.as_deref(),
+                &events,
+                &associated,
+                item.scalars.get("CurrentRowUse").map(String::as_str),
+            )
+            .ok_or_else(|| anyhow!("<Pages> names a spelling the writer cannot place"))
         }
         "Popup" => {
             let picture = native_item_picture(item, source, items_root)?;
@@ -6629,7 +6652,7 @@ fn native_field_payload(
             if item.max_width.is_some()
                 || item.max_height.is_some()
                 || item.auto_max_width == Some(true)
-                || item.auto_max_height.is_some()
+                || item.auto_max_height == Some(true)
                 || !count(item.width.as_deref())
                 || !count(item.height.as_deref())
                 || item.width.as_deref() == Some("50")
@@ -6647,6 +6670,7 @@ fn native_field_payload(
                 item.horizontal_stretch.unwrap_or(true),
                 item.vertical_stretch.unwrap_or(true),
                 item.auto_max_width.unwrap_or(true),
+                item.auto_max_height.unwrap_or(true),
                 &events,
             ))
         }
@@ -6879,6 +6903,10 @@ fn native_field_payload(
             let marking = match item.scalars.get("MarkingAppearance").map(String::as_str) {
                 None => "2",
                 Some("TopLeft") => "1",
+                // The exporter reads `0` as `DontShow` (form_schema.rs, the
+                // track bar's option 11); Управление задачами
+                // `Reports/узПланированиеПроекта/Forms/ФормаУправляемая`.
+                Some("DontShow") => "0",
                 Some(other) => {
                     return Err(anyhow!(
                         "a track bar's <MarkingAppearance>{other} is not measured"
@@ -8472,6 +8500,23 @@ fn native_input_drop_list_settings(
         {
             return Ok(Some(format!("{{1,{last}}}")));
         }
+        // A path that reaches a metadata attribute past the field's own data
+        // path stores that attribute's own `{<marker>,<uuid>}` segment alone
+        // (ЛИМС КОРП `Documents/лимсПретензия/Forms/ФормаДокумента`:
+        // `{1,{0,deb0d622-…}}` for `Объект.АнализыПретензии.СписокСотрудников.
+        // Ответственный`; the exporter reads it back the same way).
+        if let Some(last) = ranges.last().map(|range| resolved[range.clone()].trim())
+            && ranges.len() > 3
+            && item.data_path.as_deref().is_some_and(|own| {
+                path.strip_prefix(own)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+            && scan_braced_fields(last, 0)
+                .ok()
+                .is_some_and(|inner| inner.len() == 2 && last[inner[1].clone()].trim().len() == 36)
+        {
+            return Ok(Some(format!("{{1,{last}}}")));
+        }
         if ranges.len() != 3 || resolved[ranges[0].clone()].trim() != "2" {
             return Err(anyhow!(
                 "<{name}> names {path}, which is not an attribute column"
@@ -8975,6 +9020,7 @@ fn format_native_form_body(
             }),
             show_title: properties.show_title.unwrap_or(true),
             show_close_button: properties.show_close_button.unwrap_or(true),
+            scale: properties.root_scalars.get("Scale").map(String::as_str),
             conversations_representation: properties
                 .root_scalars
                 .get("ConversationsRepresentation")
@@ -11672,7 +11718,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                     )
                     || path_ends_with_for_form_type_text(&path)
                 {
-                    text_value.push_str(text.xml_content()?.as_ref());
+                    text_value.push_str(&form_text_chunk(&text, &path)?);
                 }
             }
             Ok(Event::CData(text)) => {
@@ -18440,6 +18486,20 @@ fn is_form_property_bag_undefined_value(value: &str) -> bool {
         && fields.first().is_some_and(|range| {
             parse_1c_quoted_string(&value[range.clone()]).is_ok_and(|marker| marker == "U")
         })
+}
+
+/// The text of a `Form.xml` element as the body stores it. A localized
+/// `<v8:content>` keeps the CRs the file spells: a CR LF there is a CR the
+/// string holds, which the body stores as CR CR LF (Управление задачами
+/// `Catalogs/узВопросыОтветы/Forms/ФормаЭлемента`); a bare LF stays a bare
+/// LF, which the platform reads the same as CR LF. Every other text reads as
+/// before, line breaks normalized.
+fn form_text_chunk(text: &quick_xml::events::BytesText<'_>, path: &[String]) -> Result<String> {
+    if path.last().map(String::as_str) == Some("content") {
+        let raw = text.decode()?;
+        return Ok(raw.replace("\r\n", "\r\r\n"));
+    }
+    Ok(text.xml_content()?.into_owned())
 }
 
 fn format_form_title_value(title: &[LocalizedString]) -> String {

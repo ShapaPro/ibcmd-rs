@@ -812,6 +812,27 @@ const FORM_EVENT_UUIDS: &[(&str, &str, &str, &str)] = &[
         "OnChange",
         "fe115cc8-9e33-4684-a166-bd5136fe7a9f",
     ),
+    // The planner's drag events share the item-wide drag identifiers
+    // (form_schema.rs `FORM_ITEM_DRAG_*_EVENT_UUID`); Управление задачами
+    // `Reports/узПланированиеПроекта/Forms/ФормаУправляемая` names all three.
+    (
+        "PlannerField",
+        "",
+        "DragCheck",
+        "0d644ff6-443b-4390-86fa-7f9105e42711",
+    ),
+    (
+        "PlannerField",
+        "",
+        "DragStart",
+        "6d4d6747-a823-4f61-ab31-a426572f2c6c",
+    ),
+    (
+        "PlannerField",
+        "",
+        "DragEnd",
+        "cb286ab3-3a1c-40d2-a232-6e64f624ccec",
+    ),
     (
         "PlannerField",
         "",
@@ -2300,13 +2321,16 @@ pub(crate) fn format_gantt_chart_payload(
     horizontal_stretch: bool,
     vertical_stretch: bool,
     auto_max_width: bool,
+    auto_max_height: bool,
     events: &str,
 ) -> String {
+    // Member 9 is `<AutoMaxHeight>` (the exporter's Gantt option slot 9).
     format!(
-        "{{3,{width},{height},{horizontal},{vertical},{events},{auto_max_width},0,0,1,0,0,0,0,2,2}}",
+        "{{3,{width},{height},{horizontal},{vertical},{events},{auto_max_width},0,0,{auto_max_height},0,0,0,0,2,2}}",
         horizontal = u8::from(horizontal_stretch),
         vertical = u8::from(vertical_stretch),
         auto_max_width = u8::from(auto_max_width),
+        auto_max_height = u8::from(auto_max_height),
     )
 }
 
@@ -6117,7 +6141,8 @@ pub(crate) struct NativeTableTail<'a> {
     /// `SelectionPresentationAndChoice`.
     pub(crate) current_row_use: Option<&'a str>,
     /// The member after it, `<BehaviorOnHorizontalCompression>`: absent 0,
-    /// `MoveItemsByImportance` 2 (the exporter's reverse offset 4).
+    /// `HideItemsByImportance` 1, `MoveItemsByImportance` 2 (the exporter's
+    /// reverse offset 4).
     pub(crate) behavior_on_horizontal_compression: Option<&'a str>,
     /// `<FileDragMode>`, of which only `AsFile` is ever stored.
     pub(crate) file_drag_mode: Option<&'a str>,
@@ -6235,7 +6260,10 @@ pub(crate) fn format_table_tail(tail: &NativeTableTail<'_>) -> Option<String> {
          {current_row_use},{compression},{display_importance},{drag},0",
         compression = root_code(
             tail.behavior_on_horizontal_compression,
-            &[("MoveItemsByImportance", "2")],
+            &[
+                ("HideItemsByImportance", "1"),
+                ("MoveItemsByImportance", "2")
+            ],
             "0",
         )?,
         group_horizontal = root_code(
@@ -6313,7 +6341,19 @@ pub(crate) struct NativeTableAddition<'a> {
 pub(crate) fn format_table_addition(addition: &NativeTableAddition<'_>) -> Option<String> {
     let tooltip_representation = root_code(
         addition.tooltip_representation,
-        &[("None", "1"), ("Button", "3"), ("ShowTop", "5")],
+        // The whole table the exporter decodes (form_schema.rs
+        // `FormTooltipRepresentation::from_raw_scalar`); `ShowRight` is ЛИМС
+        // КОРП `Documents/лимсРегистрацияКадровогоСобытия/Forms/ФормаСписка`.
+        &[
+            ("None", "1"),
+            ("Balloon", "2"),
+            ("Button", "3"),
+            ("ShowAuto", "4"),
+            ("ShowTop", "5"),
+            ("ShowLeft", "6"),
+            ("ShowBottom", "7"),
+            ("ShowRight", "8"),
+        ],
         "0",
     )?;
     let align = root_code(
@@ -7801,7 +7841,12 @@ pub(crate) fn format_pages_payload(
     representation: Option<&str>,
     events: &str,
     associated_table_element_id: &str,
+    current_row_use: Option<&str>,
 ) -> Option<String> {
+    // Member 3 is `<CurrentRowUse>`: absent 2, `DontUse` 1 (the exporter's
+    // pages reader; ЛИМС КОРП `Catalogs/ПодключаемоеОборудование/Forms/
+    // ФормаЭлемента` `Закладки`).
+    let current_row_use = root_code(current_row_use, &[("DontUse", "1")], "2")?;
     const CODES: &[(&str, &str)] = &[
         ("None", "0"),
         ("TabsOnTop", "1"),
@@ -7813,7 +7858,7 @@ pub(crate) fn format_pages_payload(
     let first = root_code(representation, CODES, "1")?;
     let second = root_code(representation, CODES, "6")?;
     Some(format!(
-        "{{4,{first},{events},2,{associated_table_element_id},{second}}}"
+        "{{4,{first},{events},{current_row_use},{associated_table_element_id},{second}}}"
     ))
 }
 
@@ -8522,6 +8567,8 @@ pub(crate) struct NativeRootTail<'a> {
     /// `<ShowTitle>` and `<ShowCloseButton>`, both on unless turned off.
     pub(crate) show_title: bool,
     pub(crate) show_close_button: bool,
+    /// `<Scale>`, the stored percentage; 100 when the form names none.
+    pub(crate) scale: Option<&'a str>,
     /// `<ConversationsRepresentation>`: `Show` or `DontShow`.
     pub(crate) conversations_representation: Option<&'a str>,
     /// `<CollapseItemsByImportanceVariant>`: `Use` or `DontUse`.
@@ -8550,6 +8597,7 @@ impl Default for NativeRootTail<'_> {
             group: None,
             show_title: true,
             show_close_button: true,
+            scale: None,
             conversations_representation: None,
             collapse_items_by_importance: None,
             save_window_settings: true,
@@ -8665,7 +8713,8 @@ pub(crate) fn format_root_tail(tail: &NativeRootTail<'_>) -> Option<String> {
         root_code(tail.children_align, &[("None", "1")], "0")?,
         group,
         scroll_again,
-        "100".to_string(),
+        // `<Scale>`, 100 when unwritten (the exporter's `extract_form_scale`).
+        tail.scale.unwrap_or("100").to_string(),
         u8::from(tail.show_title).to_string(),
         u8::from(tail.show_close_button).to_string(),
         root_code(
@@ -9406,6 +9455,28 @@ fn data_path_context_for_types(types: &[String]) -> DataPathContext {
     }
     if let Some((members, composer)) = data_path_builtin_members(first) {
         return DataPathContext::Builtin { members, composer };
+    }
+    // A value typed by a tabular section (`cfg:DocumentTabularSection.X.Y`, or
+    // its row) walks into that section of the owner: ЛИМС КОРП
+    // `Documents/лимсПретензия/Forms/ФормаДокумента` reaches
+    // `….СписокСотрудников.Ответственный` through such a column.
+    if let [only] = types
+        && let Some((head, rest)) = only
+            .trim()
+            .strip_prefix("cfg:")
+            .and_then(|t| t.split_once('.'))
+        && let Some(kind) = head
+            .strip_suffix("TabularSectionRow")
+            .or_else(|| head.strip_suffix("TabularSection"))
+        && let Some((owner, section)) = rest.split_once('.')
+        && !kind.is_empty()
+        && !owner.is_empty()
+        && !section.is_empty()
+    {
+        return DataPathContext::Meta {
+            keys: vec![format!("{kind}.{owner}")],
+            section: Some(section.to_string()),
+        };
     }
     let keys = types
         .iter()
@@ -11516,11 +11587,11 @@ mod tests {
             "{1,3,{0}}"
         );
         assert_eq!(
-            format_pages_payload(None, "{0,1,0}", "0").expect("a payload"),
+            format_pages_payload(None, "{0,1,0}", "0", None).expect("a payload"),
             "{4,1,{0,1,0},2,0,6}"
         );
         assert_eq!(
-            format_pages_payload(Some("None"), "{0,1,0}", "0").expect("a payload"),
+            format_pages_payload(Some("None"), "{0,1,0}", "0", None).expect("a payload"),
             "{4,0,{0,1,0},2,0,0}"
         );
         assert_eq!(
