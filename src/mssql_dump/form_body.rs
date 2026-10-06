@@ -7649,10 +7649,14 @@ pub(super) fn form_dynamic_list_use_always_universe(
             return None;
         }
         universe = BTreeSet::new();
+        let english_script =
+            declarations.is_some_and(MetadataFieldDeclarationIndex::english_script);
         for (ru, en) in
             form_dynamic_list_declared_std_attribute_pairs(pairs, main_table, declarations)
         {
-            universe.insert((*ru).to_string());
+            if !english_script {
+                universe.insert((*ru).to_string());
+            }
             universe.insert((*en).to_string());
         }
         universe.extend(form_dynamic_list_main_table_children(
@@ -7870,8 +7874,11 @@ fn form_dynamic_list_star_source_fields(
     let (kind, _) = table.split_once('.')?;
     let pairs = form_dynamic_list_std_attribute_pairs(kind)?;
     let mut fields = BTreeSet::new();
-    for (ru, _) in form_dynamic_list_declared_std_attribute_pairs(pairs, &table, declarations) {
-        fields.insert((*ru).to_string());
+    // Under an English script variant the query names standard attributes
+    // in English only (`MetadataFieldDeclarationIndex::english_script`).
+    let english_script = declarations.is_some_and(MetadataFieldDeclarationIndex::english_script);
+    for (ru, en) in form_dynamic_list_declared_std_attribute_pairs(pairs, &table, declarations) {
+        fields.insert(if english_script { *en } else { *ru }.to_string());
     }
     fields.extend(form_dynamic_list_main_table_children(
         &table,
@@ -8443,9 +8450,10 @@ fn form_dynamic_list_main_table_auto_fields(
         [kind, name, _virtual_table] => format!("{kind}.{name}"),
         _ => main_table.to_string(),
     };
+    let english_script = declarations.is_some_and(MetadataFieldDeclarationIndex::english_script);
     let mut candidates: Vec<String> =
         form_dynamic_list_declared_std_attribute_pairs(pairs, &base_table, declarations)
-            .map(|(ru, _)| (*ru).to_string())
+            .map(|(ru, en)| if english_script { *en } else { *ru }.to_string())
             .collect();
     if FORM_DYNAMIC_LIST_REGISTER_KINDS.contains(&kind)
         && !declarations.is_some_and(MetadataFieldDeclarationIndex::register_dimensions_withheld)
@@ -9020,7 +9028,17 @@ pub(super) fn parse_form_dynamic_list_query_selection(
         // a clause keyword before a source (1 739 ERP УХ, 821 UT, 323
         // Документооборот, 136 БСП demo and 111 БСП base batches declare their
         // source first, and the batches that declare neither are unaffected).
+        // A word right behind `AS`/`КАК` is an alias, whatever it spells: ERP
+        // WE English `DataProcessors/ExecutionOfOperations2_2/Forms/Workplace`
+        // selects `QueueOverridable.Order AS Order` and two more fields after
+        // it, which the platform resolves (`ExecutionOfOperations.
+        // OperationNumber`, `.NextOperation`).
+        let is_alias = selection_tokens.last().is_some_and(|previous: &String| {
+            // `AS <alias>`, or a member name behind `.` (`….Order`).
+            previous == "." || is_1c_query_keyword(previous, Q_AS)
+        });
         if depth == 0
+            && !is_alias
             && (is_1c_query_keyword(token, Q_FROM)
                 || is_1c_query_keyword(token, Q_INTO)
                 || is_1c_query_keyword(token, Q_CLAUSE_END))
@@ -9093,7 +9111,10 @@ pub(super) fn parse_form_dynamic_list_query_selection(
                 ")" | "}" => depth -= 1,
                 _ => {}
             }
-            if depth == 0 && is_1c_query_keyword(token, Q_CLAUSE_END) {
+            let is_alias = clause.last().is_some_and(|previous: &String| {
+                previous == "." || is_1c_query_keyword(previous, Q_AS)
+            });
+            if depth == 0 && !is_alias && is_1c_query_keyword(token, Q_CLAUSE_END) {
                 break;
             }
             clause.push(token.clone());
@@ -12057,17 +12078,22 @@ pub(super) fn collect_form_child_item_indexes_with_object_refs(
             let attribute = attributes
                 .iter()
                 .find(|attribute| attribute.id == *attribute_id)?;
+            // A declared column's name is exact; only a list field's name is
+            // read with the table prefix the designer puts in front of it.
+            // ERP WE English `InformationRegisters/BudgetIndicatorLinks/Forms/
+            // RecordForm` declares `DimensionKind` on table `Dimension` and
+            // writes `Items.Dimension.CurrentData.DimensionKind`.
             let mut columns = attribute
                 .columns
                 .iter()
-                .map(|column| (column.id.clone(), column.name.clone()))
+                .map(|column| (column.id.clone(), (column.name.clone(), true)))
                 .collect::<BTreeMap<_, _>>();
             if let Some(settings) = &attribute.settings {
                 columns.extend(settings.fields.iter().filter_map(|field| {
                     field
                         .item_id
                         .as_ref()
-                        .map(|item_id| (item_id.clone(), field.field.clone()))
+                        .map(|item_id| (item_id.clone(), (field.field.clone(), false)))
                 }));
             }
             Some((
@@ -12079,8 +12105,12 @@ pub(super) fn collect_form_child_item_indexes_with_object_refs(
         })
         .collect::<Vec<_>>();
     for (table_id, table_name, columns, value_list) in type_link_routes {
-        for (column_id, column_name) in columns {
-            let field_name = normalize_form_table_column_name(&table_name, &column_name);
+        for (column_id, (column_name, declared)) in columns {
+            let field_name = if declared {
+                normalize_form_data_path_child_name(&table_name, &column_name)
+            } else {
+                normalize_form_table_column_name(&table_name, &column_name)
+            };
             indexes.type_link_data_path_by_table_column.insert(
                 (table_id.clone(), column_id),
                 format!("Items.{table_name}.CurrentData.{field_name}"),
@@ -22765,8 +22795,10 @@ fn form_member_may_be_extended_tooltip(field: &str) -> bool {
 /// Identity of the extended tooltip nested in a child-item record, read with
 /// the same shape test the tooltip reader itself uses.
 fn form_child_item_extended_tooltip_identity(fields: &[&str]) -> Option<(String, String)> {
-    fields.iter().find_map(|field| {
-        if !form_member_may_be_extended_tooltip(field) {
+    fields.iter().enumerate().find_map(|(index, field)| {
+        if !form_member_may_be_extended_tooltip(field)
+            || form_member_follows_child_kind(fields, index)
+        {
             return None;
         }
         let split_nested = split_1c_braced_fields(field.trim(), 0)?;
@@ -22787,16 +22819,31 @@ fn form_child_item_extended_tooltip_identity(fields: &[&str]) -> Option<(String,
         if id == "0" && name != "ExtendedTooltip" {
             return None;
         }
-        is_form_extended_tooltip_name(&name).then(|| (id.to_string(), name))
+        Some((id.to_string(), name))
     })
+}
+
+/// Whether the member at `index` is a child item: every child record follows
+/// the uuid of its kind, and an item's own extended tooltip never does. This
+/// is what tells a tooltip from a child label decoration of the same shape;
+/// the name used to, and a translated configuration names its tooltips
+/// `…ExtendedHint`, `…ExtendedTip` or `…AdvancedTooltip` (ERP WE English, 64
+/// forms lost one).
+fn form_member_follows_child_kind(fields: &[&str], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|previous| fields.get(previous))
+        .is_some_and(|previous| Uuid::parse_str(previous.trim()).is_ok())
 }
 
 pub(super) fn parse_form_child_item_extended_tooltip(
     fields: &[&str],
     object_refs: &BTreeMap<String, String>,
 ) -> Option<FormExtendedTooltip> {
-    fields.iter().find_map(|field| {
-        if !form_member_may_be_extended_tooltip(field) {
+    fields.iter().enumerate().find_map(|(index, field)| {
+        if !form_member_may_be_extended_tooltip(field)
+            || form_member_follows_child_kind(fields, index)
+        {
             return None;
         }
         let split_nested = split_1c_braced_fields(field.trim(), 0)?;
@@ -22842,9 +22889,6 @@ pub(super) fn parse_form_child_item_extended_tooltip(
         // chart's nested table and its additions, which the platform numbers
         // on dump (`renumber_form_zero_item_ids`).
         if id == "0" && name != "ExtendedTooltip" {
-            return None;
-        }
-        if !is_form_extended_tooltip_name(&name) {
             return None;
         }
         let mut tooltip = FormExtendedTooltip::new(name, id.to_string());
@@ -23013,19 +23057,6 @@ pub(super) fn parse_form_html_document_field_option_events(
         };
     }
     events
-}
-
-pub(super) fn is_form_extended_tooltip_name(name: &str) -> bool {
-    ["ExtendedTooltip", "РасширеннаяПодсказка"]
-        .iter()
-        .any(|marker| {
-            let Some(marker_offset) = name.rfind(marker) else {
-                return false;
-            };
-            name[marker_offset + marker.len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-        })
 }
 
 /// The `<xr:Abs>` file name and transparency of a picture the control carries

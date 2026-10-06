@@ -3175,7 +3175,7 @@ fn write_source_asset_inner(
             )?;
         }
         SourceAssetKind::BusinessProcessFlowchart => {
-            let flowchart = parse_business_process_flowchart_blob(
+            let mut flowchart = parse_business_process_flowchart_blob(
                 bytes,
                 context.object_refs,
                 context.metadata_object_refs,
@@ -3189,6 +3189,11 @@ fn write_source_asset_inner(
                     asset.primary_path.display()
                 )
             })?;
+            super::order_flowchart_addressing_attributes(
+                &mut flowchart,
+                context.object_refs,
+                context.metadata_texts_by_file_name,
+            );
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 context
@@ -5006,7 +5011,12 @@ pub(super) fn ext_picture_file_name(bytes: &[u8]) -> &'static str {
         if is_svg_text(text) {
             "Picture.svg"
         } else if trimmed.starts_with('<') {
-            "Picture.xml"
+            // A markup payload the platform does not recognise as an image is
+            // written with no extension at all: ERP WE English
+            // `CommonPictures/PictureBack` (an EDT metadata document stored as
+            // the picture) is published `<xr:Abs>Picture</xr:Abs>`, and no
+            // corpus publishes `Picture.xml`.
+            "Picture"
         } else {
             "Picture.txt"
         }

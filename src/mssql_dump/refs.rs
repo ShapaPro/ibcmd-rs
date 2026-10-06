@@ -359,6 +359,12 @@ pub(super) struct MetadataFieldDeclarationIndex {
     /// Whether a constants set's `<UseAlways>` names its `v8:ValueStorage`
     /// constants: 2.21 does (8.5.1.1150 ERP УХ, 75 forms), 2.20 never does.
     writes_value_storage_constants: bool,
+    /// Whether the configuration's script variant is English (root field 3
+    /// `0`): its queries name standard attributes in English only, so a
+    /// Russian standard name is a field the list cannot resolve (ERP WE
+    /// English `Catalogs/ItemKinds/Forms/ListFormForPricingSettings` is
+    /// written `~List.Наименование`).
+    english_script: bool,
 }
 
 impl MetadataFieldDeclarationIndex {
@@ -379,6 +385,10 @@ impl MetadataFieldDeclarationIndex {
 
     pub(super) fn writes_value_storage_constants(&self) -> bool {
         self.writes_value_storage_constants
+    }
+
+    pub(super) fn english_script(&self) -> bool {
+        self.english_script
     }
 
     pub(super) fn table(&self, reference: &str) -> Option<&MetadataTableStandardAttributes> {
@@ -554,6 +564,13 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
     type_index: &BTreeMap<String, String>,
 ) -> MetadataFieldDeclarationIndex {
     let mut index = MetadataFieldDeclarationIndex::default();
+    // Only the configuration's own root row is parsed: it carries the class
+    // uuid `9cd510cd-…` of the configuration properties.
+    index.english_script = rows.iter().any(|row| {
+        row.text.contains("9cd510cd-abfc-11d4-9434-004095e12fc7")
+            && configuration_root_fields(&row.text)
+                .is_some_and(|(fields, _)| fields.get(3).map(|field| field.trim()) == Some("0"))
+    });
     index.declared_tables = object_refs
         .values()
         .filter(|reference| reference.split('.').count() == 2)
@@ -4146,8 +4163,11 @@ pub(super) fn parse_configuration_properties_from_text(
             .get(2)
             .and_then(|field| parse_1c_quoted_string(field.trim())),
         configuration_extension_compatibility_mode,
+        // Field 21 is the run mode and field 3 the script variant: over 21
+        // corpora field 3 is `0` only on the English configuration and field
+        // 21 `0` only on the one `OrdinaryApplication` configuration.
         default_run_mode: fields
-            .get(3)
+            .get(21)
             .and_then(|field| configuration_default_run_mode_xml(field.trim())),
         use_purposes: Vec::new(),
         localized_properties: None,
@@ -4159,7 +4179,7 @@ pub(super) fn parse_configuration_properties_from_text(
         default_style: parse_configuration_root_reference(&fields, 9, object_refs, "Style."),
         default_language: parse_configuration_root_reference(&fields, 10, object_refs, "Language."),
         script_variant: fields
-            .get(13)
+            .get(3)
             .and_then(|field| configuration_script_variant_xml(field.trim())),
         default_roles: fields
             .get(39)
@@ -5425,8 +5445,8 @@ pub(super) fn configuration_default_run_mode_xml(value: &str) -> Option<&'static
 
 pub(super) fn configuration_script_variant_xml(value: &str) -> Option<&'static str> {
     match value {
-        "0" => Some("Russian"),
-        "1" => Some("English"),
+        "0" => Some("English"),
+        "1" => Some("Russian"),
         _ => None,
     }
 }

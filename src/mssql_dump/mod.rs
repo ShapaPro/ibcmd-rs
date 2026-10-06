@@ -8349,6 +8349,61 @@ fn parse_flowchart_activity_addressing_attributes(
     Some(attributes)
 }
 
+/// Puts every activity's addressing attributes in the order the task declares
+/// them, which is the order the platform publishes. The parse sorts them by
+/// name, which matched the Russian configurations of the stand and not ERP WE
+/// English (`Task.PerformerTask`: `AdditionalAddressingObject`, `Performer`,
+/// `MainAddressingObject`, `PerformerRole`, as in `Tasks/PerformerTask.xml`).
+/// The declaration order is where each attribute's uuid stands in the task's
+/// own metadata row; a task or attribute the rows do not place keeps the
+/// name order.
+pub(super) fn order_flowchart_addressing_attributes(
+    flowchart: &mut BusinessProcessFlowchart,
+    object_refs: &BTreeMap<String, String>,
+    texts: &BTreeMap<&str, &MetadataTextRow>,
+) {
+    let uuid_of = |reference: &str| {
+        object_refs
+            .iter()
+            .find(|(_, name)| name.as_str() == reference)
+            .map(|(uuid, _)| uuid.clone())
+    };
+    for item in &mut flowchart.items {
+        let attributes = &mut item.properties.addressing_attributes;
+        let Some(owner) = attributes
+            .first()
+            .and_then(|attribute| flowchart_task_addressing_attribute_owner(&attribute.reference))
+        else {
+            continue;
+        };
+        let Some(text) = uuid_of(&format!("Task.{owner}"))
+            .and_then(|uuid| texts.get(uuid.as_str()).map(|row| row.text.as_str()))
+        else {
+            continue;
+        };
+        let positions = attributes
+            .iter()
+            .map(|attribute| {
+                // The attribute's own header `{1,0,<uuid>}`: the bare uuid also
+                // stands earlier, in the task's own properties.
+                uuid_of(&attribute.reference).and_then(|uuid| text.find(&format!("1,0,{uuid}}}")))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(positions) = positions else {
+            continue;
+        };
+        let mut indexed = std::mem::take(attributes)
+            .into_iter()
+            .zip(positions)
+            .collect::<Vec<_>>();
+        indexed.sort_by_key(|(_, position)| *position);
+        *attributes = indexed
+            .into_iter()
+            .map(|(attribute, _)| attribute)
+            .collect();
+    }
+}
+
 fn flowchart_task_addressing_attribute_owner(reference: &str) -> Option<&str> {
     let parts = reference.split('.').collect::<Vec<_>>();
     match parts.as_slice() {
@@ -38205,10 +38260,16 @@ fn format_configuration_source_xml(
         // So the evidenced default is proven for this tuple, and a
         // configuration that actually differs fails the range check and never
         // reaches this branch.
-        insert.push_str(
-            ibcmd_schema::configuration_properties_evidenced_default_block_policy()
-                .script_variant_segment(),
-        );
+        // The script variant now has its coordinate (field 3, read into
+        // `script_variant`); the evidenced default stands for Russian only.
+        if properties.script_variant == Some("English") {
+            push_optional_simple_property_xml(&mut insert, "ScriptVariant", Some("English"));
+        } else {
+            insert.push_str(
+                ibcmd_schema::configuration_properties_evidenced_default_block_policy()
+                    .script_variant_segment(),
+            );
+        }
     } else {
         push_optional_simple_property_xml(&mut insert, "ScriptVariant", properties.script_variant);
     }
