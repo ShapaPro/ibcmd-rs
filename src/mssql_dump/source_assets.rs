@@ -1837,6 +1837,9 @@ pub(super) fn additional_indexes_body_suffix(kind: &str) -> Option<&'static str>
     match kind {
         "Document" => Some("3"),
         "AccumulationRegister" => Some("4"),
+        // `Catalogs/ПартииПроизводства` of one 8.3.27 corpus stores its
+        // additional indexes under `.1d` and the platform writes them.
+        "Catalog" => Some("1d"),
         _ => None,
     }
 }
@@ -2770,6 +2773,16 @@ fn write_source_asset_inner(
                 }
                 crate::compiler::bodies::dcs::DcsBodyLayout::DirectXml => body.plaintext().to_vec(),
             };
+            // A schema stored by 8.5 declares the palette namespace on its
+            // settings roots; 8.3.27 writes no such declaration (15 templates
+            // of one 8.3.27 corpus, `ExchangePlans/ОбменССайтом/Templates/
+            // СхемаВыгрузкиЗаказов` among them). Dropped only while nothing
+            // in the document uses the `pal:` prefix.
+            let content = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
+                strip_unused_palette_namespace(content)
+            } else {
+                content
+            };
             let path = output_dir.join(&asset.primary_path);
             if let Some(parent) = path.parent() {
                 context
@@ -2943,6 +2956,15 @@ fn write_source_asset_inner(
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             if is_xml_path(&asset.primary_path) {
+                // A document stored by 8.5 (an appearance template, say)
+                // declares the palette namespace 8.3.27 never writes:
+                // `CommonTemplates/ОформлениеОтчетовБежевый` of one 8.3.27
+                // corpus.
+                let inflated = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
+                    strip_unused_palette_namespace(inflated)
+                } else {
+                    inflated
+                };
                 context
                     .output
                     .write_xml(&path, inflated, context.source_version)?;
@@ -2975,6 +2997,13 @@ fn write_source_asset_inner(
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             if is_xml_path(&asset.primary_path) {
+                // A document stored by 8.5 (an appearance template, say)
+                // declares the palette namespace 8.3.27 never writes.
+                let content = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
+                    strip_unused_palette_namespace(content)
+                } else {
+                    content
+                };
                 context
                     .output
                     .write_xml(&path, content, context.source_version)?;
@@ -3242,6 +3271,11 @@ fn write_source_asset_inner(
                 .map(|text| text.trim_start_matches('\u{feff}').trim_start())
                 .filter(|text| looks_like_graphical_scheme_blob_text(text));
             if let Some(text) = text {
+                // The 8.5 colour and font tuples a scheme may be stored in
+                // (`parse_business_process_flowchart_blob`, same grammar).
+                let converted =
+                    super::form::layout_8_5_1::down_convert_primitives_8_5_1_text(text).ok();
+                let text = converted.as_deref().unwrap_or(text);
                 let flowchart = parse_business_process_flowchart_text_with_types(
                     text,
                     context.object_refs,
@@ -4954,6 +4988,21 @@ pub(super) fn extract_ext_picture_transparent_pixel(text: &str) -> Option<(i32, 
     let x = transparent_fields.get(2)?.trim().parse().ok()?;
     let y = transparent_fields.get(3)?.trim().parse().ok()?;
     Some((x, y))
+}
+
+fn strip_unused_palette_namespace(content: Vec<u8>) -> Vec<u8> {
+    const DECLARATION: &str = " xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"";
+    let Ok(text) = String::from_utf8(content.clone()) else {
+        return content;
+    };
+    if !text.contains(DECLARATION) {
+        return content;
+    }
+    let stripped = text.replace(DECLARATION, "");
+    if stripped.contains("pal:") {
+        return content;
+    }
+    stripped.into_bytes()
 }
 
 pub(super) fn format_ext_picture_xml(

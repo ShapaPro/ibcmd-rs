@@ -1342,7 +1342,15 @@ fn build_document(
     fields[13] = enum_code(
         object,
         "NumberPeriodicity",
-        &[("Nonperiodical", "0"), ("Year", "1")],
+        // The platform's periodicity codes, as `metadata_model::objects::
+        // NUMBER_PERIODICITY` spells them (`Month` 3 on one 8.3.27 corpus).
+        &[
+            ("Nonperiodical", "0"),
+            ("Year", "1"),
+            ("Quarter", "2"),
+            ("Month", "3"),
+            ("Day", "4"),
+        ],
     )?;
     fields[14] = bool_token(object, "CheckUnique")?;
     fields[15] = bool_token(object, "Autonumbering")?;

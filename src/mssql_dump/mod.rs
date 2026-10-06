@@ -7348,13 +7348,15 @@ fn parse_business_process_flowchart_blob(
     let inflated = inflate_raw_deflate(bytes).ok()?;
     let text = String::from_utf8(inflated).ok()?;
     // An 8.5 flowchart differs from its 8.3.27 spelling only in its colour and
-    // font tuples (BSP `BusinessProcesses/Задание`, member for member).
-    let text = if source_version == InfobaseConfigSourceVersion::V2_21 {
+    // font tuples (BSP `BusinessProcesses/Задание`, member for member). The
+    // stored spelling does not follow the XML being written: a configuration
+    // exported as 2.20 can hold flowcharts in the 8.5 tuples (20 of one 8.3.27
+    // corpus, `BusinessProcesses/Задание` among them), so the down-conversion
+    // runs on every text -- an 8.3.27 text carries none of those tuples.
+    let _ = source_version;
+    let text =
         form::layout_8_5_1::down_convert_primitives_8_5_1_text(text.trim_start_matches('\u{feff}'))
-            .ok()?
-    } else {
-        text
-    };
+            .unwrap_or(text);
     parse_business_process_flowchart_text_with_types(
         text.trim_start_matches('\u{feff}'),
         object_refs,
@@ -28976,6 +28978,10 @@ fn parse_document_properties_from_text(
             number_periodicity: match fields.get(13)?.trim() {
                 "0" => "Nonperiodical",
                 "1" => "Year",
+                // `Month` on `Documents/ЧерновикЭлектронногоДокументаЭДО` of
+                // one 8.3.27 corpus.
+                "2" => "Quarter",
+                "3" => "Month",
                 "4" => "Day",
                 _ => return None,
             },
@@ -36255,6 +36261,9 @@ fn parse_style_body_items(
     if items.len() != declared_count {
         return None;
     }
+    // `{0}` is a brand record with no colour (`Styles/Основной` of a
+    // configuration stored by 8.5), which writes nothing.
+    let brand = brand.filter(|record| record.trim() != "{0}");
     if let Some(brand) = brand {
         // `{1,{0,<colour>}}`: one colour, item 0.
         let record = split_1c_braced_fields(brand, 0)?;
@@ -36386,10 +36395,13 @@ fn parse_style_body_color_value(
 ) -> Option<String> {
     let fields = split_1c_braced_fields(value, 0)?;
     if layout_8_5_1 {
-        // `{4,<variant>,{<code>},0}`.
+        // `{4,<variant>,{<code>},0}`, or with the variant repeated in the
+        // last member -- the shape every other 8.5 colour tuple takes and the
+        // one `Styles/Основной` of a configuration stored by 8.5 carries
+        // (`{4,3,{-1},3}`, 161 items).
         if fields.first()?.trim() != STYLE_BODY_COLOR_TAG_8_5_1
             || fields.len() != 4
-            || fields.get(3)?.trim() != "0"
+            || !(fields.get(3)?.trim() == "0" || fields.get(3)?.trim() == fields.get(1)?.trim())
         {
             return None;
         }

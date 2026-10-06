@@ -19931,7 +19931,12 @@ fn parse_form_font_mask_tuple_xml(
     tag_name: &str,
 ) -> Option<String> {
     let fields = split_1c_braced_fields(field.trim(), 0)?;
-    if fields.first()?.trim() != "7" {
+    // Revision `8` carries the same members as `7`: `DataProcessors/
+    // ДокументооборотСКонтролирующимиОрганами/Forms/
+    // Мастер_ВопросОтключитьМультирежим` stores `{8,3,4,700,1,100}` on the
+    // label decoration the platform writes `<Font bold="true" kind="AutoFont"/>`
+    // (about 40 forms of one 8.3.27 corpus).
+    if !matches!(fields.first()?.trim(), "7" | "8") {
         return None;
     }
     let kind = fields.get(1)?.trim();
@@ -39247,6 +39252,11 @@ fn parse_form_chart_settings_xml(
     if !is_chart {
         return None;
     }
+    // A chart stored in the 8.5 colour and font tuples (one 8.3.27 corpus
+    // holds 21 such forms) reads through the same down-conversion the
+    // business-process flowchart uses.
+    let converted = super::form::layout_8_5_1::down_convert_primitives_8_5_1_text(field).ok();
+    let field = converted.as_deref().unwrap_or(field);
     let outer = split_1c_braced_fields(field.trim(), 0)?;
     if outer.len() != 4
         || outer.first()?.trim() != "0"
@@ -39318,6 +39328,11 @@ fn parse_form_gantt_chart_settings_xml(
     if !is_gantt {
         return None;
     }
+    // A chart stored in the 8.5 colour and font tuples (one 8.3.27 corpus
+    // holds 21 such forms) reads through the same down-conversion the
+    // business-process flowchart uses.
+    let converted = super::form::layout_8_5_1::down_convert_primitives_8_5_1_text(field).ok();
+    let field = converted.as_deref().unwrap_or(field);
     let outer = split_1c_braced_fields(field.trim(), 0)?;
     if outer.len() != 4
         || outer.first()?.trim() != "0"
@@ -40563,6 +40578,29 @@ fn format_form_chart_settings_body_xml(
     object_refs: &BTreeMap<String, String>,
     child: usize,
 ) -> Option<String> {
+    // Revision 75 is revision 74 plus eight trailing colours, all automatic
+    // wherever the platform prints nothing for them -- the relation
+    // `moxel.rs` records for a template's chart, and the shape the 21 charts
+    // of one 8.3.27 corpus stored by 8.5 carry (`DataProcessors/
+    // ДиспетчированиеГрафикаПроизводства/Forms/ДиагностикаФормированияГрафика`).
+    let mut owned = Vec::new();
+    let data = if data.first().map(|value| value.trim()) == Some("75") {
+        let cut = data.len().checked_sub(8)?;
+        // The eight colours are any colour: 8.3.27 has no element for them
+        // and prints none, automatic or not (`ДиагностикаФормированияГрафика`
+        // stores four `style` colours there).
+        if !data[cut..]
+            .iter()
+            .all(|member| form_chart_compact(member).starts_with("{3,"))
+        {
+            return None;
+        }
+        owned.push("74");
+        owned.extend_from_slice(&data[1..cut]);
+        owned.as_slice()
+    } else {
+        data
+    };
     let child_tab = "\t".repeat(child);
     // `realSeriesCount` real `realSeriesData` records precede the one
     // `realExSeriesData` placeholder every record carries (empty or not) --

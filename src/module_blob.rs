@@ -2325,7 +2325,21 @@ pub fn pack_additional_indexes_blob_from_xml(
             ));
         };
         let field_node = |name: &str| -> Result<StyleNode> {
+            // A catalog's standard fields carry the catalog's own codes
+            // (`Code` -2 on one 8.3.27 corpus), not the register ones.
+            let catalog_code = (owner_kind == "Catalog")
+                .then(|| {
+                    crate::metadata_model::objects::CATALOG_STANDARD
+                        .iter()
+                        .find(|(standard, _)| *standard == name)
+                })
+                .flatten();
             let slot = match name {
+                _ if catalog_code.is_some() => StyleNode::List(vec![StyleNode::token(
+                    catalog_code
+                        .map(|(_, code)| code.to_string())
+                        .unwrap_or_default(),
+                )]),
                 "Period" => StyleNode::List(vec![StyleNode::token("-2")]),
                 "Recorder" => StyleNode::List(vec![StyleNode::token("-3")]),
                 "LineNumber" => StyleNode::List(vec![StyleNode::token("-4")]),
