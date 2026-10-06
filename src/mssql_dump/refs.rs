@@ -2406,7 +2406,11 @@ fn is_offset_inside_recalculation_dimension_list(text: &str, offset: usize) -> b
     is_offset_inside_any_list_marker(text, offset, &["{3c456b74-4ea5-4b22-a957-e9fad9133b54,"])
 }
 
-fn is_offset_inside_any_list_marker(text: &str, offset: usize, markers: &[&str]) -> bool {
+pub(super) fn is_offset_inside_any_list_marker(
+    text: &str,
+    offset: usize,
+    markers: &[&str],
+) -> bool {
     markers.iter().any(|marker| {
         let Some(start) = text[..offset].rfind(marker) else {
             return false;

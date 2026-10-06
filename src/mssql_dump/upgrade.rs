@@ -43,8 +43,38 @@ pub(super) fn upgrade_metadata_record(kind: &str, text: &str) -> Option<String> 
         "ExchangePlan" => upgrade_exchange_plan(text),
         "CommonPicture" => upgrade_common_picture(text),
         "Subsystem" => retag_owner(text, "20", 8, "21"),
+        "Enum" => upgrade_enum(text),
         _ => None,
     }
+}
+
+/// An enum owner `{19,…}` (20 members) or `{18,…}` (19) -> `{20,…}` (21).
+///
+/// Evidence: one 8.3.27 corpus stores enums in all three versions; member by
+/// member the older ones are the current one cut short -- version 19 lacks
+/// the trailing choice-history-on-input code (dumped `Auto`, `0`), version 18
+/// also the characteristics list before it (dumped empty, `{0,{0}}`). Their
+/// `{0}` standard-attribute slot dumps no `<StandardAttributes>`, as in a
+/// current enum.
+fn upgrade_enum(text: &str) -> Option<String> {
+    let root_open = text.find('{')?;
+    let (root, _) = members(text, root_open)?;
+    if member(text, root.first()?) != "1" {
+        return None;
+    }
+    let (owner, owner_close) = members(text, list_open(text, root.get(1)?)?)?;
+    let appended = match (member(text, owner.first()?), owner.len()) {
+        ("19", 20) => ",0",
+        ("18", 19) => ",{0,{0}},0",
+        _ => return None,
+    };
+    let tag = trimmed(text, &owner[0]);
+    Some(format!(
+        "{}20{}{appended}{}",
+        &text[..tag.start],
+        &text[tag.end..owner_close],
+        &text[owner_close..]
+    ))
 }
 
 /// The owner record `{<from>,…}` of `members` members retagged `<to>`, all
@@ -86,7 +116,59 @@ pub(super) fn upgrade_record_by_shape(text: &str, uuid: &str) -> Option<String> 
     let text_now = upgraded.as_deref().unwrap_or(text);
     let upgraded = upgrade_legacy_history_owner(text_now).or(upgraded);
     let text_now = upgraded.as_deref().unwrap_or(text);
+    let upgraded = upgrade_common_command(text_now).or(upgraded);
+    let text_now = upgraded.as_deref().unwrap_or(text);
     upgrade_form_record(text_now).or(upgraded)
+}
+
+/// A common command `{1,{2,{0,<ids>,{7,{3,…8 members},…12 members}},…}}` ->
+/// `{1,{2,{1,<ids>,{8,{4,…,""},…}},…}}`: the outer flag `0` -> `1`, the
+/// record `7` -> `8` and its first member `{3,…}` -> `{4,…,""}`.
+///
+/// Evidence: one 8.3.27 corpus stores 436 common commands this way next to
+/// current ones; 8.3.27.2214 dumps both alike, the old ones with the
+/// defaults the current ones state (`_onecdec` exact compare, agp).
+fn upgrade_common_command(text: &str) -> Option<String> {
+    let root_open = text.find('{')?;
+    let (root, _) = members(text, root_open)?;
+    if root.len() != 3 || member(text, &root[0]) != "1" {
+        return None;
+    }
+    let (wrapper, _) = members(text, list_open(text, &root[1])?)?;
+    if wrapper.len() != 2 || member(text, &wrapper[0]) != "2" {
+        return None;
+    }
+    let (command, _) = members(text, list_open(text, &wrapper[1])?)?;
+    if command.len() != 3 || member(text, &command[0]) != "0" {
+        return None;
+    }
+    let (ids, _) = members(text, list_open(text, &command[1])?)?;
+    if ids.len() != 3 || member(text, &ids[0]) != "2" {
+        return None;
+    }
+    let (record, _) = members(text, list_open(text, &command[2])?)?;
+    if record.len() != 12 || member(text, &record[0]) != "7" {
+        return None;
+    }
+    let (first, first_close) = members(text, list_open(text, &record[1])?)?;
+    if first.len() != 8 || member(text, &first[0]) != "3" {
+        return None;
+    }
+    let edits = [
+        (trimmed(text, &command[0]), "1"),
+        (trimmed(text, &record[0]), "8"),
+        (trimmed(text, &first[0]), "4"),
+        (first_close..first_close, ",\"\""),
+    ];
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        out.push_str(&text[copied..range.start]);
+        out.push_str(replacement);
+        copied = range.end;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
 }
 
 /// The two history processing flags were appended to these owner layouts.
@@ -100,14 +182,21 @@ fn upgrade_legacy_history_owner(text: &str) -> Option<String> {
     }
     let owner_open = list_open(text, root.get(1)?)?;
     let (owner, owner_close) = members(text, owner_open)?;
-    let target = match (member(text, owner.first()?), owner.len()) {
-        ("29", 47) => "30",
-        ("54", 59) => "56",
+    // Catalog versions 52 and 53 (58 members, one 8.3.27 corpus) also lack
+    // the data-history slot before the flags; 8.3.27.2214 dumps `DontUse`.
+    let (target, appended) = match (member(text, owner.first()?), owner.len()) {
+        ("29", 47) => ("30", ",0,0"),
+        ("54", 59) => ("56", ",0,0"),
+        ("52" | "53", 58) => ("56", ",0,0,0"),
+        // Documents of the same corpus: version 38 (51 members) lacks the two
+        // flags, version 37 (50) the data-history slot as well.
+        ("38", 51) => ("40", ",0,0"),
+        ("37", 50) => ("40", ",0,0,0"),
         _ => return None,
     };
     let tag = trimmed(text, &owner[0]);
     Some(format!(
-        "{}{target}{},0,0{}",
+        "{}{target}{}{appended}{}",
         &text[..tag.start],
         &text[tag.end..owner_close],
         &text[owner_close..]
@@ -470,6 +559,28 @@ fn list_open(text: &str, range: &Range<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrades_old_enums() {
+        let tail = "a,b,c,d,{h},1,e,f,n,n,2,1,n,n,{0},{0},{0},{0}";
+        assert_eq!(
+            upgrade_metadata_record("Enum", &format!("{{1,{{19,{tail},{{0,{{0}}}}}},x}}")).unwrap(),
+            format!("{{1,{{20,{tail},{{0,{{0}}}},0}},x}}")
+        );
+        assert_eq!(
+            upgrade_metadata_record("Enum", &format!("{{1,{{18,{tail}}},x}}")).unwrap(),
+            format!("{{1,{{20,{tail},{{0,{{0}}}},0}},x}}")
+        );
+    }
+
+    #[test]
+    fn upgrades_old_common_command() {
+        let old = "{1,{2,{0,{2,a,b},{7,{3,0,{0},\"\",-1,-1,1,0},3,{0},1,{0,0,0},0,{1,c},{\"Pattern\"},{h},0,0}}},0}";
+        assert_eq!(
+            upgrade_common_command(old).unwrap(),
+            "{1,{2,{1,{2,a,b},{8,{4,0,{0},\"\",-1,-1,1,0,\"\"},3,{0},1,{0,0,0},0,{1,c},{\"Pattern\"},{h},0,0}}},0}"
+        );
+    }
 
     #[test]
     fn upgrades_form_inside_two_member_legacy_wrapper() {

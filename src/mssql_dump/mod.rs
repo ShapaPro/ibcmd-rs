@@ -51,6 +51,7 @@ use crate::module_blob::{
 };
 use crate::parallel;
 
+mod legacy_child;
 mod characteristics {
     //! Strict physical decoder for the shared canonical Characteristics model.
 
@@ -16460,9 +16461,17 @@ fn parse_information_register_owner_fields<'a>(
     }
 
     let owner = split_information_register_braced_fields(root.get(1)?)?;
-    if owner.len() != 39 || owner.first()?.trim() != "33" {
-        return None;
-    }
+    // Older owners stop before the slots later versions append: version 30
+    // lacks the last two data-history slots, version 29 all three, version
+    // 27 also both totals-slice flags. Two 8.3.27 corpora dump the missing
+    // ones as `false`, `false`, `DontUse`, `false`, `false`.
+    let missing = match (owner.len(), owner.first()?.trim()) {
+        (39, "33") => 0,
+        (37, "30") => 2,
+        (36, "29") => 3,
+        (34, "27") => 5,
+        _ => return None,
+    };
     let generated_type_ids = owner[1..15]
         .iter()
         .map(|field| {
@@ -16514,6 +16523,7 @@ fn parse_information_register_owner_fields<'a>(
     let mut logical = Vec::with_capacity(25);
     logical.extend(header_wrapper);
     logical.extend(owner[16..].iter().copied());
+    logical.extend(["0", "0", "0", "0", "0"][5 - missing..].iter().copied());
     Some(InformationRegisterOwnerFields {
         logical: logical.try_into().ok()?,
     })
@@ -16718,17 +16728,44 @@ fn parse_information_register_standard_attribute_bag(
         fields.len(),
     ) {
         (Some("13"), Some("24"), 50) => false,
+        // Older revisions lack keys; see `absent` below.
+        (Some("12"), Some("23"), 48) | (Some("8"), Some("21"), 44) => false,
         // Revision 13 with the type-reduction key already present: a real
         // extension's tabular sections (8.3.27.2214 prints its
         // `TypeReductionMode` as for revision 14).
         (Some("14" | "13"), Some("25"), 52) => true,
         _ => return None,
     };
+    // Keys an older revision does not store, with the value the platform
+    // dumps for them (one 8.3.27 corpus, versions 27 and 29 registers):
+    // revision 12 lacks data history (`Use`), revision 8 also create-on-input
+    // and choice history on input (both `Auto`).
+    const DATA_HISTORY_USE: (&str, &str) = (
+        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_DATA_HISTORY_PROPERTY_UUID,
+        "{\"#\",d46ea122-3201-4e5e-bed4-e669c6e463c8,{d46ea122-3201-4e5e-bed4-e669c6e463c8,1}}",
+    );
+    const CREATE_ON_INPUT_AUTO: (&str, &str) = (
+        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_CREATE_ON_INPUT_PROPERTY_UUID,
+        "{\"#\",ad3615c5-aae6-4725-89be-91827523abd9,{ad3615c5-aae6-4725-89be-91827523abd9,0}}",
+    );
+    const CHOICE_HISTORY_AUTO: (&str, &str) = (
+        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_CHOICE_HISTORY_PROPERTY_UUID,
+        "{\"#\",12ca4003-ac70-450e-b897-37faf86bd313,0}",
+    );
+    let absent: &[(&str, &str)] = match fields.first()?.trim() {
+        "12" => &[DATA_HISTORY_USE],
+        "8" => &[DATA_HISTORY_USE, CREATE_ON_INPUT_AUTO, CHOICE_HISTORY_AUTO],
+        _ => &[],
+    };
     let expected_keys = INFORMATION_REGISTER_STANDARD_ATTRIBUTE_KEYS
         .iter()
         .enumerate()
-        .filter_map(|(index, key)| (has_type_reduction_mode || index != 5).then_some(*key));
+        .filter_map(|(index, key)| (has_type_reduction_mode || index != 5).then_some(*key))
+        .filter(|key| absent.iter().all(|(absent_key, _)| absent_key != key));
     let mut values = BTreeMap::new();
+    for (key, value) in absent {
+        values.insert(key.to_string(), *value);
+    }
     for (pair, expected_key) in fields[2..].chunks_exact(2).zip(expected_keys) {
         if !information_register_uuid_matches(pair[0], expected_key)
             || values.insert(expected_key.to_string(), pair[1]).is_some()
@@ -19205,6 +19242,29 @@ fn register_child_object_tag(kind: &str, text: &str, marker_start: usize) -> Opt
         if is_offset_inside_metadata_object_code(text, marker_start, 7) {
             return Some("Resource");
         }
+        // Version 30 registers wrap a resource in `{6, …}` (one 8.3.27
+        // corpus), so the collection class names the family instead.
+        if refs::is_offset_inside_any_list_marker(
+            text,
+            marker_start,
+            &["{13134202-f60b-11d5-a3c7-0050bae0a776,"],
+        ) {
+            return Some("Resource");
+        }
+        if refs::is_offset_inside_any_list_marker(
+            text,
+            marker_start,
+            &["{13134203-f60b-11d5-a3c7-0050bae0a776,"],
+        ) {
+            return Some("Dimension");
+        }
+        if refs::is_offset_inside_any_list_marker(
+            text,
+            marker_start,
+            &["{a2207540-1400-11d6-a3c7-0050bae0a776,"],
+        ) {
+            return Some("Attribute");
+        }
     }
     if kind == "AccountingRegister"
         && is_offset_inside_register_dimension_list(text, marker_start)
@@ -21219,6 +21279,36 @@ fn parse_information_register_child_payload(
     Some(value)
 }
 
+/// Older information-register child wrappers respelled as the current ones.
+///
+/// One 8.3.27 corpus (version 29 and 30 owners) writes a resource as
+/// `{5, common, indexing, fts}` or `{6, common, indexing, fts, history}`, an
+/// attribute as `{2, common, indexing, fts}` and a dimension as `{6, common,
+/// master, deny, indexing, main filter, fts}`: the current `{7}`, `{4}` and
+/// `{9}` layouts, the version 29 ones without the trailing data-history slot,
+/// which the platform dumps as `Use`.
+fn information_register_child_fields_current<'a>(fields: &[&'a str]) -> Option<Vec<&'a str>> {
+    let mut current = fields.to_vec();
+    let marker = match (fields.first()?.trim(), fields.len()) {
+        ("5", 4) => {
+            current.push("1");
+            "7"
+        }
+        ("6", 5) => "7",
+        ("2", 4) => {
+            current.push("1");
+            "4"
+        }
+        ("6", 7) => {
+            current.push("1");
+            "9"
+        }
+        _ => return Some(current),
+    };
+    current[0] = marker;
+    Some(current)
+}
+
 fn parse_information_register_child_payload_from_fields(
     fields: &[&str],
     child_header: &MetadataHeader,
@@ -21229,6 +21319,7 @@ fn parse_information_register_child_payload_from_fields(
     form_refs: &BTreeMap<String, FormSourceReference>,
     preserve_raw_data_paths: bool,
 ) -> Option<(Vec<ConstantValueType>, MetadataChildProperties)> {
+    let fields = &information_register_child_fields_current(fields)?[..];
     let value_types = parse_information_register_child_value_types_from_fields(
         fields,
         child_header,
@@ -21339,6 +21430,7 @@ fn parse_information_register_child_value_types_from_fields(
     tag: &str,
     type_index: &BTreeMap<String, String>,
 ) -> Option<Vec<ConstantValueType>> {
+    let fields = &information_register_child_fields_current(fields)?[..];
     let (expected_tag, common_field) = match (fields.first()?.trim(), fields.len()) {
         ("7", 5) | ("8", 7) => ("Resource", fields.get(1)?),
         ("4", 5) | ("5", 7) => ("Attribute", fields.get(1)?),

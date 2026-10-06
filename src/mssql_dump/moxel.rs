@@ -11567,8 +11567,8 @@ pub(super) fn parse_moxel_line(text: &str) -> Option<MoxelLine> {
 /// A document's page breaks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct MoxelPageBreaks {
-    pub(super) vertical: Vec<usize>,
-    pub(super) horizontal: Vec<usize>,
+    pub(super) vertical: Vec<i64>,
+    pub(super) horizontal: Vec<i64>,
 }
 
 /// The page breaks, read off the root behind the grouping block.
@@ -11589,6 +11589,9 @@ pub(super) struct MoxelPageBreaks {
 pub(super) fn parse_moxel_page_breaks(fields: &[&str]) -> MoxelPageBreaks {
     let token = |index: usize| fields.get(index).map(|field| field.trim());
     let count_at = |index: usize| token(index).and_then(|value| value.parse::<usize>().ok());
+    // A break position may be negative: one 8.3.27 corpus writes
+    // `<position>-126</position>` for a stored `-126`.
+    let position_at = |index: usize| token(index).and_then(|value| value.parse::<i64>().ok());
     let parse_at = |start: usize| -> Option<MoxelPageBreaks> {
         let (_, cursor) = parse_moxel_group_run(fields, start)?;
         let (_, cursor) = parse_moxel_group_run(fields, cursor)?;
@@ -11599,13 +11602,13 @@ pub(super) fn parse_moxel_page_breaks(fields: &[&str]) -> MoxelPageBreaks {
         let vertical_count = count_at(cursor)?;
         let mut vertical = Vec::with_capacity(vertical_count.min(4096));
         for index in 0..vertical_count {
-            vertical.push(count_at(cursor + 1 + index)?);
+            vertical.push(position_at(cursor + 1 + index)?);
         }
         cursor += 1 + vertical_count;
         let horizontal_count = count_at(cursor)?;
         let mut horizontal = Vec::with_capacity(horizontal_count.min(4096));
         for index in 0..horizontal_count {
-            horizontal.push(count_at(cursor + 1 + index * 2)?);
+            horizontal.push(position_at(cursor + 1 + index * 2)?);
             if token(cursor + 2 + index * 2)? != "-1" {
                 return None;
             }

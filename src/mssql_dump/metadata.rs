@@ -139,6 +139,9 @@ pub(super) fn metadata_text_row_audit_from_text(
             .unwrap_or((None, None)),
         None => (None, None),
     };
+    // Old child records are respelled once here so every reader of the row
+    // sees the current layout (`legacy_child`).
+    let text = super::legacy_child::upgrade_legacy_child_records(&text).unwrap_or(text);
     let row = MetadataTextRow {
         file_name: file_name.to_string(),
         text,
