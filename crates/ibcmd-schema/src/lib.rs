@@ -18289,6 +18289,13 @@ pub mod metadata_storage_facts {
             .find_map(|(id, reference, _)| id.eq_ignore_ascii_case(type_id).then_some(*reference))
     }
 
+    pub fn data_processor_builtin_type_references()
+    -> impl Iterator<Item = (&'static str, &'static str)> {
+        DATA_PROCESSOR_TYPES
+            .iter()
+            .map(|(id, reference, _)| (*id, *reference))
+    }
+
     pub fn data_processor_builtin_type_namespace_uri(reference: &str) -> Option<&'static str> {
         DATA_PROCESSOR_TYPES
             .iter()

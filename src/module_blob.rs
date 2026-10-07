@@ -11772,6 +11772,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                         .push_str(chunk.as_ref());
                 }
                 if form_nested_text_element(&path) {
+                    let text = quick_xml::events::BytesText::from_escaped(text.decode()?);
                     nested_text.push_str(&form_text_chunk(&text, &path)?);
                 }
                 if path_ends_with(&path, &["Form", "WindowOpeningMode"])

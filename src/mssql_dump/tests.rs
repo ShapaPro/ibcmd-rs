@@ -74601,7 +74601,8 @@ fn a_root_bound_platform_type_name_is_one_fact_for_every_reader() {
     // every other one.
     for (_, reference) in FORM_BUILTIN_TYPE_REFERENCES
         .iter()
-        .chain(DATA_PROCESSOR_BUILTIN_TYPE_REFERENCES.iter())
+        .copied()
+        .chain(ibcmd_schema::metadata_storage_facts::data_processor_builtin_type_references())
     {
         assert!(
             !reference.starts_with("cfg:")
