@@ -19,6 +19,10 @@
 //! it as before (fail closed).
 
 use std::ops::Range;
+use ibcmd_schema::metadata_record_upgrades::{
+    LegacyMetadataRecordLayout, ATTRIBUTE_WRAPPER_UPGRADES,
+    enum_owner_upgrade, history_owner_upgrade,
+};
 
 use super::metadata::{MetadataTextRow, parse_metadata_object_code};
 
@@ -43,7 +47,7 @@ pub(super) fn upgrade_metadata_record(kind: &str, text: &str) -> Option<String> 
         "ExchangePlan" => upgrade_exchange_plan(text),
         "CommonPicture" => upgrade_common_picture(text),
         "Subsystem" => retag_owner(text, "20", 8, "21"),
-        "Enum" => upgrade_enum(text),
+        LegacyMetadataRecordLayout::ENUM_KIND => upgrade_enum(text),
         _ => None,
     }
 }
@@ -59,18 +63,16 @@ pub(super) fn upgrade_metadata_record(kind: &str, text: &str) -> Option<String> 
 fn upgrade_enum(text: &str) -> Option<String> {
     let root_open = text.find('{')?;
     let (root, _) = members(text, root_open)?;
-    if member(text, root.first()?) != "1" {
+    if !LegacyMetadataRecordLayout::ordinary_root(member(text, root.first()?)) {
         return None;
     }
     let (owner, owner_close) = members(text, list_open(text, root.get(1)?)?)?;
-    let appended = match (member(text, owner.first()?), owner.len()) {
-        ("19", 20) => ",0",
-        ("18", 19) => ",{0,{0}},0",
-        _ => return None,
-    };
+    let upgrade = enum_owner_upgrade(member(text, owner.first()?), owner.len())?;
+    let target = upgrade.target_revision;
+    let appended = upgrade.appended_members;
     let tag = trimmed(text, &owner[0]);
     Some(format!(
-        "{}20{}{appended}{}",
+        "{}{target}{}{appended}{}",
         &text[..tag.start],
         &text[tag.end..owner_close],
         &text[owner_close..]
@@ -87,7 +89,7 @@ fn upgrade_document_journal(text: &str) -> Option<String> {
         .filter(|c| !c.is_whitespace())
         .take(17)
         .collect();
-    if owner.len() != 17 || attributes != "{1,{1,6,{-60003},"[..17] {
+    if !LegacyMetadataRecordLayout::document_journal_owner(owner.len(), &attributes) {
         return None;
     }
     retag_owner(text, "25", 17, "26")
@@ -101,15 +103,15 @@ fn upgrade_document_journal(text: &str) -> Option<String> {
 fn upgrade_command_group(text: &str) -> Option<String> {
     let root_open = text.find('{')?;
     let (root, _) = members(text, root_open)?;
-    if member(text, root.first()?) != "1" {
+    if !LegacyMetadataRecordLayout::ordinary_root(member(text, root.first()?)) {
         return None;
     }
     let (owner, _) = members(text, list_open(text, root.get(1)?)?)?;
-    if owner.len() != 7 || member(text, &owner[0]) != "3" {
+    if !LegacyMetadataRecordLayout::command_group_owner(member(text, owner.first()?), owner.len()) {
         return None;
     }
     let (picture, picture_close) = members(text, list_open(text, &owner[1])?)?;
-    if picture.len() != 8 || member(text, &picture[0]) != "3" {
+    if !LegacyMetadataRecordLayout::command_picture(member(text, picture.first()?), picture.len()) {
         return None;
     }
     let tag = trimmed(text, &picture[0]);
@@ -185,26 +187,12 @@ pub(super) fn upgrade_record_by_shape(text: &str, uuid: &str) -> Option<String> 
 /// <fts>}` and tabular-section attributes of both as `{6,<common>,<indexing>,
 /// <fts>}` next to current `{5,…,<history>}` and `{8,…,<history>}` ones;
 /// 8.3.27.2214 dumps the old ones with `<DataHistory>Use</DataHistory>` (`1`).
-const OLD_ATTRIBUTE_COLLECTIONS: [(&str, &str, usize, &str, bool); 6] = [
-    ("cf4abea7-37b2-11d4-940f-008048da11f9", "3", 5, "5", true),
-    // A later catalog `{4,…}` already holds every slot of `{5,…}`.
-    ("cf4abea7-37b2-11d4-940f-008048da11f9", "4", 6, "5", false),
-    ("45e46cbc-3e24-4165-8b7b-cc98a6f80211", "3", 4, "5", true),
-    // Likewise a later document `{4,…}`.
-    ("45e46cbc-3e24-4165-8b7b-cc98a6f80211", "4", 5, "5", false),
-    ("888744e1-b616-11d4-9436-004095e12fc7", "6", 4, "8", true),
-    // And a later tabular-section `{7,…}`.
-    ("888744e1-b616-11d4-9436-004095e12fc7", "7", 5, "8", false),
-];
-
 fn upgrade_old_attribute_wrappers(text: &str) -> Option<String> {
     let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
-    for (collection, old_tag, count, new_tag, append) in OLD_ATTRIBUTE_COLLECTIONS {
+    for upgrade in ATTRIBUTE_WRAPPER_UPGRADES {
+        let collection = upgrade.collection_id;
         let marker = format!("{{{collection},");
-        let mut from = 0;
-        while let Some(found) = text[from..].find(&marker) {
-            let open = from + found;
-            from = open + 1;
+        for open in unquoted_list_offsets(text, &marker) {
             let Some((items, _)) = members(text, open) else {
                 continue;
             };
@@ -225,13 +213,10 @@ fn upgrade_old_attribute_wrappers(text: &str) -> Option<String> {
                     .get(1)
                     .map(|range| member(text, range))
                     .unwrap_or("");
-                if wrapper.len() == count
-                    && member(text, &wrapper[0]) == old_tag
-                    && (common.starts_with("{27,") || common.starts_with("{25,"))
-                {
-                    edits.push((trimmed(text, &wrapper[0]), new_tag));
-                    if append {
-                        edits.push((close..close, ",1"));
+                if wrapper.first().is_some_and(|field| upgrade.accepts(member(text, field), wrapper.len(), common)) {
+                    edits.push((trimmed(text, &wrapper[0]), upgrade.target_revision));
+                    if !upgrade.appended_members.is_empty() {
+                        edits.push((close..close, upgrade.appended_members));
                     }
                 }
             }
@@ -260,10 +245,7 @@ fn upgrade_old_attribute_wrappers(text: &str) -> Option<String> {
 /// standard attributes; 8.3.27.2214 dumps nine, and in all 451 catalogs of
 /// that dump the `PredefinedDataName` block equals the `Predefined` one.
 fn upgrade_catalog_predefined_data_name(text: &str) -> Option<String> {
-    let mut from = 0;
-    while let Some(found) = text[from..].find("{1,8,") {
-        let open = from + found;
-        from = open + 1;
+    for open in unquoted_list_offsets(text, "{1,8,") {
         let Some((list, _)) = members(text, open) else {
             continue;
         };
@@ -293,6 +275,27 @@ fn upgrade_catalog_predefined_data_name(text: &str) -> Option<String> {
     None
 }
 
+/// Physical list starts only; record-shaped text in a quoted property is data.
+fn unquoted_list_offsets(text: &str, marker: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut cursor = 0;
+    let mut in_string = false;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            if in_string && bytes.get(cursor + 1) == Some(&b'"') {
+                cursor += 2;
+                continue;
+            }
+            in_string = !in_string;
+        } else if !in_string && bytes[cursor..].starts_with(marker.as_bytes()) {
+            found.push(cursor);
+        }
+        cursor += 1;
+    }
+    found
+}
+
 /// A common command `{1,{2,{0,<ids>,{7,{3,…8 members},…12 members}},…}}` ->
 /// `{1,{2,{1,<ids>,{8,{4,…,""},…}},…}}`: the outer flag `0` -> `1`, the
 /// record `7` -> `8` and its first member `{3,…}` -> `{4,…,""}`.
@@ -303,23 +306,23 @@ fn upgrade_catalog_predefined_data_name(text: &str) -> Option<String> {
 fn upgrade_common_command(text: &str) -> Option<String> {
     let root_open = text.find('{')?;
     let (root, _) = members(text, root_open)?;
-    if root.len() != 3 || member(text, &root[0]) != "1" {
+    if !LegacyMetadataRecordLayout::common_command_root(member(text, root.first()?), root.len()) {
         return None;
     }
     let (wrapper, _) = members(text, list_open(text, &root[1])?)?;
-    if wrapper.len() != 2 || member(text, &wrapper[0]) != "2" {
+    if !LegacyMetadataRecordLayout::common_command_wrapper(member(text, wrapper.first()?), wrapper.len()) {
         return None;
     }
     let (command, _) = members(text, list_open(text, &wrapper[1])?)?;
-    if command.len() != 3 || !matches!(member(text, &command[0]), "0" | "1") {
+    if !LegacyMetadataRecordLayout::common_command_envelope(member(text, command.first()?), command.len()) {
         return None;
     }
     let (ids, _) = members(text, list_open(text, &command[1])?)?;
-    if ids.len() != 3 || member(text, &ids[0]) != "2" {
+    if !LegacyMetadataRecordLayout::common_command_identity(member(text, ids.first()?), ids.len()) {
         return None;
     }
     let (record, _) = members(text, list_open(text, &command[2])?)?;
-    if record.len() != 12 || member(text, &record[0]) != "7" {
+    if !LegacyMetadataRecordLayout::common_command_record(member(text, record.first()?), record.len()) {
         return None;
     }
     let (first, first_close) = members(text, list_open(text, &record[1])?)?;
@@ -355,31 +358,16 @@ fn upgrade_common_command(text: &str) -> Option<String> {
 fn upgrade_legacy_history_owner(text: &str) -> Option<String> {
     let root_open = text.find('{')?;
     let (root, _) = members(text, root_open)?;
-    if root.len() != 8 || member(text, &root[0]) != "1" || member(text, &root[2]) != "5" {
+    if !LegacyMetadataRecordLayout::history_root(member(text, root.first()?), root.len(), member(text, root.get(2)?)) {
         return None;
     }
     let owner_open = list_open(text, root.get(1)?)?;
     let (owner, owner_close) = members(text, owner_open)?;
     // Catalog versions 52 and 53 (58 members, one 8.3.27 corpus) also lack
     // the data-history slot before the flags; 8.3.27.2214 dumps `DontUse`.
-    let (target, appended) = match (member(text, owner.first()?), owner.len()) {
-        ("29", 47) => ("30", ",0,0"),
-        ("54", 59) => ("56", ",0,0"),
-        ("52" | "53", 58) => ("56", ",0,0,0"),
-        // Catalog versions 46 and 47 (53 members) also lack the five slots
-        // before: data-history sharing, the predefined pair, predefined-data
-        // update, input modes and choice history on input -- appended as a
-        // version 53 catalog of the same corpus stores their defaults.
-        ("46" | "47", 53) => ("56", ",2,{1,{0,0}},0,{1,2,0},0,0,0,0"),
-        // Documents of the same corpus: version 38 (51 members) lacks the two
-        // flags, version 37 (50) the data-history slot as well.
-        ("38", 51) => ("40", ",0,0"),
-        ("37", 50) => ("40", ",0,0,0"),
-        // Version 34 documents (46) also lack the four slots before, appended
-        // as a version 37 document of the same corpus stores their defaults.
-        ("34", 46) => ("40", ",2,{1,{0,0}},{1,2,0},0,0,0,0"),
-        _ => return None,
-    };
+    let upgrade = history_owner_upgrade(member(text, owner.first()?), owner.len())?;
+    let target = upgrade.target_revision;
+    let appended = upgrade.appended_members;
     let tag = trimmed(text, &owner[0]);
     Some(format!(
         "{}{target}{}{appended}{}",
@@ -405,7 +393,7 @@ fn upgrade_form_record(text: &str) -> Option<String> {
     let (mut wrapper, _) = members(text, wrapper_open)?;
     // One form record of 1C:Документооборот sits a level deeper,
     // `{1,{0,{12,…}},{0}}`.
-    if matches!(wrapper.len(), 2 | 3) && member(text, &wrapper[0]) == "1" {
+    if LegacyMetadataRecordLayout::form_has_nested_wrapper(member(text, wrapper.first()?), wrapper.len()) {
         let inner_open = list_open(text, &wrapper[1])?;
         wrapper = members(text, inner_open)?.0;
         if member(text, wrapper.first()?) != "0" {
@@ -745,6 +733,30 @@ fn list_open(text: &str, range: &Range<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_attribute_wrappers_inside_comments_stay_unchanged() {
+        let body = "{cf4abea7-37b2-11d4-940f-008048da11f9,1,{{3,{27,c},0,0,1},0}}";
+        let comment = format!(r#"{{1,"prefix ""quoted"" {body}"}}"#);
+        assert!(upgrade_old_attribute_wrappers(&comment).is_none());
+        let actual = format!("{{x,{comment},{body}}}");
+        let upgraded = upgrade_old_attribute_wrappers(&actual).unwrap();
+        assert!(upgraded.contains(&comment));
+        assert_eq!(upgraded.matches("{{5,{27,c},0,0,1,1},0}").count(), 1);
+    }
+
+    #[test]
+    fn legacy_catalog_standard_attributes_inside_comments_stay_unchanged() {
+        let codes = ["-10", "-8", "-7", "-6", "-5", "-4", "-3", "-2"];
+        let entries = codes.map(|code| format!("{{{code}}},s,{{b{code}}}")).join(",");
+        let body = format!("{{1,8,{entries}}}");
+        let comment = format!(r#"{{1,"prefix ""quoted"" {body}"}}"#);
+        assert!(upgrade_catalog_predefined_data_name(&comment).is_none());
+        let actual = format!("{{x,{comment},{body}}}");
+        let upgraded = upgrade_catalog_predefined_data_name(&actual).unwrap();
+        assert!(upgraded.contains(&comment));
+        assert_eq!(upgraded.matches("{1,9,{-13}").count(), 1);
+    }
 
     #[test]
     fn upgrades_old_attribute_wrappers() {

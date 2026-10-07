@@ -387,9 +387,8 @@ pub(super) fn is_binary_module_container(bytes: &[u8]) -> bool {
     let Some(names) = v8_container_element_names(&inflated) else {
         return false;
     };
-    names.contains("image")
-        && names.contains("info")
-        && (!names.contains("text") || unpack_module_blob_text(bytes).is_err())
+    crate::compiler::families::assets::BinaryModuleMemberLayout::from_member_names(&names)
+        .is_some_and(|layout| !layout.text_member_present || unpack_module_blob_text(bytes).is_err())
 }
 
 pub(super) fn v8_container_element_names(bytes: &[u8]) -> Option<BTreeSet<String>> {
@@ -1834,14 +1833,7 @@ pub(super) fn source_assets_from_metadata_text_inner(
 }
 
 pub(super) fn additional_indexes_body_suffix(kind: &str) -> Option<&'static str> {
-    match kind {
-        "Document" => Some("3"),
-        "AccumulationRegister" => Some("4"),
-        // `Catalogs/ПартииПроизводства` of one 8.3.27 corpus stores its
-        // additional indexes under `.1d` and the platform writes them.
-        "Catalog" => Some("1d"),
-        _ => None,
-    }
+    crate::compiler::families::assets::SourceAssetRegistry.additional_indexes_suffix(kind)
 }
 
 pub(super) fn preferred_help_body_id(kind: &str, uuid: &str) -> String {
@@ -2779,7 +2771,7 @@ fn write_source_asset_inner(
             // СхемаВыгрузкиЗаказов` among them). Dropped only while nothing
             // in the document uses the `pal:` prefix.
             let content = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
-                strip_unused_palette_namespace(content)
+                ibcmd_xml::palette::strip_unused_palette_namespace(content)
             } else {
                 content
             };
@@ -2961,7 +2953,7 @@ fn write_source_asset_inner(
                 // `CommonTemplates/ОформлениеОтчетовБежевый` of one 8.3.27
                 // corpus.
                 let inflated = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
-                    strip_unused_palette_namespace(inflated)
+                    ibcmd_xml::palette::strip_unused_palette_namespace(inflated)
                 } else {
                     inflated
                 };
@@ -3000,7 +2992,7 @@ fn write_source_asset_inner(
                 // A document stored by 8.5 (an appearance template, say)
                 // declares the palette namespace 8.3.27 never writes.
                 let content = if context.source_version == InfobaseConfigSourceVersion::V2_20 {
-                    strip_unused_palette_namespace(content)
+                    ibcmd_xml::palette::strip_unused_palette_namespace(content)
                 } else {
                     content
                 };
@@ -3030,13 +3022,16 @@ fn write_source_asset_inner(
             // both. `CodeLength` 0 cuts nothing: ERP УХ
             // `Catalogs/ГруппыПользователей` and Монитор `Catalogs/Триггеры`
             // keep `000000001` and `000001` whole.
-            if model.xsi_type == "CatalogPredefinedItems"
-                && let Some(length) = context
+            use ibcmd_schema::source_asset_storage_facts::PredefinedTextCodePolicy;
+            let code_policy = PredefinedTextCodePolicy::for_source_type(model.xsi_type);
+            let declared_code_length = match code_policy {
+                PredefinedTextCodePolicy::CatalogCodeLength => context
                     .metadata_texts_by_file_name
                     .get(owner_uuid.as_str())
-                    .and_then(|row| super::catalog_string_code_length(&row.text, owner_uuid))
-                    .filter(|length| *length > 0)
-            {
+                    .and_then(|row| super::catalog_string_code_length(&row.text, owner_uuid)),
+                PredefinedTextCodePolicy::Preserve => None,
+            };
+            if let Some(length) = code_policy.maximum_text_code_length(declared_code_length) {
                 truncate_predefined_text_codes(&mut items, length);
             }
             let chart_names = match model.item_layout {
@@ -4988,21 +4983,6 @@ pub(super) fn extract_ext_picture_transparent_pixel(text: &str) -> Option<(i32, 
     let x = transparent_fields.get(2)?.trim().parse().ok()?;
     let y = transparent_fields.get(3)?.trim().parse().ok()?;
     Some((x, y))
-}
-
-fn strip_unused_palette_namespace(content: Vec<u8>) -> Vec<u8> {
-    const DECLARATION: &str = " xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\"";
-    let Ok(text) = String::from_utf8(content.clone()) else {
-        return content;
-    };
-    if !text.contains(DECLARATION) {
-        return content;
-    }
-    let stripped = text.replace(DECLARATION, "");
-    if stripped.contains("pal:") {
-        return content;
-    }
-    stripped.into_bytes()
 }
 
 pub(super) fn format_ext_picture_xml(

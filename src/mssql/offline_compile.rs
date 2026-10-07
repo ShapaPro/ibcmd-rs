@@ -239,18 +239,22 @@ fn patch_child_headers(
         brace::{self, Brace},
         xml::Element,
     };
-    fn collect(node: &Element, headers: &mut std::collections::HashMap<String, Brace>) {
+    type HeaderPatch = (Brace, [bool; 3]);
+    fn collect(node: &Element, headers: &mut std::collections::HashMap<String, HeaderPatch>) {
         if let (Some(uuid), Some(properties)) = (node.attr("uuid"), node.child("Properties")) {
             headers.insert(
                 uuid.to_ascii_lowercase(),
-                crate::metadata_model::md_base(uuid, properties),
+                (
+                    crate::metadata_model::md_base(uuid, properties),
+                    ["Name", "Synonym", "Comment"].map(|name| properties.child(name).is_some()),
+                ),
             );
         }
         for child in &node.children {
             collect(child, headers);
         }
     }
-    fn patch(node: &mut Brace, headers: &std::collections::HashMap<String, Brace>) {
+    fn patch(node: &mut Brace, headers: &std::collections::HashMap<String, HeaderPatch>) {
         let Some(items) = node.as_list_mut() else {
             return;
         };
@@ -260,11 +264,15 @@ fn patch_child_headers(
                 .and_then(Brace::as_list)
                 .and_then(|v| v.get(2))
                 .and_then(Brace::as_atom);
-            if let Some(header) = uuid.and_then(|uuid| headers.get(uuid))
+            if let Some((header, present)) = uuid.and_then(|uuid| headers.get(uuid))
                 && let Some(source) = header.as_list()
                 && items.len() >= 5
             {
-                items[2..5].clone_from_slice(&source[2..5]);
+                for (index, present) in present.iter().enumerate() {
+                    if *present {
+                        items[index + 2] = source[index + 2].clone();
+                    }
+                }
             }
         }
         for item in items {
@@ -308,6 +316,41 @@ mod child_header_tests {
         let expected = row.replace("\"old\"", "\"edited\"");
         assert_eq!(
             result,
+            crate::metadata_model::brace::parse_row(expected.as_bytes()).unwrap()
+        );
+    }
+
+    #[test]
+    fn omitted_child_name_and_synonym_preserve_stored_values() {
+        let id = "aaaaaaaa-0000-0000-0000-000000000001";
+        let xml = crate::metadata_model::xml::MetadataXml::parse(format!(
+            "<MetaDataObject><DataProcessor><ChildObjects><Attribute uuid=\"{id}\"><Properties><Comment>edited</Comment></Properties></Attribute></ChildObjects></DataProcessor></MetaDataObject>"
+        ).as_bytes()).unwrap();
+        let row = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}");
+        let packed = crate::module_blob::deflate_raw(row.as_bytes()).unwrap();
+        let result = patch_child_headers(Some(&xml), &packed).unwrap();
+        assert_eq!(
+            crate::metadata_model::brace::parse_row(
+                &crate::module_blob::inflate_raw(&result).unwrap()
+            ).unwrap(),
+            crate::metadata_model::brace::parse_row(row.replace("\"old\"", "\"edited\"").as_bytes()).unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_empty_child_fields_clear_stored_values() {
+        let id = "aaaaaaaa-0000-0000-0000-000000000001";
+        let xml = crate::metadata_model::xml::MetadataXml::parse(format!(
+            "<MetaDataObject><DataProcessor><ChildObjects><Attribute uuid=\"{id}\"><Properties><Synonym/><Comment/></Properties></Attribute></ChildObjects></DataProcessor></MetaDataObject>"
+        ).as_bytes()).unwrap();
+        let row = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}");
+        let packed = crate::module_blob::deflate_raw(row.as_bytes()).unwrap();
+        let result = patch_child_headers(Some(&xml), &packed).unwrap();
+        let expected = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{0}},\"\",7,8,9,10}}}}");
+        assert_eq!(
+            crate::metadata_model::brace::parse_row(
+                &crate::module_blob::inflate_raw(&result).unwrap()
+            ).unwrap(),
             crate::metadata_model::brace::parse_row(expected.as_bytes()).unwrap()
         );
     }

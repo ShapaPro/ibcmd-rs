@@ -7191,6 +7191,7 @@ fn moxel_gantt_time_measure(code: &str) -> Option<&'static str> {
         "30" => Some("Day"),
         "40" => Some("Week"),
         "50" => Some("Month"),
+        "60" => Some("Quarter"),
         "70" => Some("Year"),
         _ => None,
     }
@@ -7296,6 +7297,20 @@ mod gantt_multilevel_tests {
         let scale = parse_gantt_time_scale(fields[7]).expect("time scale");
         assert_eq!(scale.levels.len(), 4);
         assert_eq!(scale.current_level, 1);
+    }
+
+    #[test]
+    fn quarter_scale_uses_the_same_time_code_as_the_writer() {
+        let text = include_str!(
+            "../../tests/fixtures/native-evidence/8.3.27.2214/moxel-gantt-multiple-levels/object-payload.txt"
+        );
+        let fields = split_1c_braced_fields(text, 0).unwrap();
+        let scale = fields[7].replacen("{8,40,", "{8,60,", 1);
+        let decoded = parse_gantt_time_scale(&scale).unwrap();
+        assert_eq!(decoded.levels[0].measure, "Quarter");
+        assert_eq!(decoded.levels.len(), 4);
+        assert_eq!(decoded.current_level, 1);
+        assert!(parse_gantt_time_scale(&scale.replacen("{8,60,", "{8,80,", 1)).is_none());
     }
 }
 

@@ -355,11 +355,11 @@ fn form_metadata_fields_and_extended_presentation_in_block<'a>(
     uuid: &str,
 ) -> Option<(Vec<&'a str>, Option<&'a str>)> {
     let fields = split_1c_braced_fields(block, 0)?;
-    if matches!(fields.first().map(|field| field.trim()), Some("13" | "14"))
-        || (fields.first().map(|field| field.trim()) == Some("12")
-            && fields.len() == 5
-            && direct_form_application_purposes_are_valid(fields[4]))
-    {
+    if ibcmd_schema::metadata_child_storage_facts::FormMetadataRecordLayout::from_fields(&fields)
+        .is_some_and(|layout| match layout.application_purposes_slot {
+            Some(slot) => direct_form_application_purposes_are_valid(fields[slot]),
+            None => true,
+        }) {
         if metadata_header_field_index(&fields, uuid).is_some() {
             return Some((fields, None));
         }
@@ -369,12 +369,11 @@ fn form_metadata_fields_and_extended_presentation_in_block<'a>(
         let Some(child_fields) = split_1c_braced_fields(field.trim(), 0) else {
             continue;
         };
-        if (matches!(
-            child_fields.first().map(|field| field.trim()),
-            Some("13" | "14")
-        ) || (child_fields.first().map(|field| field.trim()) == Some("12")
-            && child_fields.len() == 5
-            && direct_form_application_purposes_are_valid(child_fields[4])))
+        if ibcmd_schema::metadata_child_storage_facts::FormMetadataRecordLayout::from_fields(&child_fields)
+            .is_some_and(|layout| match layout.application_purposes_slot {
+                Some(slot) => direct_form_application_purposes_are_valid(child_fields[slot]),
+                None => true,
+            })
             && metadata_header_field_index(&child_fields, uuid).is_some()
         {
             let extended_presentation = fields

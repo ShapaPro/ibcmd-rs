@@ -567,9 +567,11 @@ pub(super) fn build_metadata_field_declaration_index_from_texts(
     // Only the configuration's own root row is parsed: it carries the class
     // uuid `9cd510cd-…` of the configuration properties.
     index.english_script = rows.iter().any(|row| {
-        row.text.contains("9cd510cd-abfc-11d4-9434-004095e12fc7")
+        row.text.contains(ibcmd_schema::metadata_record_upgrades::ConfigurationRecordLayout::PROPERTIES_CLASS_ID)
             && configuration_root_fields(&row.text)
-                .is_some_and(|(fields, _)| fields.get(3).map(|field| field.trim()) == Some("0"))
+                .is_some_and(|(fields, _)| fields.get(ibcmd_schema::metadata_record_upgrades::ConfigurationRecordLayout::SCRIPT_VARIANT_SLOT)
+                    .and_then(|field| ibcmd_schema::metadata_record_upgrades::ConfigurationScriptVariant::from_record_code(field.trim()))
+                    == Some(ibcmd_schema::metadata_record_upgrades::ConfigurationScriptVariant::English))
     });
     index.declared_tables = object_refs
         .values()
@@ -4162,17 +4164,21 @@ pub(super) fn parse_configuration_properties_from_text(
     } else {
         None
     };
+    // ScriptVariant and DefaultRunMode are independent coordinates in the
+    // normalized configuration record. Keep their storage interpretation out
+    // of the property assembly below.
+    let default_run_mode = fields
+        .get(ibcmd_schema::metadata_record_upgrades::ConfigurationRecordLayout::DEFAULT_RUN_MODE_SLOT)
+        .and_then(|field| configuration_default_run_mode_xml(field.trim()));
+    let script_variant = fields
+        .get(ibcmd_schema::metadata_record_upgrades::ConfigurationRecordLayout::SCRIPT_VARIANT_SLOT)
+        .and_then(|field| configuration_script_variant_xml(field.trim()));
     Some(ConfigurationProperties {
         name_prefix: fields
             .get(2)
             .and_then(|field| parse_1c_quoted_string(field.trim())),
         configuration_extension_compatibility_mode,
-        // Field 21 is the run mode and field 3 the script variant: over 21
-        // corpora field 3 is `0` only on the English configuration and field
-        // 21 `0` only on the one `OrdinaryApplication` configuration.
-        default_run_mode: fields
-            .get(21)
-            .and_then(|field| configuration_default_run_mode_xml(field.trim())),
+        default_run_mode,
         use_purposes: Vec::new(),
         localized_properties: None,
         brief_information: parse_configuration_localized_property(&fields, 4),
@@ -4182,9 +4188,7 @@ pub(super) fn parse_configuration_properties_from_text(
         configuration_information_address: parse_configuration_localized_property(&fields, 8),
         default_style: parse_configuration_root_reference(&fields, 9, object_refs, "Style."),
         default_language: parse_configuration_root_reference(&fields, 10, object_refs, "Language."),
-        script_variant: fields
-            .get(3)
-            .and_then(|field| configuration_script_variant_xml(field.trim())),
+        script_variant,
         default_roles: fields
             .get(39)
             .map(|field| parse_configuration_default_roles(field, object_refs))
@@ -5448,11 +5452,8 @@ pub(super) fn configuration_default_run_mode_xml(value: &str) -> Option<&'static
 }
 
 pub(super) fn configuration_script_variant_xml(value: &str) -> Option<&'static str> {
-    match value {
-        "0" => Some("English"),
-        "1" => Some("Russian"),
-        _ => None,
-    }
+    ibcmd_schema::metadata_record_upgrades::ConfigurationScriptVariant::from_record_code(value)
+        .map(ibcmd_schema::metadata_record_upgrades::ConfigurationScriptVariant::metadata_name)
 }
 
 /// The highest packed platform-version value this reader has direct

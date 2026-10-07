@@ -8714,7 +8714,7 @@ pub(crate) fn format_root_tail(tail: &NativeRootTail<'_>) -> Option<String> {
         group,
         scroll_again,
         // `<Scale>`, 100 when unwritten (the exporter's `extract_form_scale`).
-        tail.scale.unwrap_or("100").to_string(),
+        tail.scale.unwrap_or("100").parse::<u32>().ok()?.to_string(),
         u8::from(tail.show_title).to_string(),
         u8::from(tail.show_close_button).to_string(),
         root_code(
@@ -10026,6 +10026,21 @@ fn resolve_metadata_data_path_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_scale_rejects_non_numeric_and_extra_member_input() {
+        let expected = format_root_tail(&NativeRootTail::default()).unwrap();
+        assert_eq!(
+            format_root_tail(&NativeRootTail { scale: Some("0100"), ..NativeRootTail::default() }),
+            Some(expected)
+        );
+        assert!(format_root_tail(&NativeRootTail { scale: Some("130"), ..NativeRootTail::default() }).is_some());
+        for invalid in ["1,0", "abc", "4294967296", "-1", ""] {
+            assert!(format_root_tail(&NativeRootTail {
+                scale: Some(invalid), ..NativeRootTail::default()
+            }).is_none(), "accepted invalid scale {invalid}");
+        }
+    }
 
     /// The three label fields and the one input field of
     /// `Documents/Лот/Forms/ВыигранныеЛоты`, read out of the stored body.

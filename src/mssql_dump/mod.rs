@@ -1320,14 +1320,6 @@ const PLANNER_TYPE_REFERENCE: &str = "pl:Planner";
 // name whose prefix the metadata-root document fixes stays here: `Chart` at
 // depth 7. SettingsComposer stays on its stricter owner-wide admission path
 // below.
-const DATA_PROCESSOR_BUILTIN_TYPE_REFERENCES: &[(&str, &str)] = &[
-    (CHART_TYPE_UUID, "d7p1:Chart"),
-    ("4652c4ec-1d1d-4af4-b835-e33fcb43af8c", "d7p1:Filter"),
-    (
-        "4af83795-fc2a-48cd-9bea-ce665789a62c",
-        "d7p1:FlowchartContextType",
-    ),
-];
 const MAX_METADATA_CHOICE_PARAMETER_VALUE_DEPTH: usize = 64;
 // Platform collection type IDs, stable across independent infobases.
 const CATALOG_TABULAR_ATTRIBUTE_GROUP_UUID: &str = "888744e1-b616-11d4-9436-004095e12fc7";
@@ -6254,9 +6246,8 @@ fn is_direct_code14_form_metadata_text(text: &str, uuid: &str) -> bool {
     let Some(fields) = metadata_object_fields(text) else {
         return false;
     };
-    matches!(
-        (fields.first().map(|field| field.trim()), fields.len()),
-        (Some("12"), 5) | (Some("14"), 6)
+    ibcmd_schema::metadata_storage_facts::direct_form_header_layout(
+        fields.first().map(|field| field.trim()), fields.len(),
     ) && metadata_header_field_index(&fields, uuid) == Some(1)
         && information_register_bool(fields[2]).is_some()
         && information_register_bool(fields[3]).is_some()
@@ -11908,7 +11899,9 @@ fn push_indexed_tabular_section_generated_types(
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut from = 0;
-    while let Some(offset) = text[from..].find("{11,") {
+    while let Some(offset) = text[from..].find(
+        ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::RECORD_START,
+    ) {
         let start = from + offset;
         from = start + 4;
         let Some(end) = matching_1c_brace(bytes, start) else {
@@ -11917,7 +11910,7 @@ fn push_indexed_tabular_section_generated_types(
         let Some(fields) = split_1c_braced_fields(&text[start..=end], 0) else {
             continue;
         };
-        if fields.len() < 6 || fields[0].trim() != "11" {
+        if !ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::record_is_valid(&fields) {
             continue;
         }
         let ids = fields[1..5]
@@ -11926,9 +11919,9 @@ fn push_indexed_tabular_section_generated_types(
             .collect::<Option<Vec<_>>>();
         let Some(ids) = ids else { continue };
         let Some(name) = split_1c_braced_fields(fields[5].trim(), 0)
-            .filter(|outer| outer.len() == 2 && outer[0].trim() == "0")
+            .filter(|outer| ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::header_wrapper_is_valid(outer))
             .and_then(|outer| split_1c_braced_fields(outer[1].trim(), 0))
-            .filter(|header| header.first().map(|code| code.trim()) == Some("3"))
+            .filter(|header| ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::header_is_valid(header))
             .and_then(|header| parse_information_register_quoted_string(header.get(2)?))
         else {
             continue;
@@ -13041,7 +13034,8 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
         let xml = format_recalculation_source_xml(header, &properties, source_version).into_bytes();
         return Some(ExtractedMetadataSourceXml { relative_path, xml });
     }
-    if object_code == 12 {
+    let direct_code14_form = is_direct_code14_form_metadata_text(text, uuid);
+    if object_code == 12 && !direct_code14_form {
         let header = row.header.as_ref()?;
         let flags = parse_common_module_flags_from_text(text, uuid)?;
         let relative_path = PathBuf::from("CommonModules")
@@ -13160,7 +13154,6 @@ fn extract_metadata_source_xml_from_text_row_with_owner_graph_diagnostic(
             format_functional_option_source_xml(header, &properties, source_version).into_bytes();
         return Some(ExtractedMetadataSourceXml { relative_path, xml });
     }
-    let direct_code14_form = is_direct_code14_form_metadata_text(text, uuid);
     if is_form_metadata_text(text, uuid) || direct_code14_form {
         let header = row.header.as_ref()?;
         let form_ref = form_refs.get(uuid);
@@ -14814,12 +14807,7 @@ fn parse_strict_tabular_sections(
             // stores all four sections that way and the platform writes
             // `<LineNumberLength>5</LineNumberLength>` on each.
             "ExchangePlan" if exchange_plan_modern_layout => {
-                let legacy_envelope = wrapper.len() == 2 && wrapper.first()?.trim() == "0";
-                if !legacy_envelope
-                    && (wrapper.len() != 3
-                        || wrapper.first()?.trim() != "1"
-                        || wrapper.get(2)?.trim() != "5")
-                {
+                if !ibcmd_schema::metadata_storage_facts::modern_exchange_plan_section_envelope(&wrapper) {
                     return None;
                 }
             }
@@ -16722,41 +16710,9 @@ fn parse_information_register_standard_attribute_bag(
     value: &str,
 ) -> Option<InformationRegisterStandardAttributeBag<'_>> {
     let fields = split_information_register_braced_fields(value)?;
-    let has_type_reduction_mode = match (
-        fields.first().map(|field| field.trim()),
-        fields.get(1).map(|field| field.trim()),
-        fields.len(),
-    ) {
-        (Some("13"), Some("24"), 50) => false,
-        // Older revisions lack keys; see `absent` below.
-        (Some("12"), Some("23"), 48) | (Some("8"), Some("21"), 44) => false,
-        // Revision 13 with the type-reduction key already present: a real
-        // extension's tabular sections (8.3.27.2214 prints its
-        // `TypeReductionMode` as for revision 14).
-        (Some("14" | "13"), Some("25"), 52) => true,
-        _ => return None,
-    };
-    // Keys an older revision does not store, with the value the platform
-    // dumps for them (one 8.3.27 corpus, versions 27 and 29 registers):
-    // revision 12 lacks data history (`Use`), revision 8 also create-on-input
-    // and choice history on input (both `Auto`).
-    const DATA_HISTORY_USE: (&str, &str) = (
-        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_DATA_HISTORY_PROPERTY_UUID,
-        "{\"#\",d46ea122-3201-4e5e-bed4-e669c6e463c8,{d46ea122-3201-4e5e-bed4-e669c6e463c8,1}}",
-    );
-    const CREATE_ON_INPUT_AUTO: (&str, &str) = (
-        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_CREATE_ON_INPUT_PROPERTY_UUID,
-        "{\"#\",ad3615c5-aae6-4725-89be-91827523abd9,{ad3615c5-aae6-4725-89be-91827523abd9,0}}",
-    );
-    const CHOICE_HISTORY_AUTO: (&str, &str) = (
-        INFORMATION_REGISTER_STANDARD_ATTRIBUTE_CHOICE_HISTORY_PROPERTY_UUID,
-        "{\"#\",12ca4003-ac70-450e-b897-37faf86bd313,0}",
-    );
-    let absent: &[(&str, &str)] = match fields.first()?.trim() {
-        "12" => &[DATA_HISTORY_USE],
-        "8" => &[DATA_HISTORY_USE, CREATE_ON_INPUT_AUTO, CHOICE_HISTORY_AUTO],
-        _ => &[],
-    };
+    let layout = ibcmd_schema::metadata_storage_facts::InformationRegisterStandardAttributeLayout::from_fields(&fields)?;
+    let has_type_reduction_mode = layout.has_type_reduction_mode;
+    let absent = layout.absent_defaults;
     let expected_keys = INFORMATION_REGISTER_STANDARD_ATTRIBUTE_KEYS
         .iter()
         .enumerate()
@@ -18836,27 +18792,13 @@ fn parse_register_include_help_in_contents(
     fields: &[&str],
     uuid: &str,
 ) -> Option<bool> {
-    match kind {
-        // Four slots behind the header: default list form, register type,
-        // UseStandardCommands, then this flag -- the order the writer in
-        // metadata_model/registers.rs stores. ЛИМС КОРП `AccumulationRegisters/
-        // лимсРасходы` holds `1` there and the platform writes `true`.
-        "AccumulationRegister" => {
-            // Only the full code-28 owner layout keeps the flag there; a short
-            // record ends with the register type in that slot and states no
-            // flag (the writer's `false`).
-            let header_index = metadata_header_field_index(fields, uuid)?;
-            if fields.len() < header_index + 10 {
-                return Some(false);
-            }
-            parse_1c_bool_field(fields.get(header_index + 4).copied()).or(Some(false))
-        }
-        "AccountingRegister" => {
-            let header_index = metadata_header_field_index(fields, uuid)?;
-            parse_1c_bool_field(fields.get(header_index + 2).copied())
-        }
-        _ => None,
+    let layout = ibcmd_schema::metadata_storage_facts::register_include_help_layout(kind)?;
+    let header_index = metadata_header_field_index(fields, uuid)?;
+    if fields.len() < header_index + layout.minimum_fields_after_header {
+        return layout.absent_or_malformed_default;
     }
+    parse_1c_bool_field(fields.get(header_index + layout.offset_after_header).copied())
+        .or(layout.absent_or_malformed_default)
 }
 
 fn parse_register_presentations(
@@ -19244,26 +19186,10 @@ fn register_child_object_tag(kind: &str, text: &str, marker_start: usize) -> Opt
         }
         // Version 30 registers wrap a resource in `{6, …}` (one 8.3.27
         // corpus), so the collection class names the family instead.
-        if refs::is_offset_inside_any_list_marker(
-            text,
-            marker_start,
-            &["{13134202-f60b-11d5-a3c7-0050bae0a776,"],
-        ) {
-            return Some("Resource");
-        }
-        if refs::is_offset_inside_any_list_marker(
-            text,
-            marker_start,
-            &["{13134203-f60b-11d5-a3c7-0050bae0a776,"],
-        ) {
-            return Some("Dimension");
-        }
-        if refs::is_offset_inside_any_list_marker(
-            text,
-            marker_start,
-            &["{a2207540-1400-11d6-a3c7-0050bae0a776,"],
-        ) {
-            return Some("Attribute");
+        for (tag, markers) in ibcmd_schema::metadata_storage_facts::information_register_child_collections() {
+            if refs::is_offset_inside_any_list_marker(text, marker_start, markers) {
+                return Some(*tag);
+            }
         }
     }
     if kind == "AccountingRegister"
@@ -27305,7 +27231,7 @@ pub(super) fn catalog_string_code_length(text: &str, uuid: &str) -> Option<usize
         &mut diagnostic,
     )?;
     let fields = &owner_graph.owner_fields;
-    if catalog_code_type_xml(parse_exchange_plan_u32(fields.get(18)?)?)? != "String" {
+    if !ibcmd_schema::metadata_storage_facts::catalog_code_is_string(parse_exchange_plan_u32(fields.get(18)?)?) {
         return None;
     }
     usize::try_from(parse_exchange_plan_u32(
@@ -29067,16 +28993,7 @@ fn parse_document_properties_from_text(
             // (`0`) and `Day` 1 (`4`, `uh`'s
             // `Documents/РеестрСведенийНеобходимыхДляНазначенияИВыплатыПособий`).
             // Codes the corpus never writes stay refused.
-            number_periodicity: match fields.get(13)?.trim() {
-                "0" => "Nonperiodical",
-                "1" => "Year",
-                // `Month` on `Documents/ЧерновикЭлектронногоДокументаЭДО` of
-                // one 8.3.27 corpus.
-                "2" => "Quarter",
-                "3" => "Month",
-                "4" => "Day",
-                _ => return None,
-            },
+            number_periodicity: ibcmd_schema::metadata_storage_facts::document_number_periodicity(fields.get(13)?)?,
             check_unique: information_register_bool(fields.get(14)?)?,
             autonumbering: information_register_bool(fields.get(15)?)?,
         },
@@ -32464,7 +32381,7 @@ fn parse_data_processor_properties_from_text(
 ) -> Option<DataProcessorProperties> {
     let header = parse_metadata_header_from_text(text, uuid)?;
     let fields = metadata_object_fields(text)?;
-    if !matches!(fields.first().map(|value| value.trim()), Some("16" | "17")) {
+    if !ibcmd_schema::metadata_storage_facts::data_processor_owner_revision(fields.first().map(|value| value.trim())) {
         return None;
     }
 
@@ -36246,7 +36163,6 @@ const STYLE_BODY_FONT_TAG: &str = "7";
 /// only style body on the 8.5 stand), and after the declared items one record
 /// `{1,{0,<colour>}}` that the export prints as the item `FirstBrand`.
 const STYLE_BODY_TAG_8_5_1: &str = "2";
-const STYLE_BODY_COLOR_TAG_8_5_1: &str = "4";
 const STYLE_BODY_FONT_TAG_8_5_1: &str = "8";
 /// The only font form a style body is evidenced to carry: a reference to a
 /// style item (`kind="StyleItem"`). `Absolute` and `WindowsFont` bodies would
@@ -36355,7 +36271,7 @@ fn parse_style_body_items(
     }
     // `{0}` is a brand record with no colour (`Styles/Основной` of a
     // configuration stored by 8.5), which writes nothing.
-    let brand = brand.filter(|record| record.trim() != "{0}");
+    let brand = brand.filter(|record| ibcmd_schema::metadata_storage_facts::style_brand_has_color(record));
     if let Some(brand) = brand {
         // `{1,{0,<colour>}}`: one colour, item 0.
         let record = split_1c_braced_fields(brand, 0)?;
@@ -36491,10 +36407,7 @@ fn parse_style_body_color_value(
         // last member -- the shape every other 8.5 colour tuple takes and the
         // one `Styles/Основной` of a configuration stored by 8.5 carries
         // (`{4,3,{-1},3}`, 161 items).
-        if fields.first()?.trim() != STYLE_BODY_COLOR_TAG_8_5_1
-            || fields.len() != 4
-            || !(fields.get(3)?.trim() == "0" || fields.get(3)?.trim() == fields.get(1)?.trim())
-        {
+        if !ibcmd_schema::metadata_storage_facts::style_color_85_layout(&fields) {
             return None;
         }
     } else if fields.first()?.trim() != STYLE_BODY_COLOR_TAG {
@@ -37283,13 +37196,7 @@ fn form_builtin_type_reference(type_id: &str) -> Option<&'static str> {
 }
 
 fn data_processor_builtin_type_reference(type_id: &str) -> Option<&'static str> {
-    DATA_PROCESSOR_BUILTIN_TYPE_REFERENCES
-        .iter()
-        .find_map(|(candidate, reference)| {
-            candidate
-                .eq_ignore_ascii_case(type_id)
-                .then_some(*reference)
-        })
+    ibcmd_schema::metadata_storage_facts::data_processor_builtin_type_reference(type_id)
         .or_else(|| platform_reference_family_type_reference(type_id))
 }
 
@@ -45739,17 +45646,9 @@ fn metadata_type_xml_namespace_attr(value_type: &ConstantValueType) -> &'static 
             r#" xmlns:d7p1="http://v8.1c.ru/8.2/data/chart""#
         }
         ConstantValueType::Reference { reference }
-        | ConstantValueType::ReferenceTypeSet { reference }
-            if reference == "d7p1:Filter" =>
-        {
-            r#" xmlns:d7p1="http://v8.1c.ru/8.2/misc""#
-        }
-        ConstantValueType::Reference { reference }
-        | ConstantValueType::ReferenceTypeSet { reference }
-            if reference == "d7p1:FlowchartContextType" =>
-        {
-            r#" xmlns:d7p1="http://v8.1c.ru/8.2/data/graphscheme""#
-        }
+        | ConstantValueType::ReferenceTypeSet { reference } =>
+            ibcmd_xml::metadata::data_processor_builtin_type_namespace_attribute(reference)
+                .unwrap_or_default(),
         _ => "",
     }
 }

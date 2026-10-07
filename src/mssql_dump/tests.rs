@@ -79050,6 +79050,25 @@ fn legacy_v12_form_descriptor_is_not_a_common_module() {
         properties.use_purposes,
         vec!["PlatformApplication", "MobilePlatformApplication"]
     );
+    let forms = BTreeMap::from([(
+        uuid.to_string(),
+        FormSourceReference {
+            relative_path: PathBuf::from("Catalogs/Probe/Forms/LegacyForm.xml"),
+            kind: "Form",
+        },
+    )]);
+    let extracted = extract_metadata_source_xml(
+        &deflate_for_test(text.as_bytes()),
+        uuid,
+        &BTreeMap::new(),
+        &forms,
+        &BTreeMap::new(),
+    ).unwrap();
+    assert_eq!(extracted.relative_path, forms[uuid].relative_path);
+    let xml = String::from_utf8(extracted.xml).unwrap();
+    assert!(xml.contains(&format!(r#"<Form uuid="{uuid}">"#)));
+    assert!(xml.contains("<FormType>Managed</FormType>"));
+    assert!(!xml.contains("<CommonModule"));
 }
 
 #[test]

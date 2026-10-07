@@ -35,21 +35,6 @@ const INDEX_TYPE_UUID: &str = "4b3b32e1-14f6-4ce8-b4c4-1bc85a74237e";
 /// Type uuid of one indexed-field reference inside a record.
 const FIELD_TYPE_UUID: &str = "07c5e7a4-56de-47f1-9895-724a499e8a8c";
 
-/// Standard fields addressed by a negative code instead of a uuid.
-///
-/// One global table, not one per owner family: every code observed in the
-/// corpus names the same field wherever it appears, so a per-family table would
-/// be two tables saying the same thing. UT 11.5.27.75 spells out all four --
-/// `AccumulationRegister.ВыручкаИСебестоимостьПродаж` writes `Period`,
-/// `Recorder` and `LineNumber` for `-2`, `-3` and `-4`, and
-/// `Document.ЗаявкаНаЗакупку.Товары` writes `Ref` for `-5`.
-const STANDARD_FIELDS: &[(&str, &str)] = &[
-    ("-2", "Period"),
-    ("-3", "Recorder"),
-    ("-4", "LineNumber"),
-    ("-5", "Ref"),
-];
-
 const HEADER: &str = "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\
 <AdditionalIndexes xmlns=\"http://v8.1c.ru/8.3/xcf/extrnprops\" \
 xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" \
@@ -133,28 +118,20 @@ fn resolve_field(
             })?;
             Ok(leaf.to_string())
         }
-        // A catalog numbers its own standard fields: one 8.3.27 corpus writes
-        // `Code` for `-2` on a catalog index, where registers write `Period`.
-        [code] if owner_kind == "Catalog" => crate::metadata_model::objects::CATALOG_STANDARD
-            .iter()
-            .find(|(_, marker)| marker.to_string() == code.trim())
-            .map(|(name, _)| (*name).to_string())
-            .ok_or_else(|| {
-                anyhow!(
+        [code] => {
+            use ibcmd_schema::metadata_child_storage_facts::AdditionalIndexStandardFieldFamily;
+            let family = AdditionalIndexStandardFieldFamily::for_owner(owner_kind);
+            family.field_name(code).map(str::to_string).ok_or_else(|| match family {
+                AdditionalIndexStandardFieldFamily::Catalog => anyhow!(
                     "additional-index catalog standard-field code {} is not known",
                     code.trim()
-                )
-            }),
-        [code] => STANDARD_FIELDS
-            .iter()
-            .find(|(marker, _)| *marker == code.trim())
-            .map(|(_, name)| (*name).to_string())
-            .ok_or_else(|| {
-                anyhow!(
+                ),
+                AdditionalIndexStandardFieldFamily::RegisterOrTabularSection => anyhow!(
                     "additional-index standard-field code {} is not in the evidenced table",
                     code.trim()
-                )
-            }),
+                ),
+            })
+        }
         _ => Err(anyhow!("additional-index field slot has an unknown shape")),
     }
 }

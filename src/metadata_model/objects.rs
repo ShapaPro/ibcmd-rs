@@ -115,17 +115,8 @@ pub(crate) const DEPENDENCE_ON_CALCULATION_TYPES: Codes =
     &[("DontUse", 0), ("OnActionPeriod", 1), ("OnBasePeriod", 2)];
 
 // Standard-attribute markers per family, root level.
-pub(crate) const CATALOG_STANDARD: Codes = &[
-    ("PredefinedDataName", -13),
-    ("Predefined", -10),
-    ("Ref", -8),
-    ("DeletionMark", -7),
-    ("IsFolder", -6),
-    ("Owner", -5),
-    ("Parent", -4),
-    ("Description", -3),
-    ("Code", -2),
-];
+pub(crate) const CATALOG_STANDARD: Codes =
+    ibcmd_schema::metadata_child_storage_facts::CATALOG_STANDARD_FIELDS;
 pub(crate) const DOCUMENT_STANDARD: Codes = &[
     ("Posted", -7),
     ("Ref", -5),

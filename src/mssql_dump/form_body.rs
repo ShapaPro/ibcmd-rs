@@ -2786,7 +2786,7 @@ pub(super) fn extract_form_scale(fields: &[&str]) -> Option<String> {
         fields.get(tail_start..)?,
     )?;
     let value = fields.get(tail_start + 16 + blocks)?.trim();
-    (value != "100" && value.parse::<u32>().is_ok()).then(|| value.to_string())
+    crate::form_schema::form_nondefault_percent_scale(value)
 }
 
 pub(super) fn extract_form_dimension(fields: &[&str], index: usize) -> Option<String> {
@@ -6274,199 +6274,9 @@ pub(super) fn reconcile_form_list_settings_data_parameter_values(
     settings: &mut FormListSettings,
     server_state_xml: Option<&str>,
 ) {
-    let Some(fragment) = settings.data_parameters.as_mut() else {
-        return;
-    };
-    let xml = server_state_xml.unwrap_or_default();
-    let restricted_names = form_server_state_nil_parameter_names(xml, "useRestriction");
-    *fragment = reconcile_nil_data_parameter_items(fragment, &restricted_names, true);
-    let parameter_names = form_server_state_nil_parameter_names(xml, "valueListAllowed");
-    *fragment = reconcile_nil_data_parameter_items(fragment, &parameter_names, false);
-    if fragment
-        .replace("<dcsset:dataParameters>", "")
-        .replace("</dcsset:dataParameters>", "")
-        .trim()
-        .is_empty()
-    {
-        if let Some(start) = fragment.find("<dcsset:dataParameters>") {
-            *fragment = format!("{}<dcsset:dataParameters/>\r\n", &fragment[..start]);
-        } else {
-            settings.data_parameters = None;
-        }
-    }
-}
-
-fn form_server_state_nil_parameter_names(xml: &str, flag: &str) -> BTreeSet<String> {
-    #[derive(Default)]
-    struct ParameterState {
-        name: Option<String>,
-        nil_default: bool,
-        value_list_allowed: bool,
-    }
-
-    fn local_name(name: &[u8]) -> &[u8] {
-        name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
-    }
-
-    fn has_true_nil_attribute(event: &quick_xml::events::BytesStart<'_>) -> bool {
-        event
-            .attributes()
-            .with_checks(false)
-            .flatten()
-            .any(|attribute| {
-                local_name(attribute.key.as_ref()) == b"nil" && attribute.value.as_ref() == b"true"
-            })
-    }
-
-    let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut parameter = None::<ParameterState>;
-    let mut text_target = None::<&'static str>;
-    let mut names = BTreeSet::new();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(event)) => match local_name(event.name().as_ref()) {
-                b"Parameter" => parameter = Some(ParameterState::default()),
-                b"name" if parameter.is_some() => text_target = Some("name"),
-                name if name == flag.as_bytes() && parameter.is_some() => {
-                    text_target = Some("valueListAllowed")
-                }
-                b"value" if parameter.is_some() && has_true_nil_attribute(&event) => {
-                    parameter.as_mut().unwrap().nil_default = true;
-                }
-                _ => {}
-            },
-            Ok(Event::Empty(event)) => {
-                if local_name(event.name().as_ref()) == b"value"
-                    && parameter.is_some()
-                    && has_true_nil_attribute(&event)
-                {
-                    parameter.as_mut().unwrap().nil_default = true;
-                }
-            }
-            Ok(Event::Text(event)) if text_target.is_some() => {
-                let Ok(encoded) = std::str::from_utf8(event.as_ref()) else {
-                    return BTreeSet::new();
-                };
-                let Ok(value) = quick_xml::escape::unescape(encoded) else {
-                    return BTreeSet::new();
-                };
-                if let Some(parameter) = parameter.as_mut() {
-                    match text_target {
-                        Some("name") => parameter.name = Some(value.into_owned()),
-                        Some("valueListAllowed") => {
-                            parameter.value_list_allowed = value.as_ref() == "true"
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
-                name if name == b"name" || name == flag.as_bytes() => text_target = None,
-                b"Parameter" => {
-                    if let Some(parameter) = parameter.take()
-                        && parameter.nil_default
-                        && parameter.value_list_allowed
-                        && let Some(name) = parameter.name
-                    {
-                        names.insert(name);
-                    }
-                    text_target = None;
-                }
-                _ => {}
-            },
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(_) => return BTreeSet::new(),
-        }
-    }
-    names
-}
-
-fn reconcile_nil_data_parameter_items(
-    fragment: &str,
-    parameter_names: &BTreeSet<String>,
-    omit_restricted_item: bool,
-) -> String {
-    const ITEM_OPEN: &str = r#"<dcscor:item xsi:type="dcsset:SettingsParameterValue">"#;
-    const ITEM_CLOSE: &str = "</dcscor:item>";
-    const PARAMETER_OPEN: &str = "<dcscor:parameter>";
-    const PARAMETER_CLOSE: &str = "</dcscor:parameter>";
-    const NIL_VALUE: &str = r#"<dcscor:value xsi:nil="true"/>"#;
-
-    let mut output = String::with_capacity(fragment.len());
-    let mut remainder = fragment;
-    while let Some(item_start) = remainder.find(ITEM_OPEN) {
-        output.push_str(&remainder[..item_start]);
-        let item_remainder = &remainder[item_start..];
-        let Some(item_end) = item_remainder
-            .find(ITEM_CLOSE)
-            .map(|offset| offset + ITEM_CLOSE.len())
-        else {
-            output.push_str(item_remainder);
-            return output;
-        };
-        let item = &item_remainder[..item_end];
-        let parameter_name = item
-            .find(PARAMETER_OPEN)
-            .map(|offset| offset + PARAMETER_OPEN.len())
-            .and_then(|start| {
-                item[start..]
-                    .find(PARAMETER_CLOSE)
-                    .map(|length| &item[start..start + length])
-            })
-            .and_then(|encoded| quick_xml::escape::unescape(encoded).ok())
-            .map(|value| value.into_owned());
-        if parameter_name
-            .as_ref()
-            .is_some_and(|name| parameter_names.contains(name))
-            && let Some(value_start) = item.find(NIL_VALUE)
-        {
-            if omit_restricted_item {
-                if item.contains("<dcscor:use>false</dcscor:use>") {
-                    let line_start = output.rfind('\n').map_or(0, |offset| offset + 1);
-                    if output[line_start..]
-                        .bytes()
-                        .all(|byte| matches!(byte, b' ' | b'\t'))
-                    {
-                        output.truncate(line_start);
-                    }
-                    remainder = item_remainder[item_end..]
-                        .strip_prefix("\r\n")
-                        .unwrap_or(&item_remainder[item_end..]);
-                    continue;
-                }
-                output.push_str(item);
-                remainder = &item_remainder[item_end..];
-                continue;
-            }
-            let line_start = item[..value_start]
-                .rfind('\n')
-                .map_or(0, |offset| offset + 1);
-            let value_end = value_start + NIL_VALUE.len();
-            if item[line_start..value_start]
-                .bytes()
-                .all(|byte| matches!(byte, b' ' | b'\t'))
-            {
-                let line_end = if item[value_end..].starts_with("\r\n") {
-                    value_end + 2
-                } else if item[value_end..].starts_with('\n') {
-                    value_end + 1
-                } else {
-                    value_end
-                };
-                output.push_str(&item[..line_start]);
-                output.push_str(&item[line_end..]);
-            } else {
-                output.push_str(item);
-            }
-        } else {
-            output.push_str(item);
-        }
-        remainder = &item_remainder[item_end..];
-    }
-    output.push_str(remainder);
-    output
+    settings.data_parameters = settings.data_parameters.as_deref().and_then(|fragment| {
+        ibcmd_xml::dcs::reconcile_form_list_settings_data_parameters(fragment, server_state_xml)
+    });
 }
 
 const FORM_LOCALIZED_STRING_TYPE_UUID: &str = "87024738-fc2a-4436-ada1-df79d395c424";
@@ -8476,12 +8286,9 @@ fn form_dynamic_list_main_table_auto_fields(
     // selects `ВидыНоменклатуры.Ссылка КАК ВидНоменклатуры`, and the platform
     // writes `~Список.Наименование` for the standard attribute it does not
     // select.
+    let reference_name = if english_script { "Ref" } else { "Ссылка" };
     if let Some(alias) = &main_table_alias
-        && selection
-            .paths
-            .get(&(alias.clone(), "Ссылка".to_string()))
-            .is_some_and(|selected_as| selected_as != "Ссылка")
-        && !selection.aliases.contains("Ссылка")
+        && form_dynamic_list_reference_alias_loses_key(selection, alias, reference_name)
     {
         return Some(BTreeSet::new());
     }
@@ -8496,6 +8303,75 @@ fn form_dynamic_list_main_table_auto_fields(
         fields.insert(name);
     }
     Some(fields)
+}
+
+fn form_dynamic_list_reference_alias_loses_key(
+    selection: &FormDynamicListQuerySelection,
+    source_alias: &str,
+    reference_name: &str,
+) -> bool {
+    selection
+        .paths
+        .get(&(source_alias.to_string(), reference_name.to_string()))
+        .is_some_and(|selected_as| selected_as != reference_name)
+        && !selection.aliases.contains(reference_name)
+}
+
+#[cfg(test)]
+mod reference_alias_tests {
+    use super::*;
+
+    #[test]
+    fn renamed_reference_removes_auto_fields_in_both_script_variants() {
+        for (script_code, reference, description) in
+            [("0", "Ref", "Description"), ("1", "Ссылка", "Наименование")]
+        {
+            let mut fields = ["0"; 61];
+            fields[0] = "68";
+            fields[3] = script_code;
+            let root = MetadataTextRow {
+                file_name: "11111111-1111-4111-8111-111111111111".into(),
+                text: format!(
+                    "{{9cd510cd-abfc-11d4-9434-004095e12fc7,{{{}}}}}",
+                    fields.join(",")
+                ),
+                object_code: None,
+                header: None,
+                kind: None,
+                folder: None,
+            };
+            let declarations = refs::build_metadata_field_declaration_index_from_texts(
+                &[root],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(declarations.english_script(), script_code == "0");
+            let query = format!("SELECT P.{reference} AS SelectedRef FROM Catalog.Products AS P");
+            let selected = parse_form_dynamic_list_query_selection(&query).unwrap();
+            let fields = form_dynamic_list_main_table_auto_fields(
+                "Catalog.Products",
+                &selected,
+                &BTreeMap::new(),
+                Some(&declarations),
+                None,
+            )
+            .unwrap();
+            assert!(fields.is_empty());
+
+            let query = format!("SELECT P.{reference} AS {reference} FROM Catalog.Products AS P");
+            let selected = parse_form_dynamic_list_query_selection(&query).unwrap();
+            let fields = form_dynamic_list_main_table_auto_fields(
+                "Catalog.Products",
+                &selected,
+                &BTreeMap::new(),
+                Some(&declarations),
+                None,
+            )
+            .unwrap();
+            assert!(fields.contains(reference));
+            assert!(fields.contains(description));
+        }
+    }
 }
 
 /// What the final `SELECT` of a dynamic-list query names, read with the query
@@ -9035,7 +8911,7 @@ pub(super) fn parse_form_dynamic_list_query_selection(
         // OperationNumber`, `.NextOperation`).
         let is_alias = selection_tokens.last().is_some_and(|previous: &String| {
             // `AS <alias>`, or a member name behind `.` (`….Order`).
-            previous == "." || is_1c_query_keyword(previous, Q_AS)
+            crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator() || is_1c_query_keyword(previous, Q_AS)
         });
         if depth == 0
             && !is_alias
@@ -9112,7 +8988,7 @@ pub(super) fn parse_form_dynamic_list_query_selection(
                 _ => {}
             }
             let is_alias = clause.last().is_some_and(|previous: &String| {
-                previous == "." || is_1c_query_keyword(previous, Q_AS)
+                crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator() || is_1c_query_keyword(previous, Q_AS)
             });
             if depth == 0 && !is_alias && is_1c_query_keyword(token, Q_CLAUSE_END) {
                 break;
@@ -15806,11 +15682,9 @@ fn parse_form_child_item_with_metadata_owners(
         // from the end: over all 27 778 native buttons the slot reads `1` on
         // 27 777 that carry no `<CommandUniqueness>` and `0` on the one that
         // says `false`, in both button layouts, with no other code.
-        command_uniqueness: (tag == "Button" && form_button_layout_is_extended(&fields))
-            .then(|| fields.len().checked_sub(2))
-            .flatten()
-            .and_then(|slot| fields.get(slot))
-            .and_then(|field| (field.trim() == "0").then_some(false)),
+        command_uniqueness: crate::form_schema::FormButtonCommandUniquenessSchema::decode(
+            tag, form_button_layout_is_extended(&fields), &fields,
+        ),
         // A `UsualGroup` keeps `CurrentRowUse` in member 25 of its extended
         // option tuple. Census of the dumped layouts of all eight stand
         // corpora, joined to the platform's own element for the same item id:
@@ -15822,27 +15696,10 @@ fn parse_form_child_item_with_metadata_owners(
         // ОтветНаЗапросРеквизитовДляВыплатыПособия, ОтветНаЗапросФССДляРасчетаПособия,
         // СведенияДляОплатыОтпускаСФР, СведенияОЗастрахованномЛицеФСС}/Forms/
         // ФормаДокумента` -- lost the element.
-        usual_group_current_row_use: match tag {
-            "UsualGroup" => fields
-                .get(20)
+        usual_group_current_row_use: crate::form_schema::FormContainerCurrentRowSchema::from_tag(tag)
+            .and_then(|schema| fields.get(schema.options_slot())
                 .and_then(|field| split_1c_braced_fields(field.trim(), 0))
-                .and_then(|members| match members.get(25)?.trim() {
-                    "0" => Some("Use"),
-                    "1" => Some("DontUse"),
-                    _ => None,
-                }),
-            // The long `{4,…}` pages tuple keeps the same code in member 3: `2`
-            // on every container that writes no element (`Страницы` of ЛИМС
-            // КОРП `Documents/лимсПретензия/Forms/ФормаДокумента` among them)
-            // and `1` on `Catalogs/ПодключаемоеОборудование/Forms/
-            // ФормаЭлемента` `Закладки`, which writes `DontUse`.
-            "Pages" => fields
-                .get(20)
-                .and_then(|field| split_1c_braced_fields(field.trim(), 0))
-                .filter(|members| members.len() == 6 && members[0].trim() == "4")
-                .and_then(|members| (members.get(3)?.trim() == "1").then_some("DontUse")),
-            _ => None,
-        },
+                .and_then(|members| schema.decode(&members))),
         decoration_enable_start_drag: picture_decoration_options.as_deref().and_then(|options| {
             let slot = FormPictureDecorationSchema.enable_start_drag_option_slot(options)?;
             (options.get(slot)?.trim() == "1").then_some(true)
@@ -16279,7 +16136,7 @@ fn parse_form_child_item_with_metadata_owners(
             picture_decoration_options.as_deref().and_then(|options| {
                 let slot = FormPictureDecorationSchema.image_scale_option_slot(options)?;
                 let value = options.get(slot)?.trim();
-                (value != "100" && value.parse::<u32>().is_ok()).then(|| value.to_string())
+                crate::form_schema::form_nondefault_percent_scale(value)
             })
         } else {
             None
@@ -19936,7 +19793,7 @@ fn parse_form_font_mask_tuple_xml(
     // Мастер_ВопросОтключитьМультирежим` stores `{8,3,4,700,1,100}` on the
     // label decoration the platform writes `<Font bold="true" kind="AutoFont"/>`
     // (about 40 forms of one 8.3.27 corpus).
-    if !matches!(fields.first()?.trim(), "7" | "8") {
+    if !crate::form_schema::FormFontMaskLayout::recognizes_revision(fields.first()?.trim()) {
         return None;
     }
     let kind = fields.get(1)?.trim();
@@ -24528,7 +24385,7 @@ pub(super) fn parse_form_child_item_data_path(
     // `Копия` and `СкрытаяКопия` over `Объект.ПолучателиПисьма` and its two
     // siblings, each the additional column `Значение` (id 3) of its table.
     let multiple_value = multiple_value_paths.0.or_else(|| {
-        if tag != "InputField" {
+        if !crate::form_schema::FormInputBindingLayout::applies_to(tag) {
             return None;
         }
         let primary = data_path.as_ref()?.data_path.as_str();
@@ -24574,7 +24431,7 @@ pub(super) fn parse_form_child_item_data_path(
     // platform writes `Объект.АнализыПретензии.СписокСотрудников.Ответственный`
     // for both.
     let metadata_member = |member: usize| -> Option<String> {
-        if tag != "InputField" {
+        if !crate::form_schema::FormInputBindingLayout::applies_to(tag) {
             return None;
         }
         let primary = data_path.as_ref()?.data_path.as_str();
@@ -24658,10 +24515,10 @@ fn resolve_form_physical_verdict_data_path(
     match members {
         [terminal]
             if terminal.as_slice().len() == 1
-                && terminal[0].trim() == "-2"
+                && terminal[0].trim() == crate::form_schema::FormStandardBindingMember::Period.marker()
                 && owner_scoped_bindings
                     .undeclared_root_standard_attributes
-                    .contains(&(root_id.to_string(), "Period")) =>
+                    .contains(&(root_id.to_string(), crate::form_schema::FormStandardBindingMember::Period.name())) =>
         {
             Some(format!("{root_id}/-2"))
         }
@@ -24683,6 +24540,66 @@ fn resolve_form_physical_verdict_data_path(
             Some(format!("{root_id}/{column_id}/{marker}:{uuid}"))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod composite_reference_consumer_tests {
+    use super::*;
+
+    #[test]
+    fn buttons_and_titles_preserve_composite_reference_bindings() {
+        let mut bindings = FormOwnerScopedBindingIndexes::default();
+        bindings.composite_reference_columns.insert(FormAttributeColumnKey {
+            attribute_id: "1".into(),
+            column_id: "1".into(),
+        });
+        let member_uuid = "29818e09-1111-4111-8111-111111111111";
+        let field = format!("{{3,{{1}},{{1}},{{0,{member_uuid}}}}}");
+        let physical = format!("1/1/0:{member_uuid}");
+        assert!(matches!(
+            resolve_form_owner_scoped_button_data_path(
+                &field,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &bindings,
+                &BTreeMap::new(),
+            ),
+            FormOwnerScopedDataPath::Resolved(path) if path == physical
+        ));
+        for (tag, kind, count, slot) in [("Page", "18", 20, 4), ("UsualGroup", "29", 29, 5)] {
+            let mut options = vec!["0"; count];
+            options[0] = kind;
+            options[slot] = &field;
+            let options = format!("{{{}}}", options.join(","));
+            let mut fields = ["0"; 21];
+            fields[20] = &options;
+            assert_eq!(
+                parse_form_title_data_path(
+                    tag,
+                    "22",
+                    &fields,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &bindings,
+                    &BTreeMap::new(),
+                ),
+                Some(physical.clone())
+            );
+        }
+        assert!(resolve_form_physical_verdict_data_path(
+            &field,
+            &FormOwnerScopedBindingIndexes::default()
+        ).is_none());
+        assert!(resolve_form_physical_verdict_data_path(
+            "{3,{1},{1},{0,not-a-uuid}}",
+            &bindings
+        ).is_none());
     }
 }
 
@@ -24864,6 +24781,9 @@ fn resolve_form_owner_scoped_button_data_path(
     object_refs: &BTreeMap<String, String>,
 ) -> FormOwnerScopedDataPath {
     let no_global_binding_paths = BTreeMap::new();
+    if let Some(path) = resolve_form_physical_verdict_data_path(field, owner_scoped_bindings) {
+        return FormOwnerScopedDataPath::Resolved(path);
+    }
     FormOwnerScopedDataPath::from_option(
         // The standard member a negative marker names is the one the root
         // attribute's own declared type names, exactly as every other bound
@@ -25954,14 +25874,16 @@ pub(super) fn resolve_form_bound_chain_member_path(
     // No declared column is involved, so a neighbouring field binding must
     // not supply the terminal's name.
     if members.len() == 2
-        && members[0].as_slice() == ["-5"]
+        && members[0].as_slice() == [crate::form_schema::FormStandardBindingMember::Reference.marker()]
         && attribute
             .exact_single_type_reference
             .as_deref()
-            .is_some_and(|reference| reference.starts_with("cfg:DocumentObject."))
+            .and_then(parse_generated_metadata_owner)
+            .is_some_and(|owner| owner.family() == GeneratedMetadataOwnerFamily::Document
+                && owner.role() == GeneratedMetadataOwnerRole::Object)
         && !owner_scoped_bindings
             .undeclared_root_standard_attributes
-            .contains(&(attribute_id.to_string(), "Ref"))
+            .contains(&(attribute_id.to_string(), crate::form_schema::FormStandardBindingMember::Reference.name()))
         && let [marker] = members[1].as_slice()
         && let Some(name) =
             lookup_form_standard_attribute(DOCUMENT_REF_STANDARD_ATTRIBUTES, marker.trim())
@@ -26084,7 +26006,7 @@ fn walk_form_bound_chain_members(
                                 .map(String::as_str);
                         }
                         // `Ref` stands on the very reference the chain holds.
-                        if name == "Ref" {
+                        if crate::form_schema::FormStandardBindingMember::retains_reference_type(name) {
                             reached_type = Some(reference);
                         }
                         name
@@ -27913,6 +27835,9 @@ pub(super) fn parse_form_title_data_path(
         return None;
     }
     let binding = options.get(binding_slot)?.trim();
+    if let Some(path) = resolve_form_physical_verdict_data_path(binding, owner_scoped_bindings) {
+        return Some(path);
+    }
     // A bound title reaches its column from *outside* the table, so the
     // aggregate marker `101000000` in its last segment means the column total,
     // which the platform spells with a `Total` prefix -- the same rule
@@ -28816,10 +28741,7 @@ pub(super) fn parse_form_button_command_name_with_main_attribute(
                 form_spreadsheet_document_standard_command_suffix(&uuid)
             }
             FormStandardCommandOwnerKind::Table => form_table_standard_command_suffix(&uuid),
-            FormStandardCommandOwnerKind::Planner => match uuid.as_str() {
-                "2c75e90f-36f0-48c8-913d-0d92afdb4b93" => Some("Preview"),
-                _ => None,
-            },
+            FormStandardCommandOwnerKind::Planner => crate::form_schema::form_planner_standard_command_suffix(&uuid),
         } {
             return Some(format!(
                 "Form.Item.{}.StandardCommand.{standard}",
@@ -29230,7 +29152,7 @@ pub(super) fn form_extension_owns_standard_command(
     // `Catalogs/лимсЛабораторноеОборудование/Forms/
     // ФормаВыбораОборудованияВСтатусеВработеНаДатуПоМетодикеИИзмерению` keeps
     // all five in its root command set and its XML has no `<CommandSet>`.
-    if matches!(command, "Change" | "Choose" | "Copy" | "Create" | "Delete") {
+    if crate::form_schema::form_list_row_command_requires_main_attribute(command) {
         return !matches!(main_attribute, FormMainAttributeExtension::Absent);
     }
     if !matches!(
@@ -31994,7 +31916,7 @@ fn format_form_body_open_xml_with_dcs_profiles(
     // `Scale` closes the scalar run, ahead of `AutoCommandBar` (the 2.21
     // element order in form/xml_2_21_order.rs).
     if let Some(value) = &properties.scale {
-        xml.push_str(&format!("\t<Scale>{}</Scale>\r\n", escape_xml_text(value)));
+        crate::form_schema::FormScalarXmlProperty::Scale.emit(&mut xml, "\t", &escape_xml_text(value));
     }
     if let Some(command_bar) = auto_command_bar {
         let display_importance = command_bar
@@ -35312,10 +35234,9 @@ pub(super) fn format_form_child_item_xml(
     if item.auto_show_open_button_mode.is_none()
         && let Some(value) = item.auto_correction_on_text_input
     {
-        xml.push_str(&format!(
-            "{tab}\t<AutoCorrectionOnTextInput>{}</AutoCorrectionOnTextInput>\r\n",
-            escape_xml_text(value)
-        ));
+        crate::form_schema::FormScalarXmlProperty::AutoCorrectionOnTextInput.emit(
+            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+        );
     }
     // The three mobile-input properties close the same run, all three behind
     // the `Font` block and ahead of `InputHint`.  Документооборот КОРП
@@ -35873,10 +35794,9 @@ pub(super) fn format_form_child_item_xml(
     if item.auto_show_open_button_mode.is_some()
         && let Some(value) = item.auto_correction_on_text_input
     {
-        xml.push_str(&format!(
-            "{tab}\t<AutoCorrectionOnTextInput>{}</AutoCorrectionOnTextInput>\r\n",
-            escape_xml_text(value)
-        ));
+        crate::form_schema::FormScalarXmlProperty::AutoCorrectionOnTextInput.emit(
+            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+        );
     }
     // `SpellCheckingOnTextInput` stands immediately behind
     // `AutoShowOpenButtonMode`: the one native item that carries it lists that
@@ -36005,13 +35925,12 @@ pub(super) fn format_form_child_item_xml(
     // A pages container writes `CurrentRowUse` right behind its
     // representation (ЛИМС КОРП `Catalogs/ПодключаемоеОборудование/Forms/
     // ФормаЭлемента` `Закладки`).
-    if item.tag == "Pages"
+    if crate::form_schema::FormContainerCurrentRowSchema::from_tag(item.tag).is_some_and(|schema| schema.is_pages())
         && let Some(value) = item.usual_group_current_row_use
     {
-        xml.push_str(&format!(
-            "{tab}\t<CurrentRowUse>{}</CurrentRowUse>\r\n",
-            escape_xml_text(value)
-        ));
+        crate::form_schema::FormScalarXmlProperty::CurrentRowUse.emit(
+            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+        );
     }
     if matches!(item.tag, "Page" | "UsualGroup")
         && let Some(title_data_path) = &item.title_data_path
@@ -38793,34 +38712,25 @@ fn form_planner_labels_xml(
     }
     let record = split_1c_braced_fields(labels.get(1)?.trim(), 0)?;
     let count: usize = record.get(1)?.trim().parse().ok()?;
-    if record.first()?.trim() != "1"
-        || count > MAX_FORM_PLANNER_ITEMS
-        || record.len() != 3 + 2 * count
-    {
-        return None;
-    }
-    let tab = "\t".repeat(indent);
-    let mut xml = format!("{tab}<labels>\r\n");
+    if !crate::form_schema::FormPlannerDatedLabelsSchema::recognizes_record(
+        &record, count, MAX_FORM_PLANNER_ITEMS,
+    ) { return None; }
+    let mut labels = Vec::with_capacity(count);
     for pair in record.get(2..2 + 2 * count)?.chunks_exact(2) {
         let label = split_1c_braced_fields(pair.get(1)?.trim(), 0)?;
-        // The dated labels in the corpus carry empty unformatted text and
-        // two independent colors. Decline other payloads rather than lose them.
-        if label.len() != 7
-            || label.first()?.trim() != "5"
-            || form_chart_compact(label.get(1)?) != "{0}"
-            || form_chart_compact(label.get(2)?) != "{1,0}"
-            || form_chart_compact(label.get(3)?) != "{\"U\"}"
-            || form_chart_compact(label.get(6)?) != "{1,{1,0},0}"
-        {
+        let compact: Vec<String> = label.iter().map(|field| form_chart_compact(field)).collect();
+        if !crate::form_schema::FormPlannerDatedLabelsSchema::recognizes_label(&compact) {
             return None;
         }
-        xml.push_str(&format!("{tab}\t<label>\r\n{tab}\t\t<key>{}</key>\r\n{tab}\t\t<text/>\r\n{tab}\t\t<textFormatted>false</textFormatted>\r\n{tab}\t\t<lineColor>{}</lineColor>\r\n{tab}\t\t<textColor>{}</textColor>\r\n{tab}\t</label>\r\n",
-            form_planner_date(pair.first()?.trim())?, form_chart_color(label.get(4)?, object_refs)?, form_chart_color(label.get(5)?, object_refs)?));
+        labels.push(crate::form_schema::FormPlannerDatedLabel {
+            key: form_planner_date(pair.first()?.trim())?,
+            line_color: form_chart_color(label.get(4)?, object_refs)?,
+            text_color: form_chart_color(label.get(5)?, object_refs)?,
+        });
     }
-    xml.push_str(&format!(
-        "{tab}\t<ticks>{}</ticks>\r\n{tab}</labels>\r\n",
-        form_chart_integer(record.last()?)?
-    ));
+    let xml = crate::form_schema::FormPlannerDatedLabelsSchema::emit(
+        &labels, &form_chart_integer(record.last()?)?, indent,
+    );
     Some(xml)
 }
 
@@ -40585,16 +40495,10 @@ fn format_form_chart_settings_body_xml(
     // ДиспетчированиеГрафикаПроизводства/Forms/ДиагностикаФормированияГрафика`).
     let mut owned = Vec::new();
     let data = if data.first().map(|value| value.trim()) == Some("75") {
-        let cut = data.len().checked_sub(8)?;
+        let cut = crate::form_schema::FormChartColorTailLayout::payload_end(data, form_chart_compact)?;
         // The eight colours are any colour: 8.3.27 has no element for them
         // and prints none, automatic or not (`ДиагностикаФормированияГрафика`
         // stores four `style` colours there).
-        if !data[cut..]
-            .iter()
-            .all(|member| form_chart_compact(member).starts_with("{3,"))
-        {
-            return None;
-        }
         owned.push("74");
         owned.extend_from_slice(&data[1..cut]);
         owned.as_slice()

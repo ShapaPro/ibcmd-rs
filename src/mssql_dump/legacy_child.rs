@@ -9,6 +9,7 @@
 //! Rewriting the old record once lets every parser keep its one layout.
 
 use super::split_1c_braced_fields;
+use ibcmd_schema::metadata_child_storage_facts::LegacyTypedMetadataChildLayout;
 
 /// Byte offset just past the brace that closes the one opening at `start`.
 fn braced_end(text: &str, start: usize) -> Option<usize> {
@@ -47,31 +48,44 @@ fn braced_end(text: &str, start: usize) -> Option<usize> {
 /// `{25, …}` rewritten as `{27, …}`, or `None` when the record is not one.
 fn upgrade_record(record: &str) -> Option<String> {
     let fields = split_1c_braced_fields(record, 0)?;
-    if fields.len() != 21 || fields.first()?.trim() != "25" {
-        return None;
-    }
-    let typed = split_1c_braced_fields(fields.get(1)?.trim(), 0)?;
-    if typed.len() != 3 || typed.first()?.trim() != "2" {
+    let layout = LegacyTypedMetadataChildLayout::from_fields(&fields)?;
+    let typed = split_1c_braced_fields(fields.get(layout.typed_payload_slot)?.trim(), 0)?;
+    if !LegacyTypedMetadataChildLayout::typed_payload_is_valid(&typed) {
         return None;
     }
     if !typed.get(1)?.trim().starts_with('{') {
         return None;
     }
-    let typed = fields.get(1)?.trim().to_string();
-    let mut members = vec!["27".to_string(), typed];
-    members.extend(fields[2..].iter().map(|field| field.to_string()));
-    members.extend(["0".to_string(), "0".to_string()]);
+    let typed = fields.get(layout.typed_payload_slot)?.trim().to_string();
+    let mut members = vec![layout.current_revision.to_string(), typed];
+    members.extend(fields[layout.following_members_slot..].iter().map(|field| field.to_string()));
+    members.extend(layout.appended_defaults.iter().map(|field| field.to_string()));
     Some(format!("{{{}}}", members.join(",")))
 }
 
 /// The text with every old child record upgraded; `None` when none is found.
 pub(super) fn upgrade_legacy_child_records(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
     let mut out = String::new();
     let mut copied = 0;
     let mut cursor = 0;
     let mut changed = false;
-    while let Some(found) = text[cursor..].find("{25,") {
-        let start = cursor + found;
+    let mut in_string = false;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            if in_string && bytes.get(cursor + 1) == Some(&b'"') {
+                cursor += 2;
+                continue;
+            }
+            in_string = !in_string;
+            cursor += 1;
+            continue;
+        }
+        if in_string || !bytes[cursor..].starts_with(LegacyTypedMetadataChildLayout::RECORD_START) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
         let Some(end) = braced_end(text, start) else {
             break;
         };
@@ -111,5 +125,29 @@ mod tests {
     #[test]
     fn leaves_other_records_alone() {
         assert!(upgrade_legacy_child_records("{25,1,2}").is_none());
+    }
+
+    #[test]
+    fn leaves_record_shaped_text_inside_quoted_comments_unchanged() {
+        let record = format!("{{25,{{2,{{3}},{{Pattern}}}},{}}}", ["0"; 19].join(","));
+        assert!(upgrade_legacy_child_records(&record).is_some());
+        for comment in [
+            format!(r#"{{1,"{record}"}}"#),
+            format!(r#"{{1,"prefix ""quoted"" {record} suffix"}}"#),
+        ] {
+            assert!(upgrade_legacy_child_records(&comment).is_none());
+        }
+    }
+
+    #[test]
+    fn upgrades_nested_records_after_escaped_quoted_comments() {
+        let record = format!("{{25,{{2,{{3}},{{Pattern}}}},{}}}", ["0"; 19].join(","));
+        let prefix = format!(r#"{{1,"prefix ""quoted"" {record}",{{5,"#);
+        let text = format!("{prefix}{record},0,1}}}}");
+        let upgraded = upgrade_legacy_child_records(&text).unwrap();
+        assert!(upgraded.starts_with(&prefix));
+        assert_eq!(upgraded.matches("{25,").count(), 1);
+        assert_eq!(upgraded.matches("{27,").count(), 1);
+        assert!(upgraded.ends_with(",0,0},0,1}}"));
     }
 }

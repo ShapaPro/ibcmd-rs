@@ -1541,14 +1541,7 @@ impl MetadataSourceContext {
             .ok_or_else(|| anyhow!("invalid metadata type reference: {reference}"))?;
         // A tabular section's types (`DocumentTabularSection.<owner>.<section>`)
         // live in the owner's own file.
-        let owner_file = if generated_type_name
-            .split_once('.')
-            .is_some_and(|(head, _)| head.contains("TabularSection"))
-        {
-            name.split_once('.').map(|(owner, _)| owner)
-        } else {
-            None
-        };
+        let owner_file = ibcmd_schema::generated_tabular_section_source_owner(generated_type_name);
         if let Some(owner) = owner_file {
             let path = self.source_root.join(folder).join(format!("{owner}.xml"));
             if let Ok(xml) = self.read_source(&path)
@@ -2327,13 +2320,12 @@ pub fn pack_additional_indexes_blob_from_xml(
         let field_node = |name: &str| -> Result<StyleNode> {
             // A catalog's standard fields carry the catalog's own codes
             // (`Code` -2 on one 8.3.27 corpus), not the register ones.
-            let catalog_code = (owner_kind == "Catalog")
-                .then(|| {
-                    crate::metadata_model::objects::CATALOG_STANDARD
-                        .iter()
-                        .find(|(standard, _)| *standard == name)
-                })
-                .flatten();
+            let catalog_code = matches!(
+                ibcmd_schema::metadata_child_storage_facts::AdditionalIndexStandardFieldFamily::for_owner(owner_kind),
+                ibcmd_schema::metadata_child_storage_facts::AdditionalIndexStandardFieldFamily::Catalog
+            )
+            .then_some(ibcmd_schema::metadata_child_storage_facts::CATALOG_STANDARD_FIELDS)
+            .and_then(|codes| codes.iter().find(|(standard, _)| *standard == name));
             let slot = match name {
                 _ if catalog_code.is_some() => StyleNode::List(vec![StyleNode::token(
                     catalog_code
@@ -4882,7 +4874,7 @@ fn format_native_table_record(
             main_attribute_class,
             source,
             items_root,
-            nested_in_gantt_chart.then_some(item.id.as_str()),
+            Some(item.id.as_str()),
         )?);
     }
 
@@ -5683,7 +5675,7 @@ fn native_container_payload(
                 &associated,
                 item.scalars.get("CurrentRowUse").map(String::as_str),
             )
-            .ok_or_else(|| anyhow!("<Pages> names a spelling the writer cannot place"))
+            .ok_or_else(|| anyhow!("the pages group names a spelling the writer cannot place"))
         }
         "Popup" => {
             let picture = native_item_picture(item, source, items_root)?;
@@ -6435,8 +6427,8 @@ fn native_field_payload(
 ) -> Result<String> {
     use crate::compiler::bodies::form_native as native;
     let events = native_item_events_where(item, main_attribute_class, |name| name != "OnChange")?;
-    match item.tag.as_str() {
-        "LabelField" => Ok(native::format_label_payload(&native::NativeLabelPayload {
+    match native::native_field_kind(&item.tag) {
+        Some(1) => Ok(native::format_label_payload(&native::NativeLabelPayload {
             width: item.width.as_deref().unwrap_or("0"),
             height: item.height.as_deref().unwrap_or("0"),
             horizontal_stretch: item.horizontal_stretch,
@@ -6459,7 +6451,7 @@ fn native_field_payload(
             border_color: &native_scalar_color(item, "BorderColor", source)?,
             ..native::NativeLabelPayload::plain(false)
         })),
-        "InputField" => {
+        Some(2) => {
             let choice_parameter_links = native_choice_parameter_links(item, data_paths)?;
             native::format_input_payload(&native::NativeInputPayload {
                 width: item.width.as_deref().unwrap_or("0"),
@@ -6553,7 +6545,7 @@ fn native_field_payload(
             })
             .ok_or_else(|| anyhow!("the input field names something the writer cannot place"))
         }
-        "CheckBoxField" => {
+        Some(3) => {
             // Slot 5 holds a check box's `<EditFormat>` -- the `БЛ=…; БИ=…`
             // pair of its two captions, 81 ERP УХ forms -- and `<Format>` when
             // it names that instead.
@@ -6582,7 +6574,7 @@ fn native_field_payload(
             })
             .ok_or_else(|| anyhow!("<CheckBoxField> names a spelling the writer cannot place"))
         }
-        "GraphicalSchemaField" => {
+        Some(14) => {
             // The exporter reads the kind's own tuple for its extent,
             // `<Output>`, `<Edit>` and `<AutoMaxWidth>` only
             // (`FORM_DOCUMENT_FIELD_GEOMETRY`): the other geometry flags and
@@ -6612,7 +6604,7 @@ fn native_field_payload(
                 anyhow!("<GraphicalSchemaField> names a spelling the writer cannot place")
             })
         }
-        "PlannerField" => {
+        Some(19) => {
             if item.max_width.is_some()
                 || item.max_height.is_some()
                 || item.auto_max_width.is_some()
@@ -6621,7 +6613,7 @@ fn native_field_payload(
                 || item.vertical_stretch == Some(false)
             {
                 return Err(anyhow!(
-                    "a <PlannerField> names a property whose slot is not measured"
+                    "the planner field names a property whose slot is not measured"
                 ));
             }
             Ok(native::format_planner_payload(
@@ -6631,7 +6623,7 @@ fn native_field_payload(
                 &events,
             ))
         }
-        "ChartField" => {
+        Some(11) => {
             let horizontal = item.horizontal_stretch.unwrap_or(true);
             let vertical = item.vertical_stretch.unwrap_or(true);
             if horizontal != vertical
@@ -6656,7 +6648,7 @@ fn native_field_payload(
         // and the stretch pair only where they are not the default, so a
         // default the source spells out would not come back and refuses, as
         // does every extent the bag has no member for.
-        "GanttChartField" => {
+        Some(12) => {
             let count = |value: Option<&str>| {
                 value.is_none_or(|value| {
                     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
@@ -6688,7 +6680,7 @@ fn native_field_payload(
                 &events,
             ))
         }
-        "PDFDocumentField" => {
+        Some(20) => {
             if events != "{0,1,0}"
                 || item.max_width.is_some()
                 || item.max_height.is_some()
@@ -6706,7 +6698,7 @@ fn native_field_payload(
                 item.height.as_deref().unwrap_or("10"),
             ))
         }
-        "HTMLDocumentField" => {
+        Some(15) => {
             native::format_html_document_payload(&native::NativeHtmlDocumentPayload {
                 // A document field's size defaults are not a field's: absent
                 // stores 50 and 10, over all 222 records of both corpora.
@@ -6724,7 +6716,7 @@ fn native_field_payload(
             })
             .ok_or_else(|| anyhow!("<HTMLDocumentField> names a spelling the writer cannot place"))
         }
-        "FormattedDocumentField" => {
+        Some(17) => {
             // Members 3 and 4, horizontal then vertical: the exporter reads
             // them so, and the 8.5.1.1150 BSP field that stretches one way
             // only exports byte for byte through it.
@@ -6747,7 +6739,7 @@ fn native_field_payload(
                 },
             ))
         }
-        "TextDocumentField" => Ok(native::format_text_document_payload(
+        Some(7) => Ok(native::format_text_document_payload(
             &native::NativeTextDocumentPayload {
                 width: item.width.as_deref().unwrap_or("50"),
                 height: item.height.as_deref().unwrap_or("10"),
@@ -6762,7 +6754,7 @@ fn native_field_payload(
                 events: &events,
             },
         )),
-        "RadioButtonField" => {
+        Some(5) => {
             // The font and the choice list used to refuse together, which
             // put 114 BSP forms behind a condition none of them meets: not
             // one radio button of that tree names a `<Font>`. They are two
@@ -6790,7 +6782,7 @@ fn native_field_payload(
             })
             .ok_or_else(|| anyhow!("<RadioButtonField> names a spelling the writer cannot place"))
         }
-        "SpreadSheetDocumentField" => {
+        Some(6) => {
             let border_color = native_scalar_color(item, "BorderColor", source)?;
             native::format_spreadsheet_payload(&native::NativeSpreadsheetPayload {
                 events: &events,
@@ -6831,7 +6823,7 @@ fn native_field_payload(
         // width (32 when absent), a constant 1, the horizontal stretch, the
         // maximum (100), the representation (`Broken` 0, absent 1), the
         // percentage and the maximum-width switch; the rest never varies.
-        "ProgressBarField" => {
+        Some(9) => {
             if item.height.is_some() {
                 return Err(anyhow!(
                     "a progress bar names a height, which is not measured"
@@ -6864,7 +6856,7 @@ fn native_field_payload(
         // switch, the font and colour, the events, the months panel, the
         // months across and down (1 when absent), the border (style 1 when
         // absent), and the maximum-size switches.
-        "CalendarField" => {
+        Some(8) => {
             let events =
                 native_item_events_where(item, main_attribute_class, |name| name != "OnChange")?;
             let border = if item.control_border.is_none() && !item.control_border_seen {
@@ -6885,16 +6877,9 @@ fn native_field_payload(
                 hstretch = u8::from(item.horizontal_stretch.unwrap_or(true)),
                 vstretch = u8::from(item.vertical_stretch.unwrap_or(true)),
                 max_height = item.max_height.as_deref().unwrap_or("0"),
-                selection = match item.scalars.get("SelectionMode").map(String::as_str) {
-                    None => "0",
-                    Some("Multiple") => "1",
-                    Some("Interval") => "2",
-                    Some(other) => {
-                        return Err(anyhow!(
-                            "a calendar's <SelectionMode>{other} is not measured"
-                        ));
-                    }
-                },
+                selection = crate::form_schema::form_calendar_selection_mode_code(
+                    item.scalars.get("SelectionMode").map(String::as_str),
+                ).ok_or_else(|| anyhow!("a calendar's selection mode is not measured"))?,
                 drag = u8::from(item.enable_drag.unwrap_or(false)),
                 current = u8::from(native_scalar_flag(item, "ShowCurrentDate", true)),
                 font = native_item_font(item, source)?,
@@ -6913,20 +6898,10 @@ fn native_field_payload(
             ))
         }
         // A track bar's `{2,…}` payload, 18 members over 13 records.
-        "TrackBarField" => {
-            let marking = match item.scalars.get("MarkingAppearance").map(String::as_str) {
-                None => "2",
-                Some("TopLeft") => "1",
-                // The exporter reads `0` as `DontShow` (form_schema.rs, the
-                // track bar's option 11); Управление задачами
-                // `Reports/узПланированиеПроекта/Forms/ФормаУправляемая`.
-                Some("DontShow") => "0",
-                Some(other) => {
-                    return Err(anyhow!(
-                        "a track bar's <MarkingAppearance>{other} is not measured"
-                    ));
-                }
-            };
+        Some(10) => {
+            let marking = crate::form_schema::form_track_bar_marking_appearance_code(
+                item.scalars.get("MarkingAppearance").map(String::as_str),
+            ).ok_or_else(|| anyhow!("a track bar's marking appearance is not measured"))?;
             Ok(format!(
                 "{{2,{width},{height},{stretch},0,{min},{max},{step},0,{large_step},{marking_step},{marking},{{3,4,{{0}}}},{auto_max_width},{max_width},0,1,0}}",
                 width = item.width.as_deref().unwrap_or("32"),
@@ -6942,7 +6917,7 @@ fn native_field_payload(
                 max_width = item.max_width.as_deref().unwrap_or("0"),
             ))
         }
-        "PictureField" => {
+        Some(4) => {
             if item.picture_present {
                 return Err(anyhow!("a picture field names a picture"));
             }
@@ -7077,7 +7052,7 @@ fn native_decoration_payload(
         )
         .ok_or_else(|| {
             anyhow!(
-                "<PictureDecoration> {} names a spelling the payload writer cannot place (PictureSize {:?}, FileDragMode {:?})",
+                "picture decoration {} names a spelling the payload writer cannot place (PictureSize {:?}, FileDragMode {:?})",
                 item.name,
                 item.scalars.get("PictureSize"),
                 file_drag_mode
@@ -8993,6 +8968,7 @@ fn format_native_form_body(
         native_mobile_device_command_bar_content(properties, &data_paths.form.items)?;
     let tail = crate::compiler::bodies::form_native::format_root_tail(
         &crate::compiler::bodies::form_native::NativeRootTail {
+            scale: properties.root_scalars.get("Scale").map(String::as_str),
             auto_url: properties.auto_url.unwrap_or(true),
             vertical_scroll: properties.vertical_scroll.map(|scroll| match scroll {
                 FormXmlVerticalScroll::UseIfNecessary => "useIfNecessary",
@@ -9034,7 +9010,6 @@ fn format_native_form_body(
             }),
             show_title: properties.show_title.unwrap_or(true),
             show_close_button: properties.show_close_button.unwrap_or(true),
-            scale: properties.root_scalars.get("Scale").map(String::as_str),
             conversations_representation: properties
                 .root_scalars
                 .get("ConversationsRepresentation")
@@ -11235,7 +11210,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                         .push_str(chunk.as_ref());
                 }
                 if form_nested_text_element(&path) {
-                    nested_text.push_str(text.xml_content()?.as_ref());
+                    nested_text.push_str(&form_text_chunk(&text, &path)?);
                 }
                 // A scalar child of a child item -- `<LabelDecoration><TextColor>`
                 // and its like. The record writers read these from the item's
@@ -11795,7 +11770,7 @@ fn parse_form_xml_body_properties(xml: &[u8]) -> Result<FormXmlBodyProperties> {
                         .push_str(chunk.as_ref());
                 }
                 if form_nested_text_element(&path) {
-                    nested_text.push_str(text.xml_content()?.as_ref());
+                    nested_text.push_str(&form_text_chunk(&text, &path)?);
                 }
                 if path_ends_with(&path, &["Form", "WindowOpeningMode"])
                     || path_ends_with(&path, &["Form", "EnterKeyBehavior"])
@@ -33275,6 +33250,42 @@ mod tests {
         r#"xmlns:xs="http://www.w3.org/2001/XMLSchema" "#,
         r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">"#,
     );
+
+    #[test]
+    fn choice_list_localized_content_preserves_stored_carriage_returns() -> anyhow::Result<()> {
+        let xml = format!(
+            "{FORM_XML_HEAD}<ChildItems><RadioButtonField name=\"Choice\" id=\"1\"><ChoiceList><xr:Item><xr:Value xsi:type=\"FormChoiceListDesTimeValue\"><Presentation><v8:item><v8:lang>en</v8:lang><v8:content>first\r\nsecond &amp; third</v8:content></v8:item></Presentation><Value xsi:type=\"xs:string\">value</Value></xr:Value></xr:Item></ChoiceList></RadioButtonField></ChildItems></Form>"
+        );
+        let properties = super::parse_form_xml_body_properties(xml.as_bytes())?;
+        let choices = properties.child_items[0].choice_list.as_ref().unwrap();
+        assert_eq!(choices[0].title[0].content, "first\r\r\nsecond & third");
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_table_additions_without_source_serve_the_enclosing_table() -> anyhow::Result<()> {
+        use crate::metadata_model::brace::{self, Brace};
+        let mut xml = format!("{FORM_XML_HEAD}<ChildItems><Table name=\"Rows\" id=\"25\"><AutoCommandBar name=\"Bar\" id=\"26\"/>");
+        for (index, tag) in ["SearchStringAddition", "ViewStatusAddition", "SearchControlAddition"].iter().enumerate() {
+            let id = index * 3 + 30;
+            xml.push_str(&format!("<{tag} name=\"Addition{index}\" id=\"{id}\"><ContextMenu name=\"Menu{index}\" id=\"{}\"/><ExtendedTooltip name=\"Tip{index}\" id=\"{}\"/></{tag}>", id + 1, id + 2));
+        }
+        xml.push_str("<ContextMenu name=\"TableMenu\" id=\"50\"/><ExtendedTooltip name=\"TableTip\" id=\"51\"/></Table></ChildItems></Form>");
+        let body = super::compile_native_form_body(xml.as_bytes(), None, None, None)?;
+        let tree = brace::parse_row(body.as_bytes())?;
+        fn collect(node: &Brace, sources: &mut Vec<Brace>) {
+            if let Some(items) = node.as_list() {
+                if items.get(6).and_then(Brace::as_str).is_some_and(|name| name.starts_with("Addition")) {
+                    sources.push(items[19].clone());
+                }
+                for child in items { collect(child, sources); }
+            }
+        }
+        let mut sources = Vec::new();
+        collect(&tree, &mut sources);
+        assert_eq!(sources, vec![Brace::list(vec![Brace::num(25), Brace::num(0)]); 3]);
+        Ok(())
+    }
 
     /// `<MobileDeviceCommandBarContent>` reaches root trailer slot 22, and
     /// what it stores there is the id of the form **item** its `<xr:Value>`
