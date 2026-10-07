@@ -110,7 +110,7 @@ impl LegacyMetadataRecordLayout {
         tag == "1" && members == 8 && collection_count == "5"
     }
     pub fn document_journal_owner(members: usize, attribute_prefix: &str) -> bool {
-        members == 17 && attribute_prefix == "{1,{1,6,{-60003},"[..17]
+        members == 17 && attribute_prefix == "{1,{1,6,{-60003},"
     }
     pub fn command_group_owner(tag: &str, members: usize) -> bool {
         tag == "3" && members == 7
