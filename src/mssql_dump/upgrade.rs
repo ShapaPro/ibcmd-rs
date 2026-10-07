@@ -18,11 +18,11 @@
 //! A record in a version no rule names is left as stored; its reader refuses
 //! it as before (fail closed).
 
-use std::ops::Range;
 use ibcmd_schema::metadata_record_upgrades::{
-    LegacyMetadataRecordLayout, ATTRIBUTE_WRAPPER_UPGRADES,
-    enum_owner_upgrade, history_owner_upgrade,
+    ATTRIBUTE_WRAPPER_UPGRADES, LegacyMetadataRecordLayout, enum_owner_upgrade,
+    history_owner_upgrade,
 };
+use std::ops::Range;
 
 use super::metadata::{MetadataTextRow, parse_metadata_object_code};
 
@@ -213,7 +213,9 @@ fn upgrade_old_attribute_wrappers(text: &str) -> Option<String> {
                     .get(1)
                     .map(|range| member(text, range))
                     .unwrap_or("");
-                if wrapper.first().is_some_and(|field| upgrade.accepts(member(text, field), wrapper.len(), common)) {
+                if wrapper.first().is_some_and(|field| {
+                    upgrade.accepts(member(text, field), wrapper.len(), common)
+                }) {
                     edits.push((trimmed(text, &wrapper[0]), upgrade.target_revision));
                     if !upgrade.appended_members.is_empty() {
                         edits.push((close..close, upgrade.appended_members));
@@ -310,11 +312,17 @@ fn upgrade_common_command(text: &str) -> Option<String> {
         return None;
     }
     let (wrapper, _) = members(text, list_open(text, &root[1])?)?;
-    if !LegacyMetadataRecordLayout::common_command_wrapper(member(text, wrapper.first()?), wrapper.len()) {
+    if !LegacyMetadataRecordLayout::common_command_wrapper(
+        member(text, wrapper.first()?),
+        wrapper.len(),
+    ) {
         return None;
     }
     let (command, _) = members(text, list_open(text, &wrapper[1])?)?;
-    if !LegacyMetadataRecordLayout::common_command_envelope(member(text, command.first()?), command.len()) {
+    if !LegacyMetadataRecordLayout::common_command_envelope(
+        member(text, command.first()?),
+        command.len(),
+    ) {
         return None;
     }
     let (ids, _) = members(text, list_open(text, &command[1])?)?;
@@ -322,7 +330,10 @@ fn upgrade_common_command(text: &str) -> Option<String> {
         return None;
     }
     let (record, _) = members(text, list_open(text, &command[2])?)?;
-    if !LegacyMetadataRecordLayout::common_command_record(member(text, record.first()?), record.len()) {
+    if !LegacyMetadataRecordLayout::common_command_record(
+        member(text, record.first()?),
+        record.len(),
+    ) {
         return None;
     }
     let (first, first_close) = members(text, list_open(text, &record[1])?)?;
@@ -358,7 +369,11 @@ fn upgrade_common_command(text: &str) -> Option<String> {
 fn upgrade_legacy_history_owner(text: &str) -> Option<String> {
     let root_open = text.find('{')?;
     let (root, _) = members(text, root_open)?;
-    if !LegacyMetadataRecordLayout::history_root(member(text, root.first()?), root.len(), member(text, root.get(2)?)) {
+    if !LegacyMetadataRecordLayout::history_root(
+        member(text, root.first()?),
+        root.len(),
+        member(text, root.get(2)?),
+    ) {
         return None;
     }
     let owner_open = list_open(text, root.get(1)?)?;
@@ -393,7 +408,10 @@ fn upgrade_form_record(text: &str) -> Option<String> {
     let (mut wrapper, _) = members(text, wrapper_open)?;
     // One form record of 1C:Документооборот sits a level deeper,
     // `{1,{0,{12,…}},{0}}`.
-    if LegacyMetadataRecordLayout::form_has_nested_wrapper(member(text, wrapper.first()?), wrapper.len()) {
+    if LegacyMetadataRecordLayout::form_has_nested_wrapper(
+        member(text, wrapper.first()?),
+        wrapper.len(),
+    ) {
         let inner_open = list_open(text, &wrapper[1])?;
         wrapper = members(text, inner_open)?.0;
         if member(text, wrapper.first()?) != "0" {
@@ -748,7 +766,9 @@ mod tests {
     #[test]
     fn legacy_catalog_standard_attributes_inside_comments_stay_unchanged() {
         let codes = ["-10", "-8", "-7", "-6", "-5", "-4", "-3", "-2"];
-        let entries = codes.map(|code| format!("{{{code}}},s,{{b{code}}}")).join(",");
+        let entries = codes
+            .map(|code| format!("{{{code}}},s,{{b{code}}}"))
+            .join(",");
         let body = format!("{{1,8,{entries}}}");
         let comment = format!(r#"{{1,"prefix ""quoted"" {body}"}}"#);
         assert!(upgrade_catalog_predefined_data_name(&comment).is_none());

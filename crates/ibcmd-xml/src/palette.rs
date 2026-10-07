@@ -26,16 +26,27 @@ mod tests {
     #[test]
     fn unused_palette_declaration_is_the_only_removed_lexeme() {
         let xml = b"\xef\xbb\xbf<Settings xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\" keep='exact'/>\r\n";
-        assert_eq!(strip_unused_palette_namespace(xml.to_vec()), b"\xef\xbb\xbf<Settings keep='exact'/>\r\n");
+        assert_eq!(
+            strip_unused_palette_namespace(xml.to_vec()),
+            b"\xef\xbb\xbf<Settings keep='exact'/>\r\n"
+        );
     }
 
     #[test]
     fn used_palette_prefix_in_names_attribute_values_or_text_keeps_exact_bytes() {
-        for usage in ["<pal:Color/>", "<Color xsi:type='pal:Color'/>", "<Value>pal:Color</Value>", "<!-- pal:Color -->"] {
+        for usage in [
+            "<pal:Color/>",
+            "<Color xsi:type='pal:Color'/>",
+            "<Value>pal:Color</Value>",
+            "<!-- pal:Color -->",
+        ] {
             let xml = format!("<Settings xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\">{usage}</Settings>").into_bytes();
             assert_eq!(strip_unused_palette_namespace(xml.clone()), xml);
         }
         let invalid_utf8 = vec![0xff, 0xfe];
-        assert_eq!(strip_unused_palette_namespace(invalid_utf8.clone()), invalid_utf8);
+        assert_eq!(
+            strip_unused_palette_namespace(invalid_utf8.clone()),
+            invalid_utf8
+        );
     }
 }

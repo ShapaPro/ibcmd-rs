@@ -10031,14 +10031,28 @@ mod tests {
     fn root_scale_rejects_non_numeric_and_extra_member_input() {
         let expected = format_root_tail(&NativeRootTail::default()).unwrap();
         assert_eq!(
-            format_root_tail(&NativeRootTail { scale: Some("0100"), ..NativeRootTail::default() }),
+            format_root_tail(&NativeRootTail {
+                scale: Some("0100"),
+                ..NativeRootTail::default()
+            }),
             Some(expected)
         );
-        assert!(format_root_tail(&NativeRootTail { scale: Some("130"), ..NativeRootTail::default() }).is_some());
+        assert!(
+            format_root_tail(&NativeRootTail {
+                scale: Some("130"),
+                ..NativeRootTail::default()
+            })
+            .is_some()
+        );
         for invalid in ["1,0", "abc", "4294967296", "-1", ""] {
-            assert!(format_root_tail(&NativeRootTail {
-                scale: Some(invalid), ..NativeRootTail::default()
-            }).is_none(), "accepted invalid scale {invalid}");
+            assert!(
+                format_root_tail(&NativeRootTail {
+                    scale: Some(invalid),
+                    ..NativeRootTail::default()
+                })
+                .is_none(),
+                "accepted invalid scale {invalid}"
+            );
         }
     }
 

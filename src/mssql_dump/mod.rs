@@ -6245,7 +6245,8 @@ fn is_direct_code14_form_metadata_text(text: &str, uuid: &str) -> bool {
         return false;
     };
     ibcmd_schema::metadata_storage_facts::direct_form_header_layout(
-        fields.first().map(|field| field.trim()), fields.len(),
+        fields.first().map(|field| field.trim()),
+        fields.len(),
     ) && metadata_header_field_index(&fields, uuid) == Some(1)
         && information_register_bool(fields[2]).is_some()
         && information_register_bool(fields[3]).is_some()
@@ -11897,9 +11898,9 @@ fn push_indexed_tabular_section_generated_types(
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut from = 0;
-    while let Some(offset) = text[from..].find(
-        ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::RECORD_START,
-    ) {
+    while let Some(offset) = text[from..]
+        .find(ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::RECORD_START)
+    {
         let start = from + offset;
         from = start + 4;
         let Some(end) = matching_1c_brace(bytes, start) else {
@@ -11908,7 +11909,9 @@ fn push_indexed_tabular_section_generated_types(
         let Some(fields) = split_1c_braced_fields(&text[start..=end], 0) else {
             continue;
         };
-        if !ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::record_is_valid(&fields) {
+        if !ibcmd_schema::metadata_storage_facts::GeneratedTabularSectionLayout::record_is_valid(
+            &fields,
+        ) {
             continue;
         }
         let ids = fields[1..5]
@@ -14805,7 +14808,9 @@ fn parse_strict_tabular_sections(
             // stores all four sections that way and the platform writes
             // `<LineNumberLength>5</LineNumberLength>` on each.
             "ExchangePlan" if exchange_plan_modern_layout => {
-                if !ibcmd_schema::metadata_storage_facts::modern_exchange_plan_section_envelope(&wrapper) {
+                if !ibcmd_schema::metadata_storage_facts::modern_exchange_plan_section_envelope(
+                    &wrapper,
+                ) {
                     return None;
                 }
             }
@@ -18795,8 +18800,12 @@ fn parse_register_include_help_in_contents(
     if fields.len() < header_index + layout.minimum_fields_after_header {
         return layout.absent_or_malformed_default;
     }
-    parse_1c_bool_field(fields.get(header_index + layout.offset_after_header).copied())
-        .or(layout.absent_or_malformed_default)
+    parse_1c_bool_field(
+        fields
+            .get(header_index + layout.offset_after_header)
+            .copied(),
+    )
+    .or(layout.absent_or_malformed_default)
 }
 
 fn parse_register_presentations(
@@ -19184,7 +19193,9 @@ fn register_child_object_tag(kind: &str, text: &str, marker_start: usize) -> Opt
         }
         // Version 30 registers wrap a resource in `{6, …}` (one 8.3.27
         // corpus), so the collection class names the family instead.
-        for (tag, markers) in ibcmd_schema::metadata_storage_facts::information_register_child_collections() {
+        for (tag, markers) in
+            ibcmd_schema::metadata_storage_facts::information_register_child_collections()
+        {
             if refs::is_offset_inside_any_list_marker(text, marker_start, markers) {
                 return Some(*tag);
             }
@@ -27229,7 +27240,9 @@ pub(super) fn catalog_string_code_length(text: &str, uuid: &str) -> Option<usize
         &mut diagnostic,
     )?;
     let fields = &owner_graph.owner_fields;
-    if !ibcmd_schema::metadata_storage_facts::catalog_code_is_string(parse_exchange_plan_u32(fields.get(18)?)?) {
+    if !ibcmd_schema::metadata_storage_facts::catalog_code_is_string(parse_exchange_plan_u32(
+        fields.get(18)?,
+    )?) {
         return None;
     }
     usize::try_from(parse_exchange_plan_u32(
@@ -28991,7 +29004,9 @@ fn parse_document_properties_from_text(
             // (`0`) and `Day` 1 (`4`, `uh`'s
             // `Documents/РеестрСведенийНеобходимыхДляНазначенияИВыплатыПособий`).
             // Codes the corpus never writes stay refused.
-            number_periodicity: ibcmd_schema::metadata_storage_facts::document_number_periodicity(fields.get(13)?)?,
+            number_periodicity: ibcmd_schema::metadata_storage_facts::document_number_periodicity(
+                fields.get(13)?,
+            )?,
             check_unique: information_register_bool(fields.get(14)?)?,
             autonumbering: information_register_bool(fields.get(15)?)?,
         },
@@ -32379,7 +32394,9 @@ fn parse_data_processor_properties_from_text(
 ) -> Option<DataProcessorProperties> {
     let header = parse_metadata_header_from_text(text, uuid)?;
     let fields = metadata_object_fields(text)?;
-    if !ibcmd_schema::metadata_storage_facts::data_processor_owner_revision(fields.first().map(|value| value.trim())) {
+    if !ibcmd_schema::metadata_storage_facts::data_processor_owner_revision(
+        fields.first().map(|value| value.trim()),
+    ) {
         return None;
     }
 
@@ -36269,7 +36286,8 @@ fn parse_style_body_items(
     }
     // `{0}` is a brand record with no colour (`Styles/Основной` of a
     // configuration stored by 8.5), which writes nothing.
-    let brand = brand.filter(|record| ibcmd_schema::metadata_storage_facts::style_brand_has_color(record));
+    let brand =
+        brand.filter(|record| ibcmd_schema::metadata_storage_facts::style_brand_has_color(record));
     if let Some(brand) = brand {
         // `{1,{0,<colour>}}`: one colour, item 0.
         let record = split_1c_braced_fields(brand, 0)?;
@@ -45644,9 +45662,10 @@ fn metadata_type_xml_namespace_attr(value_type: &ConstantValueType) -> &'static 
             r#" xmlns:d7p1="http://v8.1c.ru/8.2/data/chart""#
         }
         ConstantValueType::Reference { reference }
-        | ConstantValueType::ReferenceTypeSet { reference } =>
+        | ConstantValueType::ReferenceTypeSet { reference } => {
             ibcmd_xml::metadata::data_processor_builtin_type_namespace_attribute(reference)
-                .unwrap_or_default(),
+                .unwrap_or_default()
+        }
         _ => "",
     }
 }

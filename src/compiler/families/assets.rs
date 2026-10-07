@@ -40,7 +40,9 @@ impl BinaryModuleMemberLayout {
         if !names.contains("image") || !names.contains("info") {
             return None;
         }
-        Some(Self { text_member_present: names.contains("text") })
+        Some(Self {
+            text_member_present: names.contains("text"),
+        })
     }
 }
 
@@ -1872,19 +1874,39 @@ mod tests {
         let mut names = BTreeSet::from(["image".to_owned(), "text".to_owned()]);
         assert!(BinaryModuleMemberLayout::from_member_names(&names).is_none());
         names.insert("info".to_owned());
-        assert!(BinaryModuleMemberLayout::from_member_names(&names).unwrap().text_member_present);
+        assert!(
+            BinaryModuleMemberLayout::from_member_names(&names)
+                .unwrap()
+                .text_member_present
+        );
         names.remove("text");
-        assert!(!BinaryModuleMemberLayout::from_member_names(&names).unwrap().text_member_present);
+        assert!(
+            !BinaryModuleMemberLayout::from_member_names(&names)
+                .unwrap()
+                .text_member_present
+        );
         names.remove("image");
         assert!(BinaryModuleMemberLayout::from_member_names(&names).is_none());
     }
 
     #[test]
     fn additional_indexes_routes_are_closed_and_keep_existing_owner_suffixes() {
-        assert_eq!(SourceAssetRegistry.additional_indexes_suffix("Catalog"), Some("1d"));
-        assert_eq!(SourceAssetRegistry.additional_indexes_suffix("Document"), Some("3"));
-        assert_eq!(SourceAssetRegistry.additional_indexes_suffix("AccumulationRegister"), Some("4"));
-        assert_eq!(SourceAssetRegistry.additional_indexes_suffix("InformationRegister"), None);
+        assert_eq!(
+            SourceAssetRegistry.additional_indexes_suffix("Catalog"),
+            Some("1d")
+        );
+        assert_eq!(
+            SourceAssetRegistry.additional_indexes_suffix("Document"),
+            Some("3")
+        );
+        assert_eq!(
+            SourceAssetRegistry.additional_indexes_suffix("AccumulationRegister"),
+            Some("4")
+        );
+        assert_eq!(
+            SourceAssetRegistry.additional_indexes_suffix("InformationRegister"),
+            None
+        );
     }
 
     #[test]

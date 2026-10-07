@@ -326,14 +326,20 @@ mod child_header_tests {
         let xml = crate::metadata_model::xml::MetadataXml::parse(format!(
             "<MetaDataObject><DataProcessor><ChildObjects><Attribute uuid=\"{id}\"><Properties><Comment>edited</Comment></Properties></Attribute></ChildObjects></DataProcessor></MetaDataObject>"
         ).as_bytes()).unwrap();
-        let row = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}");
+        let row = format!(
+            "{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}"
+        );
         let packed = crate::module_blob::deflate_raw(row.as_bytes()).unwrap();
         let result = patch_child_headers(Some(&xml), &packed).unwrap();
         assert_eq!(
             crate::metadata_model::brace::parse_row(
                 &crate::module_blob::inflate_raw(&result).unwrap()
-            ).unwrap(),
-            crate::metadata_model::brace::parse_row(row.replace("\"old\"", "\"edited\"").as_bytes()).unwrap()
+            )
+            .unwrap(),
+            crate::metadata_model::brace::parse_row(
+                row.replace("\"old\"", "\"edited\"").as_bytes()
+            )
+            .unwrap()
         );
     }
 
@@ -343,14 +349,17 @@ mod child_header_tests {
         let xml = crate::metadata_model::xml::MetadataXml::parse(format!(
             "<MetaDataObject><DataProcessor><ChildObjects><Attribute uuid=\"{id}\"><Properties><Synonym/><Comment/></Properties></Attribute></ChildObjects></DataProcessor></MetaDataObject>"
         ).as_bytes()).unwrap();
-        let row = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}");
+        let row = format!(
+            "{{1,{{3,{{1,0,{id}}},\"StoredName\",{{1,\"ru\",\"Stored synonym\"}},\"old\",7,8,9,10}}}}"
+        );
         let packed = crate::module_blob::deflate_raw(row.as_bytes()).unwrap();
         let result = patch_child_headers(Some(&xml), &packed).unwrap();
         let expected = format!("{{1,{{3,{{1,0,{id}}},\"StoredName\",{{0}},\"\",7,8,9,10}}}}");
         assert_eq!(
             crate::metadata_model::brace::parse_row(
                 &crate::module_blob::inflate_raw(&result).unwrap()
-            ).unwrap(),
+            )
+            .unwrap(),
             crate::metadata_model::brace::parse_row(expected.as_bytes()).unwrap()
         );
     }

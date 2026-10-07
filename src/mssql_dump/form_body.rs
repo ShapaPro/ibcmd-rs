@@ -8286,7 +8286,11 @@ fn form_dynamic_list_main_table_auto_fields(
     // selects `ВидыНоменклатуры.Ссылка КАК ВидНоменклатуры`, and the platform
     // writes `~Список.Наименование` for the standard attribute it does not
     // select.
-    let reference_name = if english_script { "Ref" } else { "Ссылка" };
+    let reference_name = if english_script {
+        "Ref"
+    } else {
+        "Ссылка"
+    };
     if let Some(alias) = &main_table_alias
         && form_dynamic_list_reference_alias_loses_key(selection, alias, reference_name)
     {
@@ -8911,7 +8915,8 @@ pub(super) fn parse_form_dynamic_list_query_selection(
         // OperationNumber`, `.NextOperation`).
         let is_alias = selection_tokens.last().is_some_and(|previous: &String| {
             // `AS <alias>`, or a member name behind `.` (`….Order`).
-            crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator() || is_1c_query_keyword(previous, Q_AS)
+            crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator()
+                || is_1c_query_keyword(previous, Q_AS)
         });
         if depth == 0
             && !is_alias
@@ -8988,7 +8993,8 @@ pub(super) fn parse_form_dynamic_list_query_selection(
                 _ => {}
             }
             let is_alias = clause.last().is_some_and(|previous: &String| {
-                crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator() || is_1c_query_keyword(previous, Q_AS)
+                crate::form_schema::FormQueryLexeme::classify(previous).is_member_separator()
+                    || is_1c_query_keyword(previous, Q_AS)
             });
             if depth == 0 && !is_alias && is_1c_query_keyword(token, Q_CLAUSE_END) {
                 break;
@@ -15683,7 +15689,9 @@ fn parse_form_child_item_with_metadata_owners(
         // 27 777 that carry no `<CommandUniqueness>` and `0` on the one that
         // says `false`, in both button layouts, with no other code.
         command_uniqueness: crate::form_schema::FormButtonCommandUniquenessSchema::decode(
-            tag, form_button_layout_is_extended(&fields), &fields,
+            tag,
+            form_button_layout_is_extended(&fields),
+            &fields,
         ),
         // A `UsualGroup` keeps `CurrentRowUse` in member 25 of its extended
         // option tuple. Census of the dumped layouts of all eight stand
@@ -15696,10 +15704,15 @@ fn parse_form_child_item_with_metadata_owners(
         // ОтветНаЗапросРеквизитовДляВыплатыПособия, ОтветНаЗапросФССДляРасчетаПособия,
         // СведенияДляОплатыОтпускаСФР, СведенияОЗастрахованномЛицеФСС}/Forms/
         // ФормаДокумента` -- lost the element.
-        usual_group_current_row_use: crate::form_schema::FormContainerCurrentRowSchema::from_tag(tag)
-            .and_then(|schema| fields.get(schema.options_slot())
+        usual_group_current_row_use: crate::form_schema::FormContainerCurrentRowSchema::from_tag(
+            tag,
+        )
+        .and_then(|schema| {
+            fields
+                .get(schema.options_slot())
                 .and_then(|field| split_1c_braced_fields(field.trim(), 0))
-                .and_then(|members| schema.decode(&members))),
+                .and_then(|members| schema.decode(&members))
+        }),
         decoration_enable_start_drag: picture_decoration_options.as_deref().and_then(|options| {
             let slot = FormPictureDecorationSchema.enable_start_drag_option_slot(options)?;
             (options.get(slot)?.trim() == "1").then_some(true)
@@ -24515,10 +24528,14 @@ fn resolve_form_physical_verdict_data_path(
     match members {
         [terminal]
             if terminal.as_slice().len() == 1
-                && terminal[0].trim() == crate::form_schema::FormStandardBindingMember::Period.marker()
+                && terminal[0].trim()
+                    == crate::form_schema::FormStandardBindingMember::Period.marker()
                 && owner_scoped_bindings
                     .undeclared_root_standard_attributes
-                    .contains(&(root_id.to_string(), crate::form_schema::FormStandardBindingMember::Period.name())) =>
+                    .contains(&(
+                        root_id.to_string(),
+                        crate::form_schema::FormStandardBindingMember::Period.name(),
+                    )) =>
         {
             Some(format!("{root_id}/-2"))
         }
@@ -24550,10 +24567,12 @@ mod composite_reference_consumer_tests {
     #[test]
     fn buttons_and_titles_preserve_composite_reference_bindings() {
         let mut bindings = FormOwnerScopedBindingIndexes::default();
-        bindings.composite_reference_columns.insert(FormAttributeColumnKey {
-            attribute_id: "1".into(),
-            column_id: "1".into(),
-        });
+        bindings
+            .composite_reference_columns
+            .insert(FormAttributeColumnKey {
+                attribute_id: "1".into(),
+                column_id: "1".into(),
+            });
         let member_uuid = "29818e09-1111-4111-8111-111111111111";
         let field = format!("{{3,{{1}},{{1}},{{0,{member_uuid}}}}}");
         let physical = format!("1/1/0:{member_uuid}");
@@ -24592,14 +24611,17 @@ mod composite_reference_consumer_tests {
                 Some(physical.clone())
             );
         }
-        assert!(resolve_form_physical_verdict_data_path(
-            &field,
-            &FormOwnerScopedBindingIndexes::default()
-        ).is_none());
-        assert!(resolve_form_physical_verdict_data_path(
-            "{3,{1},{1},{0,not-a-uuid}}",
-            &bindings
-        ).is_none());
+        assert!(
+            resolve_form_physical_verdict_data_path(
+                &field,
+                &FormOwnerScopedBindingIndexes::default()
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_form_physical_verdict_data_path("{3,{1},{1},{0,not-a-uuid}}", &bindings)
+                .is_none()
+        );
     }
 }
 
@@ -25874,16 +25896,22 @@ pub(super) fn resolve_form_bound_chain_member_path(
     // No declared column is involved, so a neighbouring field binding must
     // not supply the terminal's name.
     if members.len() == 2
-        && members[0].as_slice() == [crate::form_schema::FormStandardBindingMember::Reference.marker()]
+        && members[0].as_slice()
+            == [crate::form_schema::FormStandardBindingMember::Reference.marker()]
         && attribute
             .exact_single_type_reference
             .as_deref()
             .and_then(parse_generated_metadata_owner)
-            .is_some_and(|owner| owner.family() == GeneratedMetadataOwnerFamily::Document
-                && owner.role() == GeneratedMetadataOwnerRole::Object)
+            .is_some_and(|owner| {
+                owner.family() == GeneratedMetadataOwnerFamily::Document
+                    && owner.role() == GeneratedMetadataOwnerRole::Object
+            })
         && !owner_scoped_bindings
             .undeclared_root_standard_attributes
-            .contains(&(attribute_id.to_string(), crate::form_schema::FormStandardBindingMember::Reference.name()))
+            .contains(&(
+                attribute_id.to_string(),
+                crate::form_schema::FormStandardBindingMember::Reference.name(),
+            ))
         && let [marker] = members[1].as_slice()
         && let Some(name) =
             lookup_form_standard_attribute(DOCUMENT_REF_STANDARD_ATTRIBUTES, marker.trim())
@@ -26006,7 +26034,9 @@ fn walk_form_bound_chain_members(
                                 .map(String::as_str);
                         }
                         // `Ref` stands on the very reference the chain holds.
-                        if crate::form_schema::FormStandardBindingMember::retains_reference_type(name) {
+                        if crate::form_schema::FormStandardBindingMember::retains_reference_type(
+                            name,
+                        ) {
                             reached_type = Some(reference);
                         }
                         name
@@ -28741,7 +28771,9 @@ pub(super) fn parse_form_button_command_name_with_main_attribute(
                 form_spreadsheet_document_standard_command_suffix(&uuid)
             }
             FormStandardCommandOwnerKind::Table => form_table_standard_command_suffix(&uuid),
-            FormStandardCommandOwnerKind::Planner => crate::form_schema::form_planner_standard_command_suffix(&uuid),
+            FormStandardCommandOwnerKind::Planner => {
+                crate::form_schema::form_planner_standard_command_suffix(&uuid)
+            }
         } {
             return Some(format!(
                 "Form.Item.{}.StandardCommand.{standard}",
@@ -31916,7 +31948,11 @@ fn format_form_body_open_xml_with_dcs_profiles(
     // `Scale` closes the scalar run, ahead of `AutoCommandBar` (the 2.21
     // element order in form/xml_2_21_order.rs).
     if let Some(value) = &properties.scale {
-        crate::form_schema::FormScalarXmlProperty::Scale.emit(&mut xml, "\t", &escape_xml_text(value));
+        crate::form_schema::FormScalarXmlProperty::Scale.emit(
+            &mut xml,
+            "\t",
+            &escape_xml_text(value),
+        );
     }
     if let Some(command_bar) = auto_command_bar {
         let display_importance = command_bar
@@ -35235,7 +35271,9 @@ pub(super) fn format_form_child_item_xml(
         && let Some(value) = item.auto_correction_on_text_input
     {
         crate::form_schema::FormScalarXmlProperty::AutoCorrectionOnTextInput.emit(
-            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+            &mut xml,
+            &format!("{tab}\t"),
+            &escape_xml_text(value),
         );
     }
     // The three mobile-input properties close the same run, all three behind
@@ -35795,7 +35833,9 @@ pub(super) fn format_form_child_item_xml(
         && let Some(value) = item.auto_correction_on_text_input
     {
         crate::form_schema::FormScalarXmlProperty::AutoCorrectionOnTextInput.emit(
-            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+            &mut xml,
+            &format!("{tab}\t"),
+            &escape_xml_text(value),
         );
     }
     // `SpellCheckingOnTextInput` stands immediately behind
@@ -35925,11 +35965,14 @@ pub(super) fn format_form_child_item_xml(
     // A pages container writes `CurrentRowUse` right behind its
     // representation (ЛИМС КОРП `Catalogs/ПодключаемоеОборудование/Forms/
     // ФормаЭлемента` `Закладки`).
-    if crate::form_schema::FormContainerCurrentRowSchema::from_tag(item.tag).is_some_and(|schema| schema.is_pages())
+    if crate::form_schema::FormContainerCurrentRowSchema::from_tag(item.tag)
+        .is_some_and(|schema| schema.is_pages())
         && let Some(value) = item.usual_group_current_row_use
     {
         crate::form_schema::FormScalarXmlProperty::CurrentRowUse.emit(
-            &mut xml, &format!("{tab}\t"), &escape_xml_text(value),
+            &mut xml,
+            &format!("{tab}\t"),
+            &escape_xml_text(value),
         );
     }
     if matches!(item.tag, "Page" | "UsualGroup")
@@ -38713,12 +38756,19 @@ fn form_planner_labels_xml(
     let record = split_1c_braced_fields(labels.get(1)?.trim(), 0)?;
     let count: usize = record.get(1)?.trim().parse().ok()?;
     if !crate::form_schema::FormPlannerDatedLabelsSchema::recognizes_record(
-        &record, count, MAX_FORM_PLANNER_ITEMS,
-    ) { return None; }
+        &record,
+        count,
+        MAX_FORM_PLANNER_ITEMS,
+    ) {
+        return None;
+    }
     let mut labels = Vec::with_capacity(count);
     for pair in record.get(2..2 + 2 * count)?.chunks_exact(2) {
         let label = split_1c_braced_fields(pair.get(1)?.trim(), 0)?;
-        let compact: Vec<String> = label.iter().map(|field| form_chart_compact(field)).collect();
+        let compact: Vec<String> = label
+            .iter()
+            .map(|field| form_chart_compact(field))
+            .collect();
         if !crate::form_schema::FormPlannerDatedLabelsSchema::recognizes_label(&compact) {
             return None;
         }
@@ -38729,7 +38779,9 @@ fn form_planner_labels_xml(
         });
     }
     let xml = crate::form_schema::FormPlannerDatedLabelsSchema::emit(
-        &labels, &form_chart_integer(record.last()?)?, indent,
+        &labels,
+        &form_chart_integer(record.last()?)?,
+        indent,
     );
     Some(xml)
 }
@@ -40494,7 +40546,8 @@ fn format_form_chart_settings_body_xml(
     // ДиспетчированиеГрафикаПроизводства/Forms/ДиагностикаФормированияГрафика`).
     let mut owned = Vec::new();
     let data = if data.first().map(|value| value.trim()) == Some("75") {
-        let cut = crate::form_schema::FormChartColorTailLayout::payload_end(data, form_chart_compact)?;
+        let cut =
+            crate::form_schema::FormChartColorTailLayout::payload_end(data, form_chart_compact)?;
         // The eight colours are any colour: 8.3.27 has no element for them
         // and prints none, automatic or not (`ДиагностикаФормированияГрафика`
         // stores four `style` colours there).

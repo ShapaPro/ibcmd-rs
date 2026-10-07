@@ -9996,10 +9996,16 @@ pub(crate) fn form_nondefault_percent_scale(value: &str) -> Option<String> {
 
 /// A qualified query member cannot start a clause. Classifying the lexical
 /// token keeps the binding walker independent of the query punctuation.
-pub(crate) enum FormQueryLexeme { MemberSeparator, Other }
+pub(crate) enum FormQueryLexeme {
+    MemberSeparator,
+    Other,
+}
 impl FormQueryLexeme {
     pub(crate) fn classify(token: &str) -> Self {
-        match token { "." => Self::MemberSeparator, _ => Self::Other }
+        match token {
+            "." => Self::MemberSeparator,
+            _ => Self::Other,
+        }
     }
     pub(crate) fn is_member_separator(self) -> bool {
         matches!(self, Self::MemberSeparator)
@@ -10009,7 +10015,9 @@ impl FormQueryLexeme {
 /// Only input fields own the multiple-value and metadata-member binding bag.
 pub(crate) struct FormInputBindingLayout;
 impl FormInputBindingLayout {
-    pub(crate) fn applies_to(tag: &str) -> bool { tag == "InputField" }
+    pub(crate) fn applies_to(tag: &str) -> bool {
+        tag == "InputField"
+    }
 }
 
 /// The extended button trailer has a command uniqueness flag two members
@@ -10017,7 +10025,9 @@ impl FormInputBindingLayout {
 pub(crate) struct FormButtonCommandUniquenessSchema;
 impl FormButtonCommandUniquenessSchema {
     pub(crate) fn decode(tag: &str, extended: bool, fields: &[&str]) -> Option<bool> {
-        (tag == "Button" && extended).then(|| fields.len().checked_sub(2)).flatten()
+        (tag == "Button" && extended)
+            .then(|| fields.len().checked_sub(2))
+            .flatten()
             .and_then(|slot| fields.get(slot))
             .and_then(|field| (field.trim() == "0").then_some(false))
     }
@@ -10026,20 +10036,34 @@ impl FormButtonCommandUniquenessSchema {
 /// Current-row ownership is stored in two distinct container option layouts.
 /// Usual groups use member 25; the six-member revision 4 Pages bag uses member 3.
 #[derive(Clone, Copy)]
-pub(crate) enum FormContainerCurrentRowSchema { UsualGroup, Pages }
+pub(crate) enum FormContainerCurrentRowSchema {
+    UsualGroup,
+    Pages,
+}
 impl FormContainerCurrentRowSchema {
     pub(crate) fn from_tag(tag: &str) -> Option<Self> {
-        match tag { "UsualGroup" => Some(Self::UsualGroup), "Pages" => Some(Self::Pages), _ => None }
+        match tag {
+            "UsualGroup" => Some(Self::UsualGroup),
+            "Pages" => Some(Self::Pages),
+            _ => None,
+        }
     }
-    pub(crate) const fn options_slot(self) -> usize { 20 }
-    pub(crate) const fn is_pages(self) -> bool { matches!(self, Self::Pages) }
+    pub(crate) const fn options_slot(self) -> usize {
+        20
+    }
+    pub(crate) const fn is_pages(self) -> bool {
+        matches!(self, Self::Pages)
+    }
     pub(crate) fn decode(self, members: &[&str]) -> Option<&'static str> {
         match self {
             Self::UsualGroup => match members.get(25)?.trim() {
-                "0" => Some("Use"), "1" => Some("DontUse"), _ => None,
+                "0" => Some("Use"),
+                "1" => Some("DontUse"),
+                _ => None,
             },
-            Self::Pages if members.len() == 6 && members[0].trim() == "4" =>
-                (members.get(3)?.trim() == "1").then_some("DontUse"),
+            Self::Pages if members.len() == 6 && members[0].trim() == "4" => {
+                (members.get(3)?.trim() == "1").then_some("DontUse")
+            }
             Self::Pages => None,
         }
     }
@@ -10047,21 +10071,35 @@ impl FormContainerCurrentRowSchema {
 
 /// Built-in binding members have owner-specific physical markers. Period
 /// stays physical when undeclared; Ref preserves the referenced owner type.
-pub(crate) enum FormStandardBindingMember { Period, Reference }
+pub(crate) enum FormStandardBindingMember {
+    Period,
+    Reference,
+}
 impl FormStandardBindingMember {
     pub(crate) const fn marker(self) -> &'static str {
-        match self { Self::Period => "-2", Self::Reference => "-5" }
+        match self {
+            Self::Period => "-2",
+            Self::Reference => "-5",
+        }
     }
     pub(crate) const fn name(self) -> &'static str {
-        match self { Self::Period => "Period", Self::Reference => "Ref" }
+        match self {
+            Self::Period => "Period",
+            Self::Reference => "Ref",
+        }
     }
-    pub(crate) fn retains_reference_type(name: &str) -> bool { name == Self::Reference.name() }
+    pub(crate) fn retains_reference_type(name: &str) -> bool {
+        name == Self::Reference.name()
+    }
 }
 
 /// Planner standard commands are an item-scoped registry, independent of the
 /// actual form name or item id. The dated planner corpus records Preview.
 pub(crate) fn form_planner_standard_command_suffix(uuid: &str) -> Option<&'static str> {
-    match uuid { "2c75e90f-36f0-48c8-913d-0d92afdb4b93" => Some("Preview"), _ => None }
+    match uuid {
+        "2c75e90f-36f0-48c8-913d-0d92afdb4b93" => Some("Preview"),
+        _ => None,
+    }
 }
 
 /// Chart revision 75 adds eight color tuples after the revision 74 payload.
@@ -10069,18 +10107,26 @@ pub(crate) struct FormChartColorTailLayout;
 impl FormChartColorTailLayout {
     pub(crate) fn payload_end(fields: &[&str], compact: fn(&str) -> String) -> Option<usize> {
         let cut = fields.len().checked_sub(8)?;
-        fields[cut..].iter().all(|member| compact(member).starts_with("{3,")).then_some(cut)
+        fields[cut..]
+            .iter()
+            .all(|member| compact(member).starts_with("{3,"))
+            .then_some(cut)
     }
 }
 
 /// Canonical form scalars that have more than one physical placement.
 /// Callers choose their measured order; this boundary owns their XML QName
 /// and CRLF spelling. Values have already been escaped by the common writer.
-pub(crate) enum FormScalarXmlProperty { Scale, CurrentRowUse, AutoCorrectionOnTextInput }
+pub(crate) enum FormScalarXmlProperty {
+    Scale,
+    CurrentRowUse,
+    AutoCorrectionOnTextInput,
+}
 impl FormScalarXmlProperty {
     pub(crate) fn emit(self, xml: &mut String, tab: &str, escaped_value: &str) {
         let name = match self {
-            Self::Scale => "Scale", Self::CurrentRowUse => "CurrentRowUse",
+            Self::Scale => "Scale",
+            Self::CurrentRowUse => "CurrentRowUse",
             Self::AutoCorrectionOnTextInput => "AutoCorrectionOnTextInput",
         };
         xml.push_str(&format!("{tab}<{name}>{escaped_value}</{name}>\r\n"));
@@ -10100,11 +10146,15 @@ pub(crate) struct FormPlannerDatedLabelsSchema;
 impl FormPlannerDatedLabelsSchema {
     pub(crate) fn recognizes_record(record: &[&str], count: usize, limit: usize) -> bool {
         record.first().is_some_and(|version| version.trim() == "1")
-            && count <= limit && record.len() == 3 + 2 * count
+            && count <= limit
+            && record.len() == 3 + 2 * count
     }
     pub(crate) fn recognizes_label(compact: &[String]) -> bool {
-        compact.len() == 7 && compact[0] == "5" && compact[1] == "{0}"
-            && compact[2] == "{1,0}" && compact[3] == "{\"U\"}"
+        compact.len() == 7
+            && compact[0] == "5"
+            && compact[1] == "{0}"
+            && compact[2] == "{1,0}"
+            && compact[3] == "{\"U\"}"
             && compact[6] == "{1,{1,0},0}"
     }
     pub(crate) fn emit(labels: &[FormPlannerDatedLabel], ticks: &str, indent: usize) -> String {
@@ -10113,7 +10163,9 @@ impl FormPlannerDatedLabelsSchema {
         for label in labels {
             xml.push_str(&format!("{tab}\t<label>\r\n{tab}\t\t<key>{}</key>\r\n{tab}\t\t<text/>\r\n{tab}\t\t<textFormatted>false</textFormatted>\r\n{tab}\t\t<lineColor>{}</lineColor>\r\n{tab}\t\t<textColor>{}</textColor>\r\n{tab}\t</label>\r\n", label.key, label.line_color, label.text_color));
         }
-        xml.push_str(&format!("{tab}\t<ticks>{ticks}</ticks>\r\n{tab}</labels>\r\n"));
+        xml.push_str(&format!(
+            "{tab}\t<ticks>{ticks}</ticks>\r\n{tab}</labels>\r\n"
+        ));
         xml
     }
 }
@@ -10125,7 +10177,10 @@ mod form_layout_policy_tests {
     #[test]
     fn current_row_layouts_are_distinct_and_unknown_codes_are_omitted() {
         let pages = FormContainerCurrentRowSchema::from_tag("Pages").unwrap();
-        assert_eq!(pages.decode(&["4", "0", "0", "1", "0", "0"]), Some("DontUse"));
+        assert_eq!(
+            pages.decode(&["4", "0", "0", "1", "0", "0"]),
+            Some("DontUse")
+        );
         assert_eq!(pages.decode(&["4", "0", "0", "2", "0", "0"]), None);
         assert_eq!(pages.decode(&["3", "0", "0", "1", "0", "0"]), None);
         let mut usual = ["0"; 26];

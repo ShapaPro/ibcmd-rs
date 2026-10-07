@@ -6879,7 +6879,8 @@ fn native_field_payload(
                 max_height = item.max_height.as_deref().unwrap_or("0"),
                 selection = crate::form_schema::form_calendar_selection_mode_code(
                     item.scalars.get("SelectionMode").map(String::as_str),
-                ).ok_or_else(|| anyhow!("a calendar's selection mode is not measured"))?,
+                )
+                .ok_or_else(|| anyhow!("a calendar's selection mode is not measured"))?,
                 drag = u8::from(item.enable_drag.unwrap_or(false)),
                 current = u8::from(native_scalar_flag(item, "ShowCurrentDate", true)),
                 font = native_item_font(item, source)?,
@@ -6901,7 +6902,8 @@ fn native_field_payload(
         Some(10) => {
             let marking = crate::form_schema::form_track_bar_marking_appearance_code(
                 item.scalars.get("MarkingAppearance").map(String::as_str),
-            ).ok_or_else(|| anyhow!("a track bar's marking appearance is not measured"))?;
+            )
+            .ok_or_else(|| anyhow!("a track bar's marking appearance is not measured"))?;
             Ok(format!(
                 "{{2,{width},{height},{stretch},0,{min},{max},{step},0,{large_step},{marking_step},{marking},{{3,4,{{0}}}},{auto_max_width},{max_width},0,1,0}}",
                 width = item.width.as_deref().unwrap_or("32"),
@@ -33265,8 +33267,17 @@ mod tests {
     #[test]
     fn ordinary_table_additions_without_source_serve_the_enclosing_table() -> anyhow::Result<()> {
         use crate::metadata_model::brace::{self, Brace};
-        let mut xml = format!("{FORM_XML_HEAD}<ChildItems><Table name=\"Rows\" id=\"25\"><AutoCommandBar name=\"Bar\" id=\"26\"/>");
-        for (index, tag) in ["SearchStringAddition", "ViewStatusAddition", "SearchControlAddition"].iter().enumerate() {
+        let mut xml = format!(
+            "{FORM_XML_HEAD}<ChildItems><Table name=\"Rows\" id=\"25\"><AutoCommandBar name=\"Bar\" id=\"26\"/>"
+        );
+        for (index, tag) in [
+            "SearchStringAddition",
+            "ViewStatusAddition",
+            "SearchControlAddition",
+        ]
+        .iter()
+        .enumerate()
+        {
             let id = index * 3 + 30;
             xml.push_str(&format!("<{tag} name=\"Addition{index}\" id=\"{id}\"><ContextMenu name=\"Menu{index}\" id=\"{}\"/><ExtendedTooltip name=\"Tip{index}\" id=\"{}\"/></{tag}>", id + 1, id + 2));
         }
@@ -33275,15 +33286,24 @@ mod tests {
         let tree = brace::parse_row(body.as_bytes())?;
         fn collect(node: &Brace, sources: &mut Vec<Brace>) {
             if let Some(items) = node.as_list() {
-                if items.get(6).and_then(Brace::as_str).is_some_and(|name| name.starts_with("Addition")) {
+                if items
+                    .get(6)
+                    .and_then(Brace::as_str)
+                    .is_some_and(|name| name.starts_with("Addition"))
+                {
                     sources.push(items[19].clone());
                 }
-                for child in items { collect(child, sources); }
+                for child in items {
+                    collect(child, sources);
+                }
             }
         }
         let mut sources = Vec::new();
         collect(&tree, &mut sources);
-        assert_eq!(sources, vec![Brace::list(vec![Brace::num(25), Brace::num(0)]); 3]);
+        assert_eq!(
+            sources,
+            vec![Brace::list(vec![Brace::num(25), Brace::num(0)]); 3]
+        );
         Ok(())
     }
 

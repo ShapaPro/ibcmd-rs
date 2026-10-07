@@ -121,16 +121,19 @@ fn resolve_field(
         [code] => {
             use ibcmd_schema::metadata_child_storage_facts::AdditionalIndexStandardFieldFamily;
             let family = AdditionalIndexStandardFieldFamily::for_owner(owner_kind);
-            family.field_name(code).map(str::to_string).ok_or_else(|| match family {
-                AdditionalIndexStandardFieldFamily::Catalog => anyhow!(
-                    "additional-index catalog standard-field code {} is not known",
-                    code.trim()
-                ),
-                AdditionalIndexStandardFieldFamily::RegisterOrTabularSection => anyhow!(
-                    "additional-index standard-field code {} is not in the evidenced table",
-                    code.trim()
-                ),
-            })
+            family
+                .field_name(code)
+                .map(str::to_string)
+                .ok_or_else(|| match family {
+                    AdditionalIndexStandardFieldFamily::Catalog => anyhow!(
+                        "additional-index catalog standard-field code {} is not known",
+                        code.trim()
+                    ),
+                    AdditionalIndexStandardFieldFamily::RegisterOrTabularSection => anyhow!(
+                        "additional-index standard-field code {} is not in the evidenced table",
+                        code.trim()
+                    ),
+                })
         }
         _ => Err(anyhow!("additional-index field slot has an unknown shape")),
     }

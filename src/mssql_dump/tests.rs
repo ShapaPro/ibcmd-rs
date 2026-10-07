@@ -79063,7 +79063,8 @@ fn legacy_v12_form_descriptor_is_not_a_common_module() {
         &BTreeMap::new(),
         &forms,
         &BTreeMap::new(),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(extracted.relative_path, forms[uuid].relative_path);
     let xml = String::from_utf8(extracted.xml).unwrap();
     assert!(xml.contains(&format!(r#"<Form uuid="{uuid}">"#)));

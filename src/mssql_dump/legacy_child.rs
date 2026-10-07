@@ -58,8 +58,17 @@ fn upgrade_record(record: &str) -> Option<String> {
     }
     let typed = fields.get(layout.typed_payload_slot)?.trim().to_string();
     let mut members = vec![layout.current_revision.to_string(), typed];
-    members.extend(fields[layout.following_members_slot..].iter().map(|field| field.to_string()));
-    members.extend(layout.appended_defaults.iter().map(|field| field.to_string()));
+    members.extend(
+        fields[layout.following_members_slot..]
+            .iter()
+            .map(|field| field.to_string()),
+    );
+    members.extend(
+        layout
+            .appended_defaults
+            .iter()
+            .map(|field| field.to_string()),
+    );
     Some(format!("{{{}}}", members.join(",")))
 }
 

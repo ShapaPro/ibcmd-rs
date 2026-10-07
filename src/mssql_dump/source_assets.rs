@@ -388,7 +388,9 @@ pub(super) fn is_binary_module_container(bytes: &[u8]) -> bool {
         return false;
     };
     crate::compiler::families::assets::BinaryModuleMemberLayout::from_member_names(&names)
-        .is_some_and(|layout| !layout.text_member_present || unpack_module_blob_text(bytes).is_err())
+        .is_some_and(|layout| {
+            !layout.text_member_present || unpack_module_blob_text(bytes).is_err()
+        })
 }
 
 pub(super) fn v8_container_element_names(bytes: &[u8]) -> Option<BTreeSet<String>> {

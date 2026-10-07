@@ -359,7 +359,8 @@ fn form_metadata_fields_and_extended_presentation_in_block<'a>(
         .is_some_and(|layout| match layout.application_purposes_slot {
             Some(slot) => direct_form_application_purposes_are_valid(fields[slot]),
             None => true,
-        }) {
+        })
+    {
         if metadata_header_field_index(&fields, uuid).is_some() {
             return Some((fields, None));
         }
@@ -369,12 +370,13 @@ fn form_metadata_fields_and_extended_presentation_in_block<'a>(
         let Some(child_fields) = split_1c_braced_fields(field.trim(), 0) else {
             continue;
         };
-        if ibcmd_schema::metadata_child_storage_facts::FormMetadataRecordLayout::from_fields(&child_fields)
-            .is_some_and(|layout| match layout.application_purposes_slot {
-                Some(slot) => direct_form_application_purposes_are_valid(child_fields[slot]),
-                None => true,
-            })
-            && metadata_header_field_index(&child_fields, uuid).is_some()
+        if ibcmd_schema::metadata_child_storage_facts::FormMetadataRecordLayout::from_fields(
+            &child_fields,
+        )
+        .is_some_and(|layout| match layout.application_purposes_slot {
+            Some(slot) => direct_form_application_purposes_are_valid(child_fields[slot]),
+            None => true,
+        }) && metadata_header_field_index(&child_fields, uuid).is_some()
         {
             let extended_presentation = fields
                 .get(index + 1)

@@ -6227,7 +6227,6 @@ mod tests {
     }
 }
 
-
 /// Reconciles settings parameter values with the schema's nil defaults.
 /// Only the affected items are edited: all unchanged XML, prefixes and CRLF
 /// formatting remain byte-for-byte source owned.
@@ -6236,28 +6235,45 @@ pub fn reconcile_form_list_settings_data_parameters(
     server_state_xml: Option<&str>,
 ) -> Option<String> {
     let xml = server_state_xml.unwrap_or_default();
-    let restricted_names = form_server_state_nil_parameter_names(xml, FormSchemaParameterFlag::UseRestriction);
+    let restricted_names =
+        form_server_state_nil_parameter_names(xml, FormSchemaParameterFlag::UseRestriction);
     let fragment = reconcile_nil_data_parameter_items(fragment, &restricted_names, true);
-    let parameter_names = form_server_state_nil_parameter_names(xml, FormSchemaParameterFlag::ValueListAllowed);
+    let parameter_names =
+        form_server_state_nil_parameter_names(xml, FormSchemaParameterFlag::ValueListAllowed);
     let mut fragment = reconcile_nil_data_parameter_items(&fragment, &parameter_names, false);
-    if fragment.replace("<dcsset:dataParameters>", "")
-        .replace("</dcsset:dataParameters>", "").trim().is_empty() {
+    if fragment
+        .replace("<dcsset:dataParameters>", "")
+        .replace("</dcsset:dataParameters>", "")
+        .trim()
+        .is_empty()
+    {
         if let Some(start) = fragment.find("<dcsset:dataParameters>") {
             fragment = format!("{}<dcsset:dataParameters/>\r\n", &fragment[..start]);
-        } else { return None; }
+        } else {
+            return None;
+        }
     }
     Some(fragment)
 }
 
 #[derive(Clone, Copy)]
-enum FormSchemaParameterFlag { UseRestriction, ValueListAllowed }
+enum FormSchemaParameterFlag {
+    UseRestriction,
+    ValueListAllowed,
+}
 impl FormSchemaParameterFlag {
     fn local_name(self) -> &'static [u8] {
-        match self { Self::UseRestriction => b"useRestriction", Self::ValueListAllowed => b"valueListAllowed" }
+        match self {
+            Self::UseRestriction => b"useRestriction",
+            Self::ValueListAllowed => b"valueListAllowed",
+        }
     }
 }
 
-fn form_server_state_nil_parameter_names(xml: &str, flag: FormSchemaParameterFlag) -> std::collections::BTreeSet<String> {
+fn form_server_state_nil_parameter_names(
+    xml: &str,
+    flag: FormSchemaParameterFlag,
+) -> std::collections::BTreeSet<String> {
     #[derive(Default)]
     struct ParameterState {
         name: Option<String>,
@@ -6283,7 +6299,10 @@ fn form_server_state_nil_parameter_names(xml: &str, flag: FormSchemaParameterFla
     reader.config_mut().trim_text(true);
     let mut parameter = None::<ParameterState>;
     #[derive(Clone, Copy)]
-    enum ParameterTextTarget { Name, Flag }
+    enum ParameterTextTarget {
+        Name,
+        Flag,
+    }
     let mut text_target = None::<ParameterTextTarget>;
     let mut names = std::collections::BTreeSet::new();
     loop {
@@ -6316,7 +6335,9 @@ fn form_server_state_nil_parameter_names(xml: &str, flag: FormSchemaParameterFla
                 };
                 if let Some(parameter) = parameter.as_mut() {
                     match text_target {
-                        Some(ParameterTextTarget::Name) => parameter.name = Some(value.into_owned()),
+                        Some(ParameterTextTarget::Name) => {
+                            parameter.name = Some(value.into_owned())
+                        }
                         Some(ParameterTextTarget::Flag) => {
                             parameter.flag_enabled = value.as_ref() == "true"
                         }
@@ -6439,18 +6460,46 @@ mod form_data_parameters_reconciliation_tests {
     #[test]
     fn unchanged_fragments_retain_exact_source_bytes() {
         let fragment = "\t<dcsset:dataParameters>\r\n\t\t<dcscor:item xsi:type=\"dcsset:SettingsParameterValue\"><dcscor:parameter>X</dcscor:parameter><dcscor:value xsi:nil=\"true\"/></dcscor:item>\r\n\t</dcsset:dataParameters>\r\n";
-        assert_eq!(reconcile_form_list_settings_data_parameters(fragment, None).as_deref(), Some(fragment));
-        assert_eq!(reconcile_form_list_settings_data_parameters(fragment, Some("<broken")).as_deref(), Some(fragment));
+        assert_eq!(
+            reconcile_form_list_settings_data_parameters(fragment, None).as_deref(),
+            Some(fragment)
+        );
+        assert_eq!(
+            reconcile_form_list_settings_data_parameters(fragment, Some("<broken")).as_deref(),
+            Some(fragment)
+        );
     }
 
     #[test]
     fn restricted_unused_items_and_allowed_nil_values_have_distinct_outcomes() {
         let fragment = "\t<dcsset:dataParameters>\r\n\t\t<dcscor:item xsi:type=\"dcsset:SettingsParameterValue\">\r\n\t\t\t<dcscor:parameter>A&amp;B</dcscor:parameter>\r\n\t\t\t<dcscor:value xsi:nil=\"true\"/>\r\n\t\t\t<dcscor:use>false</dcscor:use>\r\n\t\t</dcscor:item>\r\n\t</dcsset:dataParameters>\r\n";
-        let schema = |flag| format!("<schema><Parameter><name>A&amp;B</name><value xsi:nil=\"true\"/><{flag}>true</{flag}></Parameter></schema>");
-        assert_eq!(reconcile_form_list_settings_data_parameters(fragment, Some(&schema("useRestriction"))).unwrap(), "\t<dcsset:dataParameters/>\r\n");
-        let allowed = reconcile_form_list_settings_data_parameters(fragment, Some(&schema("valueListAllowed"))).unwrap();
-        assert_eq!(allowed, fragment.replace("\t\t\t<dcscor:value xsi:nil=\"true\"/>\r\n", ""));
-        let valued = fragment.replace("<dcscor:value xsi:nil=\"true\"/>", "<dcscor:value>7</dcscor:value>");
-        assert_eq!(reconcile_form_list_settings_data_parameters(&valued, Some(&schema("useRestriction"))).as_deref(), Some(valued.as_str()));
+        let schema = |flag| {
+            format!(
+                "<schema><Parameter><name>A&amp;B</name><value xsi:nil=\"true\"/><{flag}>true</{flag}></Parameter></schema>"
+            )
+        };
+        assert_eq!(
+            reconcile_form_list_settings_data_parameters(fragment, Some(&schema("useRestriction")))
+                .unwrap(),
+            "\t<dcsset:dataParameters/>\r\n"
+        );
+        let allowed = reconcile_form_list_settings_data_parameters(
+            fragment,
+            Some(&schema("valueListAllowed")),
+        )
+        .unwrap();
+        assert_eq!(
+            allowed,
+            fragment.replace("\t\t\t<dcscor:value xsi:nil=\"true\"/>\r\n", "")
+        );
+        let valued = fragment.replace(
+            "<dcscor:value xsi:nil=\"true\"/>",
+            "<dcscor:value>7</dcscor:value>",
+        );
+        assert_eq!(
+            reconcile_form_list_settings_data_parameters(&valued, Some(&schema("useRestriction")))
+                .as_deref(),
+            Some(valued.as_str())
+        );
     }
 }
