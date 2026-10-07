@@ -6314,16 +6314,18 @@ fn form_server_state_nil_parameter_names(
                     text_target = Some(ParameterTextTarget::Flag)
                 }
                 b"value" if parameter.is_some() && has_true_nil_attribute(&event) => {
-                    parameter.as_mut().unwrap().nil_default = true;
+                    if let Some(parameter) = parameter.as_mut() {
+                        parameter.nil_default = true;
+                    }
                 }
                 _ => {}
             },
             Ok(QuickXmlEvent::Empty(event)) => {
                 if local_name(event.name().as_ref()) == b"value"
-                    && parameter.is_some()
                     && has_true_nil_attribute(&event)
+                    && let Some(parameter) = parameter.as_mut()
                 {
-                    parameter.as_mut().unwrap().nil_default = true;
+                    parameter.nil_default = true;
                 }
             }
             Ok(QuickXmlEvent::Text(event)) if text_target.is_some() => {
