@@ -33269,7 +33269,7 @@ mod tests {
     fn ordinary_table_additions_without_source_serve_the_enclosing_table() -> anyhow::Result<()> {
         use crate::metadata_model::brace::{self, Brace};
         let mut xml = format!(
-            "{FORM_XML_HEAD}<ChildItems><Table name=\"Rows\" id=\"25\"><AutoCommandBar name=\"Bar\" id=\"26\"/>"
+            "{FORM_XML_HEAD}<AutoCommandBar name=\"FormBar\" id=\"-1\"/><ChildItems><Table name=\"Rows\" id=\"25\"><AutoCommandBar name=\"Bar\" id=\"26\"/>"
         );
         for (index, tag) in [
             "SearchStringAddition",
