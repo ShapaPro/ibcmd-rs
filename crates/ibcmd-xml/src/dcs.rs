@@ -6279,6 +6279,7 @@ fn form_server_state_nil_parameter_names(
         name: Option<String>,
         nil_default: bool,
         flag_enabled: bool,
+        flag_text: String,
     }
 
     fn local_name(name: &[u8]) -> &[u8] {
@@ -6296,7 +6297,7 @@ fn form_server_state_nil_parameter_names(
     }
 
     let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut parameter = None::<ParameterState>;
     #[derive(Clone, Copy)]
     enum ParameterTextTarget {
@@ -6309,7 +6310,12 @@ fn form_server_state_nil_parameter_names(
         match reader.read_event() {
             Ok(QuickXmlEvent::Start(event)) => match local_name(event.name().as_ref()) {
                 b"Parameter" => parameter = Some(ParameterState::default()),
-                b"name" if parameter.is_some() => text_target = Some(ParameterTextTarget::Name),
+                b"name" if parameter.is_some() => {
+                    if let Some(parameter) = parameter.as_mut() {
+                        parameter.name = Some(String::new());
+                    }
+                    text_target = Some(ParameterTextTarget::Name);
+                }
                 name if name == flag.local_name() && parameter.is_some() => {
                     text_target = Some(ParameterTextTarget::Flag)
                 }
@@ -6338,24 +6344,61 @@ fn form_server_state_nil_parameter_names(
                 if let Some(parameter) = parameter.as_mut() {
                     match text_target {
                         Some(ParameterTextTarget::Name) => {
-                            parameter.name = Some(value.into_owned())
+                            parameter.name.get_or_insert_default().push_str(&value)
                         }
-                        Some(ParameterTextTarget::Flag) => {
-                            parameter.flag_enabled = value.as_ref() == "true"
+                        Some(ParameterTextTarget::Flag) => parameter.flag_text.push_str(&value),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(QuickXmlEvent::GeneralRef(event)) if text_target.is_some() => {
+                let Ok(reference) = std::str::from_utf8(event.as_ref()) else {
+                    return std::collections::BTreeSet::new();
+                };
+                let encoded = format!("&{reference};");
+                let Ok(value) = quick_xml::escape::unescape(&encoded) else {
+                    return std::collections::BTreeSet::new();
+                };
+                if let Some(parameter) = parameter.as_mut() {
+                    match text_target {
+                        Some(ParameterTextTarget::Name) => {
+                            parameter.name.get_or_insert_default().push_str(&value)
                         }
+                        Some(ParameterTextTarget::Flag) => parameter.flag_text.push_str(&value),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(QuickXmlEvent::CData(event)) if text_target.is_some() => {
+                let Ok(value) = std::str::from_utf8(event.as_ref()) else {
+                    return std::collections::BTreeSet::new();
+                };
+                if let Some(parameter) = parameter.as_mut() {
+                    match text_target {
+                        Some(ParameterTextTarget::Name) => {
+                            parameter.name.get_or_insert_default().push_str(value)
+                        }
+                        Some(ParameterTextTarget::Flag) => parameter.flag_text.push_str(value),
                         _ => {}
                     }
                 }
             }
             Ok(QuickXmlEvent::End(event)) => match local_name(event.name().as_ref()) {
-                name if name == b"name" || name == flag.local_name() => text_target = None,
+                name if name == b"name" || name == flag.local_name() => {
+                    if name == flag.local_name()
+                        && let Some(parameter) = parameter.as_mut()
+                    {
+                        parameter.flag_enabled = parameter.flag_text.trim() == "true";
+                    }
+                    text_target = None;
+                }
                 b"Parameter" => {
                     if let Some(parameter) = parameter.take()
                         && parameter.nil_default
                         && parameter.flag_enabled
                         && let Some(name) = parameter.name
                     {
-                        names.insert(name);
+                        names.insert(name.trim().to_string());
                     }
                     text_target = None;
                 }
