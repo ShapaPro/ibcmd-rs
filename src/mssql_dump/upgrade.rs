@@ -77,6 +77,50 @@ fn upgrade_enum(text: &str) -> Option<String> {
     ))
 }
 
+fn upgrade_document_journal(text: &str) -> Option<String> {
+    let root_open = text.find('{')?;
+    let (root, _) = members(text, root_open)?;
+    let owner_open = list_open(text, root.get(1)?)?;
+    let (owner, _) = members(text, owner_open)?;
+    let attributes: String = member(text, owner.get(12)?)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take(17)
+        .collect();
+    if owner.len() != 17 || attributes != "{1,{1,6,{-60003},"[..17] {
+        return None;
+    }
+    retag_owner(text, "25", 17, "26")
+}
+
+/// A command group `{1,{3,{3,…8 members},…},…}` -> its picture `{4,…,""}`.
+///
+/// Evidence: one 8.3.27 corpus stores 13 of its 31 command groups with the
+/// older picture record; 8.3.27.2214 dumps them like the current ones (the
+/// header block is left to `upgrade_header_blocks`).
+fn upgrade_command_group(text: &str) -> Option<String> {
+    let root_open = text.find('{')?;
+    let (root, _) = members(text, root_open)?;
+    if member(text, root.first()?) != "1" {
+        return None;
+    }
+    let (owner, _) = members(text, list_open(text, root.get(1)?)?)?;
+    if owner.len() != 7 || member(text, &owner[0]) != "3" {
+        return None;
+    }
+    let (picture, picture_close) = members(text, list_open(text, &owner[1])?)?;
+    if picture.len() != 8 || member(text, &picture[0]) != "3" {
+        return None;
+    }
+    let tag = trimmed(text, &picture[0]);
+    Some(format!(
+        "{}4{},\"\"{}",
+        &text[..tag.start],
+        &text[tag.end..picture_close],
+        &text[picture_close..]
+    ))
+}
+
 /// The owner record `{<from>,…}` of `members` members retagged `<to>`, all
 /// members kept.
 ///
@@ -110,7 +154,9 @@ pub(super) fn upgrade_record_by_shape(text: &str, uuid: &str) -> Option<String> 
         let text = upgrade_header_blocks(text)?;
         return upgrade_common_picture(&text);
     }
-    let upgraded = upgrade_header_blocks(text);
+    let grouped = upgrade_command_group(text);
+    let text = grouped.as_deref().unwrap_or(text);
+    let upgraded = upgrade_header_blocks(text).or(grouped.clone());
     let text_now = upgraded.as_deref().unwrap_or(text);
     let upgraded = upgrade_root_section_identities(text_now, uuid).or(upgraded);
     let text_now = upgraded.as_deref().unwrap_or(text);
@@ -118,7 +164,133 @@ pub(super) fn upgrade_record_by_shape(text: &str, uuid: &str) -> Option<String> 
     let text_now = upgraded.as_deref().unwrap_or(text);
     let upgraded = upgrade_common_command(text_now).or(upgraded);
     let text_now = upgraded.as_deref().unwrap_or(text);
+    let upgraded = upgrade_old_attribute_wrappers(text_now).or(upgraded);
+    let text_now = upgraded.as_deref().unwrap_or(text);
+    let upgraded = upgrade_catalog_predefined_data_name(text_now).or(upgraded);
+    let text_now = upgraded.as_deref().unwrap_or(text);
+    // Kinds are told by record version, so these old versions are read by
+    // shape: a document journal of the same members
+    // with an older tag (one 8.3.27 corpus, 17 journals, revision-12
+    // standard attributes read as they are).
+    let upgraded = upgrade_document_journal(text_now).or(upgraded);
+    let text_now = upgraded.as_deref().unwrap_or(text);
     upgrade_form_record(text_now).or(upgraded)
+}
+
+/// Attribute collections whose old wrapper is a current one without the
+/// trailing data-history slot: (collection, old tag, member count, new tag).
+///
+/// Evidence: one 8.3.27 corpus stores catalog attributes as `{3,<common>,
+/// <indexing>,<use>,<fts>}`, document attributes as `{3,<common>,<indexing>,
+/// <fts>}` and tabular-section attributes of both as `{6,<common>,<indexing>,
+/// <fts>}` next to current `{5,…,<history>}` and `{8,…,<history>}` ones;
+/// 8.3.27.2214 dumps the old ones with `<DataHistory>Use</DataHistory>` (`1`).
+const OLD_ATTRIBUTE_COLLECTIONS: [(&str, &str, usize, &str, bool); 6] = [
+    ("cf4abea7-37b2-11d4-940f-008048da11f9", "3", 5, "5", true),
+    // A later catalog `{4,…}` already holds every slot of `{5,…}`.
+    ("cf4abea7-37b2-11d4-940f-008048da11f9", "4", 6, "5", false),
+    ("45e46cbc-3e24-4165-8b7b-cc98a6f80211", "3", 4, "5", true),
+    // Likewise a later document `{4,…}`.
+    ("45e46cbc-3e24-4165-8b7b-cc98a6f80211", "4", 5, "5", false),
+    ("888744e1-b616-11d4-9436-004095e12fc7", "6", 4, "8", true),
+    // And a later tabular-section `{7,…}`.
+    ("888744e1-b616-11d4-9436-004095e12fc7", "7", 5, "8", false),
+];
+
+fn upgrade_old_attribute_wrappers(text: &str) -> Option<String> {
+    let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
+    for (collection, old_tag, count, new_tag, append) in OLD_ATTRIBUTE_COLLECTIONS {
+        let marker = format!("{{{collection},");
+        let mut from = 0;
+        while let Some(found) = text[from..].find(&marker) {
+            let open = from + found;
+            from = open + 1;
+            let Some((items, _)) = members(text, open) else {
+                continue;
+            };
+            for item in items.iter().skip(2) {
+                let Some((wrapper_item, _)) =
+                    list_open(text, item).and_then(|at| members(text, at))
+                else {
+                    continue;
+                };
+                let Some((wrapper, close)) = wrapper_item
+                    .first()
+                    .and_then(|first| list_open(text, first))
+                    .and_then(|at| members(text, at))
+                else {
+                    continue;
+                };
+                let common = wrapper
+                    .get(1)
+                    .map(|range| member(text, range))
+                    .unwrap_or("");
+                if wrapper.len() == count
+                    && member(text, &wrapper[0]) == old_tag
+                    && (common.starts_with("{27,") || common.starts_with("{25,"))
+                {
+                    edits.push((trimmed(text, &wrapper[0]), new_tag));
+                    if append {
+                        edits.push((close..close, ",1"));
+                    }
+                }
+            }
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut out = String::with_capacity(text.len() + edits.len() * 2);
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        out.push_str(&text[copied..range.start]);
+        out.push_str(replacement);
+        copied = range.end;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
+}
+
+/// A catalog standard-attribute list of eight `{1,8,{-10},…}` -> nine, the
+/// `PredefinedDataName` (`{-13}`) entry inserted first as a copy of the
+/// `Predefined` (`{-10}`) one.
+///
+/// Evidence: catalogs of versions 46/47 in one 8.3.27 corpus store eight
+/// standard attributes; 8.3.27.2214 dumps nine, and in all 451 catalogs of
+/// that dump the `PredefinedDataName` block equals the `Predefined` one.
+fn upgrade_catalog_predefined_data_name(text: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(found) = text[from..].find("{1,8,") {
+        let open = from + found;
+        from = open + 1;
+        let Some((list, _)) = members(text, open) else {
+            continue;
+        };
+        // A catalog's eight codes; a task's list also opens with `{-10}`.
+        let codes = [
+            "{-10}", "{-8}", "{-7}", "{-6}", "{-5}", "{-4}", "{-3}", "{-2}",
+        ];
+        if list.len() != 26
+            || codes
+                .iter()
+                .enumerate()
+                .any(|(index, code)| member(text, &list[2 + index * 3]) != *code)
+        {
+            continue;
+        }
+        let triplet = text[list[2].start..list[4].end].trim_start();
+        let triplet = triplet.replacen("{-10}", "{-13}", 1);
+        let count = trimmed(text, &list[1]);
+        let insert = trimmed(text, &list[2]).start;
+        return Some(format!(
+            "{}9{}{triplet},{}",
+            &text[..count.start],
+            &text[count.end..insert],
+            &text[insert..]
+        ));
+    }
+    None
 }
 
 /// A common command `{1,{2,{0,<ids>,{7,{3,…8 members},…12 members}},…}}` ->
@@ -139,7 +311,7 @@ fn upgrade_common_command(text: &str) -> Option<String> {
         return None;
     }
     let (command, _) = members(text, list_open(text, &wrapper[1])?)?;
-    if command.len() != 3 || member(text, &command[0]) != "0" {
+    if command.len() != 3 || !matches!(member(text, &command[0]), "0" | "1") {
         return None;
     }
     let (ids, _) = members(text, list_open(text, &command[1])?)?;
@@ -151,15 +323,21 @@ fn upgrade_common_command(text: &str) -> Option<String> {
         return None;
     }
     let (first, first_close) = members(text, list_open(text, &record[1])?)?;
-    if first.len() != 8 || member(text, &first[0]) != "3" {
-        return None;
-    }
-    let edits = [
+    // A later variant (166 commands of the same corpus) already stores the
+    // flag `1` and `{4,…,""}`; only its record tag is old.
+    let old_first = match (member(text, &first[0]), first.len()) {
+        ("3", 8) => true,
+        ("4", 9) => false,
+        _ => return None,
+    };
+    let mut edits = vec![
         (trimmed(text, &command[0]), "1"),
         (trimmed(text, &record[0]), "8"),
-        (trimmed(text, &first[0]), "4"),
-        (first_close..first_close, ",\"\""),
     ];
+    if old_first {
+        edits.push((trimmed(text, &first[0]), "4"));
+        edits.push((first_close..first_close, ",\"\""));
+    }
     let mut out = String::with_capacity(text.len() + 8);
     let mut copied = 0;
     for (range, replacement) in edits {
@@ -188,10 +366,18 @@ fn upgrade_legacy_history_owner(text: &str) -> Option<String> {
         ("29", 47) => ("30", ",0,0"),
         ("54", 59) => ("56", ",0,0"),
         ("52" | "53", 58) => ("56", ",0,0,0"),
+        // Catalog versions 46 and 47 (53 members) also lack the five slots
+        // before: data-history sharing, the predefined pair, predefined-data
+        // update, input modes and choice history on input -- appended as a
+        // version 53 catalog of the same corpus stores their defaults.
+        ("46" | "47", 53) => ("56", ",2,{1,{0,0}},0,{1,2,0},0,0,0,0"),
         // Documents of the same corpus: version 38 (51 members) lacks the two
         // flags, version 37 (50) the data-history slot as well.
         ("38", 51) => ("40", ",0,0"),
         ("37", 50) => ("40", ",0,0,0"),
+        // Version 34 documents (46) also lack the four slots before, appended
+        // as a version 37 document of the same corpus stores their defaults.
+        ("34", 46) => ("40", ",2,{1,{0,0}},{1,2,0},0,0,0,0"),
         _ => return None,
     };
     let tag = trimmed(text, &owner[0]);
@@ -559,6 +745,42 @@ fn list_open(text: &str, range: &Range<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrades_old_attribute_wrappers() {
+        let old = "{x,{cf4abea7-37b2-11d4-940f-008048da11f9,1,{{3,{27,c},0,0,1},0}},{45e46cbc-3e24-4165-8b7b-cc98a6f80211,1,{{3,{27,d},2,1},0}}}";
+        assert_eq!(
+            upgrade_old_attribute_wrappers(old).unwrap(),
+            "{x,{cf4abea7-37b2-11d4-940f-008048da11f9,1,{{5,{27,c},0,0,1,1},0}},{45e46cbc-3e24-4165-8b7b-cc98a6f80211,1,{{5,{27,d},2,1,1},0}}}"
+        );
+    }
+
+    #[test]
+    fn inserts_catalog_predefined_data_name() {
+        let entry = |code: &str| format!("{{{code}}},s,{{b{code}}}");
+        let rest = ["-8", "-7", "-6", "-5", "-4", "-3", "-2"]
+            .map(entry)
+            .join(",");
+        let old = format!("{{1,{{1,8,{},{rest}}}}}", entry("-10"));
+        let new = format!("{{1,{{1,9,{{-13}},s,{{b-10}},{},{rest}}}}}", entry("-10"));
+        assert_eq!(upgrade_catalog_predefined_data_name(&old).unwrap(), new);
+        let task = ["-10", "-9", "-8", "-7", "-5", "-4", "-3", "-2"]
+            .map(entry)
+            .join(",");
+        assert_eq!(
+            upgrade_catalog_predefined_data_name(&format!("{{1,{{1,8,{task}}}}}")),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrades_old_command_group() {
+        let old = "{1,{3,{3,0,{0},\"\",-1,-1,1,0},4,3,{0},{0},{h}},0}";
+        assert_eq!(
+            upgrade_command_group(old).unwrap(),
+            "{1,{3,{4,0,{0},\"\",-1,-1,1,0,\"\"},4,3,{0},{0},{h}},0}"
+        );
+    }
 
     #[test]
     fn upgrades_old_enums() {
