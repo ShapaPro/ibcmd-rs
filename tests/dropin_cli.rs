@@ -154,6 +154,10 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
             NodeKind::ImportFiles => {
                 assert_malformed(&args, "Не указано значение параметра: base-dir");
             }
+            // served: without an object it asks for one, in the platform's words
+            NodeKind::ExportObjects => {
+                assert_malformed(&args, "Не указано ни одного объекта метаданных.");
+            }
             // served: without `--base` it asks for one, in the platform's words
             NodeKind::ExportStatus => {
                 assert_malformed(&args, "Не указан путь к файлу ConfigDumpInfo.xml");

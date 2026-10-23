@@ -275,6 +275,34 @@ ibcmd infobase config export status --db-path=C:ase --base=ConfigDumpInfo.xml [
 Штатный `ibcmd` пишет стандартный вывод в кодировке консоли (cp866);
 `ibcmd-rs` пишет UTF-8.
 
+### Выгрузка выбранных объектов (`export objects`)
+
+```bat
+ibcmd infobase config export objects --db-path=C:ase --out=<каталог> [--recursive] Catalog.Валюты CommonModule.ОбщегоНазначения
+```
+
+Пишет в `--out` (каталог создается) файлы только названных объектов, без
+`ConfigDumpInfo.xml`. Объект — строки `ConfigDumpInfo.xml`, которыми он
+владеет, как у 8.5.1.1529:
+
+- `Catalog.Валюты` — описание справочника, его модули и справка (строки
+  `Catalog.Валюты` и `Catalog.Валюты.<часть>`); формы, макеты и вложенные
+  подсистемы — только с `--recursive`;
+- `Catalog.Валюты.ObjectModule` — только модуль,
+  `Catalog.Валюты.Form.ФормаЭлемента.Form` — `Form.xml` и модуль формы;
+- `Configuration` (или `Configuration.<имя>`) — `Configuration.xml` и
+  файлы `Ext/`, с `--recursive` — вся конфигурация;
+- регистр имен не важен; реквизит (`Catalog.Валюты.Attribute.Х`)
+  отклоняется («Невозможно сохранить объект метаданных … в отдельный
+  XML-файл»), отсутствующий объект — «Объект метаданных … не существует в
+  конфигурации.», код -1.
+
+Файлы те же, что у полной выгрузки: выгрузка идет как `--base` против
+`ConfigDumpInfo.xml`, в котором другие версии только у строк выбранных
+объектов. Перед ней конфигурация разбирается целиком, чтобы получить
+`ConfigDumpInfo.xml`, поэтому команда занимает примерно столько же времени,
+сколько полная выгрузка в память.
+
 ### Подключение к базе
 
 | Параметр | Что задаёт |
@@ -438,14 +466,14 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 --db-name=MyBa
 - команды `infobase create`, `dump`, `restore`, `clear`, `replicate`;
 - `infobase config check`, `load`, `reset`, `repair`,
   `support`, `data-separation`, `extension`, `generation-id`, `sign`;
-- `infobase config export objects|all-extensions`,
-  `infobase config import all-extensions` (вывод `export objects`
-  штатного `ibcmd` пока не снят, поэтому он не повторяется);
+- `infobase config export all-extensions`,
+  `infobase config import all-extensions`;
 - параметры выгрузки `--file`, `--archive`, а также `--base` и `--sync`
   вместе с `--extension`; загрузки `--out`, `--extension` (и у
   `import files`); применения
-  `--extension`, `--sqlcmd`; сохранения `--extension`; `export info` и
-  `export status` — `--extension`;
+  `--extension`, `--sqlcmd`; сохранения `--extension`; `export info`,
+  `export status` и `export objects` — `--extension`; `export objects` —
+  `--archive` и русские имена видов (`Справочник.Валюты`);
   общие `--pid`, `--remote`;
 - применение, сохранение, `import files` и расширения файловых баз
   (`--db-path`); СУБД кроме `MSSQLServer`.

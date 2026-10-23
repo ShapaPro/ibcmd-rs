@@ -360,3 +360,67 @@ id=\"6d1c2a0e-1cd0-4f00-9a00-000000000001.0\" configVersion=\"c57df04f818190488e
         "\u{feff}modified: CommonModule.ФайловаяБазаПроверка.Module\r\n".as_bytes()
     );
 }
+
+#[test]
+fn export_objects_writes_the_files_of_the_named_objects_only() {
+    // 8.5.1.1529 on a БСП file infobase: an object is its row and the rows
+    // named by it and one more segment, written as the full export writes
+    // them, without ConfigDumpInfo.xml (`src/dropin/objects.rs`).
+    let dir = scratch("objects");
+    let db = infobase(&dir, "tiny");
+    let expected = files(&fixtures().join("tiny-xml"));
+    let objects = |tag: &str, names: &[&str]| {
+        let out = dir.join(tag);
+        let mut option = std::ffi::OsString::from("--out=");
+        option.push(&out);
+        let mut args: Vec<&std::ffi::OsStr> = vec![&option];
+        args.extend(names.iter().map(|name| std::ffi::OsStr::new(*name)));
+        (export_state(&db, "objects", &args), out)
+    };
+    for (tag, names, written) in [
+        (
+            "module",
+            &["commonmodule.файловаябазапроверка"][..],
+            &[
+                "CommonModules/ФайловаяБазаПроверка.xml",
+                "CommonModules/ФайловаяБазаПроверка/Ext/Module.bsl",
+            ][..],
+        ),
+        (
+            "text",
+            &["CommonModule.ФайловаяБазаПроверка.Module"][..],
+            &["CommonModules/ФайловаяБазаПроверка/Ext/Module.bsl"][..],
+        ),
+        (
+            "two",
+            &["Configuration", "Language.English"][..],
+            &["Configuration.xml", "Languages/English.xml"][..],
+        ),
+    ] {
+        let (output, out) = objects(tag, names);
+        ok(&output);
+        let got = files(&out);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            written,
+            "{tag}"
+        );
+        for (path, bytes) in got {
+            assert_eq!(bytes, expected[&path], "{tag}: {path}");
+        }
+    }
+    let (output, out) = objects("recursive", &["--recursive", "Configuration"]);
+    ok(&output);
+    let mut whole = expected.clone();
+    whole.remove("ConfigDumpInfo.xml");
+    assert_eq!(files(&out), whole);
+    // what the configuration does not have: the platform's words, exit -1
+    let (output, _) = objects("absent", &["Catalog.Нет"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Объект метаданных Catalog.Нет не существует в конфигурации."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

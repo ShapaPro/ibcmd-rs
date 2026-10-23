@@ -74,6 +74,8 @@ pub enum Opt {
     Db,
     // `config export status`
     Short,
+    // `config export objects`
+    Recursive,
     // `config apply`
     Dynamic,
     SessionTerminate,
@@ -219,6 +221,18 @@ const EXPORT_STATUS_OPTIONS: &[OptSpec] = &[
     flag(Opt::Short, &["short"], Some('s')),
 ];
 
+/// `config export objects --out=<dir> [--recursive] <Object1 ... ObjectN>`
+/// (8.5.1.1529, `ibcmd help infobase`). Its `-r` is `--recursive`, not the
+/// common `--remote`: the command's own options are looked up first.
+const EXPORT_OBJECTS_OPTIONS: &[OptSpec] = &[
+    valued(Opt::Out, &["out"], Some('o')),
+    valued(Opt::Extension, &["extension"], Some('e')),
+    flag(Opt::Recursive, &["recursive"], Some('r')),
+    valued(Opt::Threads, &["threads"], Some('T')),
+    flag(Opt::Archive, &["archive"], Some('A')),
+    flag(Opt::IgnoreUnresolvedRefs, &["ignore-unresolved-refs"], None),
+];
+
 const SAVE_OPTIONS: &[OptSpec] = &[
     flag(Opt::Db, &["db"], None),
     valued(Opt::Extension, &["extension"], Some('e')),
@@ -258,6 +272,8 @@ pub enum NodeKind {
     ExportInfo,
     /// `infobase config export status`.
     ExportStatus,
+    /// `infobase config export objects`.
+    ExportObjects,
     /// A native command ibcmd-rs does not implement yet.
     Unsupported,
 }
@@ -342,7 +358,13 @@ pub static INFOBASE: Node = Node {
                             options: EXPORT_STATUS_OPTIONS,
                             children: &[],
                         },
-                        unsupported("objects", "Экспорт выбранных объектов конфигурации в XML"),
+                        Node {
+                            name: "objects",
+                            summary: "Экспорт выбранных объектов конфигурации в XML",
+                            kind: NodeKind::ExportObjects,
+                            options: EXPORT_OBJECTS_OPTIONS,
+                            children: &[],
+                        },
                         unsupported(
                             "all-extensions",
                             "Экспорт всех расширений конфигурации в XML",
@@ -438,6 +460,9 @@ pub enum Refusal {
     /// `config export status` without `--base`, as the platform words it
     /// (8.5.1.1529: `Не указан путь к файлу ConfigDumpInfo.xml`, exit 2).
     MissingBase,
+    /// `config export objects` without an object, as the platform words it
+    /// (8.5.1.1529: `Не указано ни одного объекта метаданных.`, exit 2).
+    NoObjects,
     /// A command word that needs one of its subcommands.
     Incomplete { path: Vec<&'static str> },
     /// A native command ibcmd-rs does not implement yet.
@@ -631,6 +656,20 @@ pub struct ExportStatusRequest {
 
 /// `infobase config save [--db] <file>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportObjectsRequest {
+    pub common: Common,
+    /// `--out`, `-o`: the directory the files of the objects go to.
+    pub out: PathBuf,
+    /// `--recursive`, `-r`: the objects' own objects too (forms, templates,
+    /// nested subsystems).
+    pub recursive: bool,
+    /// `--threads`, `-T`.
+    pub threads: Option<usize>,
+    /// The objects, as given (`Catalog.Валюты`, `Catalog.Валюты.ObjectModule`).
+    pub objects: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveRequest {
     pub common: Common,
     /// `--db`: the database configuration (Config) instead of the main one.
@@ -650,6 +689,7 @@ pub enum Invocation {
     Save(SaveRequest),
     ExportInfo(ExportInfoRequest),
     ExportStatus(ExportStatusRequest),
+    ExportObjects(ExportObjectsRequest),
 }
 
 /// The tokens of one command line, resolved against the tree.
@@ -822,7 +862,11 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
         | NodeKind::Apply
         | NodeKind::Save
         | NodeKind::ExportInfo
-        | NodeKind::ExportStatus => {}
+        | NodeKind::ExportStatus
+        | NodeKind::ExportObjects => {}
+    }
+    if node.kind == NodeKind::ExportObjects {
+        return parse_export_objects(&scan);
     }
     if matches!(node.kind, NodeKind::ExportInfo | NodeKind::ExportStatus) {
         return parse_export_state(&scan, node.kind);
@@ -1130,6 +1174,60 @@ fn parse_export_state(scan: &Scan, kind: NodeKind) -> Result<Invocation, Refusal
             short: scan.has(Opt::Short),
         })
     })
+}
+
+fn parse_export_objects(scan: &Scan) -> Result<Invocation, Refusal> {
+    if let Some(error) = scan.error.clone() {
+        return Err(error);
+    }
+    for opt in [Opt::Pid, Opt::Remote] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedServer(spelled.to_string()));
+        }
+    }
+    for opt in [Opt::Extension, Opt::Archive] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedOption {
+                option: spelled.to_string(),
+                command: scan.command(),
+            });
+        }
+    }
+    let common = common(scan)?;
+    // 8.5.1.1529 asks for the objects first, then for `--out`
+    if scan.arguments.is_empty() {
+        return Err(Refusal::NoObjects);
+    }
+    let Some(out) = scan.value(Opt::Out) else {
+        return Err(Refusal::MissingValue(
+            "Путь к каталогу или архиву для экспорта выбранных объектов".to_string(),
+        ));
+    };
+    let threads = match scan.value(Opt::Threads) {
+        None => None,
+        Some(value) => Some(
+            value
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|threads| *threads > 0)
+                .ok_or_else(|| Refusal::InvalidValue {
+                    option: "--threads".to_string(),
+                    value: value.to_string(),
+                })?,
+        ),
+    };
+    Ok(Invocation::ExportObjects(ExportObjectsRequest {
+        common,
+        out: PathBuf::from(out),
+        recursive: scan.has(Opt::Recursive),
+        threads,
+        objects: scan
+            .arguments
+            .iter()
+            .map(|object| object.to_string_lossy().into_owned())
+            .collect(),
+    }))
 }
 
 fn parse_save(scan: &Scan) -> Result<Invocation, Refusal> {
@@ -1838,6 +1936,9 @@ mod tests {
                     matches!(result, Ok(Invocation::ExportInfo(_))),
                     "{path:?}: {result:?}"
                 ),
+                NodeKind::ExportObjects => {
+                    assert_eq!(result, Err(Refusal::NoObjects), "{path:?}")
+                }
                 // served: without `--base` it asks for one
                 NodeKind::ExportStatus => assert_eq!(result, Err(Refusal::MissingBase), "{path:?}"),
             }
@@ -1917,9 +2018,9 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse(&["config", "export", "objects", "-r", "Catalog.A"]),
+            parse(&["config", "export", "all-extensions", "out"]),
             Err(Refusal::UnsupportedCommand(
-                "infobase config export objects".to_string()
+                "infobase config export all-extensions".to_string()
             ))
         );
     }
@@ -2269,6 +2370,66 @@ mod tests {
             parse(&["config", "export", "info", "--db-name=b", "--extension=E"]),
             Err(Refusal::UnsupportedOption { .. })
         ));
+    }
+
+    #[test]
+    fn export_objects_takes_the_objects_and_out() {
+        match parse(&[
+            "config",
+            "export",
+            "objects",
+            "--db-name=b",
+            "--out=dir",
+            "-r",
+            "-T",
+            "4",
+            "Catalog.Валюты",
+            "CommonModule.М",
+        ]) {
+            Ok(Invocation::ExportObjects(request)) => {
+                assert_eq!(request.out, PathBuf::from("dir"));
+                assert!(request.recursive, "-r is --recursive here, not --remote");
+                assert_eq!(request.threads, Some(4));
+                assert_eq!(request.objects, ["Catalog.Валюты", "CommonModule.М"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&[
+            "config",
+            "export",
+            "objects",
+            "--db-name=b",
+            "-o",
+            "d",
+            "Catalog.A",
+        ]) {
+            Ok(Invocation::ExportObjects(request)) => assert!(!request.recursive),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            parse(&["config", "export", "objects", "--db-name=b", "--out=d"]),
+            Err(Refusal::NoObjects)
+        );
+        assert_eq!(
+            parse(&["config", "export", "objects", "--db-name=b", "Catalog.A"]),
+            Err(Refusal::MissingValue(
+                "Путь к каталогу или архиву для экспорта выбранных объектов".to_string()
+            ))
+        );
+        for option in ["--archive", "--extension=E"] {
+            assert!(matches!(
+                parse(&[
+                    "config",
+                    "export",
+                    "objects",
+                    "--db-name=b",
+                    "--out=d",
+                    option,
+                    "Catalog.A"
+                ]),
+                Err(Refusal::UnsupportedOption { .. })
+            ));
+        }
     }
 
     #[test]

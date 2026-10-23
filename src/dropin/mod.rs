@@ -46,10 +46,11 @@ use crate::cli::{
 };
 use crate::infobase::OutputDirectoryNotEmpty;
 pub use parse::{
-    ApplyRequest, Common, ExportInfoRequest, ExportRequest, ExportStatusRequest,
-    ImportFilesRequest, ImportRequest, Invocation, Refusal, SaveRequest,
+    ApplyRequest, Common, ExportInfoRequest, ExportObjectsRequest, ExportRequest,
+    ExportStatusRequest, ImportFilesRequest, ImportRequest, Invocation, Refusal, SaveRequest,
 };
 
+mod objects;
 mod status;
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
@@ -69,6 +70,7 @@ pub fn refusal_exit_code(refusal: &Refusal) -> i32 {
         Refusal::Parse(_)
         | Refusal::MissingValue(_)
         | Refusal::MissingBase
+        | Refusal::NoObjects
         | Refusal::Incomplete { .. }
         | Refusal::UnknownDbms(_)
         | Refusal::InvalidValue { .. }
@@ -129,6 +131,7 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         Ok(Invocation::Save(request)) => run_save(request),
         Ok(Invocation::ExportInfo(request)) => run_export_info(request),
         Ok(Invocation::ExportStatus(request)) => run_export_status(request),
+        Ok(Invocation::ExportObjects(request)) => run_export_objects(request),
         Err(refusal) => {
             print_refusal(&refusal, &program_name());
             refusal_exit_code(&refusal)
@@ -191,6 +194,7 @@ pub fn refusal_message(refusal: &Refusal, program: &str) -> (String, bool) {
         Refusal::Parse(argument) => format!("Ошибка разбора параметра: {argument}"),
         Refusal::MissingValue(name) => format!("Не указано значение параметра: {name}"),
         Refusal::MissingBase => "Не указан путь к файлу ConfigDumpInfo.xml".to_string(),
+        Refusal::NoObjects => "Не указано ни одного объекта метаданных.".to_string(),
         Refusal::Incomplete { path } => return (incomplete_message(path, program), true),
         Refusal::UnsupportedCommand(command) => format!("Команда `{command}` {PLANNED}"),
         Refusal::UnsupportedOption { option, command } => {
@@ -582,14 +586,7 @@ const EXPORT_STATUS: Operation = Operation {
 /// The current `ConfigDumpInfo.xml` of the request's connection, made by an
 /// export into memory; the scratch folder only lets the platform probe run.
 fn current_config_dump_info(common: &Common) -> anyhow::Result<Vec<u8>> {
-    let scratch = std::env::temp_dir().join(format!(
-        "ibcmd-rs-export-info-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default()
-    ));
+    let scratch = temp_scratch("ibcmd-rs-export-info");
     let args = export_args(&ExportRequest {
         common: common.clone(),
         threads: None,
@@ -693,6 +690,130 @@ fn run_export_status(mut request: ExportStatusRequest) -> i32 {
         }
         (_, Err(error)) => EXPORT_STATUS.fail_with(&format!("{error:#}"), report.as_deref()),
     }
+}
+
+const EXPORT_OBJECTS: Operation = Operation {
+    command: "infobase config export objects",
+    title: "Экспорт объектов конфигурации в XML",
+    ended: "завершен",
+    stop: "",
+};
+
+/// `config export objects --out=<dir> <objects>`: the files of the named
+/// objects (`objects::rows`). The export is the one `--base` runs, against a
+/// `ConfigDumpInfo.xml` in which only the rows of the objects have another
+/// version: it writes their files and nothing else. It runs in a scratch
+/// folder, whose files but `ConfigDumpInfo.xml` are then moved to `--out`.
+fn run_export_objects(mut request: ExportObjectsRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        EXPORT_OBJECTS.start();
+        return EXPORT_OBJECTS.fail_with(&message, report.as_deref());
+    }
+    if let Some(threads) = request.threads {
+        crate::parallel::request_workers(threads);
+    }
+    EXPORT_OBJECTS.start();
+    let failed = |message: &str| {
+        let message = format!(
+            "Операция невозможна, при выполнении экспорта объектов конфигурации в XML обнаружены ошибки: {message}"
+        );
+        eprintln!("[ERROR] {message}");
+        EXPORT_OBJECTS.record_failure(&message, report.as_deref());
+        EXIT_FAILED
+    };
+    let current = match current_config_dump_info(&request.common) {
+        Ok(bytes) => bytes,
+        Err(error) => return EXPORT_OBJECTS.fail_with(&format!("{error:#}"), report.as_deref()),
+    };
+    let info = match crate::mssql_dump::incremental::DumpInfo::parse(&current) {
+        Ok(info) => info,
+        Err(error) => return EXPORT_OBJECTS.fail_with(&format!("{error:#}"), report.as_deref()),
+    };
+    let selected = match objects::rows(&info, &request.objects, request.recursive) {
+        Ok(selected) => selected,
+        Err(refused) if refused.unsupported() => {
+            return EXPORT_OBJECTS.refuse_with(&refused.message(), report.as_deref());
+        }
+        Err(refused) => return failed(&refused.message()),
+    };
+    let scratch = temp_scratch("ibcmd-rs-export-objects");
+    let exported = (|| -> anyhow::Result<serde_json::Value> {
+        let text = String::from_utf8(current)
+            .map_err(|_| anyhow::anyhow!("ConfigDumpInfo.xml is not UTF-8"))?;
+        std::fs::create_dir_all(&scratch)?;
+        let base = scratch.join("base-ConfigDumpInfo.xml");
+        std::fs::write(&base, objects::base_for(&text, &selected)?)?;
+        let tree = scratch.join("tree");
+        let args = export_args(&ExportRequest {
+            common: request.common.clone(),
+            threads: None,
+            extension: None,
+            base: Some(base),
+            sync: false,
+            path: tree.clone().into_os_string(),
+        });
+        let exported = crate::infobase::export_config(&args)?;
+        let incremental = exported.incremental.as_ref();
+        if let Some(reason) = incremental.and_then(|summary| summary.reason.as_deref()) {
+            anyhow::bail!("выгрузка только выбранных объектов не удалась: {reason}");
+        }
+        let moved = move_tree(&tree, &request.out, &["ConfigDumpInfo.xml"])?;
+        Ok(serde_json::json!({
+            "operation": EXPORT_OBJECTS.command,
+            "ok": true,
+            "out": request.out,
+            "objects": request.objects,
+            "recursive": request.recursive,
+            "rows": selected.len(),
+            "files": moved,
+        }))
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    match exported {
+        Ok(value) => EXPORT_OBJECTS.succeed(report.as_deref(), &value),
+        Err(error) => EXPORT_OBJECTS.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+/// A folder under the temporary directory no other run uses.
+fn temp_scratch(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ))
+}
+
+/// Moves the files of `from` into `to` (made when missing), replacing files
+/// of the same path, except the top-level files named in `skipped`; returns
+/// how many were moved.
+fn move_tree(from: &Path, to: &Path, skipped: &[&str]) -> anyhow::Result<usize> {
+    let mut moved = 0;
+    for entry in walkdir::WalkDir::new(from) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(from)?;
+        if relative.parent() == Some(Path::new(""))
+            && skipped.iter().any(|name| relative == Path::new(name))
+        {
+            continue;
+        }
+        let target = to.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(entry.path(), &target).is_err() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+        moved += 1;
+    }
+    Ok(moved)
 }
 
 fn run_export(mut request: ExportRequest) -> i32 {

@@ -272,6 +272,30 @@ pub fn infobase_help(program: &str) -> String {
                 --short | -s
                     Писать A: и M: вместо added: и modified:
 
+            export objects
+                Экспорт выбранных объектов конфигурации в XML: файлы только
+                этих объектов, без ConfigDumpInfo.xml. Объект - его строки
+                ConfigDumpInfo.xml: Catalog.Валюты - описание, модули и
+                справка справочника; Catalog.Валюты.ObjectModule - только
+                модуль; Configuration - Configuration.xml и Ext. Имена видов
+                - английские (Catalog, CommonModule), регистр не важен
+
+                --out=<path> | -o <path>
+                    (обязательный) Каталог для файлов объектов
+
+                --recursive | -r
+                    Выгрузить и подчиненные объекты (формы, макеты,
+                    вложенные подсистемы); Configuration - вся конфигурация
+
+                --threads=<n> | -T <n>
+                    Количество потоков, используемых при экспорте
+
+                --ignore-unresolved-refs
+                    Принимается для совместимости
+
+                <Object1 ... ObjectN>
+                    Список объектов конфигурации для экспорта
+
 Параметры ibcmd-rs (у ibcmd их нет):
 
     --report=<file>
@@ -332,7 +356,8 @@ pub fn infobase_help(program: &str) -> String {
         параметры import --out, --extension
         параметры apply --extension, --sqlcmd
         параметр save --extension
-        параметр --extension у export info и export status
+        параметр --extension у export info, export status и export objects;
+        export objects --archive и русские имена видов (Справочник.Имя)
         общие параметры --pid, --remote
         режимы {modes}
 
@@ -360,7 +385,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config export info, config export status, config import, config import files, config apply, config save
+{infobase:<23}{summary}: config export, config export info, config export status, config export objects, config import, config import files, config apply, config save
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -388,7 +413,7 @@ mod tests {
         for command in [
             "ibcmd infobase create",
             "ibcmd infobase config check",
-            "ibcmd infobase config export objects",
+            "ibcmd infobase config export all-extensions",
             "ibcmd infobase config import all-extensions",
             "ibcmd infobase config support",
             "ibcmd infobase config extension",
@@ -407,6 +432,7 @@ mod tests {
         // export info and export status are served too
         assert!(!help.contains("ibcmd infobase config export info"));
         assert!(!help.contains("ibcmd infobase config export status"));
+        assert!(!help.contains("ibcmd infobase config export objects"));
         // so is save; load is not
         assert!(!help.contains("ibcmd infobase config save"));
         assert!(help.contains("ibcmd infobase config load"));
