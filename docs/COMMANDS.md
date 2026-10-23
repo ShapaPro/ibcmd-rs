@@ -253,6 +253,28 @@ infobase config repair`), если в конфигурации нет строк
 load`) и совпадение её выгрузки с выгрузкой исходной базы. Сохранение
 расширения (`--extension`) не поддерживается (код 1).
 
+### Состояние конфигурации (`export info`, `export status`)
+
+```bat
+ibcmd infobase config export info --db-path=C:ase [--out=<каталог>]
+ibcmd infobase config export status --db-path=C:ase --base=ConfigDumpInfo.xml [--out=<файл>] [--short]
+```
+
+`export info` выводит `ConfigDumpInfo.xml` конфигурации — тот же файл, что
+пишет `export`, — в стандартный вывод (без метки порядка байтов) или, с
+`--out`, в `<каталог>/ConfigDumpInfo.xml` (каталог должен существовать).
+
+`export status` сравнивает текущий `ConfigDumpInfo.xml` с файлом `--base` по
+идентификаторам строк и выводит по строке на изменение в порядке текущего
+файла: `added: <объект>` — строки нет в `--base`, `modified: <объект>` —
+другая `configVersion`; `--short` пишет `A:` и `M:`. Если строка из `--base`
+пропала (объект или модуль удален), выводится одна строка `modified: all`,
+как у 8.5.1.1529. С `--out` строки пишутся в файл UTF-8 с меткой порядка
+байтов и переводами строк CRLF, а в консоль — две строки `[INFO]`.
+
+Штатный `ibcmd` пишет стандартный вывод в кодировке консоли (cp866);
+`ibcmd-rs` пишет UTF-8.
+
 ### Подключение к базе
 
 | Параметр | Что задаёт |
@@ -416,14 +438,14 @@ ibcmd infobase config export --dbms=MSSQLServer --db-server=sql01 --db-name=MyBa
 - команды `infobase create`, `dump`, `restore`, `clear`, `replicate`;
 - `infobase config check`, `load`, `reset`, `repair`,
   `support`, `data-separation`, `extension`, `generation-id`, `sign`;
-- `infobase config export info|status|objects|all-extensions`,
-  `infobase config import all-extensions` (вывод `export info`,
-  `status` и `objects` штатного `ibcmd` пока не снят, поэтому они не
-  повторяются);
+- `infobase config export objects|all-extensions`,
+  `infobase config import all-extensions` (вывод `export objects`
+  штатного `ibcmd` пока не снят, поэтому он не повторяется);
 - параметры выгрузки `--file`, `--archive`, а также `--base` и `--sync`
   вместе с `--extension`; загрузки `--out`, `--extension` (и у
   `import files`); применения
-  `--extension`, `--sqlcmd`; сохранения `--extension`;
+  `--extension`, `--sqlcmd`; сохранения `--extension`; `export info` и
+  `export status` — `--extension`;
   общие `--pid`, `--remote`;
 - применение, сохранение, `import files` и расширения файловых баз
   (`--db-path`); СУБД кроме `MSSQLServer`.

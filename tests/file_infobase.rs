@@ -274,3 +274,89 @@ fn broken_files_fail_closed() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("1Cv8.1CD"));
 }
+
+fn export_state(db: &Path, command: &str, extra: &[&std::ffi::OsStr]) -> Output {
+    let mut args: Vec<&std::ffi::OsStr> = vec![
+        "infobase".as_ref(),
+        "config".as_ref(),
+        "export".as_ref(),
+        command.as_ref(),
+    ];
+    let db = db_path(db);
+    args.push(&db);
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+#[test]
+fn export_info_prints_the_exports_config_dump_info() {
+    // 8.5.1.1529 prints the file without its byte-order mark; with `--out`
+    // it writes the export's file as is.
+    let dir = scratch("info");
+    let db = infobase(&dir, "tiny");
+    let expected = fs::read(fixtures().join("tiny-xml/ConfigDumpInfo.xml")).unwrap();
+    let output = export_state(&db, "info", &[]);
+    ok(&output);
+    assert_eq!(output.stdout, expected[3..]);
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let mut option = std::ffi::OsString::from("--out=");
+    option.push(&out);
+    ok(&export_state(&db, "info", &[&option]));
+    assert_eq!(fs::read(out.join("ConfigDumpInfo.xml")).unwrap(), expected);
+}
+
+#[test]
+fn export_status_lists_the_changes_since_a_base() {
+    let dir = scratch("status");
+    let db = infobase(&dir, "tiny");
+    let own = fs::read_to_string(fixtures().join("tiny-xml/ConfigDumpInfo.xml")).unwrap();
+    let status = |base: &str, extra: &[&std::ffi::OsStr]| {
+        let path = dir.join("base.xml");
+        fs::write(&path, base).unwrap();
+        let mut option = std::ffi::OsString::from("--base=");
+        option.push(&path);
+        let mut args = vec![option.as_os_str()];
+        args.extend_from_slice(extra);
+        let output = export_state(&db, "status", &args);
+        ok(&output);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // the state against itself: no line
+    assert_eq!(status(&own, &[]), "");
+    // a module edited and a common module added since the base
+    let module = "<Metadata name=\"CommonModule.ФайловаяБазаПроверка.Module\" \
+id=\"6d1c2a0e-1cd0-4f00-9a00-000000000001.0\" configVersion=\"c57df04f818190488e0bdade6c7ca93900000000\"/>";
+    assert!(own.contains(module));
+    let edited = own.replace(
+        "c57df04f818190488e0bdade6c7ca93900000000",
+        "00000000000000000000000000000000000000ff",
+    );
+    let before = edited.replace(
+        "<Metadata name=\"CommonModule.ФайловаяБазаПроверка\" id=\"6d1c2a0e-1cd0-4f00-9a00-000000000001\"",
+        "<Metadata name=\"CommonModule.ФайловаяБазаПроверка\" id=\"00000000-0000-0000-0000-000000000000\"",
+    );
+    assert_eq!(
+        status(&before, &[]),
+        "modified: all\n",
+        "a row of the base is gone"
+    );
+    assert_eq!(
+        status(&edited, &[]),
+        "modified: CommonModule.ФайловаяБазаПроверка.Module\n"
+    );
+    assert_eq!(
+        status(&edited, &["--short".as_ref()]),
+        "M: CommonModule.ФайловаяБазаПроверка.Module\n"
+    );
+    // `--out`: the file is UTF-8 with the byte-order mark and CRLF
+    let out = dir.join("status.txt");
+    let mut option = std::ffi::OsString::from("--out=");
+    option.push(&out);
+    let printed = status(&edited, &[&option]);
+    assert!(printed.starts_with("[INFO] "), "{printed}");
+    assert_eq!(
+        fs::read(&out).unwrap(),
+        "\u{feff}modified: CommonModule.ФайловаяБазаПроверка.Module\r\n".as_bytes()
+    );
+}

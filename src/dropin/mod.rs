@@ -46,9 +46,11 @@ use crate::cli::{
 };
 use crate::infobase::OutputDirectoryNotEmpty;
 pub use parse::{
-    ApplyRequest, Common, ExportRequest, ImportFilesRequest, ImportRequest, Invocation, Refusal,
-    SaveRequest,
+    ApplyRequest, Common, ExportInfoRequest, ExportRequest, ExportStatusRequest,
+    ImportFilesRequest, ImportRequest, Invocation, Refusal, SaveRequest,
 };
+
+mod status;
 
 const PLANNED: &str = "не поддерживается в этой версии ibcmd-rs (планируется в следующих)";
 
@@ -66,6 +68,7 @@ pub fn refusal_exit_code(refusal: &Refusal) -> i32 {
     match refusal {
         Refusal::Parse(_)
         | Refusal::MissingValue(_)
+        | Refusal::MissingBase
         | Refusal::Incomplete { .. }
         | Refusal::UnknownDbms(_)
         | Refusal::InvalidValue { .. }
@@ -124,6 +127,8 @@ pub fn run_infobase(args: &[OsString]) -> i32 {
         Ok(Invocation::ImportFiles(request)) => run_import_files(request),
         Ok(Invocation::Apply(request)) => apply::run(request),
         Ok(Invocation::Save(request)) => run_save(request),
+        Ok(Invocation::ExportInfo(request)) => run_export_info(request),
+        Ok(Invocation::ExportStatus(request)) => run_export_status(request),
         Err(refusal) => {
             print_refusal(&refusal, &program_name());
             refusal_exit_code(&refusal)
@@ -185,6 +190,7 @@ pub fn refusal_message(refusal: &Refusal, program: &str) -> (String, bool) {
     let message = match refusal {
         Refusal::Parse(argument) => format!("Ошибка разбора параметра: {argument}"),
         Refusal::MissingValue(name) => format!("Не указано значение параметра: {name}"),
+        Refusal::MissingBase => "Не указан путь к файлу ConfigDumpInfo.xml".to_string(),
         Refusal::Incomplete { path } => return (incomplete_message(path, program), true),
         Refusal::UnsupportedCommand(command) => format!("Команда `{command}` {PLANNED}"),
         Refusal::UnsupportedOption { option, command } => {
@@ -463,6 +469,9 @@ struct Operation {
     title: &'static str,
     /// The participle that agrees with the title: `завершен` or `завершено`.
     ended: &'static str,
+    /// What closes the success line: nothing, or the full stop 8.5.1.1529
+    /// puts after `config export info` and `config export status`.
+    stop: &'static str,
 }
 
 impl Operation {
@@ -477,7 +486,7 @@ impl Operation {
         {
             return self.fail_with(&format!("{error:#}"), None);
         }
-        println!("[INFO] {} успешно {}", self.title, self.ended);
+        println!("[INFO] {} успешно {}{}", self.title, self.ended, self.stop);
         0
     }
 
@@ -518,12 +527,14 @@ const EXPORT: Operation = Operation {
     command: "infobase config export",
     title: "Экспорт конфигурации в XML",
     ended: "завершен",
+    stop: "",
 };
 
 const IMPORT: Operation = Operation {
     command: "infobase config import",
     title: "Импорт конфигурации из XML",
     ended: "завершен",
+    stop: "",
 };
 
 /// The platform's own lines of `import files` (8.3.27 and 8.5, recorded in
@@ -534,12 +545,14 @@ const IMPORT_FILES: Operation = Operation {
     command: "infobase config import files",
     title: "Импорт файлов конфигурации из XML",
     ended: "завершен",
+    stop: "",
 };
 
 const APPLY: Operation = Operation {
     command: "infobase config apply",
     title: "Обновление конфигурации базы данных",
     ended: "завершено",
+    stop: "",
 };
 
 /// The title is the platform's own name of the command (`ibcmd help
@@ -549,7 +562,138 @@ const SAVE: Operation = Operation {
     command: "infobase config save",
     title: "Выгрузка конфигурации",
     ended: "завершена",
+    stop: "",
 };
+
+const EXPORT_INFO: Operation = Operation {
+    command: "infobase config export info",
+    title: "Получение информации о состоянии конфигурации информационной базы",
+    ended: "завершено",
+    stop: ".",
+};
+
+const EXPORT_STATUS: Operation = Operation {
+    command: "infobase config export status",
+    title: "Вычисление изменений конфигурации информационной базы относительно ранее сохраненного состояния",
+    ended: "завершено",
+    stop: ".",
+};
+
+/// The current `ConfigDumpInfo.xml` of the request's connection, made by an
+/// export into memory; the scratch folder only lets the platform probe run.
+fn current_config_dump_info(common: &Common) -> anyhow::Result<Vec<u8>> {
+    let scratch = std::env::temp_dir().join(format!(
+        "ibcmd-rs-export-info-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    let args = export_args(&ExportRequest {
+        common: common.clone(),
+        threads: None,
+        extension: None,
+        base: None,
+        sync: false,
+        path: scratch.clone().into_os_string(),
+    });
+    crate::mssql_dump::model_export::set_quiet_summaries(true);
+    let result = crate::infobase::config_dump_info(&args);
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// `config export info`: the state of the configuration (its
+/// `ConfigDumpInfo.xml`). 8.5.1.1529 writes it to the standard output
+/// without the byte-order mark and with no line of its own; with `--out` it
+/// writes `<out>/ConfigDumpInfo.xml`, the export's file byte for byte, between
+/// its two `[INFO]` lines.
+fn run_export_info(mut request: ExportInfoRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        return EXPORT_INFO.fail_with(&message, report.as_deref());
+    }
+    let Some(out) = request.out.clone() else {
+        return match current_config_dump_info(&request.common) {
+            Ok(bytes) => {
+                let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+                let mut stdout = std::io::stdout();
+                if stdout
+                    .write_all(body)
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+                {
+                    return EXIT_FAILED;
+                }
+                0
+            }
+            Err(error) => EXPORT_INFO.fail_with(&format!("{error:#}"), report.as_deref()),
+        };
+    };
+    EXPORT_INFO.start();
+    let written = current_config_dump_info(&request.common).and_then(|bytes| {
+        let path = out.join("ConfigDumpInfo.xml");
+        std::fs::write(&path, bytes)
+            .map_err(|error| anyhow::anyhow!("Каталог не обнаружен '{}'. {error}", path.display()))
+    });
+    match written {
+        Ok(()) => EXPORT_INFO.succeed(
+            report.as_deref(),
+            &serde_json::json!({
+                "operation": EXPORT_INFO.command,
+                "ok": true,
+                "out": out,
+            }),
+        ),
+        Err(error) => EXPORT_INFO.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
+
+/// `config export status --base=<ConfigDumpInfo.xml>`: what changed since
+/// that state (`status::changes`).
+fn run_export_status(mut request: ExportStatusRequest) -> i32 {
+    let report = request.common.report.clone();
+    if let Err(message) = read_requested_password(&mut request.common) {
+        return EXPORT_STATUS.fail_with(&message, report.as_deref());
+    }
+    let lines = (|| -> anyhow::Result<String> {
+        let base = std::fs::read(&request.base).map_err(|error| {
+            anyhow::anyhow!("Файл не обнаружен '{}'. {error}", request.base.display())
+        })?;
+        let current = current_config_dump_info(&request.common)?;
+        Ok(status::render(
+            &status::changes(&current, &base)?,
+            request.short,
+        ))
+    })();
+    match (&request.out, lines) {
+        (None, Ok(lines)) => {
+            print!("{lines}");
+            let _ = std::io::stdout().flush();
+            0
+        }
+        (Some(out), Ok(lines)) => {
+            EXPORT_STATUS.start();
+            // The file is UTF-8 with the byte-order mark and CRLF line
+            // breaks (8.5.1.1529, `--out=<file>`).
+            let mut bytes = b"\xef\xbb\xbf".to_vec();
+            bytes.extend_from_slice(lines.replace('\n', "\r\n").as_bytes());
+            match std::fs::write(out, bytes) {
+                Ok(()) => EXPORT_STATUS.succeed(
+                    report.as_deref(),
+                    &serde_json::json!({
+                        "operation": EXPORT_STATUS.command,
+                        "ok": true,
+                        "out": out,
+                    }),
+                ),
+                Err(error) => EXPORT_STATUS.fail_with(&format!("{error:#}"), report.as_deref()),
+            }
+        }
+        (_, Err(error)) => EXPORT_STATUS.fail_with(&format!("{error:#}"), report.as_deref()),
+    }
+}
 
 fn run_export(mut request: ExportRequest) -> i32 {
     let report = request.common.report.clone();

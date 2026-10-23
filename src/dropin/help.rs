@@ -250,6 +250,28 @@ pub fn infobase_help(program: &str) -> String {
                 <path>
                     путь к файлу конфигурации
 
+            export info
+                Вывести ConfigDumpInfo.xml конфигурации: тот же файл, что
+                пишет export, без записи остальных файлов
+
+                --out=<path> | -o <path>
+                    Записать ConfigDumpInfo.xml в этот каталог (он должен
+                    существовать), а не в стандартный вывод
+
+            export status
+                Вывести изменения конфигурации относительно ConfigDumpInfo.xml
+                (строки added: <объект> и modified: <объект>). Если объект из
+                файла удален, выводится одна строка modified: all
+
+                --base=<path> | -b <path>
+                    Файл ConfigDumpInfo.xml, от которого считаются изменения
+
+                --out=<path> | -o <path>
+                    Записать изменения в этот файл, а не в стандартный вывод
+
+                --short | -s
+                    Писать A: и M: вместо added: и modified:
+
 Параметры ibcmd-rs (у ibcmd их нет):
 
     --report=<file>
@@ -310,6 +332,7 @@ pub fn infobase_help(program: &str) -> String {
         параметры import --out, --extension
         параметры apply --extension, --sqlcmd
         параметр save --extension
+        параметр --extension у export info и export status
         общие параметры --pid, --remote
         режимы {modes}
 
@@ -337,7 +360,7 @@ pub fn overview(program: &str) -> String {
 
 Поддерживаемые режимы:
 
-{infobase:<23}{summary}: config export, config import, config import files, config apply, config save
+{infobase:<23}{summary}: config export, config export info, config export status, config import, config import files, config apply, config save
 
 Не поддерживаются в этой версии ibcmd-rs (планируются в следующих):
 
@@ -365,7 +388,7 @@ mod tests {
         for command in [
             "ibcmd infobase create",
             "ibcmd infobase config check",
-            "ibcmd infobase config export info",
+            "ibcmd infobase config export objects",
             "ibcmd infobase config import all-extensions",
             "ibcmd infobase config support",
             "ibcmd infobase config extension",
@@ -381,6 +404,9 @@ mod tests {
         assert!(!help.contains("config support disable"));
         // apply is served: described with its words, not listed as refused
         assert!(!help.contains("ibcmd infobase config apply"));
+        // export info and export status are served too
+        assert!(!help.contains("ibcmd infobase config export info"));
+        assert!(!help.contains("ibcmd infobase config export status"));
         // so is save; load is not
         assert!(!help.contains("ibcmd infobase config save"));
         assert!(help.contains("ibcmd infobase config load"));

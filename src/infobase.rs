@@ -314,6 +314,61 @@ pub fn save_config(args: &InfobaseConfigSaveArgs) -> Result<InfobaseConfigSaveRe
     })
 }
 
+/// `infobase config export info`: the `ConfigDumpInfo.xml` the export of
+/// the connection's configuration writes, made in memory. Nothing is written
+/// to `args.output_dir`; it only names the files the export hands over.
+pub fn config_dump_info(args: &InfobaseConfigExportArgs) -> Result<Vec<u8>> {
+    let config = resolve_connection(args.connection())?;
+    if config.file_infobase.is_none() {
+        ensure_mssql(&config.dbms)?;
+    }
+    let output_dir = absolute_path(&args.output_dir)?;
+    let dump_args = dump_args(
+        &config,
+        args.sqlcmd.as_deref(),
+        &args.db_pwd_env,
+        output_dir.clone(),
+        Vec::new(),
+        config.legacy_source_version()?,
+    );
+    let sink = std::sync::Arc::new(ConfigDumpInfoSink {
+        path: output_dir.join("ConfigDumpInfo.xml"),
+        bytes: std::sync::Mutex::new(None),
+    });
+    crate::mssql_dump::dump_config_with(
+        &dump_args,
+        crate::mssql_dump::DumpHooks {
+            sql: None,
+            sink: Some(sink.clone()),
+        },
+    )?;
+    let bytes = sink
+        .bytes
+        .lock()
+        .map_err(|_| anyhow!("the ConfigDumpInfo.xml sink is poisoned"))?
+        .take();
+    bytes.ok_or_else(|| anyhow!("the export wrote no ConfigDumpInfo.xml"))
+}
+
+/// Keeps the root `ConfigDumpInfo.xml` an export hands it, drops the rest.
+struct ConfigDumpInfoSink {
+    path: PathBuf,
+    bytes: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl crate::mssql_dump::FileSink for ConfigDumpInfoSink {
+    fn accept(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        if path == self.path {
+            *self
+                .bytes
+                .lock()
+                .map_err(|_| anyhow!("the ConfigDumpInfo.xml sink is poisoned"))? =
+                Some(bytes.to_vec());
+        }
+        Ok(())
+    }
+}
+
 pub fn export_config(args: &InfobaseConfigExportArgs) -> Result<InfobaseConfigExportReport> {
     let config = resolve_connection(args.connection())?;
     if config.file_infobase.is_none() {

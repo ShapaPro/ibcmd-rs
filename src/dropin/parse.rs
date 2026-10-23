@@ -72,6 +72,8 @@ pub enum Opt {
     NoCheck,
     // `config save`
     Db,
+    // `config export status`
+    Short,
     // `config apply`
     Dynamic,
     SessionTerminate,
@@ -201,6 +203,22 @@ const IMPORT_FILES_OPTIONS: &[OptSpec] = &[
 
 /// `config save [--db] [--extension=<name>] <path>`: the native options (the
 /// issue's syntax, Untru/ibcmd-rs#352); `--extension` is refused by name.
+/// `config export info [--out=<dir>] [--extension=<name>]` (the platform's
+/// `ibcmd help infobase`, 8.5.1.1529).
+const EXPORT_INFO_OPTIONS: &[OptSpec] = &[
+    valued(Opt::Out, &["out"], Some('o')),
+    valued(Opt::Extension, &["extension"], Some('e')),
+];
+
+/// `config export status --base=<file> [--out=<file>] [--short]
+/// [--extension=<name>]`.
+const EXPORT_STATUS_OPTIONS: &[OptSpec] = &[
+    valued(Opt::Out, &["out"], Some('o')),
+    valued(Opt::Base, &["base"], Some('b')),
+    valued(Opt::Extension, &["extension"], Some('e')),
+    flag(Opt::Short, &["short"], Some('s')),
+];
+
 const SAVE_OPTIONS: &[OptSpec] = &[
     flag(Opt::Db, &["db"], None),
     valued(Opt::Extension, &["extension"], Some('e')),
@@ -236,6 +254,10 @@ pub enum NodeKind {
     Apply,
     /// `infobase config save`.
     Save,
+    /// `infobase config export info`.
+    ExportInfo,
+    /// `infobase config export status`.
+    ExportStatus,
     /// A native command ibcmd-rs does not implement yet.
     Unsupported,
 }
@@ -306,14 +328,20 @@ pub static INFOBASE: Node = Node {
                     kind: NodeKind::Export,
                     options: EXPORT_OPTIONS,
                     children: &[
-                        unsupported(
-                            "info",
-                            "Вывести информацию о состоянии конфигурации (ConfigDumpInfo)",
-                        ),
-                        unsupported(
-                            "status",
-                            "Вывести информацию о изменениях конфигурации относительно переданного состояния (ConfigDumpInfo)",
-                        ),
+                        Node {
+                            name: "info",
+                            summary: "Вывести информацию о состоянии конфигурации (ConfigDumpInfo)",
+                            kind: NodeKind::ExportInfo,
+                            options: EXPORT_INFO_OPTIONS,
+                            children: &[],
+                        },
+                        Node {
+                            name: "status",
+                            summary: "Вывести информацию о изменениях конфигурации относительно переданного состояния (ConfigDumpInfo)",
+                            kind: NodeKind::ExportStatus,
+                            options: EXPORT_STATUS_OPTIONS,
+                            children: &[],
+                        },
                         unsupported("objects", "Экспорт выбранных объектов конфигурации в XML"),
                         unsupported(
                             "all-extensions",
@@ -407,6 +435,9 @@ pub enum Refusal {
     Parse(String),
     /// An option without its value, a command without its path.
     MissingValue(String),
+    /// `config export status` without `--base`, as the platform words it
+    /// (8.5.1.1529: `Не указан путь к файлу ConfigDumpInfo.xml`, exit 2).
+    MissingBase,
     /// A command word that needs one of its subcommands.
     Incomplete { path: Vec<&'static str> },
     /// A native command ibcmd-rs does not implement yet.
@@ -576,6 +607,28 @@ pub struct ImportFilesRequest {
     pub no_check: bool,
 }
 
+/// `infobase config export info [--out=<dir>]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportInfoRequest {
+    pub common: Common,
+    /// `--out`, `-o`: the directory to write `ConfigDumpInfo.xml` into; the
+    /// standard output without it.
+    pub out: Option<PathBuf>,
+}
+
+/// `infobase config export status --base=<file> [--out=<file>] [--short]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportStatusRequest {
+    pub common: Common,
+    /// `--base`, `-b`: the ConfigDumpInfo.xml the changes are counted from.
+    pub base: PathBuf,
+    /// `--out`, `-o`: the file to write the changes to; the standard output
+    /// without it.
+    pub out: Option<PathBuf>,
+    /// `--short`, `-s`: `A:`/`M:` in place of `added:`/`modified:`.
+    pub short: bool,
+}
+
 /// `infobase config save [--db] <file>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveRequest {
@@ -595,6 +648,8 @@ pub enum Invocation {
     ImportFiles(ImportFilesRequest),
     Apply(ApplyRequest),
     Save(SaveRequest),
+    ExportInfo(ExportInfoRequest),
+    ExportStatus(ExportStatusRequest),
 }
 
 /// The tokens of one command line, resolved against the tree.
@@ -765,7 +820,12 @@ pub fn parse_infobase(args: &[OsString]) -> Result<Invocation, Refusal> {
         | NodeKind::Import
         | NodeKind::ImportFiles
         | NodeKind::Apply
-        | NodeKind::Save => {}
+        | NodeKind::Save
+        | NodeKind::ExportInfo
+        | NodeKind::ExportStatus => {}
+    }
+    if matches!(node.kind, NodeKind::ExportInfo | NodeKind::ExportStatus) {
+        return parse_export_state(&scan, node.kind);
     }
     if node.kind == NodeKind::Apply {
         return parse_apply(&scan);
@@ -1035,6 +1095,43 @@ fn parse_import_files(scan: &Scan) -> Result<Invocation, Refusal> {
 /// `infobase config save`: one file argument, `--db`, and the connection.
 /// The words of a missing path are this program's (the platform's own for
 /// `config save` are not measured).
+/// `config export info` and `config export status`: the connection, no
+/// path argument.
+fn parse_export_state(scan: &Scan, kind: NodeKind) -> Result<Invocation, Refusal> {
+    if let Some(error) = scan.error.clone() {
+        return Err(error);
+    }
+    for opt in [Opt::Pid, Opt::Remote] {
+        if let Some(spelled) = scan.spelled(opt) {
+            return Err(Refusal::UnsupportedServer(spelled.to_string()));
+        }
+    }
+    if let Some(spelled) = scan.spelled(Opt::Extension) {
+        return Err(Refusal::UnsupportedOption {
+            option: spelled.to_string(),
+            command: scan.command(),
+        });
+    }
+    if let [extra, ..] = scan.arguments.as_slice() {
+        return Err(Refusal::Parse(extra.to_string_lossy().into_owned()));
+    }
+    let common = common(scan)?;
+    let out = scan.value(Opt::Out).map(PathBuf::from);
+    Ok(if kind == NodeKind::ExportInfo {
+        Invocation::ExportInfo(ExportInfoRequest { common, out })
+    } else {
+        let Some(base) = scan.value(Opt::Base) else {
+            return Err(Refusal::MissingBase);
+        };
+        Invocation::ExportStatus(ExportStatusRequest {
+            common,
+            base: PathBuf::from(base),
+            out,
+            short: scan.has(Opt::Short),
+        })
+    })
+}
+
 fn parse_save(scan: &Scan) -> Result<Invocation, Refusal> {
     if let Some(error) = scan.error.clone() {
         return Err(error);
@@ -1737,6 +1834,12 @@ mod tests {
                     matches!(result, Ok(Invocation::Apply(_))),
                     "{path:?}: {result:?}"
                 ),
+                NodeKind::ExportInfo => assert!(
+                    matches!(result, Ok(Invocation::ExportInfo(_))),
+                    "{path:?}: {result:?}"
+                ),
+                // served: without `--base` it asks for one
+                NodeKind::ExportStatus => assert_eq!(result, Err(Refusal::MissingBase), "{path:?}"),
             }
         }
         let names = paths
@@ -1857,7 +1960,7 @@ mod tests {
         // first keeps later words as arguments.
         assert!(matches!(
             parse(&["config", "export", "info"]),
-            Err(Refusal::UnsupportedCommand(_))
+            Ok(Invocation::ExportInfo(_))
         ));
         let request = export(&["config", "export", "--db-name=b", r".\info"]);
         assert_eq!(request.path, OsString::from(r".\info"));
@@ -2136,6 +2239,76 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn export_info_takes_an_optional_out_folder() {
+        match parse(&["config", "export", "info", "--db-name=b"]) {
+            Ok(Invocation::ExportInfo(request)) => {
+                assert_eq!(request.out, None);
+                assert_eq!(request.common.db_name.as_deref(), Some("b"));
+            }
+            other => panic!("{other:?}"),
+        }
+        for out in [vec!["--out=dir"], vec!["-o", "dir"]] {
+            let mut list = vec!["config", "export", "info", "--db-name=b"];
+            list.extend(out.iter().copied());
+            match parse(&list) {
+                Ok(Invocation::ExportInfo(request)) => {
+                    assert_eq!(request.out, Some(PathBuf::from("dir")))
+                }
+                other => panic!("{list:?}: {other:?}"),
+            }
+        }
+        // the command takes no path argument
+        assert_eq!(
+            parse(&["config", "export", "info", "--db-name=b", "dir"]),
+            Err(Refusal::Parse("dir".to_string()))
+        );
+        assert!(matches!(
+            parse(&["config", "export", "info", "--db-name=b", "--extension=E"]),
+            Err(Refusal::UnsupportedOption { .. })
+        ));
+    }
+
+    #[test]
+    fn export_status_needs_a_base() {
+        match parse(&[
+            "config",
+            "export",
+            "status",
+            "--db-name=b",
+            "--base=ConfigDumpInfo.xml",
+        ]) {
+            Ok(Invocation::ExportStatus(request)) => {
+                assert_eq!(request.base, PathBuf::from("ConfigDumpInfo.xml"));
+                assert_eq!(request.out, None);
+                assert!(!request.short);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&[
+            "config",
+            "export",
+            "status",
+            "--db-name=b",
+            "-b",
+            "c.xml",
+            "-o",
+            "s.txt",
+            "-s",
+        ]) {
+            Ok(Invocation::ExportStatus(request)) => {
+                assert_eq!(request.base, PathBuf::from("c.xml"));
+                assert_eq!(request.out, Some(PathBuf::from("s.txt")));
+                assert!(request.short);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            parse(&["config", "export", "status", "--db-name=b"]),
+            Err(Refusal::MissingBase)
+        );
     }
 
     #[test]

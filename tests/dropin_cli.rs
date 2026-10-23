@@ -154,6 +154,16 @@ fn every_native_infobase_command_is_served_or_refused_by_name() {
             NodeKind::ImportFiles => {
                 assert_malformed(&args, "Не указано значение параметра: base-dir");
             }
+            // served: without `--base` it asks for one, in the platform's words
+            NodeKind::ExportStatus => {
+                assert_malformed(&args, "Не указан путь к файлу ConfigDumpInfo.xml");
+            }
+            // served, and it needs no path: it reads the connection (a user
+            // without a password never reaches the server)
+            NodeKind::ExportInfo => {
+                args.push("--db-user=sa");
+                assert_exit(&args, FAILED, "не указан пароль пользователя сервера СУБД");
+            }
             // served, and it needs no path: it starts, and stops at the
             // connection (a user without a password never reaches the server)
             NodeKind::Apply => {
