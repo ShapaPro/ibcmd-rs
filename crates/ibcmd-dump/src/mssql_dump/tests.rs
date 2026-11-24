@@ -10796,6 +10796,44 @@ fn parses_common_command_parameter_type_pattern() {
     assert!(xml.contains("<v8:Type>xs:string</v8:Type>"));
 }
 
+#[test]
+fn external_report_type_patterns_keep_only_valid_unnamed_ids() {
+    let id = "12345678-0000-4000-8000-000000000001";
+    let index = BTreeMap::new();
+    let pattern = format!(
+        r##"{{"Pattern",{{"#",{id}}},{{"L"}},{{"#",{ANY_IB_REF_TYPE_ID}}},{{"#",{DATA_PROCESSOR_SETTINGS_COMPOSER_TYPE_UUID}}}}}"##
+    );
+    assert!(parse_information_register_type_pattern(&pattern, &index).is_none());
+    assert_eq!(
+        parse_external_report_type_pattern(&pattern, &index).unwrap(),
+        [
+            ConstantValueType::Reference {
+                reference: "v8:Null".to_owned()
+            },
+            ConstantValueType::Reference {
+                reference: DATA_PROCESSOR_SETTINGS_COMPOSER_TYPE_NAME.to_owned()
+            },
+            ConstantValueType::ReferenceTypeSet {
+                reference: "cfg:AnyIBRef".to_owned()
+            },
+            ConstantValueType::TypeId {
+                type_id: id.to_owned()
+            },
+        ],
+    );
+    for invalid in [
+        r#"{"Pattern",{"L",0}}"#.to_owned(),
+        r##"{"Pattern",{"#",00000000-0000-0000-0000-000000000000}}"##.to_owned(),
+        format!(r##"{{"Pattern",{{"#",{id},0}}}}"##),
+        format!(r##"{{"Pattern",{{"#",{id}}}opaque}}"##),
+    ] {
+        assert!(
+            parse_external_report_type_pattern(&invalid, &index).is_none(),
+            "{invalid}"
+        );
+    }
+}
+
 /// Every pattern below is a byte layout the platform actually wrote into
 /// 1C:Trade Management 11.5.27.75 - `{"L"}` sits beside `{"S"}`, `{"B"}`,
 /// `{"N",…}` and `{"#",<ValueListType>}`, and it also occurs alone. It keeps its
@@ -34287,6 +34325,7 @@ fn audit_strict_filter_criterion(
         &BTreeMap::new(),
         InfobaseConfigSourceVersion::V2_20,
         &MetadataTypeSetLeafIndex::new(),
+        false,
     )
 }
 
@@ -37257,6 +37296,7 @@ fn parse_report_properties_for_child_template_test(
         &BTreeMap::new(),
         template_refs,
         &BTreeMap::new(),
+        false,
     )
 }
 
@@ -37688,6 +37728,82 @@ fn extracts_selected_report_templates_from_broad_reference_index() {
             < xml.find("<Template>MainDCS</Template>").unwrap()
     );
     assert_eq!(xml.matches("<Template>").count(), 2);
+}
+
+#[test]
+fn report_v20_auxiliary_variant_form_resolves_foreign_common_forms() {
+    let owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let nil = ZERO_UUID_FOR_REPORT_TEMPLATE_TEST;
+    let common = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let local = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let unrelated = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    let [attributes, forms, sections, commands] = report_other_collections_for_test();
+    let raw = exact_report_owner_fixture_for_test(
+        owner,
+        "CovReport",
+        "Coverage",
+        "",
+        nil,
+        nil,
+        nil,
+        nil,
+        nil,
+        nil,
+        nil,
+        "1",
+        nil,
+        nil,
+        nil,
+        "0",
+        "{0}",
+        "{0}",
+        &[
+            format!("{{{REPORT_TEMPLATE_COLLECTION_UUID_FOR_TEST},0}}"),
+            attributes,
+            forms,
+            sections,
+            commands,
+        ],
+    );
+    let root = split_information_register_braced_fields(&raw).unwrap();
+    let original = split_information_register_braced_fields(root[1]).unwrap();
+    let form_refs = BTreeMap::from([(
+        local.to_owned(),
+        FormSourceReference {
+            relative_path: PathBuf::from("Reports/CovReport/Forms/Variant.xml"),
+            kind: "Form",
+        },
+    )]);
+    // copyinfo contributes the foreign common form to object_refs only.
+    let object_refs = BTreeMap::from([
+        (common.to_owned(), "CommonForm.CovVariant".to_owned()),
+        (unrelated.to_owned(), "Catalog.CovCatalog".to_owned()),
+    ]);
+    for (reference, expected) in [
+        (common, Some("CommonForm.CovVariant")),
+        (local, Some("Report.CovReport.Form.Variant")),
+        (nil, None),
+        (unrelated, None),
+    ] {
+        let mut fields = original.clone();
+        fields[0] = "20";
+        fields.push(reference);
+        let raw = report_raw_with_owner_fields_for_test(&raw, &fields);
+        let properties = parse_report_properties_from_text(
+            &raw,
+            owner,
+            &BTreeMap::new(),
+            &form_refs,
+            &BTreeMap::new(),
+            &object_refs,
+        )
+        .unwrap();
+        assert_eq!(
+            properties.auxiliary_variant_form,
+            Some(expected.map(str::to_owned)),
+            "{reference}"
+        );
+    }
 }
 
 #[test]
